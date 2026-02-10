@@ -1,8 +1,8 @@
-# coreutils-rs
+# fcoreutils
 
 [![Test](https://github.com/AiBrush/coreutils-rs/actions/workflows/test.yml/badge.svg)](https://github.com/AiBrush/coreutils-rs/actions/workflows/test.yml)
 [![Release](https://github.com/AiBrush/coreutils-rs/actions/workflows/release.yml/badge.svg)](https://github.com/AiBrush/coreutils-rs/actions/workflows/release.yml)
-[![crates.io](https://img.shields.io/crates/v/coreutils-rs?color=orange)](https://crates.io/crates/coreutils-rs)
+[![crates.io](https://img.shields.io/crates/v/fcoreutils?color=orange)](https://crates.io/crates/fcoreutils)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/AiBrush/coreutils-rs)](https://github.com/AiBrush/coreutils-rs/releases)
 
@@ -10,7 +10,7 @@ High-performance GNU coreutils replacement in Rust. Faster with SIMD acceleratio
 
 ## Performance (100MB text file)
 
-| Command | GNU | coreutils-rs | Speedup |
+| Command | GNU | fcoreutils | Speedup |
 |---------|-----|-------------|---------|
 | `wc -l` | 42ms | 28ms | **1.5x** |
 | `wc -w` | 297ms | 117ms | **2.5x** |
@@ -37,7 +37,7 @@ High-performance GNU coreutils replacement in Rust. Faster with SIMD acceleratio
 ## Installation
 
 ```bash
-cargo install coreutils-rs
+cargo install fcoreutils
 ```
 
 Or build from source:
@@ -89,9 +89,19 @@ fsha256sum -c sums.txt    # Verify checksums
 
 Output is byte-identical to GNU coreutils. All flags are supported including `--files0-from`, `--total`, `--complement`, `--check`, and correct column alignment.
 
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for design decisions and [PROGRESS.md](PROGRESS.md) for development status.
+
+## Security
+
+To report a vulnerability, please see our [Security Policy](SECURITY.md).
 
 ## License
 

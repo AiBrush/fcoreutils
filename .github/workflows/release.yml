@@ -127,19 +127,19 @@ jobs:
             for bin in fwc fcut fbase64 fsha256sum fsort ftr funiq fb2sum ftac fmd5sum; do
               cp "target/${{ matrix.target }}/release/${bin}.exe" release/ 2>/dev/null || true
             done
-            7z a coreutils-rs-${{ matrix.target }}.zip release/*
+            7z a fcoreutils-${{ matrix.target }}.zip release/*
           else
             for bin in fwc fcut fbase64 fsha256sum fsort ftr funiq fb2sum ftac fmd5sum; do
               cp "target/${{ matrix.target }}/release/${bin}" release/ 2>/dev/null || true
             done
-            tar -czf coreutils-rs-${{ matrix.target }}.tar.gz -C release .
+            tar -czf fcoreutils-${{ matrix.target }}.tar.gz -C release .
           fi
 
       - name: Upload archive
         uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.target }}
-          path: coreutils-rs-*
+          path: fcoreutils-*
 
   # ── Publish: tag, crates.io, GitHub Release ──────────────────────
   publish:
@@ -173,8 +173,7 @@ jobs:
       - name: Publish to crates.io
         run: |
           sed -i 's/^version = ".*"/version = "${{ needs.calculate-version.outputs.version }}"/' Cargo.toml
-          cargo publish --allow-dirty --token "${{ secrets.CARGO_REGISTRY_TOKEN }}" || echo "crates.io publish skipped (no token or error)"
-        continue-on-error: true
+          cargo publish --allow-dirty --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v3
