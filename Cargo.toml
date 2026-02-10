@@ -1,9 +1,10 @@
 [package]
-name = "coreutils-rs"
+name = "fcoreutils"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "High-performance GNU coreutils replacement with SIMD and parallelism"
+homepage = "https://github.com/AiBrush/coreutils-rs"
 repository = "https://github.com/AiBrush/coreutils-rs"
 readme = "README.md"
 keywords = ["coreutils", "cli", "performance", "simd"]
