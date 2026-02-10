@@ -1,5 +1,6 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read};
+use std::ops::Deref;
 use std::path::Path;
 
 use memmap2::Mmap;
@@ -8,34 +9,41 @@ use memmap2::Mmap;
 /// mmap has overhead from page table setup; for small files buffered read wins.
 const MMAP_THRESHOLD: u64 = 64 * 1024; // 64KB
 
-/// Read a file, choosing mmap for large files and buffered read for small ones.
-///
-/// Returns the file contents as a byte vector. For mmap, we keep the mapping
-/// alive by returning the data; callers that need zero-copy access should use
-/// `mmap_file` directly.
-pub fn read_file_bytes(path: &Path) -> io::Result<Vec<u8>> {
-    let metadata = std::fs::metadata(path)?;
+/// Holds file data — either zero-copy mmap or an owned Vec.
+/// Dereferences to `&[u8]` for transparent use.
+pub enum FileData {
+    Mmap(Mmap),
+    Owned(Vec<u8>),
+}
 
-    if metadata.len() >= MMAP_THRESHOLD {
-        let file = File::open(path)?;
-        // SAFETY: We only read the file; we don't modify it. The file must not
-        // be truncated while the mapping is alive, but this is acceptable for
-        // our use case (we process and drop immediately).
-        let mmap = unsafe { Mmap::map(&file)? };
-        Ok(mmap.to_vec())
-    } else {
-        std::fs::read(path)
+impl Deref for FileData {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            FileData::Mmap(m) => m,
+            FileData::Owned(v) => v,
+        }
     }
 }
 
-/// Memory-map a file for zero-copy access.
-///
-/// Returns the Mmap handle. Caller must ensure the file is not modified
-/// while the mapping is alive.
-pub fn mmap_file(path: &Path) -> io::Result<Mmap> {
-    let file = File::open(path)?;
-    // SAFETY: read-only mapping; file must not be truncated during use.
-    unsafe { Mmap::map(&file) }
+/// Read a file with zero-copy mmap for large files, buffered read for small ones.
+pub fn read_file(path: &Path) -> io::Result<FileData> {
+    let metadata = fs::metadata(path)?;
+
+    if metadata.len() >= MMAP_THRESHOLD {
+        let file = File::open(path)?;
+        // SAFETY: Read-only mapping. File must not be truncated during use.
+        let mmap = unsafe { Mmap::map(&file)? };
+        Ok(FileData::Mmap(mmap))
+    } else {
+        Ok(FileData::Owned(fs::read(path)?))
+    }
+}
+
+/// Get file size without reading it (for byte-count-only optimization).
+pub fn file_size(path: &Path) -> io::Result<u64> {
+    Ok(fs::metadata(path)?.len())
 }
 
 /// Read all bytes from stdin into a Vec.

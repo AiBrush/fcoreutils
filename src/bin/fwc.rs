@@ -4,7 +4,7 @@ use std::process;
 
 use clap::Parser;
 
-use coreutils_rs::common::io::{read_file_bytes, read_stdin};
+use coreutils_rs::common::io::{file_size, read_file, read_stdin, FileData};
 use coreutils_rs::wc;
 
 #[derive(Parser)]
@@ -51,6 +51,13 @@ struct ShowFlags {
     max_line_length: bool,
 }
 
+impl ShowFlags {
+    /// True if only -c (bytes) is requested and nothing else needs file content.
+    fn bytes_only(&self) -> bool {
+        self.bytes && !self.lines && !self.words && !self.chars && !self.max_line_length
+    }
+}
+
 /// Compute number of decimal digits needed to display a value.
 fn num_width(n: u64) -> usize {
     if n == 0 {
@@ -62,15 +69,18 @@ fn num_width(n: u64) -> usize {
 fn main() {
     let cli = Cli::parse();
 
-    // If no flags specified, default to -lwc (lines, words, bytes)
+    // If no flags specified, default to lines + words + bytes.
+    // If any flag is specified, only show the explicitly requested ones.
     let no_explicit = !cli.bytes && !cli.chars && !cli.words && !cli.lines && !cli.max_line_length;
     let show = ShowFlags {
         lines: cli.lines || no_explicit,
         words: cli.words || no_explicit,
-        bytes: cli.bytes || (no_explicit && !cli.chars),
+        bytes: cli.bytes || no_explicit,
         chars: cli.chars,
         max_line_length: cli.max_line_length,
     };
+
+    let total_mode = cli.total.as_str();
 
     // Collect files to process
     let files: Vec<String> = if let Some(ref f0f) = cli.files0_from {
@@ -92,9 +102,30 @@ fn main() {
             has_stdin = true;
         }
 
-        let data = if filename == "-" {
+        // Fast path: -c only on regular files — just stat, no read
+        if show.bytes_only() && filename != "-" {
+            match file_size(Path::new(filename)) {
+                Ok(size) => {
+                    let counts = wc::WcCounts {
+                        bytes: size,
+                        ..Default::default()
+                    };
+                    total.bytes += size;
+                    results.push((counts, filename.clone()));
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("fwc: {}: {}", filename, e);
+                    had_error = true;
+                    continue;
+                }
+            }
+        }
+
+        // Read file data (zero-copy mmap for large files)
+        let data: FileData = if filename == "-" {
             match read_stdin() {
-                Ok(d) => d,
+                Ok(d) => FileData::Owned(d),
                 Err(e) => {
                     eprintln!("fwc: standard input: {}", e);
                     had_error = true;
@@ -102,7 +133,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file_bytes(Path::new(filename)) {
+            match read_file(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("fwc: {}: {}", filename, e);
@@ -153,22 +184,27 @@ fn main() {
     let width = num_width(max_val).max(min_width);
 
     // Phase 3: Print results
-    let show_total = match cli.total.as_str() {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    // --total=only: suppress individual file output
+    if total_mode != "only" {
+        for (counts, name) in &results {
+            print_counts_fmt(&mut out, counts, name, width, &show);
+        }
+    }
+
+    // Determine whether to print total line
+    let show_total = match total_mode {
         "always" => true,
         "never" => false,
         "only" => true,
         _ => results.len() > 1, // "auto"
     };
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    for (counts, name) in &results {
-        print_counts_fmt(&mut out, counts, name, width, &show);
-    }
-
     if show_total {
-        print_counts_fmt(&mut out, &total, "total", width, &show);
+        let label = if total_mode == "only" { "" } else { "total" };
+        print_counts_fmt(&mut out, &total, label, width, &show);
     }
 
     if had_error {
@@ -177,8 +213,7 @@ fn main() {
 }
 
 /// Print count values in GNU-compatible format.
-/// GNU wc format: first field right-aligned to `width`, subsequent fields
-/// preceded by a space and right-aligned to `width`.
+/// GNU wc order: newline, word, character, byte, maximum line length.
 fn print_counts_fmt(
     out: &mut impl Write,
     counts: &wc::WcCounts,
@@ -202,17 +237,18 @@ fn print_counts_fmt(
         };
     }
 
+    // GNU wc order: lines, words, chars, bytes, max_line_length
     if show.lines {
         field!(counts.lines);
     }
     if show.words {
         field!(counts.words);
     }
-    if show.bytes {
-        field!(counts.bytes);
-    }
     if show.chars {
         field!(counts.chars);
+    }
+    if show.bytes {
+        field!(counts.bytes);
     }
     if show.max_line_length {
         field!(counts.max_line_length);
