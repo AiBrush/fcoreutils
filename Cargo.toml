@@ -1,0 +1,100 @@
+[package]
+name = "coreutils-rs"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "High-performance GNU coreutils replacement with SIMD and parallelism"
+repository = "https://github.com/AiBrush/coreutils-rs"
+readme = "README.md"
+keywords = ["coreutils", "cli", "performance", "simd"]
+categories = ["command-line-utilities", "filesystem"]
+
+[lib]
+name = "coreutils_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fwc"
+path = "src/bin/fwc.rs"
+
+[[bin]]
+name = "fcut"
+path = "src/bin/fcut.rs"
+
+[[bin]]
+name = "fbase64"
+path = "src/bin/fbase64.rs"
+
+[[bin]]
+name = "fsha256sum"
+path = "src/bin/fsha256sum.rs"
+
+[[bin]]
+name = "fsort"
+path = "src/bin/fsort.rs"
+
+[[bin]]
+name = "ftr"
+path = "src/bin/ftr.rs"
+
+[[bin]]
+name = "funiq"
+path = "src/bin/funiq.rs"
+
+[[bin]]
+name = "fb2sum"
+path = "src/bin/fb2sum.rs"
+
+[[bin]]
+name = "ftac"
+path = "src/bin/ftac.rs"
+
+[[bin]]
+name = "fmd5sum"
+path = "src/bin/fmd5sum.rs"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "cargo"] }
+
+# SIMD byte operations (auto-detects AVX2/NEON)
+memchr = "2"
+
+# Memory-mapped I/O
+memmap2 = "0.9"
+
+# Parallelism
+rayon = "1"
+
+# Hashing (with hardware acceleration)
+sha2 = "0.10"
+blake2 = "0.10"
+md-5 = "0.10"
+
+# Base64 (SIMD-accelerated)
+base64-simd = "0.8"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+tempfile = "3"
+
+[[bench]]
+name = "wc_benchmark"
+harness = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
+debug = true
+strip = false
