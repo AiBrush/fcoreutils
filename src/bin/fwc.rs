@@ -4,11 +4,14 @@ use std::process;
 
 use clap::Parser;
 
-use coreutils_rs::common::io::{file_size, read_file, read_stdin, FileData};
+use coreutils_rs::common::io::{FileData, file_size, read_file, read_stdin};
 use coreutils_rs::wc;
 
 #[derive(Parser)]
-#[command(name = "fwc", about = "Print newline, word, and byte counts for each FILE")]
+#[command(
+    name = "fwc",
+    about = "Print newline, word, and byte counts for each FILE"
+)]
 struct Cli {
     /// Print the byte counts
     #[arg(short = 'c', long = "bytes")]
@@ -147,10 +150,26 @@ fn main() {
             wc::count_all(&data)
         } else {
             wc::WcCounts {
-                lines: if show.lines { wc::count_lines(&data) } else { 0 },
-                words: if show.words { wc::count_words(&data) } else { 0 },
-                bytes: if show.bytes { wc::count_bytes(&data) } else { 0 },
-                chars: if show.chars { wc::count_chars(&data) } else { 0 },
+                lines: if show.lines {
+                    wc::count_lines(&data)
+                } else {
+                    0
+                },
+                words: if show.words {
+                    wc::count_words(&data)
+                } else {
+                    0
+                },
+                bytes: if show.bytes {
+                    wc::count_bytes(&data)
+                } else {
+                    0
+                },
+                chars: if show.chars {
+                    wc::count_chars(&data)
+                } else {
+                    0
+                },
                 max_line_length: 0,
             }
         };
@@ -174,12 +193,22 @@ fn main() {
     // Phase 2: Compute column width
     // GNU wc uses the digit width of the largest value across totals.
     // For stdin with no files, GNU uses a default minimum width of 7.
-    let min_width = if has_stdin && results.len() == 1 { 7 } else { 1 };
+    let min_width = if has_stdin && results.len() == 1 {
+        7
+    } else {
+        1
+    };
 
-    let max_val = [total.lines, total.words, total.bytes, total.chars, total.max_line_length]
-        .into_iter()
-        .max()
-        .unwrap_or(0);
+    let max_val = [
+        total.lines,
+        total.words,
+        total.bytes,
+        total.chars,
+        total.max_line_length,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
 
     let width = num_width(max_val).max(min_width);
 

@@ -93,7 +93,12 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Set version
         shell: bash
-        run: sed -i 's/^version = ".*"/version = "${{ needs.calculate-version.outputs.version }}"/' Cargo.toml
+        run: |
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' 's/^version = ".*"/version = "${{ needs.calculate-version.outputs.version }}"/' Cargo.toml
+          else
+            sed -i 's/^version = ".*"/version = "${{ needs.calculate-version.outputs.version }}"/' Cargo.toml
+          fi
 
       - name: Install cross
         if: matrix.cross

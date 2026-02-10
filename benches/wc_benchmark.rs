@@ -1,5 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use coreutils_rs::wc;
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 fn generate_text(lines: usize, words_per_line: usize) -> Vec<u8> {
     let mut data = Vec::new();
@@ -45,9 +45,7 @@ fn bench_count_words(c: &mut Criterion) {
 
 fn bench_count_bytes(c: &mut Criterion) {
     let data = generate_text(100_000, 5);
-    c.bench_function("wc_bytes", |b| {
-        b.iter(|| wc::count_bytes(black_box(&data)))
-    });
+    c.bench_function("wc_bytes", |b| b.iter(|| wc::count_bytes(black_box(&data))));
 }
 
 fn bench_count_chars(c: &mut Criterion) {
