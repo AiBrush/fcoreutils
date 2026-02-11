@@ -62,10 +62,19 @@ fn main() {
     #[cfg(not(unix))]
     let mut out = io::BufWriter::with_capacity(2 * 1024 * 1024, io::stdout().lock());
 
+    // ManuallyDrop<File> needs deref to &mut File for Write;
+    // BufWriter implements Write directly.
+    #[cfg(unix)]
     let result = if filename == "-" {
         process_stdin(&cli, &mut *out)
     } else {
         process_file(filename, &cli, &mut *out)
+    };
+    #[cfg(not(unix))]
+    let result = if filename == "-" {
+        process_stdin(&cli, &mut out)
+    } else {
+        process_file(filename, &cli, &mut out)
     };
 
     // Flush on non-unix (raw fd doesn't need flushing)
