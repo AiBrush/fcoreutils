@@ -1,12 +1,38 @@
 /// Core sorting logic for fsort.
+/// High-performance implementation using single-buffer + index sorting.
+///
+/// Key optimizations:
+/// - Single contiguous buffer for all input (mmap for files, Vec for stdin)
+/// - Sort lightweight index pairs instead of moving line data
+/// - par_sort_unstable_by (pdqsort) for non-stable sort
+/// - memchr SIMD for line boundary detection
 use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
+use memmap2::Mmap;
 use rayon::prelude::*;
 
-use super::compare::compare_with_opts;
+use super::compare::{
+    compare_with_opts, parse_general_numeric, parse_human_numeric, parse_numeric_value,
+};
 use super::key::{KeyDef, KeyOpts, extract_key};
+
+/// Buffer that holds file data, either memory-mapped or heap-allocated.
+enum FileData {
+    Mmap(Mmap),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for FileData {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            FileData::Mmap(m) => m,
+            FileData::Owned(v) => v,
+        }
+    }
+}
 
 /// Configuration for a sort operation.
 #[derive(Debug, Clone)]
@@ -56,6 +82,7 @@ impl Default for SortConfig {
 }
 
 /// Compare two lines using the full key chain and global options.
+#[inline]
 pub fn compare_lines(a: &[u8], b: &[u8], config: &SortConfig) -> Ordering {
     if !config.keys.is_empty() {
         for key in &config.keys {
@@ -89,15 +116,72 @@ pub fn compare_lines(a: &[u8], b: &[u8], config: &SortConfig) -> Ordering {
         Ordering::Equal
     } else {
         // No keys: compare whole line with global opts
-        let mut result = compare_with_opts(a, b, &config.global_opts, config.random_seed);
-        if config.reverse && !config.global_opts.reverse {
-            result = result.reverse();
-        }
-        result
+        compare_with_opts(a, b, &config.global_opts, config.random_seed)
     }
 }
 
-/// Read all lines from inputs.
+/// Read all input into a single contiguous buffer and compute line offsets.
+/// Uses mmap for single-file input (zero-copy), Vec for stdin/multi-file.
+fn read_all_input(
+    inputs: &[String],
+    zero_terminated: bool,
+) -> io::Result<(FileData, Vec<(usize, usize)>)> {
+    let delimiter = if zero_terminated { b'\0' } else { b'\n' };
+
+    // Single file (non-stdin): use mmap directly for zero-copy
+    let buffer = if inputs.len() == 1 && inputs[0] != "-" {
+        let file = File::open(&inputs[0]).map_err(|e| {
+            io::Error::new(e.kind(), format!("open failed: {}: {}", &inputs[0], e))
+        })?;
+        let metadata = file.metadata()?;
+        if metadata.len() > 0 {
+            FileData::Mmap(unsafe { Mmap::map(&file)? })
+        } else {
+            FileData::Owned(Vec::new())
+        }
+    } else {
+        let mut data = Vec::new();
+        for input in inputs {
+            if input == "-" {
+                io::stdin().lock().read_to_end(&mut data)?;
+            } else {
+                let mut file = File::open(input).map_err(|e| {
+                    io::Error::new(e.kind(), format!("open failed: {}: {}", input, e))
+                })?;
+                file.read_to_end(&mut data)?;
+            }
+        }
+        FileData::Owned(data)
+    };
+
+    // Find line boundaries using SIMD-accelerated memchr
+    let data = &*buffer;
+    let mut offsets = Vec::with_capacity(data.len() / 40 + 1);
+    let mut start = 0usize;
+
+    for pos in memchr::memchr_iter(delimiter, data) {
+        let mut end = pos;
+        // Strip trailing CR before LF
+        if delimiter == b'\n' && end > start && data[end - 1] == b'\r' {
+            end -= 1;
+        }
+        offsets.push((start, end));
+        start = pos + 1;
+    }
+
+    // Handle last line without trailing delimiter
+    if start < data.len() {
+        let mut end = data.len();
+        if delimiter == b'\n' && end > start && data[end - 1] == b'\r' {
+            end -= 1;
+        }
+        offsets.push((start, end));
+    }
+
+    Ok((buffer, offsets))
+}
+
+/// Read all lines from inputs (legacy API, used by merge_sorted).
 pub fn read_lines(inputs: &[String], zero_terminated: bool) -> io::Result<Vec<Vec<u8>>> {
     let delimiter = if zero_terminated { b'\0' } else { b'\n' };
     let mut lines = Vec::new();
@@ -142,12 +226,15 @@ fn read_delimited_lines<R: Read>(
     Ok(())
 }
 
-/// Check if input is sorted.
+/// Check if input is sorted using the optimized buffer path.
 pub fn check_sorted(inputs: &[String], config: &SortConfig) -> io::Result<bool> {
-    let lines = read_lines(inputs, config.zero_terminated)?;
+    let (buffer, offsets) = read_all_input(inputs, config.zero_terminated)?;
+    let data = &*buffer;
 
-    for i in 1..lines.len() {
-        let cmp = compare_lines(&lines[i - 1], &lines[i], config);
+    for i in 1..offsets.len() {
+        let (s1, e1) = offsets[i - 1];
+        let (s2, e2) = offsets[i];
+        let cmp = compare_lines(&data[s1..e1], &data[s2..e2], config);
         let bad = if config.unique {
             cmp != Ordering::Less
         } else {
@@ -155,7 +242,7 @@ pub fn check_sorted(inputs: &[String], config: &SortConfig) -> io::Result<bool> 
         };
         if bad {
             if config.check == CheckMode::Diagnose {
-                let line_display = String::from_utf8_lossy(&lines[i]);
+                let line_display = String::from_utf8_lossy(&data[s2..e2]);
                 let filename = if inputs.is_empty() || inputs[0] == "-" {
                     "-"
                 } else {
@@ -236,7 +323,138 @@ pub fn merge_sorted(
     Ok(())
 }
 
-/// Main sort entry point.
+/// Extract an 8-byte prefix from a line for cache-friendly comparison.
+/// Big-endian byte order ensures u64 comparison matches lexicographic order.
+#[inline]
+fn line_prefix(data: &[u8], start: usize, end: usize) -> u64 {
+    let len = end - start;
+    if len >= 8 {
+        let slice = &data[start..start + 8];
+        u64::from_be_bytes([
+            slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+        ])
+    } else {
+        let mut bytes = [0u8; 8];
+        bytes[..len].copy_from_slice(&data[start..end]);
+        u64::from_be_bytes(bytes)
+    }
+}
+
+/// Pre-extract key byte offsets into the data buffer for all lines.
+/// Avoids repeated key extraction during sort comparisons.
+fn pre_extract_key_offsets(
+    data: &[u8],
+    offsets: &[(usize, usize)],
+    key: &KeyDef,
+    separator: Option<u8>,
+) -> Vec<(usize, usize)> {
+    offsets
+        .iter()
+        .map(|&(s, e)| {
+            let line = &data[s..e];
+            let extracted = extract_key(line, key, separator);
+            if extracted.is_empty() {
+                (0, 0)
+            } else {
+                let offset_in_data =
+                    unsafe { extracted.as_ptr().offset_from(data.as_ptr()) as usize };
+                (offset_in_data, offset_in_data + extracted.len())
+            }
+        })
+        .collect()
+}
+
+/// Select the right numeric parser for pre-parsing.
+fn parse_value_for_opts(slice: &[u8], opts: &KeyOpts) -> f64 {
+    if opts.general_numeric {
+        parse_general_numeric(slice)
+    } else if opts.human_numeric {
+        parse_human_numeric(slice)
+    } else {
+        parse_numeric_value(slice)
+    }
+}
+
+/// Convert f64 to a u64 whose natural ordering matches float ordering.
+/// This enables branchless u64::cmp instead of f64::partial_cmp.
+/// NaN sorts before all other values (for -g compatibility).
+#[inline]
+fn float_to_sortable_u64(f: f64) -> u64 {
+    if f.is_nan() {
+        return 0; // NaN sorts first
+    }
+    let bits = f.to_bits();
+    if (bits >> 63) == 0 {
+        bits ^ 0x8000000000000000 // positive: flip sign bit
+    } else {
+        !bits // negative: flip all bits
+    }
+}
+
+/// Write sorted indices to output, with optional unique dedup.
+fn write_sorted_output(
+    data: &[u8],
+    offsets: &[(usize, usize)],
+    sorted_indices: &[usize],
+    config: &SortConfig,
+    writer: &mut dyn Write,
+    terminator: &[u8],
+) -> io::Result<()> {
+    if config.unique {
+        let mut prev: Option<usize> = None;
+        for &idx in sorted_indices {
+            let (s, e) = offsets[idx];
+            let line = &data[s..e];
+            let should_output = match prev {
+                Some(p) => {
+                    let (ps, pe) = offsets[p];
+                    compare_lines(&data[ps..pe], line, config) != Ordering::Equal
+                }
+                None => true,
+            };
+            if should_output {
+                writer.write_all(line)?;
+                writer.write_all(terminator)?;
+                prev = Some(idx);
+            }
+        }
+    } else {
+        for &idx in sorted_indices {
+            let (s, e) = offsets[idx];
+            writer.write_all(&data[s..e])?;
+            writer.write_all(terminator)?;
+        }
+    }
+    Ok(())
+}
+
+/// Helper: perform a parallel or sequential sort on indices.
+fn do_sort(
+    indices: &mut [usize],
+    stable: bool,
+    cmp: impl Fn(&usize, &usize) -> Ordering + Send + Sync,
+) {
+    let n = indices.len();
+    if stable {
+        if n > 50_000 {
+            indices.par_sort_by(cmp);
+        } else {
+            indices.sort_by(cmp);
+        }
+    } else if n > 50_000 {
+        indices.par_sort_unstable_by(cmp);
+    } else {
+        indices.sort_unstable_by(cmp);
+    }
+}
+
+/// Main sort entry point — high-performance path with specialized fast paths.
+///
+/// Fast paths:
+/// 1. Default lexicographic: prefix-based sort (caches first 8 bytes inline)
+/// 2. Numeric/general-numeric/human-numeric (no keys): pre-parses all values
+/// 3. Single-key sorts: pre-extracts key offsets + optional numeric pre-parse
+/// 4. General: index-based sort with full comparison function
 pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()> {
     if let Some(n) = config.parallel {
         let n = n.max(1);
@@ -254,47 +472,355 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         return Ok(());
     }
 
-    let stdout = io::stdout();
-    let output: Box<dyn Write> = if let Some(ref path) = config.output_file {
-        Box::new(BufWriter::with_capacity(256 * 1024, File::create(path)?))
-    } else {
-        Box::new(BufWriter::with_capacity(256 * 1024, stdout.lock()))
-    };
-    let mut writer = output;
-
     if config.merge {
+        let stdout = io::stdout();
+        let output: Box<dyn Write> = if let Some(ref path) = config.output_file {
+            Box::new(BufWriter::with_capacity(1 << 18, File::create(path)?))
+        } else {
+            Box::new(BufWriter::with_capacity(1 << 18, stdout.lock()))
+        };
+        let mut writer = output;
         return merge_sorted(inputs, config, &mut writer);
     }
 
-    let mut lines = read_lines(inputs, config.zero_terminated)?;
+    // Read all input BEFORE opening output file (supports -o same-file)
+    let (buffer, offsets) = read_all_input(inputs, config.zero_terminated)?;
+    let data: &[u8] = &buffer;
+    let num_lines = offsets.len();
 
-    let config_ref = config;
-    if lines.len() > 10_000 {
-        lines.par_sort_by(|a, b| compare_lines(a, b, config_ref));
+    let stdout = io::stdout();
+    let output: Box<dyn Write> = if let Some(ref path) = config.output_file {
+        Box::new(BufWriter::with_capacity(1 << 18, File::create(path)?))
     } else {
-        lines.sort_by(|a, b| compare_lines(a, b, config_ref));
+        Box::new(BufWriter::with_capacity(1 << 18, stdout.lock()))
+    };
+    let mut writer = output;
+
+    if num_lines == 0 {
+        return Ok(());
     }
 
     let terminator: &[u8] = if config.zero_terminated { b"\0" } else { b"\n" };
+    let mut indices: Vec<usize> = (0..num_lines).collect();
 
-    if config.unique {
-        let mut prev: Option<&[u8]> = None;
-        for line in &lines {
-            let should_output = match prev {
-                Some(p) => compare_lines(p, line, config_ref) != Ordering::Equal,
-                None => true,
+    // Detect sort mode and use specialized fast path
+    let no_keys = config.keys.is_empty();
+    let gopts = &config.global_opts;
+
+    let is_plain_lex = no_keys
+        && !gopts.has_sort_type()
+        && !gopts.dictionary_order
+        && !gopts.ignore_case
+        && !gopts.ignore_nonprinting
+        && !gopts.ignore_leading_blanks;
+
+    let is_numeric_only = no_keys
+        && (gopts.numeric || gopts.general_numeric || gopts.human_numeric)
+        && !gopts.dictionary_order
+        && !gopts.ignore_case
+        && !gopts.ignore_nonprinting;
+
+    let is_single_key = config.keys.len() == 1;
+
+    if is_plain_lex && num_lines > 256 {
+        // FAST PATH 1: Radix-partitioned prefix sort
+        // Partitions by top byte of 8-byte prefix → 256 cache-friendly buckets
+        // Each bucket (~n/256 entries) fits in L2 cache for fast sorting
+        let reverse = gopts.reverse;
+        let stable = config.stable;
+
+        // Build prefix entries
+        let entries: Vec<(u64, usize)> = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
+            .collect();
+
+        // Count bucket sizes
+        let mut counts = [0usize; 256];
+        for entry in &entries {
+            counts[(entry.0 >> 56) as usize] += 1;
+        }
+
+        // Distribute into per-bucket Vecs (exact pre-allocation)
+        let mut buckets: Vec<Vec<(u64, usize)>> = (0..256)
+            .map(|i| Vec::with_capacity(counts[i]))
+            .collect();
+        for entry in entries {
+            let b = (entry.0 >> 56) as usize;
+            buckets[b].push(entry);
+        }
+
+        // Parallel sort each bucket (cache-friendly: each fits in L2)
+        let prefix_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+            let ord = match a.0.cmp(&b.0) {
+                Ordering::Equal => {
+                    let (sa, ea) = offsets[a.1];
+                    let (sb, eb) = offsets[b.1];
+                    data[sa..ea].cmp(&data[sb..eb])
+                }
+                ord => ord,
             };
-            if should_output {
-                writer.write_all(line)?;
-                writer.write_all(terminator)?;
-                prev = Some(line);
+            if reverse {
+                ord.reverse()
+            } else {
+                ord
+            }
+        };
+
+        buckets.par_iter_mut().for_each(|bucket| {
+            if bucket.len() > 1 {
+                if stable {
+                    bucket.sort_by(prefix_cmp);
+                } else {
+                    bucket.sort_unstable_by(prefix_cmp);
+                }
+            }
+        });
+
+        // Output buckets in order (forward or reverse)
+        let order: Box<dyn Iterator<Item = usize>> = if reverse {
+            Box::new((0..256).rev())
+        } else {
+            Box::new(0..256usize)
+        };
+
+        if config.unique {
+            let mut prev: Option<usize> = None;
+            for bucket_idx in order {
+                for &(_, idx) in &buckets[bucket_idx] {
+                    let (s, e) = offsets[idx];
+                    let line = &data[s..e];
+                    let emit = match prev {
+                        Some(p) => {
+                            let (ps, pe) = offsets[p];
+                            data[ps..pe] != *line
+                        }
+                        None => true,
+                    };
+                    if emit {
+                        writer.write_all(line)?;
+                        writer.write_all(terminator)?;
+                        prev = Some(idx);
+                    }
+                }
+            }
+        } else {
+            for bucket_idx in order {
+                for &(_, idx) in &buckets[bucket_idx] {
+                    let (s, e) = offsets[idx];
+                    writer.write_all(&data[s..e])?;
+                    writer.write_all(terminator)?;
+                }
             }
         }
-    } else {
-        for line in &lines {
-            writer.write_all(line)?;
-            writer.write_all(terminator)?;
+    } else if is_numeric_only {
+        // FAST PATH 2: Pre-parsed numeric sort with u64 comparison
+        // float_to_sortable_u64 enables branchless u64::cmp instead of f64::partial_cmp
+        let mut entries: Vec<(u64, usize)> = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| {
+                (
+                    float_to_sortable_u64(parse_value_for_opts(&data[s..e], gopts)),
+                    i,
+                )
+            })
+            .collect();
+        let reverse = gopts.reverse;
+        let stable = config.stable;
+
+        let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+            let ord = a.0.cmp(&b.0);
+            if ord != Ordering::Equal {
+                return if reverse { ord.reverse() } else { ord };
+            }
+            if !stable {
+                data[offsets[a.1].0..offsets[a.1].1]
+                    .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+            } else {
+                Ordering::Equal
+            }
+        };
+
+        let n = entries.len();
+        if stable {
+            if n > 50_000 {
+                entries.par_sort_by(cmp);
+            } else {
+                entries.sort_by(cmp);
+            }
+        } else if n > 50_000 {
+            entries.par_sort_unstable_by(cmp);
+        } else {
+            entries.sort_unstable_by(cmp);
         }
+
+        for (i, &(_, idx)) in entries.iter().enumerate() {
+            indices[i] = idx;
+        }
+
+        write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+    } else if is_single_key {
+        // FAST PATH 3: Single-key sort with pre-extracted key offsets
+        let key = &config.keys[0];
+        let opts = if key.opts.has_sort_type()
+            || key.opts.ignore_case
+            || key.opts.dictionary_order
+            || key.opts.ignore_nonprinting
+            || key.opts.ignore_leading_blanks
+            || key.opts.reverse
+        {
+            &key.opts
+        } else {
+            gopts
+        };
+
+        let key_offs = pre_extract_key_offsets(data, &offsets, key, config.separator);
+        let is_key_numeric = opts.numeric || opts.general_numeric || opts.human_numeric;
+
+        if is_key_numeric {
+            // Single key, numeric: u64-based branchless comparison
+            let mut entries: Vec<(u64, usize)> = key_offs
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, e))| {
+                    let f = if s == e {
+                        if opts.general_numeric {
+                            f64::NAN
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        parse_value_for_opts(&data[s..e], opts)
+                    };
+                    (float_to_sortable_u64(f), i)
+                })
+                .collect();
+            let reverse = opts.reverse;
+            let stable = config.stable;
+
+            let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                let ord = a.0.cmp(&b.0);
+                if ord != Ordering::Equal {
+                    return if reverse { ord.reverse() } else { ord };
+                }
+                if !stable {
+                    data[offsets[a.1].0..offsets[a.1].1]
+                        .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                } else {
+                    Ordering::Equal
+                }
+            };
+
+            let n = entries.len();
+            if stable {
+                if n > 50_000 {
+                    entries.par_sort_by(cmp);
+                } else {
+                    entries.sort_by(cmp);
+                }
+            } else if n > 50_000 {
+                entries.par_sort_unstable_by(cmp);
+            } else {
+                entries.sort_unstable_by(cmp);
+            }
+
+            for (i, &(_, idx)) in entries.iter().enumerate() {
+                indices[i] = idx;
+            }
+        } else {
+            // Single key, non-numeric: direct comparison of pre-extracted keys
+            let stable = config.stable;
+            let reverse = opts.reverse;
+            let random_seed = config.random_seed;
+            let has_flags = opts.dictionary_order
+                || opts.ignore_case
+                || opts.ignore_nonprinting
+                || opts.ignore_leading_blanks
+                || opts.has_sort_type();
+
+            if !has_flags {
+                // Prefix-based sort: cache 8-byte key prefix as u64
+                // Most comparisons resolve at the u64 level (no data[] access)
+                let mut entries: Vec<(u64, usize)> = key_offs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(s, e))| {
+                        (
+                            if s < e {
+                                line_prefix(data, s, e)
+                            } else {
+                                0u64
+                            },
+                            i,
+                        )
+                    })
+                    .collect();
+
+                let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                    let ord = match a.0.cmp(&b.0) {
+                        Ordering::Equal => {
+                            let (sa, ea) = key_offs[a.1];
+                            let (sb, eb) = key_offs[b.1];
+                            data[sa..ea].cmp(&data[sb..eb])
+                        }
+                        ord => ord,
+                    };
+                    if ord != Ordering::Equal {
+                        return if reverse { ord.reverse() } else { ord };
+                    }
+                    if !stable {
+                        data[offsets[a.1].0..offsets[a.1].1]
+                            .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                    } else {
+                        Ordering::Equal
+                    }
+                };
+
+                let n = entries.len();
+                if stable {
+                    if n > 50_000 {
+                        entries.par_sort_by(cmp);
+                    } else {
+                        entries.sort_by(cmp);
+                    }
+                } else if n > 50_000 {
+                    entries.par_sort_unstable_by(cmp);
+                } else {
+                    entries.sort_unstable_by(cmp);
+                }
+
+                for (i, &(_, idx)) in entries.iter().enumerate() {
+                    indices[i] = idx;
+                }
+            } else {
+                do_sort(&mut indices, stable, |&a, &b| {
+                    let (sa, ea) = key_offs[a];
+                    let (sb, eb) = key_offs[b];
+                    let ka = if sa == ea { &[] as &[u8] } else { &data[sa..ea] };
+                    let kb = if sb == eb { &[] as &[u8] } else { &data[sb..eb] };
+                    let ord = compare_with_opts(ka, kb, opts, random_seed);
+                    if ord == Ordering::Equal && !stable {
+                        data[offsets[a].0..offsets[a].1]
+                            .cmp(&data[offsets[b].0..offsets[b].1])
+                    } else {
+                        ord
+                    }
+                });
+            }
+        }
+
+        write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+    } else {
+        // GENERAL PATH: Index-based sort with full comparison
+        do_sort(&mut indices, config.stable, |&a, &b| {
+            let (sa, ea) = offsets[a];
+            let (sb, eb) = offsets[b];
+            compare_lines(&data[sa..ea], &data[sb..eb], config)
+        });
+
+        write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
     }
 
     writer.flush()?;

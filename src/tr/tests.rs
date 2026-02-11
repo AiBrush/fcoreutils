@@ -525,11 +525,12 @@ fn test_identity_translate() {
 #[test]
 fn test_delete_squeeze_combined() {
     // Delete 'a', then squeeze 'b's
+    // GNU behavior: delete 'a' → "bbbbbb", squeeze 'b' → "b"
     let input = b"aabbbaaabbba";
     let ours = run_ftr(input, &["-ds", "a", "b"]);
     let gnu = run_gnu_tr(input, &["-ds", "a", "b"]);
     assert_eq!(ours, gnu);
-    assert_eq!(ours, b"bb");
+    assert_eq!(ours, b"b");
 }
 
 #[test]

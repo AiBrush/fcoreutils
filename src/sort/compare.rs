@@ -28,7 +28,7 @@ pub fn compare_numeric(a: &[u8], b: &[u8]) -> Ordering {
     va.partial_cmp(&vb).unwrap_or(Ordering::Equal)
 }
 
-fn parse_numeric_value(s: &[u8]) -> f64 {
+pub fn parse_numeric_value(s: &[u8]) -> f64 {
     let s = skip_leading_blanks(s);
     if s.is_empty() {
         return 0.0;
@@ -80,7 +80,7 @@ pub fn compare_general_numeric(a: &[u8], b: &[u8]) -> Ordering {
     }
 }
 
-fn parse_general_numeric(s: &[u8]) -> f64 {
+pub fn parse_general_numeric(s: &[u8]) -> f64 {
     let s = skip_leading_blanks(s);
     let s_str = match std::str::from_utf8(s) {
         Ok(s) => s.trim(),
@@ -145,7 +145,7 @@ pub fn compare_human_numeric(a: &[u8], b: &[u8]) -> Ordering {
     va.partial_cmp(&vb).unwrap_or(Ordering::Equal)
 }
 
-fn parse_human_numeric(s: &[u8]) -> f64 {
+pub fn parse_human_numeric(s: &[u8]) -> f64 {
     let s = skip_leading_blanks(s);
     if s.is_empty() {
         return 0.0;

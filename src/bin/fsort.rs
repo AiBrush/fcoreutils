@@ -166,6 +166,15 @@ fn main() {
         })
     });
 
+    let random_seed = if cli.random_sort {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(42)
+    } else {
+        0
+    };
+
     let config = SortConfig {
         keys,
         separator,
@@ -180,7 +189,7 @@ fn main() {
         parallel: cli.parallel,
         buffer_size,
         temp_dir: cli.temp_dir,
-        random_seed: 0,
+        random_seed,
     };
 
     let inputs = if cli.files.is_empty() {
