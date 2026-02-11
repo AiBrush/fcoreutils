@@ -371,6 +371,7 @@ dependencies = [
  "blake2",
  "clap",
  "criterion",
+ "libc",
  "md-5",
  "memchr",
  "memmap2",

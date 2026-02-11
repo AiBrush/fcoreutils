@@ -78,6 +78,9 @@ base64-simd = "0.8"
 # Regex for tac -r
 regex = "1"
 
+# System calls (readahead, madvise)
+libc = "0.2"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
@@ -89,6 +92,10 @@ tempfile = "3"
 
 [[bench]]
 name = "wc_benchmark"
+harness = false
+
+[[bench]]
+name = "hash_benchmark"
 harness = false
 
 [profile.release]
