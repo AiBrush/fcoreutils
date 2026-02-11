@@ -523,35 +523,14 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
     let is_single_key = config.keys.len() == 1;
 
     if is_plain_lex && num_lines > 256 {
-        // FAST PATH 1: Radix-partitioned prefix sort
-        // Partitions by top byte of 8-byte prefix → 256 cache-friendly buckets
-        // Each bucket (~n/256 entries) fits in L2 cache for fast sorting
+        // FAST PATH 1: Prefix-based lexicographic sort
         let reverse = gopts.reverse;
-        let stable = config.stable;
-
-        // Build prefix entries
-        let entries: Vec<(u64, usize)> = offsets
+        let mut entries: Vec<(u64, usize)> = offsets
             .iter()
             .enumerate()
             .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
             .collect();
 
-        // Count bucket sizes
-        let mut counts = [0usize; 256];
-        for entry in &entries {
-            counts[(entry.0 >> 56) as usize] += 1;
-        }
-
-        // Distribute into per-bucket Vecs (exact pre-allocation)
-        let mut buckets: Vec<Vec<(u64, usize)>> = (0..256)
-            .map(|i| Vec::with_capacity(counts[i]))
-            .collect();
-        for entry in entries {
-            let b = (entry.0 >> 56) as usize;
-            buckets[b].push(entry);
-        }
-
-        // Parallel sort each bucket (cache-friendly: each fits in L2)
         let prefix_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
             let ord = match a.0.cmp(&b.0) {
                 Ordering::Equal => {
@@ -568,50 +547,43 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             }
         };
 
-        buckets.par_iter_mut().for_each(|bucket| {
-            if bucket.len() > 1 {
-                if stable {
-                    bucket.sort_by(prefix_cmp);
-                } else {
-                    bucket.sort_unstable_by(prefix_cmp);
-                }
+        let n = entries.len();
+        if config.stable {
+            if n > 50_000 {
+                entries.par_sort_by(prefix_cmp);
+            } else {
+                entries.sort_by(prefix_cmp);
             }
-        });
-
-        // Output buckets in order (forward or reverse)
-        let order: Box<dyn Iterator<Item = usize>> = if reverse {
-            Box::new((0..256).rev())
+        } else if n > 50_000 {
+            entries.par_sort_unstable_by(prefix_cmp);
         } else {
-            Box::new(0..256usize)
-        };
+            entries.sort_unstable_by(prefix_cmp);
+        }
 
+        // Output from entries
         if config.unique {
             let mut prev: Option<usize> = None;
-            for bucket_idx in order {
-                for &(_, idx) in &buckets[bucket_idx] {
-                    let (s, e) = offsets[idx];
-                    let line = &data[s..e];
-                    let emit = match prev {
-                        Some(p) => {
-                            let (ps, pe) = offsets[p];
-                            data[ps..pe] != *line
-                        }
-                        None => true,
-                    };
-                    if emit {
-                        writer.write_all(line)?;
-                        writer.write_all(terminator)?;
-                        prev = Some(idx);
+            for &(_, idx) in &entries {
+                let (s, e) = offsets[idx];
+                let line = &data[s..e];
+                let emit = match prev {
+                    Some(p) => {
+                        let (ps, pe) = offsets[p];
+                        data[ps..pe] != *line
                     }
+                    None => true,
+                };
+                if emit {
+                    writer.write_all(line)?;
+                    writer.write_all(terminator)?;
+                    prev = Some(idx);
                 }
             }
         } else {
-            for bucket_idx in order {
-                for &(_, idx) in &buckets[bucket_idx] {
-                    let (s, e) = offsets[idx];
-                    writer.write_all(&data[s..e])?;
-                    writer.write_all(terminator)?;
-                }
+            for &(_, idx) in &entries {
+                let (s, e) = offsets[idx];
+                writer.write_all(&data[s..e])?;
+                writer.write_all(terminator)?;
             }
         }
     } else if is_numeric_only {

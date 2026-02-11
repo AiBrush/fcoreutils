@@ -60,7 +60,7 @@ impl Default for UniqConfig {
 
 /// Extract the comparison key from a line according to skip_fields, skip_chars, check_chars.
 /// Matches GNU uniq field-skip semantics exactly: for each field, skip blanks then non-blanks.
-#[inline]
+#[inline(always)]
 fn get_compare_slice<'a>(line: &'a [u8], config: &UniqConfig) -> &'a [u8] {
     let mut start = 0;
     let len = line.len();
@@ -79,7 +79,8 @@ fn get_compare_slice<'a>(line: &'a [u8], config: &UniqConfig) -> &'a [u8] {
 
     // Skip N characters
     if config.skip_chars > 0 {
-        let skip = config.skip_chars.min(len - start);
+        let remaining = len - start;
+        let skip = config.skip_chars.min(remaining);
         start += skip;
     }
 
@@ -95,25 +96,11 @@ fn get_compare_slice<'a>(line: &'a [u8], config: &UniqConfig) -> &'a [u8] {
     slice
 }
 
-/// Strip the line terminator from the end of a line buffer.
-#[inline]
-fn strip_terminator(line: &[u8], zero_terminated: bool) -> &[u8] {
-    let term = if zero_terminated { b'\0' } else { b'\n' };
-    if line.last() == Some(&term) {
-        &line[..line.len() - 1]
-    } else {
-        line
-    }
-}
-
-/// Compare two lines after stripping terminators.
-#[inline]
-fn compare_lines(a: &[u8], b: &[u8], config: &UniqConfig) -> bool {
-    let a_stripped = strip_terminator(a, config.zero_terminated);
-    let b_stripped = strip_terminator(b, config.zero_terminated);
-
-    let sa = get_compare_slice(a_stripped, config);
-    let sb = get_compare_slice(b_stripped, config);
+/// Compare two lines (without terminators) using the config's comparison rules.
+#[inline(always)]
+fn lines_equal(a: &[u8], b: &[u8], config: &UniqConfig) -> bool {
+    let sa = get_compare_slice(a, config);
+    let sb = get_compare_slice(b, config);
 
     if config.ignore_case {
         sa.eq_ignore_ascii_case(sb)
@@ -122,40 +109,358 @@ fn compare_lines(a: &[u8], b: &[u8], config: &UniqConfig) -> bool {
     }
 }
 
+/// Check if config requires field/char skipping or char limiting.
+#[inline(always)]
+fn needs_key_extraction(config: &UniqConfig) -> bool {
+    config.skip_fields > 0 || config.skip_chars > 0 || config.check_chars.is_some()
+}
+
+/// Fast path comparison: no field/char extraction needed, no case folding.
+#[inline(always)]
+fn lines_equal_fast(a: &[u8], b: &[u8]) -> bool {
+    a == b
+}
+
 /// Write a count-prefixed line in GNU uniq format.
-/// GNU format: 7 spaces for count, right-aligned, followed by space and line.
-#[inline]
-fn write_count_line(out: &mut impl Write, count: u64, line: &[u8]) -> io::Result<()> {
-    // GNU uniq uses "%7lu " format for count prefix
-    write!(out, "{:>7} ", count)?;
-    out.write_all(line)?;
-    Ok(())
-}
-
-/// Write line with terminator if needed.
-#[inline]
-fn write_line(out: &mut impl Write, line: &[u8]) -> io::Result<()> {
-    out.write_all(line)?;
-    Ok(())
-}
-
-/// Write a line separator (empty line).
-#[inline]
-fn write_separator(out: &mut impl Write, zero_terminated: bool) -> io::Result<()> {
-    if zero_terminated {
-        out.write_all(b"\0")?;
-    } else {
-        out.write_all(b"\n")?;
+/// GNU format: "%7lu " — right-aligned in 7-char field, followed by space.
+#[inline(always)]
+fn write_count_line(out: &mut impl Write, count: u64, line: &[u8], term: u8) -> io::Result<()> {
+    // Fast path for small counts (vast majority of cases)
+    // Manually format to avoid write!() macro overhead
+    let mut buf = [b' '; 20]; // Enough for u64 max
+    let count_len = {
+        let count_str = itoa_right_aligned(&mut buf, count);
+        count_str.len()
+    };
+    let start = 20 - count_len;
+    if count_len < 7 {
+        // Pad with spaces to width 7
+        let pad = 7 - count_len;
+        out.write_all(&buf[..pad])?; // spaces
     }
+    out.write_all(&buf[start..])?;
+    out.write_all(b" ")?;
+    out.write_all(line)?;
+    out.write_all(&[term])?;
     Ok(())
 }
 
-/// Ensure line ends with proper terminator.
-#[inline]
-fn ensure_terminator(line: &[u8], zero_terminated: bool) -> bool {
-    let term = if zero_terminated { b'\0' } else { b'\n' };
-    line.last() == Some(&term)
+/// Convert u64 to decimal string in a stack buffer, right-aligned.
+/// Returns the slice of the buffer containing the decimal digits.
+#[inline(always)]
+fn itoa_right_aligned(buf: &mut [u8; 20], mut val: u64) -> &[u8] {
+    if val == 0 {
+        buf[19] = b'0';
+        return &buf[19..20];
+    }
+    let mut pos = 20;
+    while val > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (val % 10) as u8;
+        val /= 10;
+    }
+    &buf[pos..20]
 }
+
+// ============================================================================
+// High-performance mmap-based processing (for byte slices, zero-copy)
+// ============================================================================
+
+/// Process uniq from a byte slice (mmap'd file). Zero-copy, no per-line allocation.
+pub fn process_uniq_bytes(data: &[u8], output: impl Write, config: &UniqConfig) -> io::Result<()> {
+    let mut writer = BufWriter::with_capacity(256 * 1024, output);
+    let term = if config.zero_terminated { b'\0' } else { b'\n' };
+
+    match config.mode {
+        OutputMode::Group(method) => {
+            process_group_bytes(data, &mut writer, config, method, term)?;
+        }
+        OutputMode::AllRepeated(method) => {
+            process_all_repeated_bytes(data, &mut writer, config, method, term)?;
+        }
+        _ => {
+            process_standard_bytes(data, &mut writer, config, term)?;
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// Iterator over lines in a byte slice, yielding (line_without_terminator, has_terminator).
+/// Uses memchr for SIMD-accelerated line boundary detection.
+struct LineIter<'a> {
+    data: &'a [u8],
+    pos: usize,
+    term: u8,
+}
+
+impl<'a> LineIter<'a> {
+    #[inline(always)]
+    fn new(data: &'a [u8], term: u8) -> Self {
+        Self { data, pos: 0, term }
+    }
+}
+
+impl<'a> Iterator for LineIter<'a> {
+    /// (line content without terminator, full line including terminator for output)
+    type Item = (&'a [u8], &'a [u8]);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.data.len() {
+            return None;
+        }
+
+        let remaining = &self.data[self.pos..];
+        match memchr::memchr(self.term, remaining) {
+            Some(idx) => {
+                let line_start = self.pos;
+                let line_end = self.pos + idx; // without terminator
+                let full_end = self.pos + idx + 1; // with terminator
+                self.pos = full_end;
+                Some((&self.data[line_start..line_end], &self.data[line_start..full_end]))
+            }
+            None => {
+                // Last line without terminator
+                let line_start = self.pos;
+                self.pos = self.data.len();
+                let line = &self.data[line_start..];
+                Some((line, line))
+            }
+        }
+    }
+}
+
+/// Standard processing for Default, RepeatedOnly, UniqueOnly on byte slices.
+fn process_standard_bytes(
+    data: &[u8],
+    writer: &mut impl Write,
+    config: &UniqConfig,
+    term: u8,
+) -> io::Result<()> {
+    let mut lines = LineIter::new(data, term);
+
+    let (prev_content, prev_full) = match lines.next() {
+        Some(v) => v,
+        None => return Ok(()), // empty input
+    };
+
+    let mut prev_content = prev_content;
+    let mut prev_full = prev_full;
+    let mut count: u64 = 1;
+
+    let fast = !needs_key_extraction(config) && !config.ignore_case;
+
+    for (cur_content, cur_full) in lines {
+        let equal = if fast {
+            lines_equal_fast(prev_content, cur_content)
+        } else {
+            lines_equal(prev_content, cur_content, config)
+        };
+
+        if equal {
+            count += 1;
+        } else {
+            // Output previous group
+            output_group_bytes(writer, prev_content, prev_full, count, config, term)?;
+            prev_content = cur_content;
+            prev_full = cur_full;
+            count = 1;
+        }
+    }
+
+    // Output last group
+    output_group_bytes(writer, prev_content, prev_full, count, config, term)?;
+    Ok(())
+}
+
+/// Output a group for standard modes (bytes path).
+#[inline(always)]
+fn output_group_bytes(
+    writer: &mut impl Write,
+    content: &[u8],
+    full: &[u8],
+    count: u64,
+    config: &UniqConfig,
+    term: u8,
+) -> io::Result<()> {
+    let should_print = match config.mode {
+        OutputMode::Default => true,
+        OutputMode::RepeatedOnly => count > 1,
+        OutputMode::UniqueOnly => count == 1,
+        _ => true,
+    };
+
+    if should_print {
+        if config.count {
+            write_count_line(writer, count, content, term)?;
+        } else {
+            writer.write_all(full)?;
+            // Add terminator if the original line didn't have one
+            if full.len() == content.len() {
+                writer.write_all(&[term])?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Process --all-repeated / -D mode on byte slices.
+fn process_all_repeated_bytes(
+    data: &[u8],
+    writer: &mut impl Write,
+    config: &UniqConfig,
+    method: AllRepeatedMethod,
+    term: u8,
+) -> io::Result<()> {
+    let mut lines = LineIter::new(data, term);
+
+    let first = match lines.next() {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    // Collect groups as (start_offset, line_count, first_line_content, lines_vec)
+    // For all-repeated we need to buffer group lines since we only print if count > 1
+    let mut group_lines: Vec<(&[u8], &[u8])> = Vec::with_capacity(64);
+    group_lines.push(first);
+    let mut first_group_printed = false;
+
+    let fast = !needs_key_extraction(config) && !config.ignore_case;
+
+    for (cur_content, cur_full) in lines {
+        let prev_content = group_lines.last().unwrap().0;
+        let equal = if fast {
+            lines_equal_fast(prev_content, cur_content)
+        } else {
+            lines_equal(prev_content, cur_content, config)
+        };
+
+        if equal {
+            group_lines.push((cur_content, cur_full));
+        } else {
+            // Flush group
+            flush_all_repeated_bytes(
+                writer,
+                &group_lines,
+                method,
+                &mut first_group_printed,
+                term,
+            )?;
+            group_lines.clear();
+            group_lines.push((cur_content, cur_full));
+        }
+    }
+
+    // Flush last group
+    flush_all_repeated_bytes(
+        writer,
+        &group_lines,
+        method,
+        &mut first_group_printed,
+        term,
+    )?;
+
+    Ok(())
+}
+
+/// Flush a group for --all-repeated mode (bytes path).
+fn flush_all_repeated_bytes(
+    writer: &mut impl Write,
+    group: &[(&[u8], &[u8])],
+    method: AllRepeatedMethod,
+    first_group_printed: &mut bool,
+    term: u8,
+) -> io::Result<()> {
+    if group.len() <= 1 {
+        return Ok(()); // Not a duplicate group
+    }
+
+    match method {
+        AllRepeatedMethod::Prepend => {
+            writer.write_all(&[term])?;
+        }
+        AllRepeatedMethod::Separate => {
+            if *first_group_printed {
+                writer.write_all(&[term])?;
+            }
+        }
+        AllRepeatedMethod::None => {}
+    }
+
+    for &(content, full) in group {
+        writer.write_all(full)?;
+        if full.len() == content.len() {
+            writer.write_all(&[term])?;
+        }
+    }
+
+    *first_group_printed = true;
+    Ok(())
+}
+
+/// Process --group mode on byte slices.
+fn process_group_bytes(
+    data: &[u8],
+    writer: &mut impl Write,
+    config: &UniqConfig,
+    method: GroupMethod,
+    term: u8,
+) -> io::Result<()> {
+    let mut lines = LineIter::new(data, term);
+
+    let (prev_content, prev_full) = match lines.next() {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    // Prepend/Both: separator before first group
+    if matches!(method, GroupMethod::Prepend | GroupMethod::Both) {
+        writer.write_all(&[term])?;
+    }
+
+    // Write first line
+    writer.write_all(prev_full)?;
+    if prev_full.len() == prev_content.len() {
+        writer.write_all(&[term])?;
+    }
+
+    let mut prev_content = prev_content;
+    let fast = !needs_key_extraction(config) && !config.ignore_case;
+
+    for (cur_content, cur_full) in lines {
+        let equal = if fast {
+            lines_equal_fast(prev_content, cur_content)
+        } else {
+            lines_equal(prev_content, cur_content, config)
+        };
+
+        if !equal {
+            // New group — write separator
+            writer.write_all(&[term])?;
+        }
+
+        writer.write_all(cur_full)?;
+        if cur_full.len() == cur_content.len() {
+            writer.write_all(&[term])?;
+        }
+
+        prev_content = cur_content;
+    }
+
+    // Append/Both: separator after last group
+    if matches!(method, GroupMethod::Append | GroupMethod::Both) {
+        writer.write_all(&[term])?;
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Streaming processing (for stdin / pipe input)
+// ============================================================================
 
 /// Main streaming uniq processor.
 /// Reads from `input`, writes to `output`.
@@ -170,13 +475,13 @@ pub fn process_uniq<R: Read, W: Write>(
 
     match config.mode {
         OutputMode::Group(method) => {
-            process_group(reader, &mut writer, config, method, term)?;
+            process_group_stream(reader, &mut writer, config, method, term)?;
         }
         OutputMode::AllRepeated(method) => {
-            process_all_repeated(reader, &mut writer, config, method, term)?;
+            process_all_repeated_stream(reader, &mut writer, config, method, term)?;
         }
         _ => {
-            process_standard(reader, &mut writer, config, term)?;
+            process_standard_stream(reader, &mut writer, config, term)?;
         }
     }
 
@@ -184,8 +489,8 @@ pub fn process_uniq<R: Read, W: Write>(
     Ok(())
 }
 
-/// Standard processing for Default, RepeatedOnly, UniqueOnly modes.
-fn process_standard<R: BufRead, W: Write>(
+/// Standard processing for Default, RepeatedOnly, UniqueOnly modes (streaming).
+fn process_standard_stream<R: BufRead, W: Write>(
     mut reader: R,
     writer: &mut W,
     config: &UniqConfig,
@@ -193,8 +498,8 @@ fn process_standard<R: BufRead, W: Write>(
 ) -> io::Result<()> {
     let mut prev_line: Vec<u8> = Vec::with_capacity(4096);
     let mut current_line: Vec<u8> = Vec::with_capacity(4096);
+
     // Read first line
-    prev_line.clear();
     if read_line_term(&mut reader, &mut prev_line, term)? == 0 {
         return Ok(()); // empty input
     }
@@ -205,16 +510,15 @@ fn process_standard<R: BufRead, W: Write>(
         let bytes_read = read_line_term(&mut reader, &mut current_line, term)?;
 
         if bytes_read == 0 {
-            // End of input - output the last group
-            output_group(writer, &prev_line, count, config)?;
+            // End of input — output the last group
+            output_group_stream(writer, &prev_line, count, config, term)?;
             break;
         }
 
-        if compare_lines(&prev_line, &current_line, config) {
+        if compare_lines_stream(&prev_line, &current_line, config, term) {
             count += 1;
         } else {
-            // Lines differ - output previous group
-            output_group(writer, &prev_line, count, config)?;
+            output_group_stream(writer, &prev_line, count, config, term)?;
             std::mem::swap(&mut prev_line, &mut current_line);
             count = 1;
         }
@@ -223,13 +527,32 @@ fn process_standard<R: BufRead, W: Write>(
     Ok(())
 }
 
-/// Output a group based on mode (Default/RepeatedOnly/UniqueOnly).
-#[inline]
-fn output_group(
+/// Compare two lines (with terminators) in streaming mode.
+#[inline(always)]
+fn compare_lines_stream(a: &[u8], b: &[u8], config: &UniqConfig, term: u8) -> bool {
+    let a_stripped = strip_term(a, term);
+    let b_stripped = strip_term(b, term);
+    lines_equal(a_stripped, b_stripped, config)
+}
+
+/// Strip terminator from end of line.
+#[inline(always)]
+fn strip_term(line: &[u8], term: u8) -> &[u8] {
+    if line.last() == Some(&term) {
+        &line[..line.len() - 1]
+    } else {
+        line
+    }
+}
+
+/// Output a group in streaming mode.
+#[inline(always)]
+fn output_group_stream(
     writer: &mut impl Write,
     line: &[u8],
     count: u64,
     config: &UniqConfig,
+    term: u8,
 ) -> io::Result<()> {
     let should_print = match config.mode {
         OutputMode::Default => true,
@@ -239,36 +562,30 @@ fn output_group(
     };
 
     if should_print {
+        let content = strip_term(line, term);
         if config.count {
-            write_count_line(writer, count, line)?;
-            if !ensure_terminator(line, config.zero_terminated) {
-                write_separator(writer, config.zero_terminated)?;
-            }
+            write_count_line(writer, count, content, term)?;
         } else {
-            write_line(writer, line)?;
-            if !ensure_terminator(line, config.zero_terminated) {
-                write_separator(writer, config.zero_terminated)?;
-            }
+            writer.write_all(content)?;
+            writer.write_all(&[term])?;
         }
     }
 
     Ok(())
 }
 
-/// Process --all-repeated / -D mode.
-fn process_all_repeated<R: BufRead, W: Write>(
+/// Process --all-repeated / -D mode (streaming).
+fn process_all_repeated_stream<R: BufRead, W: Write>(
     mut reader: R,
     writer: &mut W,
     config: &UniqConfig,
     method: AllRepeatedMethod,
     term: u8,
 ) -> io::Result<()> {
-    // We need to buffer the current group to know if it's a duplicate group
     let mut group: Vec<Vec<u8>> = Vec::new();
     let mut current_line: Vec<u8> = Vec::with_capacity(4096);
-    let mut first_group = true;
+    let mut first_group_printed = false;
 
-    // Read first line
     current_line.clear();
     if read_line_term(&mut reader, &mut current_line, term)? == 0 {
         return Ok(());
@@ -280,15 +597,14 @@ fn process_all_repeated<R: BufRead, W: Write>(
         let bytes_read = read_line_term(&mut reader, &mut current_line, term)?;
 
         if bytes_read == 0 {
-            // End of input - flush last group
-            flush_all_repeated_group(writer, &group, method, &mut first_group, config)?;
+            flush_all_repeated_stream(writer, &group, method, &mut first_group_printed, term)?;
             break;
         }
 
-        if compare_lines(group.last().unwrap(), &current_line, config) {
+        if compare_lines_stream(group.last().unwrap(), &current_line, config, term) {
             group.push(current_line.clone());
         } else {
-            flush_all_repeated_group(writer, &group, method, &mut first_group, config)?;
+            flush_all_repeated_stream(writer, &group, method, &mut first_group_printed, term)?;
             group.clear();
             group.push(current_line.clone());
         }
@@ -297,43 +613,42 @@ fn process_all_repeated<R: BufRead, W: Write>(
     Ok(())
 }
 
-/// Flush a group for --all-repeated mode.
-fn flush_all_repeated_group(
+/// Flush a group for --all-repeated mode (streaming).
+fn flush_all_repeated_stream(
     writer: &mut impl Write,
     group: &[Vec<u8>],
     method: AllRepeatedMethod,
-    first_group: &mut bool,
-    config: &UniqConfig,
+    first_group_printed: &mut bool,
+    term: u8,
 ) -> io::Result<()> {
     if group.len() <= 1 {
-        return Ok(()); // Not a duplicate group
+        return Ok(());
     }
 
     match method {
         AllRepeatedMethod::Prepend => {
-            write_separator(writer, config.zero_terminated)?;
+            writer.write_all(&[term])?;
         }
         AllRepeatedMethod::Separate => {
-            if !*first_group {
-                write_separator(writer, config.zero_terminated)?;
+            if *first_group_printed {
+                writer.write_all(&[term])?;
             }
         }
         AllRepeatedMethod::None => {}
     }
 
     for line in group {
-        write_line(writer, line)?;
-        if !ensure_terminator(line, config.zero_terminated) {
-            write_separator(writer, config.zero_terminated)?;
-        }
+        let content = strip_term(line, term);
+        writer.write_all(content)?;
+        writer.write_all(&[term])?;
     }
 
-    *first_group = false;
+    *first_group_printed = true;
     Ok(())
 }
 
-/// Process --group mode.
-fn process_group<R: BufRead, W: Write>(
+/// Process --group mode (streaming).
+fn process_group_stream<R: BufRead, W: Write>(
     mut reader: R,
     writer: &mut W,
     config: &UniqConfig,
@@ -342,46 +657,38 @@ fn process_group<R: BufRead, W: Write>(
 ) -> io::Result<()> {
     let mut prev_line: Vec<u8> = Vec::with_capacity(4096);
     let mut current_line: Vec<u8> = Vec::with_capacity(4096);
-    // Read first line
-    prev_line.clear();
+
     if read_line_term(&mut reader, &mut prev_line, term)? == 0 {
         return Ok(());
     }
 
     // Prepend/Both: separator before first group
     if matches!(method, GroupMethod::Prepend | GroupMethod::Both) {
-        write_separator(writer, config.zero_terminated)?;
+        writer.write_all(&[term])?;
     }
 
-    write_line(writer, &prev_line)?;
-    if !ensure_terminator(&prev_line, config.zero_terminated) {
-        write_separator(writer, config.zero_terminated)?;
-    }
-    let mut first_group = false;
+    let content = strip_term(&prev_line, term);
+    writer.write_all(content)?;
+    writer.write_all(&[term])?;
 
     loop {
         current_line.clear();
         let bytes_read = read_line_term(&mut reader, &mut current_line, term)?;
 
         if bytes_read == 0 {
-            // End of input
             if matches!(method, GroupMethod::Append | GroupMethod::Both) {
-                write_separator(writer, config.zero_terminated)?;
+                writer.write_all(&[term])?;
             }
             break;
         }
 
-        if !compare_lines(&prev_line, &current_line, config) {
-            // New group - separator between groups
-            if !first_group {
-                write_separator(writer, config.zero_terminated)?;
-            }
+        if !compare_lines_stream(&prev_line, &current_line, config, term) {
+            writer.write_all(&[term])?;
         }
 
-        write_line(writer, &current_line)?;
-        if !ensure_terminator(&current_line, config.zero_terminated) {
-            write_separator(writer, config.zero_terminated)?;
-        }
+        let content = strip_term(&current_line, term);
+        writer.write_all(content)?;
+        writer.write_all(&[term])?;
 
         std::mem::swap(&mut prev_line, &mut current_line);
     }
@@ -391,11 +698,7 @@ fn process_group<R: BufRead, W: Write>(
 
 /// Read a line terminated by the given byte (newline or NUL).
 /// Returns number of bytes read (0 = EOF).
-#[inline]
+#[inline(always)]
 fn read_line_term<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>, term: u8) -> io::Result<usize> {
-    if term == b'\n' {
-        reader.read_until(b'\n', buf)
-    } else {
-        reader.read_until(b'\0', buf)
-    }
+    reader.read_until(term, buf)
 }

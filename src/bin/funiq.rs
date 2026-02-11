@@ -3,9 +3,10 @@ use std::io::{self, BufWriter};
 use std::process;
 
 use clap::Parser;
+use memmap2::Mmap;
 
 use coreutils_rs::uniq::{
-    AllRepeatedMethod, GroupMethod, OutputMode, UniqConfig, process_uniq,
+    AllRepeatedMethod, GroupMethod, OutputMode, UniqConfig, process_uniq, process_uniq_bytes,
 };
 
 #[derive(Parser)]
@@ -145,18 +146,6 @@ fn main() {
         zero_terminated: cli.zero_terminated,
     };
 
-    // Open input
-    let input: Box<dyn io::Read> = match cli.input.as_deref() {
-        Some("-") | None => Box::new(io::stdin().lock()),
-        Some(path) => match File::open(path) {
-            Ok(f) => Box::new(f),
-            Err(e) => {
-                eprintln!("funiq: {}: {}", path, e);
-                process::exit(1);
-            }
-        },
-    };
-
     // Open output
     let output: Box<dyn io::Write> = match cli.output.as_deref() {
         Some("-") | None => Box::new(BufWriter::new(io::stdout().lock())),
@@ -169,7 +158,47 @@ fn main() {
         },
     };
 
-    if let Err(e) = process_uniq(input, output, &config) {
+    let result = match cli.input.as_deref() {
+        Some("-") | None => {
+            // Stdin: use streaming mode
+            process_uniq(io::stdin().lock(), output, &config)
+        }
+        Some(path) => {
+            // File: use mmap for zero-copy performance
+            let file = match File::open(path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("funiq: {}: {}", path, e);
+                    process::exit(1);
+                }
+            };
+            let metadata = match file.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("funiq: {}: {}", path, e);
+                    process::exit(1);
+                }
+            };
+
+            if metadata.len() == 0 {
+                // Empty file, nothing to do
+                return;
+            }
+
+            // Use mmap for files
+            let mmap = match unsafe { Mmap::map(&file) } {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("funiq: {}: {}", path, e);
+                    process::exit(1);
+                }
+            };
+
+            process_uniq_bytes(&mmap, output, &config)
+        }
+    };
+
+    if let Err(e) = result {
         // Ignore broken pipe
         if e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("funiq: {}", e);
