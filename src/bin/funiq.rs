@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufWriter};
+use std::io;
 use std::process;
 
 use clap::Parser;
@@ -161,11 +161,12 @@ fn main() {
         zero_terminated: cli.zero_terminated,
     };
 
-    // Open output
+    // Open output — no BufWriter here since process_uniq/process_uniq_bytes
+    // creates its own 4MB BufWriter internally (avoids double-buffering)
     let output: Box<dyn io::Write> = match cli.output.as_deref() {
-        Some("-") | None => Box::new(BufWriter::new(io::stdout().lock())),
+        Some("-") | None => Box::new(io::stdout().lock()),
         Some(path) => match File::create(path) {
-            Ok(f) => Box::new(BufWriter::new(f)),
+            Ok(f) => Box::new(f),
             Err(e) => {
                 eprintln!("funiq: {}: {}", path, e);
                 process::exit(1);
@@ -200,9 +201,15 @@ fn main() {
                 return;
             }
 
-            // Use mmap for files
+            // Use mmap for files with sequential access hint
             let mmap = match unsafe { Mmap::map(&file) } {
-                Ok(m) => m,
+                Ok(m) => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = m.advise(memmap2::Advice::Sequential);
+                    }
+                    m
+                }
                 Err(e) => {
                     eprintln!("funiq: {}: {}", path, e);
                     process::exit(1);
