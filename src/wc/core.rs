@@ -17,8 +17,10 @@ pub struct WcCounts {
 
 /// Whitespace lookup table for branchless word boundary detection.
 /// GNU wc uses C locale `isspace()`: space, tab, newline, CR, form feed, vertical tab.
+/// Null bytes (0x00) are also treated as non-word characters (word separators) to match GNU behavior.
 const fn make_ws_table() -> [u8; 256] {
     let mut t = [0u8; 256];
+    t[0x00] = 1; // \0  null byte — acts as word separator in GNU wc
     t[0x09] = 1; // \t  horizontal tab
     t[0x0A] = 1; // \n  newline
     t[0x0B] = 1; // \v  vertical tab
@@ -89,8 +91,10 @@ unsafe fn count_words_sse2(data: &[u8]) -> u64 {
     use std::arch::x86_64::*;
 
     unsafe {
-        // Whitespace = (0x09 <= b <= 0x0D) || (b == 0x20)
-        // Using signed comparison: cmpgt(b, 0x08) && cmpgt(0x0E, b) || cmpeq(b, 0x20)
+        // Whitespace = (b == 0x00) || (0x09 <= b <= 0x0D) || (b == 0x20)
+        // Null bytes are word separators in GNU wc.
+        // Using signed comparison: cmpgt(b, 0x08) && cmpgt(0x0E, b) || cmpeq(b, 0x20) || cmpeq(b, 0x00)
+        let zero = _mm_setzero_si128();
         let min_ws = _mm_set1_epi8(0x08); // one below \t
         let max_ws = _mm_set1_epi8(0x0E); // one above \r
         let space = _mm_set1_epi8(0x20);
@@ -110,14 +114,16 @@ unsafe fn count_words_sse2(data: &[u8]) -> u64 {
             let v2 = _mm_loadu_si128(ptr.add(32) as *const __m128i);
             let v3 = _mm_loadu_si128(ptr.add(48) as *const __m128i);
 
-            // Detect whitespace in each vector: 3 comparisons + 1 AND + 1 OR
+            // Detect whitespace in each vector: range check + space + null
             macro_rules! detect_ws {
                 ($v:expr) => {{
                     let ge_9 = _mm_cmpgt_epi8($v, min_ws);
                     let le_d = _mm_cmpgt_epi8(max_ws, $v);
                     let in_range = _mm_and_si128(ge_9, le_d);
                     let is_sp = _mm_cmpeq_epi8($v, space);
-                    _mm_or_si128(in_range, is_sp)
+                    let is_null = _mm_cmpeq_epi8($v, zero);
+                    let ws = _mm_or_si128(in_range, is_sp);
+                    _mm_or_si128(ws, is_null)
                 }};
             }
 
@@ -152,7 +158,8 @@ unsafe fn count_words_sse2(data: &[u8]) -> u64 {
             let le_d = _mm_cmpgt_epi8(max_ws, v);
             let in_range = _mm_and_si128(ge_9, le_d);
             let is_sp = _mm_cmpeq_epi8(v, space);
-            let ws_vec = _mm_or_si128(in_range, is_sp);
+            let is_null = _mm_cmpeq_epi8(v, zero);
+            let ws_vec = _mm_or_si128(_mm_or_si128(in_range, is_sp), is_null);
             let ws_mask = _mm_movemask_epi8(ws_vec) as u32;
 
             let prev_mask = (ws_mask << 1) | prev_ws_u32;
@@ -581,6 +588,10 @@ pub fn max_line_length_c(data: &[u8]) -> u64 {
             b'\r' => {
                 linepos = 0;
             }
+            0x08 => {
+                // Backspace: reduce position by 1 (min 0)
+                linepos = linepos.saturating_sub(1);
+            }
             0x0C => {
                 // Form feed: acts as line terminator
                 if line_len > max_len {
@@ -640,6 +651,10 @@ pub fn max_line_length_utf8(data: &[u8]) -> u64 {
                 }
                 b'\r' => {
                     linepos = 0;
+                }
+                0x08 => {
+                    // Backspace: reduce position by 1 (min 0)
+                    linepos = linepos.saturating_sub(1);
                 }
                 0x0C => {
                     // Form feed: line terminator

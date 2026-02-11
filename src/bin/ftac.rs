@@ -24,7 +24,7 @@ struct Cli {
     regex: bool,
 
     /// Use STRING as the separator instead of newline
-    #[arg(short = 's', long = "separator", value_name = "STRING")]
+    #[arg(short = 's', long = "separator", value_name = "STRING", allow_hyphen_values = true)]
     separator: Option<String>,
 
     /// Files to process (reads stdin if none given)
