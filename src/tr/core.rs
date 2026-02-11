@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-const BUF_SIZE: usize = 4 * 1024 * 1024; // 4MB — reduces syscall overhead
+const BUF_SIZE: usize = 8 * 1024 * 1024; // 8MB — reduces syscall overhead
 
 
 /// Build a 256-byte lookup table mapping set1[i] -> set2[i].

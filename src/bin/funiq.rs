@@ -3,7 +3,7 @@ use std::io::{self, BufWriter};
 use std::process;
 
 use clap::Parser;
-use memmap2::Mmap;
+use memmap2::MmapOptions;
 
 use coreutils_rs::uniq::{
     AllRepeatedMethod, GroupMethod, OutputMode, UniqConfig, process_uniq, process_uniq_bytes,
@@ -161,9 +161,9 @@ fn main() {
         zero_terminated: cli.zero_terminated,
     };
 
-    // Open output
+    // Open output (4MB BufWriter for fewer syscalls)
     let output: Box<dyn io::Write> = match cli.output.as_deref() {
-        Some("-") | None => Box::new(BufWriter::new(io::stdout().lock())),
+        Some("-") | None => Box::new(BufWriter::with_capacity(4 * 1024 * 1024, io::stdout().lock())),
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(BufWriter::new(f)),
             Err(e) => {
@@ -200,9 +200,15 @@ fn main() {
                 return;
             }
 
-            // Use mmap for files
-            let mmap = match unsafe { Mmap::map(&file) } {
-                Ok(m) => m,
+            // Use mmap for files — populate() for eager page table setup
+            let mmap = match unsafe { MmapOptions::new().populate().map(&file) } {
+                Ok(m) => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = m.advise(memmap2::Advice::Sequential);
+                    }
+                    m
+                }
                 Err(e) => {
                     eprintln!("funiq: {}: {}", path, e);
                     process::exit(1);
