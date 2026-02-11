@@ -133,58 +133,6 @@ pub fn tac_string_separator(
     Ok(())
 }
 
-/// Convert a POSIX Basic Regular Expression (BRE) pattern to an Extended Regular Expression (ERE)
-/// compatible with Rust's regex crate.
-///
-/// In BRE: `+`, `?`, `{`, `}`, `(`, `)`, `|` are literal characters.
-/// Their escaped forms `\+`, `\?`, `\{`, `\}`, `\(`, `\)`, `\|` are special.
-/// In ERE/Rust regex: the unescaped forms are special.
-fn bre_to_ere(pattern: &str) -> String {
-    let bytes = pattern.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len() + 16);
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            match bytes[i + 1] {
-                // BRE escaped specials → ERE unescaped specials
-                b'+' | b'?' | b'{' | b'}' | b'(' | b')' | b'|' => {
-                    result.push(bytes[i + 1]);
-                    i += 2;
-                }
-                // BRE \1-\9 backreferences → same in ERE
-                b'1'..=b'9' => {
-                    result.push(b'\\');
-                    result.push(bytes[i + 1]);
-                    i += 2;
-                }
-                // Other escaped chars pass through
-                _ => {
-                    result.push(b'\\');
-                    result.push(bytes[i + 1]);
-                    i += 2;
-                }
-            }
-        } else {
-            match bytes[i] {
-                // BRE literal chars that are special in ERE → escape them
-                b'+' | b'?' | b'{' | b'}' | b'(' | b')' | b'|' => {
-                    result.push(b'\\');
-                    result.push(bytes[i]);
-                    i += 1;
-                }
-                _ => {
-                    result.push(bytes[i]);
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    // SAFETY: We only manipulate ASCII bytes and pass through non-ASCII unchanged
-    String::from_utf8(result).unwrap_or_else(|_| pattern.to_string())
-}
-
 /// Find regex matches using backward scanning, matching GNU tac's re_search behavior.
 /// GNU tac scans backward from the end, finding the rightmost starting position first.
 /// This produces different matches than forward scanning for patterns like [0-9]+.
@@ -198,22 +146,25 @@ fn find_regex_matches_backward(data: &[u8], re: &regex::bytes::Regex) -> Vec<(us
         let mut found = false;
 
         // Scan backward: try positions from past_end-1 down to 0
+        // We need the LAST match starting position in buf, so we try from the end
         let mut pos = past_end;
         while pos > 0 {
             pos -= 1;
             if let Some(m) = re.find_at(buf, pos) {
                 if m.start() == pos {
-                    // Match starts at exactly this position
+                    // Match starts at exactly this position — this is the rightmost match start
                     matches.push((m.start(), m.end()));
                     past_end = m.start();
                     found = true;
                     break;
                 }
-                // Match starts later than pos — no match at this position, try earlier
-            } else {
-                // No match at or after pos in this buffer — no matches remain
-                break;
+                // Match starts later than pos — skip to before that match
+                // No point checking positions between pos and m.start() since
+                // find_at already told us the leftmost match from pos starts at m.start()
+                // But we need matches that START before m.start(), so continue decrementing
             }
+            // If None, there's no match at pos or later, but there might be one earlier
+            // (find_at only searches forward from pos)
         }
 
         if !found {
@@ -239,8 +190,7 @@ pub fn tac_regex_separator(
         return Ok(());
     }
 
-    let ere_pattern = bre_to_ere(pattern);
-    let re = match regex::bytes::Regex::new(&ere_pattern) {
+    let re = match regex::bytes::Regex::new(pattern) {
         Ok(r) => r,
         Err(e) => {
             return Err(io::Error::new(
