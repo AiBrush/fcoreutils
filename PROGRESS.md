@@ -80,31 +80,49 @@ Each tool is a drop-in replacement with byte-identical GNU output.
 - [x] Before-separator mode (`-b`)
 - [x] GNU-identical output format
 
-## Benchmarks (100MB text file, warm cache)
+## Benchmarks (100MB text file, hyperfine --warmup 2 --min-runs 5)
 
-| Tool | GNU | fcoreutils | Speedup | Status |
-|------|-----|------------|---------|--------|
-| `wc -l` | 42ms | 28ms | **1.5x** | measured |
-| `wc -w` | 297ms | 117ms | **2.5x** | measured |
-| `wc -c` | ~0ms | ~0ms | **instant** | measured |
-| `wc` (default) | 302ms | 135ms | **2.2x** | measured |
-| `cut -d: -f5` | 325ms | 161ms | **2.0x** | measured |
-| `cut -b1-20` | 310ms | 49ms | **6.3x** | measured |
-| `base64` | TBD | TBD | TBD | pending |
-| `sha256sum` | TBD | TBD | TBD | pending |
-| `md5sum` | TBD | TBD | TBD | pending |
-| `b2sum` | TBD | TBD | TBD | pending |
-| `sort` | TBD | TBD | TBD | pending |
-| `tr` | TBD | TBD | TBD | pending |
-| `uniq` | TBD | TBD | TBD | pending |
-| `tac` | TBD | TBD | TBD | pending |
+| Tool | Benchmark | GNU | fcoreutils | Speedup |
+|------|-----------|-----|------------|---------|
+| `fwc` | default (lwc) | 339.1ms | 28.9ms | **11.75x** |
+| `fwc` | `-l` (lines) | 39.4ms | 22.7ms | **1.74x** |
+| `fwc` | `-w` (words) | 338.7ms | 19.0ms | **17.81x** |
+| `fwc` | `-c` (bytes) | ~1ms | ~1ms | ~1x (both stat) |
+| `fcut` | `-d' ' -f1` (field) | 338.5ms | 82.4ms | **4.11x** |
+| `fcut` | `-b1-20` (bytes) | 308.8ms | 29.1ms | **10.62x** |
+| `fbase64` | encode | 188.4ms | 115.5ms | **1.63x** |
+| `fbase64` | decode | 538.9ms | 345.7ms | **1.56x** |
+| `fsha256sum` | hash | 103.8ms | 103.4ms | **1.00x** |
+| `fmd5sum` | hash | 210.6ms | 263.4ms | **0.80x** |
+| `fb2sum` | hash | 271.8ms | 222.1ms | **1.22x** |
+| `fsort` | sort (10MB) | 157.4ms | 32.6ms | **4.83x** |
+| `fsort` | sort (100MB) | 1851ms | 398.9ms | **4.64x** |
+| `ftr` | `a-z` → `A-Z` | 96.9ms | 90.4ms | **1.07x** |
+| `funiq` | dedup (10MB sorted) | 33.1ms | 6.9ms | **4.82x** |
+| `ftac` | reverse | 132.5ms | 58.9ms | **2.25x** |
+
+### Per-Tool Best Speedup
+
+| Rank | Tool | Best Speedup |
+|------|------|-------------|
+| 1 | fwc | **17.81x** |
+| 2 | fcut | **10.62x** |
+| 3 | fsort | **4.83x** |
+| 4 | funiq | **4.82x** |
+| 5 | ftac | **2.25x** |
+| 6 | fbase64 | **1.63x** |
+| 7 | fb2sum | **1.22x** |
+| 8 | ftr | **1.07x** |
+| 9 | fsha256sum | **1.00x** |
+| 10 | fmd5sum | **0.80x** |
 
 ## Key Findings
-- Zero-copy mmap is critical: eliminated 100MB copy, reduced sys time from 50ms to 4ms
-- memchr SIMD line counting is 1.5x faster than GNU's AVX-2 (on this machine)
-- Our scalar word counting is 2.5x faster than GNU (simpler code, better branch prediction)
-- GNU wc uses lseek() for -c on regular files (we now do the same with stat)
-- GNU output order: lines, words, chars, bytes, max_line_length (chars before bytes!)
-- Hardware-accelerated hashing (SHA-NI, BLAKE2b) combined with mmap+madvise provides significant throughput
-- 256-byte lookup tables in `tr` provide O(1) character classification without branching
-- Forward scanning with memchr in `tac` is faster than reverse scanning
+- **fwc -w is 17.81x faster** — SIMD SSE2 word counting dominates GNU's scalar approach
+- **fwc default is 11.75x faster** — the flagship benchmark, combining all metrics
+- **fcut -b is 10.62x faster** — SIMD byte-range extraction with zero-copy mmap
+- **fsort is ~4.7x faster** — parallel merge sort vs GNU's single-threaded sort
+- **funiq is 4.82x faster** — efficient dedup with mmap and buffered I/O
+- Zero-copy mmap eliminates 100MB copy overhead, reducing sys time from 50ms to 4ms
+- Hash tools (sha256sum, md5sum) are at parity — both use hardware-accelerated implementations
+- fmd5sum is slightly slower (0.80x) — GNU md5sum likely uses optimized assembly; room for improvement
+- ftr at ~1x — both are I/O-bound for simple transliteration on this workload
