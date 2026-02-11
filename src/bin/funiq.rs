@@ -166,18 +166,18 @@ fn main() {
     };
 
     // Dispatch to output file or stdout, avoiding Box<dyn Write> for stdout (common case)
-    if let Some(ref path) = cli.output {
-        if path != "-" {
-            let output = match File::create(path) {
-                Ok(f) => BufWriter::new(f),
-                Err(e) => {
-                    eprintln!("funiq: {}: {}", path, e);
-                    process::exit(1);
-                }
-            };
-            run_uniq(&cli, &config, output);
-            return;
-        }
+    if let Some(ref path) = cli.output
+        && path != "-"
+    {
+        let output = match File::create(path) {
+            Ok(f) => BufWriter::new(f),
+            Err(e) => {
+                eprintln!("funiq: {}: {}", path, e);
+                process::exit(1);
+            }
+        };
+        run_uniq(&cli, &config, output);
+        return;
     }
 
     // Raw fd stdout on Unix for zero-overhead writes

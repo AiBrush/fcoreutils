@@ -43,6 +43,7 @@ fn is_member(set: &[u8; 32], ch: u8) -> bool {
 // ============================================================================
 
 /// Classification of a translation table for SIMD optimization.
+#[allow(dead_code)] // Fields used only on x86_64 (AVX2 SIMD path)
 enum TranslateKind {
     /// Table is identity — no translation needed.
     Identity,
