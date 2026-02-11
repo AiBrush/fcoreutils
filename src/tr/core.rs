@@ -2,9 +2,8 @@ use std::io::{self, Read, Write};
 use std::mem::ManuallyDrop;
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
-use rayon::prelude::*;
 
-const BUF_SIZE: usize = 1024 * 1024; // 1MB — reduces syscall overhead
+const BUF_SIZE: usize = 1024 * 1024; // 1MB — reduces syscall overhead vs GNU's 8KB
 
 /// Build a 256-byte lookup table mapping set1[i] -> set2[i].
 #[inline]
