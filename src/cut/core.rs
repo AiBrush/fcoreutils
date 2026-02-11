@@ -503,6 +503,11 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
     let complement = cfg.complement;
     let output_delim = cfg.output_delim;
 
+    // Ultra-fast path: single contiguous range (e.g., cut -b1-10)
+    if !complement && ranges.len() == 1 && output_delim.is_empty() {
+        return process_single_byte_range(data, ranges[0].start, ranges[0].end, line_delim, out);
+    }
+
     if data.len() >= PARALLEL_THRESHOLD {
         let chunks = split_into_chunks(data, line_delim);
         let results: Vec<Vec<u8>> = chunks
@@ -605,6 +610,75 @@ fn cut_bytes_to_buf(
             buf.extend_from_slice(&line[start..end]);
             first_range = false;
         }
+    }
+}
+
+// ── Ultra-fast single byte range extraction ──────────────────────────────
+
+/// Specialized path for extracting a single contiguous byte range (e.g., `cut -b1-10`).
+/// Just finds newlines, copies a fixed slice from each line. Parallel for large inputs.
+fn process_single_byte_range(
+    data: &[u8],
+    start: usize, // 1-based
+    end: usize,   // 1-based, may be usize::MAX
+    line_delim: u8,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let start0 = start.saturating_sub(1); // 0-based
+
+    if data.len() >= PARALLEL_THRESHOLD {
+        let chunks = split_into_chunks(data, line_delim);
+        let results: Vec<Vec<u8>> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut buf = Vec::with_capacity(chunk.len() / 2);
+                extract_byte_range_chunk(chunk, start0, end, line_delim, &mut buf);
+                buf
+            })
+            .collect();
+        for result in &results {
+            if !result.is_empty() {
+                out.write_all(result)?;
+            }
+        }
+    } else {
+        let mut buf = Vec::with_capacity(data.len() / 2);
+        extract_byte_range_chunk(data, start0, end, line_delim, &mut buf);
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for single byte range extraction.
+#[inline]
+fn extract_byte_range_chunk(
+    data: &[u8],
+    start0: usize,
+    end: usize,
+    line_delim: u8,
+    buf: &mut Vec<u8>,
+) {
+    let mut line_start = 0;
+    for end_pos in memchr_iter(line_delim, data) {
+        let line = &data[line_start..end_pos];
+        let s = start0.min(line.len());
+        let e = end.min(line.len());
+        if s < e {
+            buf.extend_from_slice(&line[s..e]);
+        }
+        buf.push(line_delim);
+        line_start = end_pos + 1;
+    }
+    if line_start < data.len() {
+        let line = &data[line_start..];
+        let s = start0.min(line.len());
+        let e = end.min(line.len());
+        if s < e {
+            buf.extend_from_slice(&line[s..e]);
+        }
+        buf.push(line_delim);
     }
 }
 
