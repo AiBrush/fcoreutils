@@ -800,40 +800,23 @@ pub fn process_cut_data(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> i
 }
 
 /// Process input from a reader (for stdin).
+/// Reads all input into memory to use the optimized batch processing path.
 pub fn process_cut_reader<R: BufRead>(
     mut reader: R,
     cfg: &CutConfig,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    let mut buf = Vec::new();
-
-    loop {
-        buf.clear();
-        let n = reader.read_until(cfg.line_delim, &mut buf)?;
-        if n == 0 {
-            break;
-        }
-
-        let has_line_delim = buf.last() == Some(&cfg.line_delim);
-        let line = if has_line_delim {
-            &buf[..buf.len() - 1]
-        } else {
-            &buf[..]
-        };
-
-        let wrote = process_one_line(line, cfg, out)?;
-
-        // GNU always terminates output lines, even if input had no trailing delimiter
-        if wrote {
-            out.write_all(&[cfg.line_delim])?;
-        }
+    let mut data = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut data)?;
+    if data.is_empty() {
+        return Ok(());
     }
-
-    Ok(())
+    process_cut_data(&data, cfg, out)
 }
 
-/// Process one line according to the cut config (used by stdin reader path).
+/// Process one line according to the cut config (used by unit tests).
 #[inline]
+#[allow(dead_code)]
 fn process_one_line(line: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io::Result<bool> {
     match cfg.mode {
         CutMode::Fields => cut_fields(
