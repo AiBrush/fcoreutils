@@ -174,7 +174,7 @@ fn itoa_right_aligned_into(buf: &mut [u8; 28], mut val: u64) -> usize {
 
 /// Process uniq from a byte slice (mmap'd file). Zero-copy, no per-line allocation.
 pub fn process_uniq_bytes(data: &[u8], output: impl Write, config: &UniqConfig) -> io::Result<()> {
-    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, output);
+    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, output);
     let term = if config.zero_terminated { b'\0' } else { b'\n' };
 
     match config.mode {
@@ -241,9 +241,6 @@ impl<'a> Iterator for LineIter<'a> {
     }
 }
 
-/// Batched output buffer size for uniq.
-const UNIQ_BUF_SIZE: usize = 4 * 1024 * 1024;
-
 /// Standard processing for Default, RepeatedOnly, UniqueOnly on byte slices.
 fn process_standard_bytes(
     data: &[u8],
@@ -261,29 +258,61 @@ fn process_standard_bytes(
     let fast = !needs_key_extraction(config) && !config.ignore_case;
 
     // Ultra-fast path: default mode, no count, no key extraction
-    // Uses batched Vec output to avoid per-line write_all overhead
+    // Zero-copy: writes contiguous spans directly from mmap data, no intermediate Vec
     if fast && !config.count && matches!(config.mode, OutputMode::Default) {
+        let data_base = data.as_ptr() as usize;
         let mut prev_content = prev_content;
-        let mut out_buf = Vec::with_capacity(UNIQ_BUF_SIZE);
-        out_buf.extend_from_slice(prev_full);
+
+        // Write first line
+        writer.write_all(prev_full)?;
         if prev_full.len() == prev_content.len() {
-            out_buf.push(term);
+            writer.write_all(&[term])?;
         }
+
+        // Track contiguous output spans in mmap data
+        let mut span_start: usize = usize::MAX; // sentinel = no active span
+        let mut span_end: usize = 0;
+
         for (cur_content, cur_full) in lines {
-            if !lines_equal_fast(prev_content, cur_content) {
-                out_buf.extend_from_slice(cur_full);
-                if cur_full.len() == cur_content.len() {
-                    out_buf.push(term);
-                }
-                if out_buf.len() >= UNIQ_BUF_SIZE {
-                    writer.write_all(&out_buf)?;
-                    out_buf.clear();
+            if lines_equal_fast(prev_content, cur_content) {
+                // Duplicate — flush any active span, skip line
+                if span_start != usize::MAX {
+                    writer.write_all(&data[span_start..span_end])?;
+                    span_start = usize::MAX;
                 }
                 prev_content = cur_content;
+                continue;
             }
+
+            let cur_offset = cur_full.as_ptr() as usize - data_base;
+
+            if span_start == usize::MAX {
+                // Start new span
+                span_start = cur_offset;
+                span_end = cur_offset + cur_full.len();
+            } else if cur_offset == span_end {
+                // Extend contiguous span (common case — unique lines are adjacent)
+                span_end += cur_full.len();
+            } else {
+                // Non-contiguous — flush and start new span
+                writer.write_all(&data[span_start..span_end])?;
+                span_start = cur_offset;
+                span_end = cur_offset + cur_full.len();
+            }
+
+            // Handle last line without terminator
+            if cur_full.len() == cur_content.len() {
+                writer.write_all(&data[span_start..span_end])?;
+                writer.write_all(&[term])?;
+                span_start = usize::MAX;
+            }
+
+            prev_content = cur_content;
         }
-        if !out_buf.is_empty() {
-            writer.write_all(&out_buf)?;
+
+        // Flush remaining span
+        if span_start != usize::MAX {
+            writer.write_all(&data[span_start..span_end])?;
         }
         return Ok(());
     }
@@ -494,8 +523,8 @@ fn process_group_bytes(
 /// Main streaming uniq processor.
 /// Reads from `input`, writes to `output`.
 pub fn process_uniq<R: Read, W: Write>(input: R, output: W, config: &UniqConfig) -> io::Result<()> {
-    let reader = BufReader::with_capacity(4 * 1024 * 1024, input);
-    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, output);
+    let reader = BufReader::with_capacity(8 * 1024 * 1024, input);
+    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, output);
     let term = if config.zero_terminated { b'\0' } else { b'\n' };
 
     match config.mode {

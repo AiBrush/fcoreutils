@@ -353,7 +353,7 @@ fn process_single_field_chunk(
     }
 }
 
-/// Extract a single field from one line (fallback for degenerate delim==line_delim case).
+/// Extract a single field from one line using SIMD-accelerated memchr.
 #[inline(always)]
 fn extract_single_field_line(
     line: &[u8],
@@ -363,45 +363,50 @@ fn extract_single_field_line(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
-    let len = line.len();
-    if len == 0 {
+    if line.is_empty() {
         if !suppress {
             buf.push(line_delim);
         }
         return;
     }
 
-    let mut delim_count: usize = 0;
-    let mut field_start: usize = 0;
+    // Quick check: does line contain delimiter at all? (SIMD-accelerated)
+    let first_delim = match memchr::memchr(delim, line) {
+        Some(pos) => pos,
+        None => {
+            if !suppress {
+                buf.extend_from_slice(line);
+                buf.push(line_delim);
+            }
+            return;
+        }
+    };
 
-    let mut i = 0;
-    while i < len {
-        if unsafe { *line.get_unchecked(i) } == delim {
-            if delim_count == target_idx {
-                buf.extend_from_slice(unsafe { line.get_unchecked(field_start..i) });
+    // Fast path: target is field 1 (cut -f1, most common)
+    if target_idx == 0 {
+        buf.extend_from_slice(&line[..first_delim]);
+        buf.push(line_delim);
+        return;
+    }
+
+    // Skip to target field using repeated SIMD memchr
+    let mut pos = first_delim + 1;
+    for _ in 1..target_idx {
+        match memchr::memchr(delim, &line[pos..]) {
+            Some(idx) => pos += idx + 1,
+            None => {
                 buf.push(line_delim);
                 return;
             }
-            delim_count += 1;
-            field_start = i + 1;
         }
-        i += 1;
     }
 
-    if delim_count == 0 {
-        // No delimiter on line
-        if !suppress {
-            buf.extend_from_slice(line);
-            buf.push(line_delim);
-        }
-    } else if delim_count == target_idx {
-        // Target field is the last field
-        buf.extend_from_slice(unsafe { line.get_unchecked(field_start..len) });
-        buf.push(line_delim);
-    } else {
-        // Field doesn't exist
-        buf.push(line_delim);
+    // pos is start of target field. Find end with SIMD.
+    match memchr::memchr(delim, &line[pos..]) {
+        Some(idx) => buf.extend_from_slice(&line[pos..pos + idx]),
+        None => buf.extend_from_slice(&line[pos..]),
     }
+    buf.push(line_delim);
 }
 
 /// Extract fields from a single line into the output buffer.
@@ -434,30 +439,25 @@ fn extract_fields_to_buf(
     let mut first_output = true;
     let mut has_delim = false;
 
-    // Tight byte scan loop with early exit
-    let mut i = 0;
-    while i < len {
-        // SAFETY: i is always in [0, len) due to the loop condition
-        if unsafe { *line.get_unchecked(i) } == delim {
-            has_delim = true;
+    // SIMD-accelerated delimiter scanning with early exit
+    for delim_pos in memchr_iter(delim, line) {
+        has_delim = true;
 
-            if is_selected(field_num, field_mask, ranges, complement) {
-                if !first_output {
-                    buf.extend_from_slice(output_delim);
-                }
-                buf.extend_from_slice(&line[field_start..i]);
-                first_output = false;
+        if is_selected(field_num, field_mask, ranges, complement) {
+            if !first_output {
+                buf.extend_from_slice(output_delim);
             }
-
-            field_num += 1;
-            field_start = i + 1;
-
-            // Early exit: past the last needed field
-            if field_num > max_field {
-                break;
-            }
+            buf.extend_from_slice(&line[field_start..delim_pos]);
+            first_output = false;
         }
-        i += 1;
+
+        field_num += 1;
+        field_start = delim_pos + 1;
+
+        // Early exit: past the last needed field
+        if field_num > max_field {
+            break;
+        }
     }
 
     // Last field (only if we didn't early-exit past it)

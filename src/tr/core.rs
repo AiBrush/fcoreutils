@@ -4,8 +4,9 @@ use rayon::prelude::*;
 
 const BUF_SIZE: usize = 8 * 1024 * 1024; // 8MB — reduces syscall overhead
 
-/// Minimum size for parallel translation (4MB).
-const PARALLEL_TRANSLATE_THRESHOLD: usize = 4 * 1024 * 1024;
+/// Minimum size for parallel translation.
+/// AVX2 SIMD translation is so fast (~16 GB/s) that parallelism only helps for very large inputs.
+const PARALLEL_TRANSLATE_THRESHOLD: usize = 256 * 1024 * 1024;
 
 /// Build a 256-byte lookup table mapping set1[i] -> set2[i].
 #[inline]
