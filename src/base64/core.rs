@@ -4,8 +4,11 @@ use base64_simd::AsOut;
 
 const BASE64_ENGINE: &base64_simd::Base64 = &base64_simd::STANDARD;
 
-/// Streaming encode chunk: 1MB aligned to 3 bytes.
-const STREAM_ENCODE_CHUNK: usize = 1024 * 1024 - (1024 * 1024 % 3);
+/// Streaming encode chunk: 4MB aligned to 3 bytes for maximum throughput.
+const STREAM_ENCODE_CHUNK: usize = 4 * 1024 * 1024 - (4 * 1024 * 1024 % 3);
+
+/// Chunk size for no-wrap encoding: 4MB aligned to 3 bytes.
+const NOWRAP_CHUNK: usize = 4 * 1024 * 1024 - (4 * 1024 * 1024 % 3);
 
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with reusable buffers for maximum throughput.
@@ -21,13 +24,19 @@ pub fn encode_to_writer(data: &[u8], wrap_col: usize, out: &mut impl Write) -> i
     encode_wrapped(data, wrap_col, out)
 }
 
-/// Encode without wrapping: single SIMD pass, single write.
+/// Encode without wrapping: process in 4MB chunks for bounded memory usage.
+/// Each chunk is SIMD-encoded and written immediately. Reuses a single
+/// encode buffer across chunks to avoid repeated allocation.
 fn encode_no_wrap(data: &[u8], out: &mut impl Write) -> io::Result<()> {
-    // Encode entire input in one SIMD pass for maximum throughput.
-    let enc_len = BASE64_ENGINE.encoded_length(data.len());
-    let mut buf = vec![0u8; enc_len];
-    let encoded = BASE64_ENGINE.encode(data, buf.as_out());
-    out.write_all(encoded)
+    let enc_max = BASE64_ENGINE.encoded_length(NOWRAP_CHUNK);
+    let mut buf = vec![0u8; enc_max];
+
+    for chunk in data.chunks(NOWRAP_CHUNK) {
+        let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
+        let encoded = BASE64_ENGINE.encode(chunk, buf[..enc_len].as_out());
+        out.write_all(encoded)?;
+    }
+    Ok(())
 }
 
 /// Encode with line wrapping using large cache-friendly chunks.
@@ -36,9 +45,9 @@ fn encode_no_wrap(data: &[u8], out: &mut impl Write) -> io::Result<()> {
 fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
     let bytes_per_line = wrap_col * 3 / 4;
 
-    // Process ~768KB of input per chunk. Encoded output (~1MB) fits in L2 cache.
+    // Process ~4MB of input per chunk for maximum throughput.
     // Aligned to bytes_per_line for clean line boundaries.
-    let lines_per_chunk = (768 * 1024) / bytes_per_line;
+    let lines_per_chunk = (4 * 1024 * 1024) / bytes_per_line;
     let chunk_input = lines_per_chunk * bytes_per_line;
     let chunk_encoded_max = BASE64_ENGINE.encoded_length(chunk_input);
 
@@ -174,69 +183,95 @@ fn is_whitespace(b: u8) -> bool {
 }
 
 /// Stream-encode from a reader to a writer. Used for stdin processing.
+/// Uses 4MB read chunks and batches wrapped output for minimum syscalls.
 pub fn encode_stream(
     reader: &mut impl Read,
     wrap_col: usize,
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let mut buf = vec![0u8; STREAM_ENCODE_CHUNK];
-    let mut col = 0usize;
-    let mut out = BufWriter::with_capacity(1024 * 1024, writer);
+    let mut out = BufWriter::with_capacity(2 * 1024 * 1024, writer);
 
     let encode_buf_size = BASE64_ENGINE.encoded_length(STREAM_ENCODE_CHUNK);
     let mut encode_buf = vec![0u8; encode_buf_size];
 
-    loop {
-        let n = read_full(reader, &mut buf)?;
-        if n == 0 {
-            break;
-        }
-
-        let enc_len = BASE64_ENGINE.encoded_length(n);
-        let encoded = BASE64_ENGINE.encode(&buf[..n], encode_buf[..enc_len].as_out());
-
-        if wrap_col == 0 {
+    if wrap_col == 0 {
+        // No wrapping: encode each chunk and write directly.
+        loop {
+            let n = read_full(reader, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            let enc_len = BASE64_ENGINE.encoded_length(n);
+            let encoded = BASE64_ENGINE.encode(&buf[..n], encode_buf[..enc_len].as_out());
             out.write_all(encoded)?;
-        } else {
-            write_wrapped(&mut out, encoded, wrap_col, &mut col)?;
         }
-    }
+    } else {
+        // Wrapping: batch wrapped output into a pre-allocated buffer.
+        // For 4MB input at 76-col wrap, wrapped output is ~5.6MB.
+        let max_wrapped = encode_buf_size + (encode_buf_size / wrap_col + 2);
+        let mut wrap_buf = vec![0u8; max_wrapped];
+        let mut col = 0usize;
 
-    if wrap_col > 0 && col > 0 {
-        out.write_all(b"\n")?;
+        loop {
+            let n = read_full(reader, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            let enc_len = BASE64_ENGINE.encoded_length(n);
+            let encoded = BASE64_ENGINE.encode(&buf[..n], encode_buf[..enc_len].as_out());
+
+            // Build wrapped output in wrap_buf, then single write.
+            let wp = build_wrapped_output(encoded, wrap_col, &mut col, &mut wrap_buf);
+            out.write_all(&wrap_buf[..wp])?;
+        }
+
+        if col > 0 {
+            out.write_all(b"\n")?;
+        }
     }
 
     out.flush()
 }
 
-/// Write base64 text with line wrapping, tracking current column position.
-fn write_wrapped(
-    out: &mut impl Write,
+/// Build wrapped output into a pre-allocated buffer.
+/// Returns the number of bytes written to wrap_buf.
+/// Updates `col` to track the current column position across calls.
+#[inline]
+fn build_wrapped_output(
     data: &[u8],
     wrap_col: usize,
     col: &mut usize,
-) -> io::Result<()> {
-    let mut remaining = data;
+    wrap_buf: &mut [u8],
+) -> usize {
+    let mut rp = 0;
+    let mut wp = 0;
 
-    while !remaining.is_empty() {
+    while rp < data.len() {
         let space = wrap_col - *col;
-        if remaining.len() <= space {
-            out.write_all(remaining)?;
-            *col += remaining.len();
+        let avail = data.len() - rp;
+
+        if avail <= space {
+            wrap_buf[wp..wp + avail].copy_from_slice(&data[rp..rp + avail]);
+            wp += avail;
+            *col += avail;
             if *col == wrap_col {
-                out.write_all(b"\n")?;
+                wrap_buf[wp] = b'\n';
+                wp += 1;
                 *col = 0;
             }
             break;
         } else {
-            out.write_all(&remaining[..space])?;
-            out.write_all(b"\n")?;
-            remaining = &remaining[space..];
+            wrap_buf[wp..wp + space].copy_from_slice(&data[rp..rp + space]);
+            wp += space;
+            wrap_buf[wp] = b'\n';
+            wp += 1;
+            rp += space;
             *col = 0;
         }
     }
 
-    Ok(())
+    wp
 }
 
 /// Stream-decode from a reader to a writer. Used for stdin processing.
@@ -248,7 +283,7 @@ pub fn decode_stream(
     let mut data = Vec::new();
     reader.read_to_end(&mut data)?;
 
-    let mut out = BufWriter::with_capacity(1024 * 1024, writer);
+    let mut out = BufWriter::with_capacity(2 * 1024 * 1024, writer);
     decode_to_writer(&data, ignore_garbage, &mut out)?;
     out.flush()
 }
