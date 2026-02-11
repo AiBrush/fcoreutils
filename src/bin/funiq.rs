@@ -42,7 +42,12 @@ struct Cli {
     all_repeated: Option<String>,
 
     /// Avoid comparing the first N fields
-    #[arg(short = 'f', long = "skip-fields", value_name = "N", default_value = "0")]
+    #[arg(
+        short = 'f',
+        long = "skip-fields",
+        value_name = "N",
+        default_value = "0"
+    )]
     skip_fields: usize,
 
     /// Show all items, delimited by empty line (separate, prepend, append, both)
@@ -60,7 +65,12 @@ struct Cli {
     ignore_case: bool,
 
     /// Avoid comparing the first N characters
-    #[arg(short = 's', long = "skip-chars", value_name = "N", default_value = "0")]
+    #[arg(
+        short = 's',
+        long = "skip-chars",
+        value_name = "N",
+        default_value = "0"
+    )]
     skip_chars: usize,
 
     /// Only print unique lines
@@ -94,12 +104,19 @@ fn main() {
             "both" => GroupMethod::Both,
             other => {
                 eprintln!("funiq: invalid argument '{}' for '--group'", other);
-                eprintln!("Valid arguments are:\n  - 'separate'\n  - 'prepend'\n  - 'append'\n  - 'both'");
+                eprintln!(
+                    "Valid arguments are:\n  - 'separate'\n  - 'prepend'\n  - 'append'\n  - 'both'"
+                );
                 process::exit(1);
             }
         };
         // --group is incompatible with -c, -d, -D, -u
-        if cli.count || cli.repeated || cli.all_duplicates || cli.all_repeated.is_some() || cli.unique {
+        if cli.count
+            || cli.repeated
+            || cli.all_duplicates
+            || cli.all_repeated.is_some()
+            || cli.unique
+        {
             eprintln!("funiq: --group is mutually exclusive with -c/-d/-D/-u");
             process::exit(1);
         }
@@ -129,9 +146,7 @@ fn main() {
     };
 
     // -c is incompatible with -D/--all-repeated and --group
-    if cli.count
-        && matches!(mode, OutputMode::AllRepeated(_) | OutputMode::Group(_))
-    {
+    if cli.count && matches!(mode, OutputMode::AllRepeated(_) | OutputMode::Group(_)) {
         eprintln!("funiq: printing all duplicated lines and repeat counts is meaningless");
         process::exit(1);
     }

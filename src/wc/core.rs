@@ -443,9 +443,8 @@ fn decode_utf8(bytes: &[u8]) -> (u32, usize) {
         if bytes.len() < 3 || bytes[1] & 0xC0 != 0x80 || bytes[2] & 0xC0 != 0x80 {
             return (b0 as u32, 1);
         }
-        let cp = ((b0 as u32 & 0x0F) << 12)
-            | ((bytes[1] as u32 & 0x3F) << 6)
-            | (bytes[2] as u32 & 0x3F);
+        let cp =
+            ((b0 as u32 & 0x0F) << 12) | ((bytes[1] as u32 & 0x3F) << 6) | (bytes[2] as u32 & 0x3F);
         return (cp, 3);
     }
     if b0 < 0xF5 {
@@ -762,12 +761,8 @@ pub fn count_words_parallel(data: &[u8]) -> u64 {
         .par_iter()
         .map(|chunk| {
             let words = count_words(chunk);
-            let starts_non_ws = chunk
-                .first()
-                .is_some_and(|&b| WS_TABLE[b as usize] == 0);
-            let ends_non_ws = chunk
-                .last()
-                .is_some_and(|&b| WS_TABLE[b as usize] == 0);
+            let starts_non_ws = chunk.first().is_some_and(|&b| WS_TABLE[b as usize] == 0);
+            let ends_non_ws = chunk.last().is_some_and(|&b| WS_TABLE[b as usize] == 0);
             (words, starts_non_ws, ends_non_ws)
         })
         .collect();
@@ -796,9 +791,7 @@ pub fn count_chars_parallel(data: &[u8], utf8: bool) -> u64 {
     let num_threads = rayon::current_num_threads().max(1);
     let chunk_size = (data.len() / num_threads).max(1024 * 1024);
 
-    data.par_chunks(chunk_size)
-        .map(count_chars_utf8)
-        .sum()
+    data.par_chunks(chunk_size).map(count_chars_utf8).sum()
 }
 
 /// Partial result from processing a chunk, used to combine results at boundaries.
@@ -844,12 +837,8 @@ pub fn count_lwc_parallel(data: &[u8], utf8: bool) -> (u64, u64, u64) {
             } else {
                 chunk.len() as u64
             };
-            let starts_non_ws = chunk
-                .first()
-                .is_some_and(|&b| WS_TABLE[b as usize] == 0);
-            let ends_non_ws = chunk
-                .last()
-                .is_some_and(|&b| WS_TABLE[b as usize] == 0);
+            let starts_non_ws = chunk.first().is_some_and(|&b| WS_TABLE[b as usize] == 0);
+            let ends_non_ws = chunk.last().is_some_and(|&b| WS_TABLE[b as usize] == 0);
             ChunkResult {
                 lines,
                 words,

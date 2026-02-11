@@ -137,8 +137,8 @@ pub fn readahead_files(_paths: &[&Path]) {
 /// Hash raw data with BLAKE2b variable output length.
 /// `output_bytes` is the output size in bytes (e.g., 32 for 256-bit).
 pub fn blake2b_hash_data(data: &[u8], output_bytes: usize) -> String {
-    use blake2::digest::{Update, VariableOutput};
     use blake2::Blake2bVar;
+    use blake2::digest::{Update, VariableOutput};
 
     let mut hasher = Blake2bVar::new(output_bytes).expect("Invalid BLAKE2b output size");
     Update::update(&mut hasher, data);
@@ -148,8 +148,8 @@ pub fn blake2b_hash_data(data: &[u8], output_bytes: usize) -> String {
 
 /// Hash a reader with BLAKE2b variable output length.
 pub fn blake2b_hash_reader<R: Read>(mut reader: R, output_bytes: usize) -> io::Result<String> {
-    use blake2::digest::{Update, VariableOutput};
     use blake2::Blake2bVar;
+    use blake2::digest::{Update, VariableOutput};
 
     let mut hasher = Blake2bVar::new(output_bytes).expect("Invalid BLAKE2b output size");
     let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer

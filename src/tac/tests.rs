@@ -62,10 +62,7 @@ fn test_empty_lines() {
 
 #[test]
 fn test_mixed_empty_lines() {
-    assert_eq!(
-        run_tac(b"a\n\nb\n", b'\n', false),
-        b"b\n\na\n"
-    );
+    assert_eq!(run_tac(b"a\n\nb\n", b'\n', false), b"b\n\na\n");
 }
 
 #[test]
@@ -80,18 +77,12 @@ fn test_before_basic() {
     // With --before, separator attaches before the record
     // "aaa\nbbb\n" -> records are "aaa", "\nbbb", "\n"
     // reversed: "\n", "\nbbb", "aaa"
-    assert_eq!(
-        run_tac(b"aaa\nbbb\n", b'\n', true),
-        b"\n\nbbbaaa"
-    );
+    assert_eq!(run_tac(b"aaa\nbbb\n", b'\n', true), b"\n\nbbbaaa");
 }
 
 #[test]
 fn test_before_no_leading_sep() {
-    assert_eq!(
-        run_tac(b"aaa\nbbb", b'\n', true),
-        b"\nbbbaaa"
-    );
+    assert_eq!(run_tac(b"aaa\nbbb", b'\n', true), b"\nbbbaaa");
 }
 
 // ---- Custom separator tests ----
@@ -110,26 +101,17 @@ fn test_custom_separator_no_trailing() {
 
 #[test]
 fn test_string_separator() {
-    assert_eq!(
-        run_tac_str(b"aXYbXYcXY", b"XY", false),
-        b"cXYbXYaXY"
-    );
+    assert_eq!(run_tac_str(b"aXYbXYcXY", b"XY", false), b"cXYbXYaXY");
 }
 
 #[test]
 fn test_string_separator_no_trailing() {
-    assert_eq!(
-        run_tac_str(b"aXYbXYc", b"XY", false),
-        b"cXYbXYaXY"
-    );
+    assert_eq!(run_tac_str(b"aXYbXYc", b"XY", false), b"cXYbXYaXY");
 }
 
 #[test]
 fn test_string_separator_before() {
-    assert_eq!(
-        run_tac_str(b"aXYbXYc", b"XY", true),
-        b"XYcXYba"
-    );
+    assert_eq!(run_tac_str(b"aXYbXYc", b"XY", true), b"XYcXYba");
 }
 
 // ---- Regex separator tests ----
@@ -137,18 +119,12 @@ fn test_string_separator_before() {
 #[test]
 fn test_regex_separator_digit() {
     // Separator is any digit
-    assert_eq!(
-        run_tac_regex(b"a1b2c3", r"\d", false),
-        b"c3b2a1"
-    );
+    assert_eq!(run_tac_regex(b"a1b2c3", r"\d", false), b"c3b2a1");
 }
 
 #[test]
 fn test_regex_separator_newline() {
-    assert_eq!(
-        run_tac_regex(b"aaa\nbbb\n", r"\n", false),
-        b"bbb\naaa\n"
-    );
+    assert_eq!(run_tac_regex(b"aaa\nbbb\n", r"\n", false), b"bbb\naaa\n");
 }
 
 // ---- Edge cases ----

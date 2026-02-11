@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::path::Path;
 
 use coreutils_rs::hash::{self, HashAlgorithm};
@@ -55,25 +55,17 @@ fn bench_hash_file(c: &mut Criterion) {
         let size = std::fs::metadata(file_path).unwrap().len();
         group.throughput(Throughput::Bytes(size));
 
-        group.bench_with_input(
-            BenchmarkId::new("sha256", label),
-            file_path,
-            |b, path| {
-                b.iter(|| hash::hash_file(HashAlgorithm::Sha256, path).unwrap());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("sha256", label), file_path, |b, path| {
+            b.iter(|| hash::hash_file(HashAlgorithm::Sha256, path).unwrap());
+        });
 
         group.bench_with_input(BenchmarkId::new("md5", label), file_path, |b, path| {
             b.iter(|| hash::hash_file(HashAlgorithm::Md5, path).unwrap());
         });
 
-        group.bench_with_input(
-            BenchmarkId::new("blake2b", label),
-            file_path,
-            |b, path| {
-                b.iter(|| hash::hash_file(HashAlgorithm::Blake2b, path).unwrap());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("blake2b", label), file_path, |b, path| {
+            b.iter(|| hash::hash_file(HashAlgorithm::Blake2b, path).unwrap());
+        });
     }
     group.finish();
 }
@@ -130,5 +122,10 @@ fn bench_parallel_hash(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_hash_bytes, bench_hash_file, bench_parallel_hash);
+criterion_group!(
+    benches,
+    bench_hash_bytes,
+    bench_hash_file,
+    bench_parallel_hash
+);
 criterion_main!(benches);

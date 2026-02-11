@@ -155,7 +155,12 @@ fn parse_char_class(bytes: &[u8], i: usize) -> Option<(Vec<u8>, usize)> {
 /// Expand a character class name to its bytes.
 fn expand_class(name: &[u8]) -> Option<Vec<u8>> {
     match name {
-        b"alnum" => Some((b'0'..=b'9').chain(b'A'..=b'Z').chain(b'a'..=b'z').collect()),
+        b"alnum" => Some(
+            (b'0'..=b'9')
+                .chain(b'A'..=b'Z')
+                .chain(b'a'..=b'z')
+                .collect(),
+        ),
         b"alpha" => Some((b'A'..=b'Z').chain(b'a'..=b'z').collect()),
         b"blank" => Some(vec![b'\t', b' ']),
         b"cntrl" => Some((0u8..=31).chain(std::iter::once(127)).collect()),
@@ -163,14 +168,21 @@ fn expand_class(name: &[u8]) -> Option<Vec<u8>> {
         b"graph" => Some((33u8..=126).collect()),
         b"lower" => Some((b'a'..=b'z').collect()),
         b"print" => Some((32u8..=126).collect()),
-        b"punct" => Some((33u8..=47)
-            .chain(58u8..=64)
-            .chain(91u8..=96)
-            .chain(123u8..=126)
-            .collect()),
+        b"punct" => Some(
+            (33u8..=47)
+                .chain(58u8..=64)
+                .chain(91u8..=96)
+                .chain(123u8..=126)
+                .collect(),
+        ),
         b"space" => Some(vec![b'\t', b'\n', 0x0B, 0x0C, b'\r', b' ']),
         b"upper" => Some((b'A'..=b'Z').collect()),
-        b"xdigit" => Some((b'0'..=b'9').chain(b'A'..=b'F').chain(b'a'..=b'f').collect()),
+        b"xdigit" => Some(
+            (b'0'..=b'9')
+                .chain(b'A'..=b'F')
+                .chain(b'a'..=b'f')
+                .collect(),
+        ),
         _ => None,
     }
 }

@@ -7,11 +7,7 @@ use std::cmp::Ordering;
 fn test_basic_lexical_sort() {
     let config = SortConfig::default();
     let _inputs: Vec<&str> = vec![];
-    let mut lines = vec![
-        b"banana".to_vec(),
-        b"apple".to_vec(),
-        b"cherry".to_vec(),
-    ];
+    let mut lines = vec![b"banana".to_vec(), b"apple".to_vec(), b"cherry".to_vec()];
     lines.sort_by(|a, b| compare_lines(a, b, &config));
     assert_eq!(lines[0], b"apple");
     assert_eq!(lines[1], b"banana");
@@ -22,11 +18,7 @@ fn test_basic_lexical_sort() {
 fn test_reverse_sort() {
     let mut config = SortConfig::default();
     config.global_opts.reverse = true;
-    let mut lines = vec![
-        b"banana".to_vec(),
-        b"apple".to_vec(),
-        b"cherry".to_vec(),
-    ];
+    let mut lines = vec![b"banana".to_vec(), b"apple".to_vec(), b"cherry".to_vec()];
     lines.sort_by(|a, b| compare_lines(a, b, &config));
     assert_eq!(lines[0], b"cherry");
     assert_eq!(lines[1], b"banana");
@@ -37,12 +29,7 @@ fn test_reverse_sort() {
 fn test_numeric_sort() {
     let mut config = SortConfig::default();
     config.global_opts.numeric = true;
-    let mut lines = vec![
-        b"10".to_vec(),
-        b"2".to_vec(),
-        b"1".to_vec(),
-        b"20".to_vec(),
-    ];
+    let mut lines = vec![b"10".to_vec(), b"2".to_vec(), b"1".to_vec(), b"20".to_vec()];
     lines.sort_by(|a, b| compare_lines(a, b, &config));
     assert_eq!(lines[0], b"1");
     assert_eq!(lines[1], b"2");
@@ -54,11 +41,7 @@ fn test_numeric_sort() {
 fn test_ignore_case_sort() {
     let mut config = SortConfig::default();
     config.global_opts.ignore_case = true;
-    let mut lines = vec![
-        b"Banana".to_vec(),
-        b"apple".to_vec(),
-        b"Cherry".to_vec(),
-    ];
+    let mut lines = vec![b"Banana".to_vec(), b"apple".to_vec(), b"Cherry".to_vec()];
     lines.sort_by(|a, b| compare_lines(a, b, &config));
     assert_eq!(lines[0], b"apple");
     assert_eq!(lines[1], b"Banana");
@@ -183,10 +166,7 @@ fn test_unique_dedup() {
 
 #[test]
 fn test_dictionary_order() {
-    assert_eq!(
-        compare_dictionary(b"a-b", b"ab", false),
-        Ordering::Equal
-    );
+    assert_eq!(compare_dictionary(b"a-b", b"ab", false), Ordering::Equal);
 }
 
 #[test]
@@ -226,11 +206,7 @@ fn test_stable_sort() {
     config.keys.push(KeyDef::parse("1,1").unwrap());
     config.separator = Some(b'\t');
 
-    let mut lines = vec![
-        b"a\t2".to_vec(),
-        b"a\t1".to_vec(),
-        b"b\t1".to_vec(),
-    ];
+    let mut lines = vec![b"a\t2".to_vec(), b"a\t1".to_vec(), b"b\t1".to_vec()];
     // With stable + key on field 1: a\t2 and a\t1 should keep original order
     lines.sort_by(|a, b| compare_lines(a, b, &config));
     assert_eq!(lines[0], b"a\t2");

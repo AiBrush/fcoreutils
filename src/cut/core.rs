@@ -201,8 +201,16 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
             .map(|chunk| {
                 let mut buf = Vec::with_capacity(chunk.len() / 2);
                 process_fields_chunk(
-                    chunk, delim, ranges, output_delim, suppress, max_field, field_mask,
-                    line_delim, complement, &mut buf,
+                    chunk,
+                    delim,
+                    ranges,
+                    output_delim,
+                    suppress,
+                    max_field,
+                    field_mask,
+                    line_delim,
+                    complement,
+                    &mut buf,
                 );
                 buf
             })
@@ -216,8 +224,16 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
         // Sequential path
         let mut buf = Vec::with_capacity(data.len() / 2);
         process_fields_chunk(
-            data, delim, ranges, output_delim, suppress, max_field, field_mask, line_delim,
-            complement, &mut buf,
+            data,
+            delim,
+            ranges,
+            output_delim,
+            suppress,
+            max_field,
+            field_mask,
+            line_delim,
+            complement,
+            &mut buf,
         );
         if !buf.is_empty() {
             out.write_all(&buf)?;
@@ -243,15 +259,31 @@ fn process_fields_chunk(
     for end_pos in memchr_iter(line_delim, data) {
         let line = &data[start..end_pos];
         extract_fields_to_buf(
-            line, delim, ranges, output_delim, suppress, max_field, field_mask, line_delim, buf,
+            line,
+            delim,
+            ranges,
+            output_delim,
+            suppress,
+            max_field,
+            field_mask,
+            line_delim,
+            buf,
             complement,
         );
         start = end_pos + 1;
     }
     if start < data.len() {
         extract_fields_to_buf(
-            &data[start..], delim, ranges, output_delim, suppress, max_field, field_mask,
-            line_delim, buf, complement,
+            &data[start..],
+            delim,
+            ranges,
+            output_delim,
+            suppress,
+            max_field,
+            field_mask,
+            line_delim,
+            buf,
+            complement,
         );
     }
 }
@@ -278,7 +310,9 @@ fn process_single_field(
             .par_iter()
             .map(|chunk| {
                 let mut buf = Vec::with_capacity(chunk.len() / 4);
-                process_single_field_chunk(chunk, delim, target_idx, line_delim, suppress, &mut buf);
+                process_single_field_chunk(
+                    chunk, delim, target_idx, line_delim, suppress, &mut buf,
+                );
                 buf
             })
             .collect();
@@ -469,7 +503,14 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
             .par_iter()
             .map(|chunk| {
                 let mut buf = Vec::with_capacity(chunk.len() / 2);
-                process_bytes_chunk(chunk, ranges, complement, output_delim, line_delim, &mut buf);
+                process_bytes_chunk(
+                    chunk,
+                    ranges,
+                    complement,
+                    output_delim,
+                    line_delim,
+                    &mut buf,
+                );
                 buf
             })
             .collect();

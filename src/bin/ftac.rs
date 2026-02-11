@@ -5,7 +5,7 @@ use std::process;
 
 use clap::Parser;
 
-use coreutils_rs::common::io::{read_file, read_stdin, FileData};
+use coreutils_rs::common::io::{FileData, read_file, read_stdin};
 use coreutils_rs::tac;
 
 #[derive(Parser)]

@@ -130,9 +130,8 @@ fn read_all_input(
 
     // Single file (non-stdin): use mmap directly for zero-copy
     let buffer = if inputs.len() == 1 && inputs[0] != "-" {
-        let file = File::open(&inputs[0]).map_err(|e| {
-            io::Error::new(e.kind(), format!("open failed: {}: {}", &inputs[0], e))
-        })?;
+        let file = File::open(&inputs[0])
+            .map_err(|e| io::Error::new(e.kind(), format!("open failed: {}: {}", &inputs[0], e)))?;
         let metadata = file.metadata()?;
         if metadata.len() > 0 {
             FileData::Mmap(unsafe { Mmap::map(&file)? })
@@ -192,9 +191,8 @@ pub fn read_lines(inputs: &[String], zero_terminated: bool) -> io::Result<Vec<Ve
             let reader = BufReader::new(stdin.lock());
             read_delimited_lines(reader, delimiter, &mut lines)?;
         } else {
-            let file = File::open(input).map_err(|e| {
-                io::Error::new(e.kind(), format!("open failed: {}: {}", input, e))
-            })?;
+            let file = File::open(input)
+                .map_err(|e| io::Error::new(e.kind(), format!("open failed: {}: {}", input, e)))?;
             let reader = BufReader::with_capacity(256 * 1024, file);
             read_delimited_lines(reader, delimiter, &mut lines)?;
         }
@@ -540,11 +538,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 }
                 ord => ord,
             };
-            if reverse {
-                ord.reverse()
-            } else {
-                ord
-            }
+            if reverse { ord.reverse() } else { ord }
         };
 
         let n = entries.len();
@@ -608,8 +602,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 return if reverse { ord.reverse() } else { ord };
             }
             if !stable {
-                data[offsets[a.1].0..offsets[a.1].1]
-                    .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
             } else {
                 Ordering::Equal
             }
@@ -658,11 +651,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 .enumerate()
                 .map(|(i, &(s, e))| {
                     let f = if s == e {
-                        if opts.general_numeric {
-                            f64::NAN
-                        } else {
-                            0.0
-                        }
+                        if opts.general_numeric { f64::NAN } else { 0.0 }
                     } else {
                         parse_value_for_opts(&data[s..e], opts)
                     };
@@ -678,8 +667,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     return if reverse { ord.reverse() } else { ord };
                 }
                 if !stable {
-                    data[offsets[a.1].0..offsets[a.1].1]
-                        .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                    data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
                 } else {
                     Ordering::Equal
                 }
@@ -718,16 +706,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 let mut entries: Vec<(u64, usize)> = key_offs
                     .iter()
                     .enumerate()
-                    .map(|(i, &(s, e))| {
-                        (
-                            if s < e {
-                                line_prefix(data, s, e)
-                            } else {
-                                0u64
-                            },
-                            i,
-                        )
-                    })
+                    .map(|(i, &(s, e))| (if s < e { line_prefix(data, s, e) } else { 0u64 }, i))
                     .collect();
 
                 let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
@@ -770,12 +749,19 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 do_sort(&mut indices, stable, |&a, &b| {
                     let (sa, ea) = key_offs[a];
                     let (sb, eb) = key_offs[b];
-                    let ka = if sa == ea { &[] as &[u8] } else { &data[sa..ea] };
-                    let kb = if sb == eb { &[] as &[u8] } else { &data[sb..eb] };
+                    let ka = if sa == ea {
+                        &[] as &[u8]
+                    } else {
+                        &data[sa..ea]
+                    };
+                    let kb = if sb == eb {
+                        &[] as &[u8]
+                    } else {
+                        &data[sb..eb]
+                    };
                     let ord = compare_with_opts(ka, kb, opts, random_seed);
                     if ord == Ordering::Equal && !stable {
-                        data[offsets[a].0..offsets[a].1]
-                            .cmp(&data[offsets[b].0..offsets[b].1])
+                        data[offsets[a].0..offsets[a].1].cmp(&data[offsets[b].0..offsets[b].1])
                     } else {
                         ord
                     }

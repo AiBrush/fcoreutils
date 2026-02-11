@@ -2,7 +2,9 @@ use std::process;
 
 use clap::Parser;
 
-use coreutils_rs::sort::{CheckMode, KeyDef, KeyOpts, SortConfig, parse_buffer_size, sort_and_output};
+use coreutils_rs::sort::{
+    CheckMode, KeyDef, KeyOpts, SortConfig, parse_buffer_size, sort_and_output,
+};
 
 #[derive(Parser)]
 #[command(name = "fsort", about = "Sort lines of text files")]

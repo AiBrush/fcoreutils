@@ -24,9 +24,22 @@ fn cut_byte_str(input: &str, spec: &str, complement: bool) -> String {
     String::from_utf8(out).unwrap()
 }
 
-fn process_data_str(input: &str, mode: CutMode, spec: &str, delim: u8, complement: bool, suppress: bool, output_delim: Option<&[u8]>, line_delim: u8) -> String {
+fn process_data_str(
+    input: &str,
+    mode: CutMode,
+    spec: &str,
+    delim: u8,
+    complement: bool,
+    suppress: bool,
+    output_delim: Option<&[u8]>,
+    line_delim: u8,
+) -> String {
     let ranges = parse_ranges(spec).unwrap();
-    let default_od = if mode == CutMode::Fields { vec![delim] } else { vec![] };
+    let default_od = if mode == CutMode::Fields {
+        vec![delim]
+    } else {
+        vec![]
+    };
     let od = output_delim.unwrap_or(&default_od);
     let cfg = CutConfig {
         mode,
@@ -191,7 +204,13 @@ fn test_suppress_skips_no_delim_lines() {
     // Lines without delimiter should be completely suppressed (no newline either)
     let result = process_data_str(
         "has:delim\nno_delim\nalso:has\n",
-        CutMode::Fields, "1", b':', false, true, None, b'\n',
+        CutMode::Fields,
+        "1",
+        b':',
+        false,
+        true,
+        None,
+        b'\n',
     );
     assert_eq!(result, "has\nalso\n");
 }
@@ -200,7 +219,13 @@ fn test_suppress_skips_no_delim_lines() {
 fn test_suppress_all_no_delim() {
     let result = process_data_str(
         "line1\nline2\nline3\n",
-        CutMode::Fields, "1", b':', false, true, None, b'\n',
+        CutMode::Fields,
+        "1",
+        b':',
+        false,
+        true,
+        None,
+        b'\n',
     );
     assert_eq!(result, "");
 }
@@ -209,7 +234,13 @@ fn test_suppress_all_no_delim() {
 fn test_no_suppress_prints_whole_line() {
     let result = process_data_str(
         "no_delim\n",
-        CutMode::Fields, "1", b':', false, false, None, b'\n',
+        CutMode::Fields,
+        "1",
+        b':',
+        false,
+        false,
+        None,
+        b'\n',
     );
     assert_eq!(result, "no_delim\n");
 }
@@ -220,7 +251,13 @@ fn test_no_suppress_prints_whole_line() {
 fn test_process_multiline_fields() {
     let result = process_data_str(
         "a:b:c\nx:y:z\n",
-        CutMode::Fields, "2", b':', false, false, None, b'\n',
+        CutMode::Fields,
+        "2",
+        b':',
+        false,
+        false,
+        None,
+        b'\n',
     );
     assert_eq!(result, "b\ny\n");
 }
@@ -229,7 +266,13 @@ fn test_process_multiline_fields() {
 fn test_process_multiline_bytes() {
     let result = process_data_str(
         "hello\nworld\n",
-        CutMode::Bytes, "1-3", b'\t', false, false, None, b'\n',
+        CutMode::Bytes,
+        "1-3",
+        b'\t',
+        false,
+        false,
+        None,
+        b'\n',
     );
     assert_eq!(result, "hel\nwor\n");
 }

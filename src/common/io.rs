@@ -36,7 +36,9 @@ pub fn read_file(path: &Path) -> io::Result<FileData> {
         // SAFETY: Read-only mapping. File must not be truncated during use.
         let mmap = unsafe { Mmap::map(&file)? };
         #[cfg(target_os = "linux")]
-        { let _ = mmap.advise(memmap2::Advice::Sequential); }
+        {
+            let _ = mmap.advise(memmap2::Advice::Sequential);
+        }
         Ok(FileData::Mmap(mmap))
     } else {
         Ok(FileData::Owned(fs::read(path)?))

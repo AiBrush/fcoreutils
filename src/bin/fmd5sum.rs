@@ -173,7 +173,11 @@ fn main() {
                 };
                 match hash_result {
                     Ok(h) => {
-                        let name = if filename == "-" { "-" } else { filename.as_str() };
+                        let name = if filename == "-" {
+                            "-"
+                        } else {
+                            filename.as_str()
+                        };
                         if cli.tag {
                             write_tag(&mut out, algo, &h, name, cli.zero);
                         } else {

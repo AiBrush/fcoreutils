@@ -211,7 +211,7 @@ fn test_count_chars_c_locale() {
 #[test]
 fn test_count_chars_locale_dispatch() {
     let data = "caf\u{00e9}".as_bytes(); // 5 bytes, 4 UTF-8 chars
-    assert_eq!(count_chars(data, true), 4);  // UTF-8 mode
+    assert_eq!(count_chars(data, true), 4); // UTF-8 mode
     assert_eq!(count_chars(data, false), 5); // C locale mode
 }
 

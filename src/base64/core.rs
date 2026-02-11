@@ -91,11 +91,7 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
 /// Decode base64 data and write to output (borrows data, allocates clean buffer).
 /// When `ignore_garbage` is true, strip all non-base64 characters.
 /// When false, only strip whitespace (standard behavior).
-pub fn decode_to_writer(
-    data: &[u8],
-    ignore_garbage: bool,
-    out: &mut impl Write,
-) -> io::Result<()> {
+pub fn decode_to_writer(data: &[u8], ignore_garbage: bool, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }

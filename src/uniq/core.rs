@@ -219,7 +219,10 @@ impl<'a> Iterator for LineIter<'a> {
                 let line_end = self.pos + idx; // without terminator
                 let full_end = self.pos + idx + 1; // with terminator
                 self.pos = full_end;
-                Some((&self.data[line_start..line_end], &self.data[line_start..full_end]))
+                Some((
+                    &self.data[line_start..line_end],
+                    &self.data[line_start..full_end],
+                ))
             }
             None => {
                 // Last line without terminator
@@ -342,26 +345,14 @@ fn process_all_repeated_bytes(
             group_lines.push((cur_content, cur_full));
         } else {
             // Flush group
-            flush_all_repeated_bytes(
-                writer,
-                &group_lines,
-                method,
-                &mut first_group_printed,
-                term,
-            )?;
+            flush_all_repeated_bytes(writer, &group_lines, method, &mut first_group_printed, term)?;
             group_lines.clear();
             group_lines.push((cur_content, cur_full));
         }
     }
 
     // Flush last group
-    flush_all_repeated_bytes(
-        writer,
-        &group_lines,
-        method,
-        &mut first_group_printed,
-        term,
-    )?;
+    flush_all_repeated_bytes(writer, &group_lines, method, &mut first_group_printed, term)?;
 
     Ok(())
 }
@@ -464,11 +455,7 @@ fn process_group_bytes(
 
 /// Main streaming uniq processor.
 /// Reads from `input`, writes to `output`.
-pub fn process_uniq<R: Read, W: Write>(
-    input: R,
-    output: W,
-    config: &UniqConfig,
-) -> io::Result<()> {
+pub fn process_uniq<R: Read, W: Write>(input: R, output: W, config: &UniqConfig) -> io::Result<()> {
     let reader = BufReader::with_capacity(1024 * 1024, input);
     let mut writer = BufWriter::with_capacity(1024 * 1024, output);
     let term = if config.zero_terminated { b'\0' } else { b'\n' };

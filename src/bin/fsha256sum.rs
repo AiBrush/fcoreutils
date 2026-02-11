@@ -170,7 +170,11 @@ fn run_hash_mode(
 
             match hash_result {
                 Ok(h) => {
-                    let name = if filename == "-" { "-" } else { filename.as_str() };
+                    let name = if filename == "-" {
+                        "-"
+                    } else {
+                        filename.as_str()
+                    };
                     write_output(out, cli, algo, &h, name);
                 }
                 Err(e) => {
@@ -210,13 +214,7 @@ fn run_hash_mode(
 }
 
 #[inline]
-fn write_output(
-    out: &mut impl Write,
-    cli: &Cli,
-    algo: HashAlgorithm,
-    hash: &str,
-    filename: &str,
-) {
+fn write_output(out: &mut impl Write, cli: &Cli, algo: HashAlgorithm, hash: &str, filename: &str) {
     if cli.tag {
         // Tag mode: no escaping per GNU behavior
         if cli.zero {
@@ -325,10 +323,7 @@ fn run_check_mode(
             } else {
                 "listed files could not be read"
             };
-            eprintln!(
-                "{}: WARNING: {} {}",
-                TOOL_NAME, total_read_errors, word
-            );
+            eprintln!("{}: WARNING: {} {}", TOOL_NAME, total_read_errors, word);
         }
 
         if total_fmt_errors > 0 {

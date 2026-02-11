@@ -82,27 +82,18 @@ mod tests {
 
     #[test]
     fn test_decode_hello() {
-        assert_eq!(
-            decode_bytes(b"SGVsbG8=", false).unwrap(),
-            b"Hello"
-        );
+        assert_eq!(decode_bytes(b"SGVsbG8=", false).unwrap(), b"Hello");
     }
 
     #[test]
     fn test_decode_with_newlines() {
         // GNU base64 decode accepts newlines in input
-        assert_eq!(
-            decode_bytes(b"SGVs\nbG8=\n", false).unwrap(),
-            b"Hello"
-        );
+        assert_eq!(decode_bytes(b"SGVs\nbG8=\n", false).unwrap(), b"Hello");
     }
 
     #[test]
     fn test_decode_ignore_garbage() {
-        assert_eq!(
-            decode_bytes(b"SGVs!!bG8=", true).unwrap(),
-            b"Hello"
-        );
+        assert_eq!(decode_bytes(b"SGVs!!bG8=", true).unwrap(), b"Hello");
     }
 
     #[test]
@@ -142,7 +133,10 @@ mod tests {
         // -w 0 output has no trailing newline; decode must handle that
         let input: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
         let encoded = encode_bytes(&input, 0);
-        assert!(!encoded.ends_with(b"\n"), "no-wrap should not have trailing newline");
+        assert!(
+            !encoded.ends_with(b"\n"),
+            "no-wrap should not have trailing newline"
+        );
         let decoded = decode_bytes(&encoded, false).unwrap();
         assert_eq!(decoded, input);
     }
@@ -180,10 +174,7 @@ mod tests {
     #[test]
     fn test_decode_with_whitespace_variants() {
         // Should handle \r\n, tabs, spaces in encoded data
-        assert_eq!(
-            decode_bytes(b"YWJj\r\nZGVm\n", false).unwrap(),
-            b"abcdef"
-        );
+        assert_eq!(decode_bytes(b"YWJj\r\nZGVm\n", false).unwrap(), b"abcdef");
     }
 
     #[test]
@@ -198,10 +189,7 @@ mod tests {
     #[test]
     fn test_decode_ignore_garbage_various() {
         // Various garbage characters should be stripped with -i
-        assert_eq!(
-            decode_bytes(b"Y!!!W@@@J###j$$$", true).unwrap(),
-            b"abc"
-        );
+        assert_eq!(decode_bytes(b"Y!!!W@@@J###j$$$", true).unwrap(), b"abc");
     }
 
     #[test]
@@ -258,10 +246,7 @@ mod tests {
 
     #[test]
     fn test_decode_owned_ignore_garbage() {
-        assert_eq!(
-            decode_owned_bytes(b"SGVs!!bG8=", true).unwrap(),
-            b"Hello"
-        );
+        assert_eq!(decode_owned_bytes(b"SGVs!!bG8=", true).unwrap(), b"Hello");
     }
 
     #[test]

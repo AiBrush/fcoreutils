@@ -90,7 +90,11 @@ fn test_hash_bytes_sha256_hello() {
 fn test_hash_bytes_matches_reader() {
     // Verify hash_bytes and hash_reader produce identical output
     let data = b"The quick brown fox jumps over the lazy dog\n";
-    for algo in [HashAlgorithm::Md5, HashAlgorithm::Sha256, HashAlgorithm::Blake2b] {
+    for algo in [
+        HashAlgorithm::Md5,
+        HashAlgorithm::Sha256,
+        HashAlgorithm::Blake2b,
+    ] {
         let from_bytes = hash_bytes(algo, data);
         let from_reader = hash_reader(algo, Cursor::new(data)).unwrap();
         assert_eq!(from_bytes, from_reader, "Mismatch for {:?}", algo);
@@ -183,8 +187,7 @@ fn test_parse_check_line_with_spaces_in_filename() {
 
 #[test]
 fn test_parse_check_line_bsd_with_spaces_in_filename() {
-    let (hash, file) =
-        parse_check_line("SHA256 (my file.txt) = abc123def456").unwrap();
+    let (hash, file) = parse_check_line("SHA256 (my file.txt) = abc123def456").unwrap();
     assert_eq!(hash, "abc123def456");
     assert_eq!(file, "my file.txt");
 }
@@ -240,10 +243,7 @@ fn test_print_hash_tag_zero() {
 fn test_print_hash_tag_md5() {
     let mut buf = Vec::new();
     print_hash_tag(&mut buf, HashAlgorithm::Md5, "abcdef", "test.txt").unwrap();
-    assert_eq!(
-        String::from_utf8(buf).unwrap(),
-        "MD5 (test.txt) = abcdef\n"
-    );
+    assert_eq!(String::from_utf8(buf).unwrap(), "MD5 (test.txt) = abcdef\n");
 }
 
 #[test]
@@ -315,7 +315,10 @@ fn test_hash_file_large_sha256() {
 
 #[test]
 fn test_hash_file_nonexistent() {
-    let result = hash_file(HashAlgorithm::Md5, std::path::Path::new("/nonexistent/file"));
+    let result = hash_file(
+        HashAlgorithm::Md5,
+        std::path::Path::new("/nonexistent/file"),
+    );
     assert!(result.is_err());
 }
 

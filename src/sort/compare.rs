@@ -60,11 +60,7 @@ fn find_numeric_end(s: &[u8]) -> usize {
             has_digits = true;
         }
     }
-    if has_digits {
-        i
-    } else {
-        0
-    }
+    if has_digits { i } else { 0 }
 }
 
 /// General numeric sort (-g): handles scientific notation, infinity, NaN.

@@ -177,7 +177,11 @@ fn run_hash_mode(cli: &Cli, files: &[String], output_bytes: usize, out: &mut imp
 
             match hash_result {
                 Ok(h) => {
-                    let name = if filename == "-" { "-" } else { filename.as_str() };
+                    let name = if filename == "-" {
+                        "-"
+                    } else {
+                        filename.as_str()
+                    };
                     write_output(out, cli, &h, name, output_bytes);
                 }
                 Err(e) => {
@@ -271,8 +275,7 @@ fn run_check_mode(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             filename.clone()
         };
 
-        let (file_ok, file_fail, file_fmt, file_read) =
-            check_one(cli, reader, &display_name, out);
+        let (file_ok, file_fail, file_fmt, file_read) = check_one(cli, reader, &display_name, out);
 
         total_ok += file_ok;
         total_fail += file_fail;

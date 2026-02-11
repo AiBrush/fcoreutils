@@ -105,7 +105,11 @@ pub fn tac_string_separator(
         while i > 0 {
             i -= 1;
             let sep_start = positions[i];
-            let rec_start = if i == 0 { 0 } else { positions[i - 1] + sep_len };
+            let rec_start = if i == 0 {
+                0
+            } else {
+                positions[i - 1] + sep_len
+            };
             buf.write_all(&data[rec_start..sep_start + sep_len])?;
         }
     } else {
