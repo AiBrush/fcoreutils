@@ -81,9 +81,9 @@ memmap2 = "0.9"
 rayon = "1"
 
 # Hashing (with hardware acceleration)
-sha2 = "0.10"
-blake2 = "0.10"
-md-5 = "0.10"
+sha2 = { version = "0.10", features = ["asm"] }
+blake2b_simd = "1"
+md-5 = { version = "0.10", features = ["asm"] }
 
 # Base64 (SIMD-accelerated)
 base64-simd = "0.8"
