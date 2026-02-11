@@ -1,5 +1,9 @@
 use std::fs::File;
-use std::io::{self, BufWriter};
+use std::io::{self, BufWriter, Write};
+#[cfg(unix)]
+use std::mem::ManuallyDrop;
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
 use std::process;
 
 use clap::Parser;
@@ -161,22 +165,37 @@ fn main() {
         zero_terminated: cli.zero_terminated,
     };
 
-    // Open output (4MB BufWriter for fewer syscalls)
-    let output: Box<dyn io::Write> = match cli.output.as_deref() {
-        Some("-") | None => Box::new(BufWriter::with_capacity(4 * 1024 * 1024, io::stdout().lock())),
-        Some(path) => match File::create(path) {
-            Ok(f) => Box::new(BufWriter::new(f)),
-            Err(e) => {
-                eprintln!("funiq: {}: {}", path, e);
-                process::exit(1);
-            }
-        },
-    };
+    // Dispatch to output file or stdout, avoiding Box<dyn Write> for stdout (common case)
+    if let Some(ref path) = cli.output {
+        if path != "-" {
+            let output = match File::create(path) {
+                Ok(f) => BufWriter::new(f),
+                Err(e) => {
+                    eprintln!("funiq: {}: {}", path, e);
+                    process::exit(1);
+                }
+            };
+            run_uniq(&cli, &config, output);
+            return;
+        }
+    }
 
+    // Raw fd stdout on Unix for zero-overhead writes
+    #[cfg(unix)]
+    let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+    #[cfg(unix)]
+    let output = BufWriter::with_capacity(4 * 1024 * 1024, &mut *raw);
+    #[cfg(not(unix))]
+    let output = BufWriter::with_capacity(4 * 1024 * 1024, io::stdout().lock());
+
+    run_uniq(&cli, &config, output);
+}
+
+fn run_uniq(cli: &Cli, config: &UniqConfig, output: impl Write) {
     let result = match cli.input.as_deref() {
         Some("-") | None => {
             // Stdin: use streaming mode
-            process_uniq(io::stdin().lock(), output, &config)
+            process_uniq(io::stdin().lock(), output, config)
         }
         Some(path) => {
             // File: use mmap for zero-copy performance
@@ -215,7 +234,7 @@ fn main() {
                 }
             };
 
-            process_uniq_bytes(&mmap, output, &config)
+            process_uniq_bytes(&mmap, output, config)
         }
     };
 
