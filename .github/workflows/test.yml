@@ -29,6 +29,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.os }}
+      - name: Build binaries
+        run: cargo build --release
       - name: Run tests
         run: cargo test --release
       - name: Clippy

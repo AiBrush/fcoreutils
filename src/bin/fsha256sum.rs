@@ -1,12 +1,22 @@
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::Path;
 use std::process;
 
 use clap::Parser;
+use rayon::prelude::*;
 
 use coreutils_rs::hash::{self, HashAlgorithm};
 
+const TOOL_NAME: &str = "fsha256sum";
+/// SHA256 hex digest is always 64 characters.
+const SHA256_HEX_LEN: usize = 64;
+
 #[derive(Parser)]
-#[command(name = "fsha256sum", about = "Compute and check SHA256 message digest")]
+#[command(
+    name = "fsha256sum",
+    about = "Compute and check SHA256 message digest",
+    after_help = "With no FILE, or when FILE is -, read standard input."
+)]
 struct Cli {
     /// Read in binary mode
     #[arg(short = 'b', long = "binary")]
@@ -44,13 +54,79 @@ struct Cli {
     #[arg(short = 'w', long = "warn")]
     warn: bool,
 
+    /// End each output line with NUL, not newline
+    #[arg(short = 'z', long = "zero")]
+    zero: bool,
+
     /// Files to process
     files: Vec<String>,
+}
+
+// ── Filename escaping (GNU compat) ─────────────────────────────────
+
+/// Check if a filename needs escaping (contains backslash or newline).
+fn needs_escape(name: &str) -> bool {
+    name.bytes().any(|b| b == b'\\' || b == b'\n')
+}
+
+/// Escape a filename: replace `\` with `\\` and newline with `\n` (literal).
+fn escape_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 8);
+    for b in name.bytes() {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            _ => out.push(b as char),
+        }
+    }
+    out
+}
+
+/// Unescape a checksum-line filename: `\\` -> `\`, `\n` -> newline.
+fn unescape_filename(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('n') => out.push('\n'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Format an IO error message without the "(os error N)" suffix.
+fn io_error_msg(e: &io::Error) -> String {
+    if let Some(raw) = e.raw_os_error() {
+        let os_err = io::Error::from_raw_os_error(raw);
+        format!("{}", os_err).replace(&format!(" (os error {})", raw), "")
+    } else {
+        format!("{}", e)
+    }
 }
 
 fn main() {
     let cli = Cli::parse();
     let algo = HashAlgorithm::Sha256;
+
+    // Validate flag combinations
+    if cli.tag && cli.check {
+        eprintln!(
+            "{}: the --tag option is meaningless when verifying checksums",
+            TOOL_NAME
+        );
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(1);
+    }
 
     let files = if cli.files.is_empty() {
         vec!["-".to_string()]
@@ -63,70 +139,306 @@ fn main() {
     let mut had_error = false;
 
     if cli.check {
-        for filename in &files {
-            let reader: Box<dyn io::BufRead> = if filename == "-" {
-                Box::new(BufReader::new(io::stdin().lock()))
-            } else {
-                match std::fs::File::open(filename) {
-                    Ok(f) => Box::new(BufReader::new(f)),
-                    Err(e) => {
-                        eprintln!("fsha256sum: {}: {}", filename, e);
-                        had_error = true;
-                        continue;
-                    }
-                }
-            };
-
-            let mut err_out = io::stderr();
-            let opts = hash::CheckOptions {
-                quiet: cli.quiet,
-                status_only: cli.status,
-                strict: cli.strict,
-                warn: cli.warn,
-            };
-            match hash::check_file(algo, reader, &opts, &mut out, &mut err_out) {
-                Ok((_ok, fail, _fmt)) => {
-                    if fail > 0 {
-                        had_error = true;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("fsha256sum: {}: {}", filename, e);
-                    had_error = true;
-                }
-            }
-        }
+        run_check_mode(&cli, algo, &files, &mut out, &mut had_error);
     } else {
-        for filename in &files {
-            let hash_result = if filename == "-" {
-                hash::hash_stdin(algo)
-            } else {
-                hash::hash_file(algo, std::path::Path::new(filename))
-            };
-
-            match hash_result {
-                Ok(h) => {
-                    let display_name = if filename == "-" {
-                        "-"
-                    } else {
-                        filename.as_str()
-                    };
-                    if cli.tag {
-                        let _ = hash::print_hash_tag(&mut out, algo, &h, display_name);
-                    } else {
-                        let _ = hash::print_hash(&mut out, &h, display_name, cli.binary);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("fsha256sum: {}: {}", filename, e);
-                    had_error = true;
-                }
-            }
-        }
+        run_hash_mode(&cli, algo, &files, &mut out, &mut had_error);
     }
 
     let _ = out.flush();
     if had_error {
         process::exit(1);
     }
+}
+
+fn run_hash_mode(
+    cli: &Cli,
+    algo: HashAlgorithm,
+    files: &[String],
+    out: &mut impl Write,
+    had_error: &mut bool,
+) {
+    let has_stdin = files.iter().any(|f| f == "-");
+
+    if has_stdin || files.len() == 1 {
+        // Sequential for stdin or single file
+        for filename in files {
+            let hash_result = if filename == "-" {
+                hash::hash_stdin(algo)
+            } else {
+                hash::hash_file(algo, Path::new(filename))
+            };
+
+            match hash_result {
+                Ok(h) => {
+                    let name = if filename == "-" {
+                        "-"
+                    } else {
+                        filename.as_str()
+                    };
+                    write_output(out, cli, algo, &h, name);
+                }
+                Err(e) => {
+                    let _ = out.flush();
+                    eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
+                    *had_error = true;
+                }
+            }
+        }
+    } else {
+        // Pre-warm page cache for all files before parallel hashing
+        let paths: Vec<_> = files.iter().map(|f| Path::new(f.as_str())).collect();
+        hash::readahead_files(&paths.to_vec());
+
+        // Parallel hashing for multiple files
+        let results: Vec<(&str, Result<String, io::Error>)> = files
+            .par_iter()
+            .map(|filename| {
+                let result = hash::hash_file(algo, Path::new(filename));
+                (filename.as_str(), result)
+            })
+            .collect();
+
+        for (filename, result) in results {
+            match result {
+                Ok(h) => {
+                    write_output(out, cli, algo, &h, filename);
+                }
+                Err(e) => {
+                    let _ = out.flush();
+                    eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
+                    *had_error = true;
+                }
+            }
+        }
+    }
+}
+
+#[inline]
+fn write_output(out: &mut impl Write, cli: &Cli, algo: HashAlgorithm, hash: &str, filename: &str) {
+    if cli.tag {
+        // Tag mode: no escaping per GNU behavior
+        if cli.zero {
+            let _ = write!(out, "{} ({}) = {}\0", algo.name(), filename, hash);
+        } else {
+            let _ = writeln!(out, "{} ({}) = {}", algo.name(), filename, hash);
+        }
+    } else if cli.zero {
+        // -z mode: no escaping, NUL terminator
+        let mode_char = if cli.binary { '*' } else { ' ' };
+        let _ = write!(out, "{} {}{}\0", hash, mode_char, filename);
+    } else if needs_escape(filename) {
+        // Escape filename and prefix line with backslash
+        let escaped = escape_filename(filename);
+        let mode_char = if cli.binary { '*' } else { ' ' };
+        let _ = writeln!(out, "\\{} {}{}", hash, mode_char, escaped);
+    } else {
+        let mode_char = if cli.binary { '*' } else { ' ' };
+        let _ = writeln!(out, "{} {}{}", hash, mode_char, filename);
+    }
+}
+
+fn run_check_mode(
+    cli: &Cli,
+    algo: HashAlgorithm,
+    files: &[String],
+    out: &mut impl Write,
+    had_error: &mut bool,
+) {
+    let mut _total_ok: usize = 0;
+    let mut total_mismatches: usize = 0;
+    let mut total_fmt_errors: usize = 0;
+    let mut total_read_errors: usize = 0;
+
+    for filename in files {
+        let reader: Box<dyn io::BufRead> = if filename == "-" {
+            Box::new(BufReader::new(io::stdin().lock()))
+        } else {
+            match std::fs::File::open(filename) {
+                Ok(f) => Box::new(BufReader::new(f)),
+                Err(e) => {
+                    eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
+                    *had_error = true;
+                    continue;
+                }
+            }
+        };
+
+        let display_name = if filename == "-" {
+            "standard input".to_string()
+        } else {
+            filename.clone()
+        };
+
+        let (file_ok, file_fail, file_fmt, file_read) =
+            check_one(cli, algo, reader, &display_name, out);
+
+        _total_ok += file_ok;
+        total_mismatches += file_fail;
+        total_fmt_errors += file_fmt;
+        total_read_errors += file_read;
+
+        if file_fail > 0 || file_read > 0 {
+            *had_error = true;
+        }
+        if cli.strict && file_fmt > 0 {
+            *had_error = true;
+        }
+
+        // "no properly formatted checksum lines found" when no valid lines
+        if file_ok == 0 && file_fail == 0 && file_read == 0 && file_fmt > 0 {
+            if !cli.status {
+                let _ = out.flush();
+                eprintln!(
+                    "{}: {}: no properly formatted SHA256 checksum lines found",
+                    TOOL_NAME, display_name
+                );
+            }
+            // Don't count these in total_fmt_errors for the summary WARNING
+            // since the "no properly formatted" message subsumes it
+            total_fmt_errors -= file_fmt;
+            *had_error = true;
+        }
+    }
+
+    // Flush stdout before printing stderr warnings
+    let _ = out.flush();
+
+    // Print GNU-style summary warnings to stderr
+    if !cli.status {
+        if total_mismatches > 0 {
+            let checksum_word = if total_mismatches == 1 {
+                "computed checksum did NOT match"
+            } else {
+                "computed checksums did NOT match"
+            };
+            eprintln!(
+                "{}: WARNING: {} {}",
+                TOOL_NAME, total_mismatches, checksum_word
+            );
+        }
+
+        if total_read_errors > 0 {
+            let word = if total_read_errors == 1 {
+                "listed file could not be read"
+            } else {
+                "listed files could not be read"
+            };
+            eprintln!("{}: WARNING: {} {}", TOOL_NAME, total_read_errors, word);
+        }
+
+        if total_fmt_errors > 0 {
+            let line_word = if total_fmt_errors == 1 {
+                "line is"
+            } else {
+                "lines are"
+            };
+            eprintln!(
+                "{}: WARNING: {} {} improperly formatted",
+                TOOL_NAME, total_fmt_errors, line_word
+            );
+        }
+    }
+}
+
+/// Check checksums from one input source. Returns (ok, fail, fmt_errors, read_errors).
+fn check_one(
+    cli: &Cli,
+    algo: HashAlgorithm,
+    reader: Box<dyn BufRead>,
+    display_name: &str,
+    out: &mut impl Write,
+) -> (usize, usize, usize, usize) {
+    let mut ok_count: usize = 0;
+    let mut mismatch_count: usize = 0;
+    let mut format_errors: usize = 0;
+    let mut read_errors: usize = 0;
+    let mut line_num: usize = 0;
+
+    for line_result in reader.lines() {
+        line_num += 1;
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("{}: {}: {}", TOOL_NAME, display_name, io_error_msg(&e));
+                break;
+            }
+        };
+        let line = line.trim_end();
+
+        if line.is_empty() {
+            continue;
+        }
+
+        // Handle backslash-escaped lines
+        let line_content = line.strip_prefix('\\').unwrap_or(line);
+
+        // Parse checksum line
+        let (expected_hash, parsed_filename) = match hash::parse_check_line(line_content) {
+            Some(v) => v,
+            None => {
+                format_errors += 1;
+                if cli.warn {
+                    let _ = out.flush();
+                    eprintln!(
+                        "{}: {}: {}: improperly formatted SHA256 checksum line",
+                        TOOL_NAME, display_name, line_num
+                    );
+                }
+                continue;
+            }
+        };
+
+        // Validate hash: must be exactly 64 hex characters for SHA256
+        if expected_hash.len() != SHA256_HEX_LEN
+            || !expected_hash.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            format_errors += 1;
+            if cli.warn || cli.strict {
+                let _ = out.flush();
+                eprintln!(
+                    "{}: {}: {}: improperly formatted SHA256 checksum line",
+                    TOOL_NAME, display_name, line_num
+                );
+            }
+            continue;
+        }
+
+        // Unescape filename if original line was backslash-prefixed
+        let check_filename = if line.starts_with('\\') {
+            unescape_filename(parsed_filename)
+        } else {
+            parsed_filename.to_string()
+        };
+
+        // Compute actual hash
+        let actual = match hash::hash_file(algo, Path::new(&check_filename)) {
+            Ok(h) => h,
+            Err(e) => {
+                if cli.ignore_missing && e.kind() == io::ErrorKind::NotFound {
+                    continue;
+                }
+                read_errors += 1;
+                if !cli.status {
+                    let _ = out.flush();
+                    eprintln!("{}: {}: {}", TOOL_NAME, check_filename, io_error_msg(&e));
+                    let _ = writeln!(out, "{}: FAILED open or read", check_filename);
+                }
+                continue;
+            }
+        };
+
+        if actual.eq_ignore_ascii_case(expected_hash) {
+            ok_count += 1;
+            if !cli.quiet && !cli.status {
+                let _ = writeln!(out, "{}: OK", check_filename);
+            }
+        } else {
+            mismatch_count += 1;
+            if !cli.status {
+                let _ = writeln!(out, "{}: FAILED", check_filename);
+            }
+        }
+    }
+
+    (ok_count, mismatch_count, format_errors, read_errors)
 }
