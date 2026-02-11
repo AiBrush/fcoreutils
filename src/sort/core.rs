@@ -292,7 +292,7 @@ pub fn check_sorted(inputs: &[String], config: &SortConfig) -> io::Result<bool> 
     Ok(true)
 }
 
-/// Merge already-sorted files.
+/// Merge already-sorted files with batched output.
 pub fn merge_sorted(
     inputs: &[String],
     config: &SortConfig,
@@ -317,6 +317,7 @@ pub fn merge_sorted(
     let mut indices: Vec<usize> = vec![0; all_lines.len()];
     let mut prev_line: Option<Vec<u8>> = None;
     let terminator: &[u8] = if config.zero_terminated { b"\0" } else { b"\n" };
+    let mut buf = Vec::with_capacity(OUTPUT_BUF_SIZE);
 
     loop {
         let mut best: Option<(usize, &[u8])> = None;
@@ -347,8 +348,12 @@ pub fn merge_sorted(
                 };
 
                 if should_output {
-                    writer.write_all(line)?;
-                    writer.write_all(terminator)?;
+                    buf.extend_from_slice(line);
+                    buf.extend_from_slice(terminator);
+                    if buf.len() >= OUTPUT_BUF_SIZE {
+                        writer.write_all(&buf)?;
+                        buf.clear();
+                    }
                     prev_line = Some(line.to_vec());
                 }
                 indices[idx] += 1;
@@ -356,6 +361,9 @@ pub fn merge_sorted(
         }
     }
 
+    if !buf.is_empty() {
+        writer.write_all(&buf)?;
+    }
     Ok(())
 }
 
