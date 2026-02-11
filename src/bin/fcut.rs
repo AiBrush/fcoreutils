@@ -42,6 +42,10 @@ struct Cli {
     #[arg(short = 'z', long = "zero-terminated")]
     zero_terminated: bool,
 
+    /// (ignored, for historical compatibility)
+    #[arg(short = 'n', hide = true)]
+    _legacy_n: bool,
+
     /// Files to process
     files: Vec<String>,
 }

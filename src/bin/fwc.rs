@@ -62,11 +62,18 @@ impl ShowFlags {
 }
 
 /// Compute number of decimal digits needed to display a value.
+/// Uses integer arithmetic to avoid floating-point precision issues.
 fn num_width(n: u64) -> usize {
     if n == 0 {
         return 1;
     }
-    ((n as f64).log10().floor() as usize) + 1
+    let mut width = 0;
+    let mut val = n;
+    while val > 0 {
+        val /= 10;
+        width += 1;
+    }
+    width
 }
 
 fn main() {
@@ -87,6 +94,11 @@ fn main() {
 
     // Collect files to process
     let files: Vec<String> = if let Some(ref f0f) = cli.files0_from {
+        if !cli.files.is_empty() {
+            eprintln!("fwc: extra operand '{}'", cli.files[0]);
+            eprintln!("file operands cannot be combined with --files0-from");
+            process::exit(1);
+        }
         read_files0_from(f0f)
     } else if cli.files.is_empty() {
         vec!["-".to_string()] // stdin
@@ -146,32 +158,30 @@ fn main() {
             }
         };
 
-        let counts = if show.max_line_length || (show.lines && show.words && show.chars) {
-            wc::count_all(&data)
-        } else {
-            wc::WcCounts {
-                lines: if show.lines {
-                    wc::count_lines(&data)
-                } else {
-                    0
-                },
-                words: if show.words {
-                    wc::count_words(&data)
-                } else {
-                    0
-                },
-                bytes: if show.bytes {
-                    wc::count_bytes(&data)
-                } else {
-                    0
-                },
-                chars: if show.chars {
-                    wc::count_chars(&data)
-                } else {
-                    0
-                },
-                max_line_length: 0,
-            }
+        // Compute only the requested metrics — each uses its own optimized pass.
+        // Always compute bytes (it's free: data.len()) for GNU-compatible column width.
+        let counts = wc::WcCounts {
+            lines: if show.lines {
+                wc::count_lines(&data)
+            } else {
+                0
+            },
+            words: if show.words {
+                wc::count_words(&data)
+            } else {
+                0
+            },
+            bytes: data.len() as u64,
+            chars: if show.chars {
+                wc::count_chars(&data)
+            } else {
+                0
+            },
+            max_line_length: if show.max_line_length {
+                wc::max_line_length(&data)
+            } else {
+                0
+            },
         };
 
         total.lines += counts.lines;
@@ -191,26 +201,68 @@ fn main() {
     }
 
     // Phase 2: Compute column width
-    // GNU wc uses the digit width of the largest value across totals.
+    // GNU wc uses the digit width of the largest value across all computed metrics
+    // (including bytes, which is always computed) for column alignment.
+    // Special case: single file + single column + no total = natural width.
     // For stdin with no files, GNU uses a default minimum width of 7.
+
+    // Determine whether to print total line (needed for width calculation)
+    let show_total = match total_mode {
+        "always" => true,
+        "never" => false,
+        "only" => true,
+        _ => results.len() > 1, // "auto"
+    };
+
+    let num_columns = show.lines as usize
+        + show.words as usize
+        + show.bytes as usize
+        + show.chars as usize
+        + show.max_line_length as usize;
+
+    let num_output_rows = if total_mode == "only" {
+        if show_total { 1 } else { 0 }
+    } else {
+        results.len() + if show_total { 1 } else { 0 }
+    };
+
     let min_width = if has_stdin && results.len() == 1 {
         7
     } else {
         1
     };
 
-    let max_val = [
-        total.lines,
-        total.words,
-        total.bytes,
-        total.chars,
-        total.max_line_length,
-    ]
-    .into_iter()
-    .max()
-    .unwrap_or(0);
-
-    let width = num_width(max_val).max(min_width);
+    let width = if num_columns <= 1 && num_output_rows <= 1 {
+        // Single value output: no alignment needed, use natural width
+        let single_val = if show.lines {
+            total.lines
+        } else if show.words {
+            total.words
+        } else if show.chars {
+            total.chars
+        } else if show.bytes {
+            total.bytes
+        } else if show.max_line_length {
+            total.max_line_length
+        } else {
+            0
+        };
+        num_width(single_val).max(min_width)
+    } else {
+        // Multiple columns or multiple rows: use max of ALL computed values
+        // (including bytes which is always computed) for consistent alignment
+        let max_val = [
+            total.lines,
+            total.words,
+            total.bytes,
+            total.chars,
+            total.max_line_length,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+        num_width(max_val).max(min_width)
+    };
 
     // Phase 3: Print results
     let stdout = io::stdout();
@@ -222,14 +274,6 @@ fn main() {
             print_counts_fmt(&mut out, counts, name, width, &show);
         }
     }
-
-    // Determine whether to print total line
-    let show_total = match total_mode {
-        "always" => true,
-        "never" => false,
-        "only" => true,
-        _ => results.len() > 1, // "auto"
-    };
 
     if show_total {
         let label = if total_mode == "only" { "" } else { "total" };

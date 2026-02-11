@@ -75,6 +75,9 @@ md-5 = "0.10"
 # Base64 (SIMD-accelerated)
 base64-simd = "0.8"
 
+# Regex for tac -r
+regex = "1"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"

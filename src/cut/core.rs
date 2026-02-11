@@ -88,6 +88,7 @@ pub fn parse_ranges(spec: &str) -> Result<Vec<Range>, String> {
 }
 
 /// Check if a 1-based position is in any range.
+/// Ranges must be sorted. Uses early exit since ranges are sorted.
 #[inline(always)]
 fn in_ranges(ranges: &[Range], pos: usize) -> bool {
     for r in ranges {
@@ -102,6 +103,7 @@ fn in_ranges(ranges: &[Range], pos: usize) -> bool {
 }
 
 /// Cut fields from a line using a delimiter. Writes to `out`.
+/// Returns true if any output was written, false if suppressed.
 /// Uses memchr for SIMD-accelerated delimiter scanning.
 #[inline]
 pub fn cut_fields(
@@ -112,13 +114,14 @@ pub fn cut_fields(
     output_delim: &[u8],
     suppress_no_delim: bool,
     out: &mut impl Write,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     // Check if line contains delimiter at all
     if memchr::memchr(delim, line).is_none() {
         if !suppress_no_delim {
             out.write_all(line)?;
+            return Ok(true);
         }
-        return Ok(());
+        return Ok(false); // suppressed
     }
 
     // Walk through fields using memchr, output selected ones
@@ -148,7 +151,7 @@ pub fn cut_fields(
         out.write_all(&line[field_start..])?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Cut bytes/chars from a line. Writes selected bytes to `out`.
@@ -159,26 +162,35 @@ pub fn cut_bytes(
     complement: bool,
     output_delim: &[u8],
     out: &mut impl Write,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let mut first_range = true;
 
     if complement {
-        // For complement, output bytes NOT in any range
-        let mut in_excluded = false;
-        for (i, &b) in line.iter().enumerate() {
-            let pos = i + 1;
-            if in_ranges(ranges, pos) {
-                if in_excluded {
-                    first_range = false;
-                }
-                in_excluded = false;
-            } else {
-                if !in_excluded && !first_range && !output_delim.is_empty() {
-                    out.write_all(output_delim)?;
-                }
-                out.write_all(&[b])?;
-                in_excluded = true;
+        // Build complement ranges, then output in bulk
+        // This avoids byte-by-byte writes
+        let len = line.len();
+        let mut comp_ranges = Vec::new();
+        let mut pos: usize = 1;
+        for r in ranges {
+            let rs = r.start;
+            let re = r.end.min(len);
+            if pos < rs {
+                comp_ranges.push((pos, rs - 1));
             }
+            pos = re + 1;
+            if pos > len {
+                break;
+            }
+        }
+        if pos <= len {
+            comp_ranges.push((pos, len));
+        }
+        for &(s, e) in &comp_ranges {
+            if !first_range && !output_delim.is_empty() {
+                out.write_all(output_delim)?;
+            }
+            out.write_all(&line[s - 1..e])?;
+            first_range = false;
         }
     } else {
         // Output bytes in ranges. Ranges are sorted and merged.
@@ -195,7 +207,7 @@ pub fn cut_bytes(
             first_range = false;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Process a full data buffer (from mmap or read) with cut operation.
@@ -205,16 +217,20 @@ pub fn process_cut_data(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> i
 
     for end_pos in memchr_iter(cfg.line_delim, data) {
         let line = &data[start..end_pos];
-        process_one_line(line, cfg, out)?;
-        out.write_all(&[cfg.line_delim])?;
+        let wrote = process_one_line(line, cfg, out)?;
+        if wrote {
+            out.write_all(&[cfg.line_delim])?;
+        }
         start = end_pos + 1;
     }
 
     // Handle last line without terminator
     if start < data.len() {
         let line = &data[start..];
-        process_one_line(line, cfg, out)?;
-        out.write_all(b"\n")?;
+        let wrote = process_one_line(line, cfg, out)?;
+        if wrote {
+            out.write_all(&[cfg.line_delim])?;
+        }
     }
 
     Ok(())
@@ -235,27 +251,28 @@ pub fn process_cut_reader<R: BufRead>(
             break;
         }
 
-        let has_delim = buf.last() == Some(&cfg.line_delim);
-        let line = if has_delim {
+        let has_line_delim = buf.last() == Some(&cfg.line_delim);
+        let line = if has_line_delim {
             &buf[..buf.len() - 1]
         } else {
             &buf[..]
         };
 
-        process_one_line(line, cfg, out)?;
+        let wrote = process_one_line(line, cfg, out)?;
 
-        if has_delim {
+        // GNU always terminates output lines, even if input had no trailing delimiter
+        if wrote {
             out.write_all(&[cfg.line_delim])?;
-        } else if !line.is_empty() {
-            out.write_all(b"\n")?;
         }
     }
 
     Ok(())
 }
 
+/// Process one line according to the cut config.
+/// Returns true if output was written, false if the line was suppressed.
 #[inline]
-fn process_one_line(line: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io::Result<()> {
+fn process_one_line(line: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io::Result<bool> {
     match cfg.mode {
         CutMode::Fields => cut_fields(
             line,

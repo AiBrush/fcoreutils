@@ -1,4 +1,9 @@
+pub mod base64;
 pub mod common;
 pub mod cut;
 pub mod hash;
+pub mod sort;
+pub mod tac;
+pub mod tr;
+pub mod uniq;
 pub mod wc;
