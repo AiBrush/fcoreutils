@@ -233,4 +233,50 @@ mod tests {
         decode_stream(&mut reader, false, &mut output).unwrap();
         assert_eq!(output, b"Hello World");
     }
+
+    // ===== IN-PLACE DECODE TESTS =====
+
+    fn decode_owned_bytes(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, std::io::Error> {
+        let mut data = input.to_vec();
+        let mut out = Vec::new();
+        decode_owned(&mut data, ignore_garbage, &mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn test_decode_owned_basic() {
+        assert_eq!(decode_owned_bytes(b"SGVsbG8=\n", false).unwrap(), b"Hello");
+    }
+
+    #[test]
+    fn test_decode_owned_with_newlines() {
+        assert_eq!(
+            decode_owned_bytes(b"SGVs\nbG8=\n", false).unwrap(),
+            b"Hello"
+        );
+    }
+
+    #[test]
+    fn test_decode_owned_ignore_garbage() {
+        assert_eq!(
+            decode_owned_bytes(b"SGVs!!bG8=", true).unwrap(),
+            b"Hello"
+        );
+    }
+
+    #[test]
+    fn test_decode_owned_roundtrip() {
+        let input: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
+        let encoded = encode_bytes(&input, 76);
+        let decoded = decode_owned_bytes(&encoded, false).unwrap();
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn test_decode_owned_whitespace_variants() {
+        assert_eq!(
+            decode_owned_bytes(b"YWJj\r\nZGVm\n", false).unwrap(),
+            b"abcdef"
+        );
+    }
 }
