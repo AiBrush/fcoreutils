@@ -9,6 +9,19 @@ repository = "https://github.com/AiBrush/coreutils-rs"
 readme = "README.md"
 keywords = ["coreutils", "cli", "performance", "simd"]
 categories = ["command-line-utilities", "filesystem"]
+exclude = [
+    "dist/",
+    ".github/",
+    "scripts/",
+    "benches/",
+    "instructions.md",
+    "research-reference.md",
+    "ARCHITECTURE.md",
+    "PROGRESS.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+]
 
 [lib]
 name = "coreutils_rs"
