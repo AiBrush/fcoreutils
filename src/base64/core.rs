@@ -202,7 +202,7 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
 }
 
 /// Decode a clean (no whitespace) owned buffer in-place with SIMD.
-fn decode_owned_clean(data: &mut Vec<u8>, out: &mut impl Write) -> io::Result<()> {
+fn decode_owned_clean(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
