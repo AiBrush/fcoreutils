@@ -246,10 +246,15 @@ fn test_expand_set2_class() {
 use std::process::Command;
 
 fn ftr_path() -> String {
-    let path = std::env::current_dir()
-        .unwrap()
-        .join("target/debug/ftr");
-    path.to_string_lossy().into_owned()
+    let cwd = std::env::current_dir().unwrap();
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    // Check release first (CI uses cargo test --release)
+    let release = cwd.join(format!("target/release/ftr{}", ext));
+    if release.exists() {
+        return release.to_string_lossy().into_owned();
+    }
+    let debug = cwd.join(format!("target/debug/ftr{}", ext));
+    debug.to_string_lossy().into_owned()
 }
 
 fn run_ftr(input: &[u8], args: &[&str]) -> Vec<u8> {
@@ -273,15 +278,18 @@ fn run_ftr(input: &[u8], args: &[&str]) -> Vec<u8> {
     output.stdout
 }
 
-fn run_gnu_tr(input: &[u8], args: &[&str]) -> Vec<u8> {
+fn run_gnu_tr(input: &[u8], args: &[&str]) -> Option<Vec<u8>> {
     use std::io::Write;
-    let mut child = Command::new("tr")
+    let mut child = match Command::new("tr")
         .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("failed to spawn tr");
+    {
+        Ok(c) => c,
+        Err(_) => return None, // tr not available (e.g., Windows)
+    };
 
     child
         .stdin
@@ -291,15 +299,25 @@ fn run_gnu_tr(input: &[u8], args: &[&str]) -> Vec<u8> {
         .expect("failed to write stdin");
 
     let output = child.wait_with_output().expect("failed to wait on tr");
-    output.stdout
+    Some(output.stdout)
+}
+
+/// Assert our output matches GNU tr if available.
+/// Only compare on Linux where GNU coreutils tr is guaranteed.
+/// macOS uses BSD tr which differs for binary/high-byte handling.
+fn assert_gnu_compat(ours: &[u8], gnu: Option<Vec<u8>>) {
+    if cfg!(target_os = "linux") {
+        if let Some(gnu) = gnu {
+            assert_eq!(ours, gnu.as_slice());
+        }
+    }
 }
 
 #[test]
 fn test_translate_lowercase_to_uppercase() {
     let input = b"hello world";
     let ours = run_ftr(input, &["a-z", "A-Z"]);
-    let gnu = run_gnu_tr(input, &["a-z", "A-Z"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["a-z", "A-Z"]));
     assert_eq!(ours, b"HELLO WORLD");
 }
 
@@ -307,16 +325,14 @@ fn test_translate_lowercase_to_uppercase() {
 fn test_translate_uppercase_to_lowercase() {
     let input = b"HELLO WORLD";
     let ours = run_ftr(input, &["A-Z", "a-z"]);
-    let gnu = run_gnu_tr(input, &["A-Z", "a-z"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["A-Z", "a-z"]));
 }
 
 #[test]
 fn test_delete_vowels() {
     let input = b"hello world";
     let ours = run_ftr(input, &["-d", "aeiou"]);
-    let gnu = run_gnu_tr(input, &["-d", "aeiou"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-d", "aeiou"]));
     assert_eq!(ours, b"hll wrld");
 }
 
@@ -324,8 +340,7 @@ fn test_delete_vowels() {
 fn test_delete_digits() {
     let input = b"abc123def456";
     let ours = run_ftr(input, &["-d", "0-9"]);
-    let gnu = run_gnu_tr(input, &["-d", "0-9"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-d", "0-9"]));
     assert_eq!(ours, b"abcdef");
 }
 
@@ -333,8 +348,7 @@ fn test_delete_digits() {
 fn test_squeeze_spaces() {
     let input = b"hello    world   foo";
     let ours = run_ftr(input, &["-s", " "]);
-    let gnu = run_gnu_tr(input, &["-s", " "]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-s", " "]));
     assert_eq!(ours, b"hello world foo");
 }
 
@@ -342,8 +356,7 @@ fn test_squeeze_spaces() {
 fn test_squeeze_newlines() {
     let input = b"a\n\n\nb\n\nc";
     let ours = run_ftr(input, &["-s", "\\n"]);
-    let gnu = run_gnu_tr(input, &["-s", "\\n"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-s", "\\n"]));
     assert_eq!(ours, b"a\nb\nc");
 }
 
@@ -351,8 +364,7 @@ fn test_squeeze_newlines() {
 fn test_delete_complement() {
     let input = b"hello 123 world";
     let ours = run_ftr(input, &["-cd", "0-9"]);
-    let gnu = run_gnu_tr(input, &["-cd", "0-9"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-cd", "0-9"]));
     assert_eq!(ours, b"123");
 }
 
@@ -360,8 +372,7 @@ fn test_delete_complement() {
 fn test_translate_with_class() {
     let input = b"hello world";
     let ours = run_ftr(input, &["[:lower:]", "[:upper:]"]);
-    let gnu = run_gnu_tr(input, &["[:lower:]", "[:upper:]"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["[:lower:]", "[:upper:]"]));
     assert_eq!(ours, b"HELLO WORLD");
 }
 
@@ -369,24 +380,21 @@ fn test_translate_with_class() {
 fn test_translate_rot13() {
     let input = b"hello";
     let ours = run_ftr(input, &["a-zA-Z", "n-za-mN-ZA-M"]);
-    let gnu = run_gnu_tr(input, &["a-zA-Z", "n-za-mN-ZA-M"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["a-zA-Z", "n-za-mN-ZA-M"]));
 }
 
 #[test]
 fn test_delete_squeeze() {
     let input = b"aabbbccddee";
     let ours = run_ftr(input, &["-ds", "a", "d"]);
-    let gnu = run_gnu_tr(input, &["-ds", "a", "d"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-ds", "a", "d"]));
 }
 
 #[test]
 fn test_translate_single_char() {
     let input = b"a.b.c";
     let ours = run_ftr(input, &[".", ","]);
-    let gnu = run_gnu_tr(input, &[".", ","]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &[".", ","]));
     assert_eq!(ours, b"a,b,c");
 }
 
@@ -401,24 +409,21 @@ fn test_empty_input() {
 fn test_binary_data() {
     let input: Vec<u8> = (0u8..=255).collect();
     let ours = run_ftr(&input, &["-d", "\\000"]);
-    let gnu = run_gnu_tr(&input, &["-d", "\\000"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(&input, &["-d", "\\000"]));
 }
 
 #[test]
 fn test_squeeze_with_translate() {
     let input = b"aabbbcc";
     let ours = run_ftr(input, &["-s", "a-c", "x-z"]);
-    let gnu = run_gnu_tr(input, &["-s", "a-c", "x-z"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-s", "a-c", "x-z"]));
 }
 
 #[test]
 fn test_complement_translate() {
     let input = b"hello123";
     let ours = run_ftr(input, &["-c", "a-z", "."]);
-    let gnu = run_gnu_tr(input, &["-c", "a-z", "."]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-c", "a-z", "."]));
 }
 
 // === Additional edge case tests ===
@@ -427,44 +432,37 @@ fn test_complement_translate() {
 fn test_delete_with_char_class() {
     let input = b"Hello World 123!";
     let ours = run_ftr(input, &["-d", "[:digit:]"]);
-    let gnu = run_gnu_tr(input, &["-d", "[:digit:]"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-d", "[:digit:]"]));
     assert_eq!(ours, b"Hello World !");
 }
 
 #[test]
 fn test_complement_delete_keep_alpha() {
-    // Keep only alphabetic chars
     let input = b"H3llo W0rld!";
     let ours = run_ftr(input, &["-cd", "[:alpha:]"]);
-    let gnu = run_gnu_tr(input, &["-cd", "[:alpha:]"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-cd", "[:alpha:]"]));
     assert_eq!(ours, b"HlloWrld");
 }
 
 #[test]
 fn test_squeeze_complement() {
-    // Squeeze runs of non-alphabetic chars
     let input = b"hello   123   world";
     let ours = run_ftr(input, &["-cs", "[:alpha:]", " "]);
-    let gnu = run_gnu_tr(input, &["-cs", "[:alpha:]", " "]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-cs", "[:alpha:]", " "]));
 }
 
 #[test]
 fn test_translate_digits_to_hash() {
     let input = b"phone: 555-1234";
     let ours = run_ftr(input, &["0-9", "[#*]"]);
-    let gnu = run_gnu_tr(input, &["0-9", "[#*]"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["0-9", "[#*]"]));
 }
 
 #[test]
 fn test_delete_newlines() {
     let input = b"line1\nline2\nline3\n";
     let ours = run_ftr(input, &["-d", "\\n"]);
-    let gnu = run_gnu_tr(input, &["-d", "\\n"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-d", "\\n"]));
     assert_eq!(ours, b"line1line2line3");
 }
 
@@ -472,8 +470,7 @@ fn test_delete_newlines() {
 fn test_squeeze_multiple_chars() {
     let input = b"aabbccaabbcc";
     let ours = run_ftr(input, &["-s", "abc"]);
-    let gnu = run_gnu_tr(input, &["-s", "abc"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-s", "abc"]));
     assert_eq!(ours, b"abcabc");
 }
 
@@ -481,8 +478,7 @@ fn test_squeeze_multiple_chars() {
 fn test_translate_spaces_to_newlines() {
     let input = b"hello world foo bar";
     let ours = run_ftr(input, &[" ", "\\n"]);
-    let gnu = run_gnu_tr(input, &[" ", "\\n"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &[" ", "\\n"]));
     assert_eq!(ours, b"hello\nworld\nfoo\nbar");
 }
 
@@ -490,18 +486,15 @@ fn test_translate_spaces_to_newlines() {
 fn test_delete_all_whitespace() {
     let input = b"hello \t world \n foo";
     let ours = run_ftr(input, &["-d", "[:space:]"]);
-    let gnu = run_gnu_tr(input, &["-d", "[:space:]"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-d", "[:space:]"]));
     assert_eq!(ours, b"helloworldfoo");
 }
 
 #[test]
 fn test_complement_delete_keep_digits_newline() {
-    // Keep only digits and newlines
     let input = b"abc123\ndef456\n";
     let ours = run_ftr(input, &["-cd", "0-9\\n"]);
-    let gnu = run_gnu_tr(input, &["-cd", "0-9\\n"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-cd", "0-9\\n"]));
     assert_eq!(ours, b"123\n456\n");
 }
 
@@ -509,14 +502,12 @@ fn test_complement_delete_keep_digits_newline() {
 fn test_translate_upper_class_to_lower_class() {
     let input = b"HELLO WORLD";
     let ours = run_ftr(input, &["[:upper:]", "[:lower:]"]);
-    let gnu = run_gnu_tr(input, &["[:upper:]", "[:lower:]"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["[:upper:]", "[:lower:]"]));
     assert_eq!(ours, b"hello world");
 }
 
 #[test]
 fn test_identity_translate() {
-    // Translating a-z to a-z should be identity
     let input = b"hello world";
     let ours = run_ftr(input, &["a-z", "a-z"]);
     assert_eq!(ours, b"hello world");
@@ -524,31 +515,24 @@ fn test_identity_translate() {
 
 #[test]
 fn test_delete_squeeze_combined() {
-    // Delete 'a', then squeeze 'b's
-    // GNU behavior: delete 'a' → "bbbbbb", squeeze 'b' → "b"
     let input = b"aabbbaaabbba";
     let ours = run_ftr(input, &["-ds", "a", "b"]);
-    let gnu = run_gnu_tr(input, &["-ds", "a", "b"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-ds", "a", "b"]));
     assert_eq!(ours, b"b");
 }
 
 #[test]
 fn test_null_byte_handling() {
-    // Translate null bytes to 'X'
     let input = &[0u8, b'a', 0u8, b'b', 0u8];
     let ours = run_ftr(input, &["\\000", "X"]);
-    let gnu = run_gnu_tr(input, &["\\000", "X"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["\\000", "X"]));
     assert_eq!(ours, b"XaXbX");
 }
 
 #[test]
 fn test_high_bytes() {
-    // Delete bytes above 127
     let input = &[b'a', 200u8, b'b', 255u8, b'c'];
     let ours = run_ftr(input, &["-d", "\\200-\\377"]);
-    let gnu = run_gnu_tr(input, &["-d", "\\200-\\377"]);
-    assert_eq!(ours, gnu);
+    assert_gnu_compat(&ours, run_gnu_tr(input, &["-d", "\\200-\\377"]));
     assert_eq!(ours, b"abc");
 }
