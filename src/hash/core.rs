@@ -4,6 +4,7 @@ use std::path::Path;
 
 use blake2::Blake2b512;
 use md5::Md5;
+use memmap2::MmapOptions;
 use sha2::{Digest, Sha256};
 
 /// Supported hash algorithms.
@@ -35,7 +36,7 @@ fn hash_digest<D: Digest>(data: &[u8]) -> String {
 
 fn hash_reader_impl<D: Digest>(mut reader: impl Read) -> io::Result<String> {
     let mut hasher = D::new();
-    let mut buf = vec![0u8; 1024 * 1024]; // 1MB buffer
+    let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer for better throughput
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
@@ -75,11 +76,16 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     // mmap fast path for regular files >= 64KB
     if is_regular && len >= MMAP_THRESHOLD {
         let file = File::open(path)?;
-        match unsafe { memmap2::Mmap::map(&file) } {
-            Ok(mmap) => return Ok(hash_bytes(algo, &mmap)),
+        match unsafe { MmapOptions::new().map(&file) } {
+            Ok(mmap) => {
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = mmap.advise(memmap2::Advice::Sequential);
+                }
+                return Ok(hash_bytes(algo, &mmap));
+            }
             Err(_) => {
-                // Fallback to buffered read if mmap fails
-                let reader = BufReader::with_capacity(1024 * 1024, file);
+                let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
                 return hash_reader(algo, reader);
             }
         }
@@ -93,13 +99,37 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
 
     // Fallback: buffered read (special files, empty files, etc.)
     let file = File::open(path)?;
-    let reader = BufReader::with_capacity(1024 * 1024, file);
+    let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
     hash_reader(algo, reader)
 }
 
 /// Hash stdin. Returns the hex digest.
 pub fn hash_stdin(algo: HashAlgorithm) -> io::Result<String> {
     hash_reader(algo, io::stdin().lock())
+}
+
+/// Issue readahead hints for a list of file paths to warm the page cache.
+/// This should be called before parallel hashing to reduce I/O stalls.
+#[cfg(target_os = "linux")]
+pub fn readahead_files(paths: &[&Path]) {
+    use std::os::unix::io::AsRawFd;
+    for path in paths {
+        if let Ok(file) = File::open(path) {
+            if let Ok(meta) = file.metadata() {
+                let len = meta.len();
+                if meta.file_type().is_file() && len > 0 {
+                    unsafe {
+                        libc::readahead(file.as_raw_fd(), 0, len as usize);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn readahead_files(_paths: &[&Path]) {
+    // No-op on non-Linux
 }
 
 // --- BLAKE2b variable-length functions ---
@@ -122,7 +152,7 @@ pub fn blake2b_hash_reader<R: Read>(mut reader: R, output_bytes: usize) -> io::R
     use blake2::Blake2bVar;
 
     let mut hasher = Blake2bVar::new(output_bytes).expect("Invalid BLAKE2b output size");
-    let mut buf = vec![0u8; 1024 * 1024];
+    let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
@@ -141,10 +171,16 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
 
     if is_regular && len >= MMAP_THRESHOLD {
         let file = File::open(path)?;
-        match unsafe { memmap2::Mmap::map(&file) } {
-            Ok(mmap) => return Ok(blake2b_hash_data(&mmap, output_bytes)),
+        match unsafe { MmapOptions::new().map(&file) } {
+            Ok(mmap) => {
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = mmap.advise(memmap2::Advice::Sequential);
+                }
+                return Ok(blake2b_hash_data(&mmap, output_bytes));
+            }
             Err(_) => {
-                let reader = BufReader::with_capacity(1024 * 1024, file);
+                let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
                 return blake2b_hash_reader(reader, output_bytes);
             }
         }
@@ -156,7 +192,7 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
     }
 
     let file = File::open(path)?;
-    let reader = BufReader::with_capacity(1024 * 1024, file);
+    let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
     blake2b_hash_reader(reader, output_bytes)
 }
 

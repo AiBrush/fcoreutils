@@ -181,6 +181,10 @@ fn run_hash_mode(
             }
         }
     } else {
+        // Pre-warm page cache for all files before parallel hashing
+        let paths: Vec<_> = files.iter().map(|f| Path::new(f.as_str())).collect();
+        hash::readahead_files(&paths.iter().map(|p| *p).collect::<Vec<_>>());
+
         // Parallel hashing for multiple files
         let results: Vec<(&str, Result<String, io::Error>)> = files
             .par_iter()
