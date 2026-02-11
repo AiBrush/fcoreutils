@@ -79,11 +79,11 @@ fn main() {
 
     // Flush on non-unix (raw fd doesn't need flushing)
     #[cfg(not(unix))]
-    if let Err(e) = out.flush() {
-        if e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("fbase64: {}", e);
-            process::exit(1);
-        }
+    if let Err(e) = out.flush()
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("fbase64: {}", e);
+        process::exit(1);
     }
 
     if let Err(e) = result {
