@@ -191,10 +191,10 @@ fn main() {
     // Flush buffered output
     let _ = writer.flush();
 
-    if let Err(e) = result {
-        if e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("ftr: {}", e);
-            process::exit(1);
-        }
+    if let Err(e) = result
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("ftr: {}", e);
+        process::exit(1);
     }
 }

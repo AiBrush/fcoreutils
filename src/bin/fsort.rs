@@ -145,7 +145,6 @@ fn main() {
         random: cli.random_sort,
         version: cli.version_sort,
         reverse: cli.reverse,
-        ..KeyOpts::default()
     };
 
     // Determine check mode
