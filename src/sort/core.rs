@@ -524,7 +524,10 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
     if config.merge {
         let stdout = io::stdout();
         let mut writer = if let Some(ref path) = config.output_file {
-            SortOutput::File(BufWriter::with_capacity(OUTPUT_BUF_SIZE, File::create(path)?))
+            SortOutput::File(BufWriter::with_capacity(
+                OUTPUT_BUF_SIZE,
+                File::create(path)?,
+            ))
         } else {
             SortOutput::Stdout(BufWriter::with_capacity(OUTPUT_BUF_SIZE, stdout.lock()))
         };
@@ -538,7 +541,10 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
 
     let stdout = io::stdout();
     let mut writer = if let Some(ref path) = config.output_file {
-        SortOutput::File(BufWriter::with_capacity(OUTPUT_BUF_SIZE, File::create(path)?))
+        SortOutput::File(BufWriter::with_capacity(
+            OUTPUT_BUF_SIZE,
+            File::create(path)?,
+        ))
     } else {
         SortOutput::Stdout(BufWriter::with_capacity(OUTPUT_BUF_SIZE, stdout.lock()))
     };
