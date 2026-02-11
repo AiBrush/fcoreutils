@@ -303,9 +303,13 @@ fn run_gnu_tr(input: &[u8], args: &[&str]) -> Option<Vec<u8>> {
 }
 
 /// Assert our output matches GNU tr if available.
+/// Only compare on Linux where GNU coreutils tr is guaranteed.
+/// macOS uses BSD tr which differs for binary/high-byte handling.
 fn assert_gnu_compat(ours: &[u8], gnu: Option<Vec<u8>>) {
-    if let Some(gnu) = gnu {
-        assert_eq!(ours, gnu.as_slice());
+    if cfg!(target_os = "linux") {
+        if let Some(gnu) = gnu {
+            assert_eq!(ours, gnu.as_slice());
+        }
     }
 }
 
