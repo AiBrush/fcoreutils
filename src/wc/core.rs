@@ -94,15 +94,17 @@ const PRINTABLE_TABLE: [u8; 256] = make_printable_table();
 /// Only covers multi-byte Unicode spaces; ASCII spaces are handled by the byte table.
 #[inline]
 fn is_unicode_space(cp: u32) -> bool {
-    matches!(cp,
+    matches!(
+        cp,
         0x00A0 |           // No-Break Space
         0x1680 |           // Ogham Space Mark
-        0x2000..=0x200A |  // En Quad through Hair Space
+        0x2000
+            ..=0x200A |  // En Quad through Hair Space
         0x2028 |           // Line Separator
         0x2029 |           // Paragraph Separator
         0x202F |           // Narrow No-Break Space
         0x205F |           // Medium Mathematical Space
-        0x3000             // Ideographic Space
+        0x3000 // Ideographic Space
     )
 }
 
@@ -479,7 +481,8 @@ fn decode_utf8(bytes: &[u8]) -> (u32, usize) {
 /// Check if a Unicode codepoint is an East Asian Wide/Fullwidth character (display width 2).
 #[inline]
 fn is_wide_char(cp: u32) -> bool {
-    matches!(cp,
+    matches!(
+        cp,
         0x1100..=0x115F   // Hangul Jamo
         | 0x231A..=0x231B // Watch, Hourglass
         | 0x2329..=0x232A // Angle Brackets
