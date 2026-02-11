@@ -1,8 +1,11 @@
 use std::io::{self, IoSlice, Write};
 
-/// Maximum number of iovecs per writev() call.
-/// Linux IOV_MAX is 1024, but we use a larger batch for BufWriter fallback.
+/// Maximum number of iovecs per writev() call (Linux IOV_MAX is 1024).
 const IOV_BATCH: usize = 1024;
+
+/// Maximum records for vectored I/O. Beyond this, use BufWriter to avoid
+/// excessive memory for IoSlice entries (16 bytes each).
+const VECTORED_MAX_RECORDS: usize = 256 * 1024;
 
 /// Write all IoSlices to the writer, handling partial writes.
 /// Batches into IOV_BATCH-sized groups for writev() efficiency.
@@ -53,26 +56,29 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
         return Ok(());
     }
 
+    // For files with many records, use BufWriter to avoid excessive IoSlice memory.
+    // For smaller record counts, use vectored I/O for zero-copy writes.
+    if positions.len() > VECTORED_MAX_RECORDS {
+        return tac_bytes_bufwriter(data, separator, before, &positions, out);
+    }
+
     // Build IoSlice list pointing directly into mmap'd data — zero copies
     let sep_byte = [separator];
 
     if !before {
         let has_trailing_sep = *positions.last().unwrap() == data.len() - 1;
-        // Estimate capacity: number of records + possible trailing + separators
         let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(positions.len() + 4);
 
-        // Trailing content without separator — GNU tac appends the separator
         if !has_trailing_sep {
             let last_sep = *positions.last().unwrap();
             slices.push(IoSlice::new(&data[last_sep + 1..]));
             slices.push(IoSlice::new(&sep_byte));
         }
 
-        // Records in reverse order — each slice points directly into mmap'd data
         let mut i = positions.len();
         while i > 0 {
             i -= 1;
-            let end = positions[i] + 1; // include separator
+            let end = positions[i] + 1;
             let start = if i == 0 { 0 } else { positions[i - 1] + 1 };
             slices.push(IoSlice::new(&data[start..end]));
         }
@@ -93,7 +99,6 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
             slices.push(IoSlice::new(&data[start..end]));
         }
 
-        // Leading content before first separator
         if positions[0] > 0 {
             slices.push(IoSlice::new(&data[..positions[0]]));
         }
@@ -101,6 +106,50 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
         write_all_slices(out, &slices)?;
     }
 
+    Ok(())
+}
+
+/// BufWriter fallback for tac_bytes when there are too many records for vectored I/O.
+fn tac_bytes_bufwriter(
+    data: &[u8],
+    separator: u8,
+    before: bool,
+    positions: &[usize],
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let mut buf = io::BufWriter::with_capacity(4 * 1024 * 1024, out);
+
+    if !before {
+        let has_trailing_sep = *positions.last().unwrap() == data.len() - 1;
+        if !has_trailing_sep {
+            let last_sep = *positions.last().unwrap();
+            buf.write_all(&data[last_sep + 1..])?;
+            buf.write_all(&[separator])?;
+        }
+        let mut i = positions.len();
+        while i > 0 {
+            i -= 1;
+            let end = positions[i] + 1;
+            let start = if i == 0 { 0 } else { positions[i - 1] + 1 };
+            buf.write_all(&data[start..end])?;
+        }
+    } else {
+        let mut i = positions.len();
+        while i > 0 {
+            i -= 1;
+            let start = positions[i];
+            let end = if i + 1 < positions.len() {
+                positions[i + 1]
+            } else {
+                data.len()
+            };
+            buf.write_all(&data[start..end])?;
+        }
+        if positions[0] > 0 {
+            buf.write_all(&data[..positions[0]])?;
+        }
+    }
+    buf.flush()?;
     Ok(())
 }
 
