@@ -152,16 +152,6 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v7
-        with:
-          path: dist
-          pattern: release-*
-          merge-multiple: true
-
-      - name: List artifacts
-        run: ls -la dist/
-
       - name: Create and push tag
         run: |
           git tag "${{ needs.calculate-version.outputs.tag }}"
@@ -171,9 +161,20 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Publish to crates.io
+        continue-on-error: true
         run: |
           sed -i 's/^version = ".*"/version = "${{ needs.calculate-version.outputs.version }}"/' Cargo.toml
           cargo publish --allow-dirty --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v3

@@ -1,5 +1,7 @@
+use std::hint::black_box;
+
 use coreutils_rs::wc;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn generate_text(lines: usize, words_per_line: usize) -> Vec<u8> {
     let mut data = Vec::new();

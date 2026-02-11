@@ -283,7 +283,7 @@ fn test_process_multiline_bytes() {
 fn test_cut_fields_returns_false_when_suppressed() {
     let ranges = parse_ranges("1").unwrap();
     let mut out = Vec::new();
-    let result = cut_fields(b"no_delim", b':', &ranges, false, &[b':'], true, &mut out).unwrap();
+    let result = cut_fields(b"no_delim", b':', &ranges, false, b":", true, &mut out).unwrap();
     assert!(!result);
     assert!(out.is_empty());
 }
@@ -292,7 +292,7 @@ fn test_cut_fields_returns_false_when_suppressed() {
 fn test_cut_fields_returns_true_when_not_suppressed() {
     let ranges = parse_ranges("1").unwrap();
     let mut out = Vec::new();
-    let result = cut_fields(b"a:b", b':', &ranges, false, &[b':'], false, &mut out).unwrap();
+    let result = cut_fields(b"a:b", b':', &ranges, false, b":", false, &mut out).unwrap();
     assert!(result);
     assert_eq!(&out, b"a");
 }
