@@ -314,12 +314,7 @@ fn translate_inplace(data: &mut [u8], table: &[u8; 256]) {
 
 /// Translate a chunk using the best available method.
 #[inline]
-fn translate_chunk_dispatch(
-    chunk: &[u8],
-    out: &mut [u8],
-    table: &[u8; 256],
-    kind: &TranslateKind,
-) {
+fn translate_chunk_dispatch(chunk: &[u8], out: &mut [u8], table: &[u8; 256], kind: &TranslateKind) {
     match kind {
         TranslateKind::Identity => {
             out[..chunk.len()].copy_from_slice(chunk);

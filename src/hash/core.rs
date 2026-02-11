@@ -77,7 +77,7 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         let file = File::open(path)?;
         match unsafe {
             MmapOptions::new()
-                .populate()  // Eagerly populate page tables — avoids page faults
+                .populate() // Eagerly populate page tables — avoids page faults
                 .map(&file)
         } {
             Ok(mmap) => {
@@ -130,11 +130,7 @@ pub fn hash_stdin(algo: HashAlgorithm) -> io::Result<String> {
         {
             use std::os::unix::io::FromRawFd;
             let file = unsafe { File::from_raw_fd(fd) };
-            let result = unsafe {
-                MmapOptions::new()
-                    .populate()
-                    .map(&file)
-            };
+            let result = unsafe { MmapOptions::new().populate().map(&file) };
             std::mem::forget(file); // Don't close stdin
             if let Ok(mmap) = result {
                 #[cfg(target_os = "linux")]
@@ -211,11 +207,7 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
     // mmap fast path for all regular files with data
     if is_regular && len > 0 {
         let file = File::open(path)?;
-        match unsafe {
-            MmapOptions::new()
-                .populate()
-                .map(&file)
-        } {
+        match unsafe { MmapOptions::new().populate().map(&file) } {
             Ok(mmap) => {
                 #[cfg(target_os = "linux")]
                 {
