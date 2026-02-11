@@ -38,6 +38,9 @@ fn main() {
 
     let set1_str = &cli.sets[0];
 
+    let mut stdin = std::io::stdin().lock();
+    let mut stdout = std::io::stdout().lock();
+
     let result = if cli.delete && cli.squeeze {
         // -d -s: delete SET1 chars, then squeeze SET2 chars — need two sets
         if cli.sets.len() < 2 {
@@ -53,7 +56,7 @@ fn main() {
         } else {
             set1
         };
-        tr::delete_squeeze(&delete_set, &set2)
+        tr::delete_squeeze(&delete_set, &set2, &mut stdin, &mut stdout)
     } else if cli.delete {
         // -d only: delete SET1 chars
         if cli.sets.len() > 1 {
@@ -67,7 +70,7 @@ fn main() {
         } else {
             set1
         };
-        tr::delete(&delete_set)
+        tr::delete(&delete_set, &mut stdin, &mut stdout)
     } else if cli.squeeze && cli.sets.len() < 2 {
         // -s only with one set: squeeze SET1 chars
         let set1 = tr::parse_set(set1_str);
@@ -76,7 +79,7 @@ fn main() {
         } else {
             set1
         };
-        tr::squeeze(&squeeze_set)
+        tr::squeeze(&squeeze_set, &mut stdin, &mut stdout)
     } else if cli.squeeze {
         // -s with two sets: translate SET1->SET2, then squeeze SET2 chars
         let set2_str = &cli.sets[1];
@@ -91,7 +94,7 @@ fn main() {
         } else {
             tr::expand_set2(set2_str, set1.len())
         };
-        tr::translate_squeeze(&set1, &set2)
+        tr::translate_squeeze(&set1, &set2, &mut stdin, &mut stdout)
     } else {
         // Default: translate SET1 -> SET2
         if cli.sets.len() < 2 {
@@ -111,7 +114,7 @@ fn main() {
         } else {
             tr::expand_set2(set2_str, set1.len())
         };
-        tr::translate(&set1, &set2)
+        tr::translate(&set1, &set2, &mut stdin, &mut stdout)
     };
 
     if let Err(e) = result {
