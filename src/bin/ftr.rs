@@ -53,7 +53,8 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
 
     // mmap the stdin file descriptor
     // SAFETY: fd is valid, file is regular, size > 0
-    let file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
+    use std::os::unix::io::FromRawFd;
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
     let mmap: Option<memmap2::Mmap> = unsafe { memmap2::Mmap::map(&file) }.ok();
     std::mem::forget(file); // Don't close stdin
     #[cfg(target_os = "linux")]
