@@ -169,6 +169,220 @@ mod simd_tr {
         }
     }
 
+    /// General 256-byte table lookup using 16-way vpshufb (nibble decomposition).
+    /// Splits each input byte into high nibble (selects one of 16 shuffle tables)
+    /// and low nibble (index within the shuffle table). Processes 64 bytes per
+    /// iteration (2x unrolled) for instruction-level parallelism.
+    ///
+    /// SAFETY: Caller must ensure AVX2 is available and out.len() >= data.len().
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn general_lookup(data: &[u8], out: &mut [u8], table: &[u8; 256]) {
+        unsafe {
+            use std::arch::x86_64::*;
+
+            // Build 16 vpshufb LUTs from the 256-byte translation table.
+            // LUT[h] covers table[h*16..h*16+16], broadcast to both 128-bit lanes.
+            let tp = table.as_ptr();
+            let mut luts = [_mm256_setzero_si256(); 16];
+            let mut h = 0;
+            while h < 16 {
+                luts[h] =
+                    _mm256_broadcastsi128_si256(_mm_loadu_si128(tp.add(h * 16) as *const __m128i));
+                h += 1;
+            }
+
+            let lo_mask = _mm256_set1_epi8(0x0F);
+            let len = data.len();
+            let inp = data.as_ptr();
+            let outp = out.as_mut_ptr();
+            let mut i = 0;
+
+            // 2x unrolled: process 64 bytes per iteration
+            while i + 64 <= len {
+                let v0 = _mm256_loadu_si256(inp.add(i) as *const __m256i);
+                let v1 = _mm256_loadu_si256(inp.add(i + 32) as *const __m256i);
+
+                let lo0 = _mm256_and_si256(v0, lo_mask);
+                let lo1 = _mm256_and_si256(v1, lo_mask);
+                let hi0 = _mm256_and_si256(_mm256_srli_epi16(v0, 4), lo_mask);
+                let hi1 = _mm256_and_si256(_mm256_srli_epi16(v1, 4), lo_mask);
+
+                let mut r0 = _mm256_setzero_si256();
+                let mut r1 = _mm256_setzero_si256();
+
+                // Process all 16 high-nibble values.
+                // For each h, bytes where high_nibble == h get their result from luts[h].
+                macro_rules! do_nib {
+                    ($h:literal) => {
+                        let hv = _mm256_set1_epi8($h);
+                        let lut = luts[$h as usize];
+                        let m0 = _mm256_cmpeq_epi8(hi0, hv);
+                        let m1 = _mm256_cmpeq_epi8(hi1, hv);
+                        r0 = _mm256_or_si256(
+                            r0,
+                            _mm256_and_si256(_mm256_shuffle_epi8(lut, lo0), m0),
+                        );
+                        r1 = _mm256_or_si256(
+                            r1,
+                            _mm256_and_si256(_mm256_shuffle_epi8(lut, lo1), m1),
+                        );
+                    };
+                }
+
+                do_nib!(0);
+                do_nib!(1);
+                do_nib!(2);
+                do_nib!(3);
+                do_nib!(4);
+                do_nib!(5);
+                do_nib!(6);
+                do_nib!(7);
+                do_nib!(8);
+                do_nib!(9);
+                do_nib!(10);
+                do_nib!(11);
+                do_nib!(12);
+                do_nib!(13);
+                do_nib!(14);
+                do_nib!(15);
+
+                _mm256_storeu_si256(outp.add(i) as *mut __m256i, r0);
+                _mm256_storeu_si256(outp.add(i + 32) as *mut __m256i, r1);
+                i += 64;
+            }
+
+            // Single vector tail
+            while i + 32 <= len {
+                let v = _mm256_loadu_si256(inp.add(i) as *const __m256i);
+                let lo = _mm256_and_si256(v, lo_mask);
+                let hi = _mm256_and_si256(_mm256_srli_epi16(v, 4), lo_mask);
+
+                let mut result = _mm256_setzero_si256();
+                let mut hh = 0u8;
+                while hh < 16 {
+                    let hv = _mm256_set1_epi8(hh as i8);
+                    let m = _mm256_cmpeq_epi8(hi, hv);
+                    result = _mm256_or_si256(
+                        result,
+                        _mm256_and_si256(_mm256_shuffle_epi8(luts[hh as usize], lo), m),
+                    );
+                    hh += 1;
+                }
+
+                _mm256_storeu_si256(outp.add(i) as *mut __m256i, result);
+                i += 32;
+            }
+
+            // Scalar tail
+            while i < len {
+                *outp.add(i) = *table.get_unchecked(*inp.add(i) as usize);
+                i += 1;
+            }
+        }
+    }
+
+    /// In-place general 256-byte table lookup using 16-way vpshufb.
+    ///
+    /// SAFETY: Caller must ensure AVX2 is available.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn general_lookup_inplace(data: &mut [u8], table: &[u8; 256]) {
+        unsafe {
+            use std::arch::x86_64::*;
+
+            let tp = table.as_ptr();
+            let mut luts = [_mm256_setzero_si256(); 16];
+            let mut h = 0;
+            while h < 16 {
+                luts[h] =
+                    _mm256_broadcastsi128_si256(_mm_loadu_si128(tp.add(h * 16) as *const __m128i));
+                h += 1;
+            }
+
+            let lo_mask = _mm256_set1_epi8(0x0F);
+            let len = data.len();
+            let ptr = data.as_mut_ptr();
+            let mut i = 0;
+
+            while i + 64 <= len {
+                let v0 = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
+                let v1 = _mm256_loadu_si256(ptr.add(i + 32) as *const __m256i);
+
+                let lo0 = _mm256_and_si256(v0, lo_mask);
+                let lo1 = _mm256_and_si256(v1, lo_mask);
+                let hi0 = _mm256_and_si256(_mm256_srli_epi16(v0, 4), lo_mask);
+                let hi1 = _mm256_and_si256(_mm256_srli_epi16(v1, 4), lo_mask);
+
+                let mut r0 = _mm256_setzero_si256();
+                let mut r1 = _mm256_setzero_si256();
+
+                macro_rules! do_nib {
+                    ($h:literal) => {
+                        let hv = _mm256_set1_epi8($h);
+                        let lut = luts[$h as usize];
+                        let m0 = _mm256_cmpeq_epi8(hi0, hv);
+                        let m1 = _mm256_cmpeq_epi8(hi1, hv);
+                        r0 = _mm256_or_si256(
+                            r0,
+                            _mm256_and_si256(_mm256_shuffle_epi8(lut, lo0), m0),
+                        );
+                        r1 = _mm256_or_si256(
+                            r1,
+                            _mm256_and_si256(_mm256_shuffle_epi8(lut, lo1), m1),
+                        );
+                    };
+                }
+
+                do_nib!(0);
+                do_nib!(1);
+                do_nib!(2);
+                do_nib!(3);
+                do_nib!(4);
+                do_nib!(5);
+                do_nib!(6);
+                do_nib!(7);
+                do_nib!(8);
+                do_nib!(9);
+                do_nib!(10);
+                do_nib!(11);
+                do_nib!(12);
+                do_nib!(13);
+                do_nib!(14);
+                do_nib!(15);
+
+                _mm256_storeu_si256(ptr.add(i) as *mut __m256i, r0);
+                _mm256_storeu_si256(ptr.add(i + 32) as *mut __m256i, r1);
+                i += 64;
+            }
+
+            while i + 32 <= len {
+                let v = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
+                let lo = _mm256_and_si256(v, lo_mask);
+                let hi = _mm256_and_si256(_mm256_srli_epi16(v, 4), lo_mask);
+
+                let mut result = _mm256_setzero_si256();
+                let mut hh = 0u8;
+                while hh < 16 {
+                    let hv = _mm256_set1_epi8(hh as i8);
+                    let m = _mm256_cmpeq_epi8(hi, hv);
+                    result = _mm256_or_si256(
+                        result,
+                        _mm256_and_si256(_mm256_shuffle_epi8(luts[hh as usize], lo), m),
+                    );
+                    hh += 1;
+                }
+
+                _mm256_storeu_si256(ptr.add(i) as *mut __m256i, result);
+                i += 32;
+            }
+
+            while i < len {
+                let b = *ptr.add(i);
+                *ptr.add(i) = *table.get_unchecked(b as usize);
+                i += 1;
+            }
+        }
+    }
+
     /// In-place SIMD translate for stdin path.
     ///
     /// SAFETY: Caller must ensure AVX2 is available.
@@ -332,6 +546,15 @@ fn translate_chunk_dispatch(
         TranslateKind::RangeDelta { .. } => {
             translate_chunk(chunk, out, table);
         }
+        #[cfg(target_arch = "x86_64")]
+        TranslateKind::General => {
+            if _use_simd {
+                unsafe { simd_tr::general_lookup(chunk, out, table) };
+                return;
+            }
+            translate_chunk(chunk, out, table);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         TranslateKind::General => {
             translate_chunk(chunk, out, table);
         }
@@ -361,6 +584,15 @@ fn translate_inplace_dispatch(
         TranslateKind::RangeDelta { .. } => {
             translate_inplace(data, table);
         }
+        #[cfg(target_arch = "x86_64")]
+        TranslateKind::General => {
+            if _use_simd {
+                unsafe { simd_tr::general_lookup_inplace(data, table) };
+                return;
+            }
+            translate_inplace(data, table);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         TranslateKind::General => {
             translate_inplace(data, table);
         }
