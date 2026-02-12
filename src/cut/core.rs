@@ -186,6 +186,24 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
         return process_single_field(data, delim, line_delim, ranges[0].start, suppress, out);
     }
 
+    // Fast path: complement of single field with default output delimiter.
+    // e.g., cut --complement -f1: skip first field, output rest unchanged.
+    if complement
+        && ranges.len() == 1
+        && ranges[0].start == ranges[0].end
+        && output_delim.len() == 1
+        && output_delim[0] == delim
+    {
+        return process_complement_single_field(
+            data,
+            delim,
+            line_delim,
+            ranges[0].start,
+            suppress,
+            out,
+        );
+    }
+
     // Pre-compute for general field extraction
     let max_field = if complement {
         usize::MAX
@@ -360,6 +378,127 @@ fn process_single_field(
         }
     }
     Ok(())
+}
+
+/// Complement single-field extraction: skip one field, output rest unchanged.
+/// For `--complement -f1`: find first delimiter, output everything after.
+/// For `--complement -fN`: output fields 1..N-1, skip N, output N+1...
+/// Uses combined SIMD scan for first-field complement (most common case).
+fn process_complement_single_field(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    skip_field: usize,
+    suppress: bool,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let skip_idx = skip_field - 1;
+
+    if data.len() >= PARALLEL_THRESHOLD {
+        let chunks = split_into_chunks(data, line_delim);
+        let results: Vec<Vec<u8>> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut buf = Vec::with_capacity(chunk.len());
+                complement_single_field_chunk(
+                    chunk, delim, skip_idx, line_delim, suppress, &mut buf,
+                );
+                buf
+            })
+            .collect();
+        for result in &results {
+            if !result.is_empty() {
+                out.write_all(result)?;
+            }
+        }
+    } else {
+        let mut buf = Vec::with_capacity(data.len());
+        complement_single_field_chunk(data, delim, skip_idx, line_delim, suppress, &mut buf);
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for complement single-field extraction.
+fn complement_single_field_chunk(
+    data: &[u8],
+    delim: u8,
+    skip_idx: usize,
+    line_delim: u8,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    let mut start = 0;
+    for end_pos in memchr_iter(line_delim, data) {
+        let line = &data[start..end_pos];
+        complement_single_field_line(line, delim, skip_idx, line_delim, suppress, buf);
+        start = end_pos + 1;
+    }
+    if start < data.len() {
+        complement_single_field_line(&data[start..], delim, skip_idx, line_delim, suppress, buf);
+    }
+}
+
+/// Extract all fields except skip_idx from one line.
+#[inline(always)]
+fn complement_single_field_line(
+    line: &[u8],
+    delim: u8,
+    skip_idx: usize,
+    line_delim: u8,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    if line.is_empty() {
+        if !suppress {
+            buf.push(line_delim);
+        }
+        return;
+    }
+
+    // Find all delimiter positions
+    let mut field_idx = 0;
+    let mut field_start = 0;
+    let mut first_output = true;
+    let mut has_delim = false;
+
+    for pos in memchr_iter(delim, line) {
+        has_delim = true;
+        if field_idx != skip_idx {
+            if !first_output {
+                buf.push(delim);
+            }
+            buf.extend_from_slice(&line[field_start..pos]);
+            first_output = false;
+        }
+        field_idx += 1;
+        field_start = pos + 1;
+    }
+
+    if !has_delim {
+        if !suppress {
+            buf.extend_from_slice(line);
+            buf.push(line_delim);
+        }
+        return;
+    }
+
+    // Last field
+    if field_idx != skip_idx {
+        if !first_output {
+            buf.push(delim);
+        }
+        buf.extend_from_slice(&line[field_start..]);
+    }
+
+    if !first_output || field_idx != skip_idx {
+        buf.push(line_delim);
+    } else {
+        // Only the skipped field existed — output empty line
+        buf.push(line_delim);
+    }
 }
 
 /// First-field extraction using combined delimiter+newline SIMD scan.

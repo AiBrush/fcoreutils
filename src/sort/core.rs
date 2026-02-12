@@ -468,26 +468,29 @@ fn line_prefix(data: &[u8], start: usize, end: usize) -> u64 {
 
 /// Pre-extract key byte offsets into the data buffer for all lines.
 /// Avoids repeated key extraction during sort comparisons.
+/// Parallelized with rayon for large inputs (>10K lines).
 fn pre_extract_key_offsets(
     data: &[u8],
     offsets: &[(usize, usize)],
     key: &KeyDef,
     separator: Option<u8>,
 ) -> Vec<(usize, usize)> {
-    offsets
-        .iter()
-        .map(|&(s, e)| {
-            let line = &data[s..e];
-            let extracted = extract_key(line, key, separator);
-            if extracted.is_empty() {
-                (0, 0)
-            } else {
-                let offset_in_data =
-                    unsafe { extracted.as_ptr().offset_from(data.as_ptr()) as usize };
-                (offset_in_data, offset_in_data + extracted.len())
-            }
-        })
-        .collect()
+    let extract = |&(s, e): &(usize, usize)| {
+        let line = &data[s..e];
+        let extracted = extract_key(line, key, separator);
+        if extracted.is_empty() {
+            (0, 0)
+        } else {
+            let offset_in_data = unsafe { extracted.as_ptr().offset_from(data.as_ptr()) as usize };
+            (offset_in_data, offset_in_data + extracted.len())
+        }
+    };
+
+    if offsets.len() > 10_000 {
+        offsets.par_iter().map(extract).collect()
+    } else {
+        offsets.iter().map(extract).collect()
+    }
 }
 
 /// Select the right numeric parser for pre-parsing.
@@ -589,6 +592,7 @@ fn radix_sort_entries(entries: &mut Vec<(u64, usize)>, reverse: bool) {
 /// Break ties in radix-sorted entries by running comparison sort on equal-key groups.
 /// After radix sort, entries with equal u64 keys are adjacent (and in input order, stable).
 /// For non-stable sort, GNU requires last-resort whole-line comparison for deterministic output.
+/// Uses par_sort_unstable_by for large tied groups (>5000) to parallelize tie-breaking.
 fn break_ties_line_cmp(entries: &mut [(u64, usize)], data: &[u8], offsets: &[(usize, usize)]) {
     if entries.len() <= 1 {
         return;
@@ -600,7 +604,13 @@ fn break_ties_line_cmp(entries: &mut [(u64, usize)], data: &[u8], offsets: &[(us
         while j < entries.len() && entries[j].0 == key {
             j += 1;
         }
-        if j - i > 1 {
+        if j - i > 5000 {
+            entries[i..j].par_sort_unstable_by(|a, b| {
+                let (sa, ea) = offsets[a.1];
+                let (sb, eb) = offsets[b.1];
+                data[sa..ea].cmp(&data[sb..eb])
+            });
+        } else if j - i > 1 {
             entries[i..j].sort_unstable_by(|a, b| {
                 let (sa, ea) = offsets[a.1];
                 let (sb, eb) = offsets[b.1];
@@ -977,16 +987,30 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
     } else if is_numeric_only {
         // FAST PATH 2: Pre-parsed numeric sort with u64 comparison
         // float_to_sortable_u64 enables branchless u64::cmp instead of f64::partial_cmp
-        let mut entries: Vec<(u64, usize)> = offsets
-            .iter()
-            .enumerate()
-            .map(|(i, &(s, e))| {
-                (
-                    float_to_sortable_u64(parse_value_for_opts(&data[s..e], gopts)),
-                    i,
-                )
-            })
-            .collect();
+        // Parallelize numeric parsing for large inputs (parsing is CPU-bound)
+        let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+            offsets
+                .par_iter()
+                .enumerate()
+                .map(|(i, &(s, e))| {
+                    (
+                        float_to_sortable_u64(parse_value_for_opts(&data[s..e], gopts)),
+                        i,
+                    )
+                })
+                .collect()
+        } else {
+            offsets
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, e))| {
+                    (
+                        float_to_sortable_u64(parse_value_for_opts(&data[s..e], gopts)),
+                        i,
+                    )
+                })
+                .collect()
+        };
         let reverse = gopts.reverse;
         let stable = config.stable;
 
@@ -1033,18 +1057,29 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
 
         if is_key_numeric {
             // Single key, numeric: u64-based branchless comparison
-            let mut entries: Vec<(u64, usize)> = key_offs
-                .iter()
-                .enumerate()
-                .map(|(i, &(s, e))| {
-                    let f = if s == e {
-                        if opts.general_numeric { f64::NAN } else { 0.0 }
-                    } else {
-                        parse_value_for_opts(&data[s..e], opts)
-                    };
-                    (float_to_sortable_u64(f), i)
-                })
-                .collect();
+            // Parallelize numeric parsing for large inputs
+            let is_gen = opts.general_numeric;
+            let parse_entry = |i: usize, &(s, e): &(usize, usize)| {
+                let f = if s == e {
+                    if is_gen { f64::NAN } else { 0.0 }
+                } else {
+                    parse_value_for_opts(&data[s..e], opts)
+                };
+                (float_to_sortable_u64(f), i)
+            };
+            let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+                key_offs
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, ko)| parse_entry(i, ko))
+                    .collect()
+            } else {
+                key_offs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ko)| parse_entry(i, ko))
+                    .collect()
+            };
             let reverse = opts.reverse;
             let stable = config.stable;
 
