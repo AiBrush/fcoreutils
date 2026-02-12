@@ -13,7 +13,7 @@ use coreutils_rs::common::io::read_file;
 
 #[derive(Parser)]
 #[command(
-    name = "fbase64",
+    name = "base64",
     about = "Base64 encode or decode FILE, or standard input, to standard output.",
     after_help = "With no FILE, or when FILE is -, read standard input.\n\n\
         The data are encoded as described for the base64 alphabet in RFC 4648.\n\
@@ -82,7 +82,7 @@ fn main() {
     if let Err(e) = out.flush()
         && e.kind() != io::ErrorKind::BrokenPipe
     {
-        eprintln!("fbase64: {}", e);
+        eprintln!("base64: {}", e);
         process::exit(1);
     }
 
@@ -91,7 +91,7 @@ fn main() {
         if e.kind() == io::ErrorKind::BrokenPipe {
             process::exit(0);
         }
-        eprintln!("fbase64: {}", e);
+        eprintln!("base64: {}", e);
         process::exit(1);
     }
 }

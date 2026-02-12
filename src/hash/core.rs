@@ -1,6 +1,10 @@
+use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
+
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use md5::Md5;
 use memmap2::MmapOptions;
@@ -66,53 +70,139 @@ pub fn hash_reader<R: Read>(algo: HashAlgorithm, reader: R) -> io::Result<String
     }
 }
 
-/// Hash a file by path using mmap for regular files. Returns the hex digest.
+/// Threshold below which read() is faster than mmap() due to mmap setup overhead.
+/// For small files, the page table setup + madvise syscalls cost more than a simple read.
+const MMAP_THRESHOLD: u64 = 256 * 1024; // 256KB
+
+// Thread-local reusable buffer for small file reads.
+// Avoids per-file heap allocation when processing many small files sequentially or in parallel.
+// Each rayon worker thread gets its own buffer automatically.
+thread_local! {
+    static READ_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(MMAP_THRESHOLD as usize));
+}
+
+/// Track whether O_NOATIME is supported to avoid repeated failed open() attempts.
+/// After the first EPERM, we never try O_NOATIME again (saves one syscall per file).
+#[cfg(target_os = "linux")]
+static NOATIME_SUPPORTED: AtomicBool = AtomicBool::new(true);
+
+/// Open a file with O_NOATIME on Linux to avoid atime update overhead.
+/// Caches whether O_NOATIME works to avoid double-open on every file.
+#[cfg(target_os = "linux")]
+fn open_noatime(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if NOATIME_SUPPORTED.load(Ordering::Relaxed) {
+        match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOATIME)
+            .open(path)
+        {
+            Ok(f) => return Ok(f),
+            Err(ref e) if e.raw_os_error() == Some(libc::EPERM) => {
+                // O_NOATIME requires file ownership or CAP_FOWNER — disable globally
+                NOATIME_SUPPORTED.store(false, Ordering::Relaxed);
+            }
+            Err(e) => return Err(e), // Real error, propagate
+        }
+    }
+    File::open(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_noatime(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+/// Hash a file by path. Single open + fstat to minimize syscalls.
+/// Uses read() for small files, mmap for large files.
 pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
-    let metadata = fs::metadata(path)?;
+    // Single open — reuse fd for fstat + read/mmap (saves separate stat + open)
+    let file = open_noatime(path)?;
+    let metadata = file.metadata()?; // fstat on existing fd, cheaper than stat(path)
     let len = metadata.len();
     let is_regular = metadata.file_type().is_file();
 
-    // mmap fast path for all regular files with data
-    if is_regular && len > 0 {
-        let file = File::open(path)?;
-        match unsafe {
-            MmapOptions::new()
-                .populate() // Eagerly populate page tables — avoids page faults
-                .map(&file)
-        } {
-            Ok(mmap) => {
-                #[cfg(target_os = "linux")]
-                {
-                    let _ = mmap.advise(memmap2::Advice::Sequential);
-                    // Request transparent huge pages for TLB efficiency on large files
-                    if len >= 2 * 1024 * 1024 {
-                        unsafe {
-                            libc::madvise(
-                                mmap.as_ptr() as *mut libc::c_void,
-                                mmap.len(),
-                                libc::MADV_HUGEPAGE,
-                            );
-                        }
-                    }
-                }
-                return Ok(hash_bytes(algo, &mmap));
-            }
-            Err(_) => {
-                let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
-                return hash_reader(algo, reader);
-            }
-        }
-    }
-
-    // Empty regular files
-    if is_regular {
+    if is_regular && len == 0 {
         return Ok(hash_bytes(algo, &[]));
     }
 
-    // Fallback: buffered read (special files, pipes, etc.)
-    let file = File::open(path)?;
+    if is_regular && len > 0 {
+        // Small files: read into thread-local buffer (zero allocation after first call)
+        if len < MMAP_THRESHOLD {
+            return READ_BUF.with(|cell| {
+                let mut buf = cell.borrow_mut();
+                buf.clear();
+                // Reserve is a no-op if capacity >= len (which it is after first call)
+                buf.reserve(len as usize);
+                Read::read_to_end(&mut &file, &mut buf)?;
+                Ok(hash_bytes(algo, &buf))
+            });
+        }
+
+        // Large files: mmap the already-open fd for zero-copy
+        return mmap_and_hash(algo, &file);
+    }
+
+    // Fallback: buffered read (special files, pipes, etc.) — fd already open
     let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
     hash_reader(algo, reader)
+}
+
+/// Mmap a file and hash it. Shared by hash_file and blake2b_hash_file.
+fn mmap_and_hash(algo: HashAlgorithm, file: &File) -> io::Result<String> {
+    match unsafe {
+        MmapOptions::new()
+            .populate() // Eagerly populate page tables — avoids page faults during hash
+            .map(file)
+    } {
+        Ok(mmap) => {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                if mmap.len() >= 2 * 1024 * 1024 {
+                    unsafe {
+                        libc::madvise(
+                            mmap.as_ptr() as *mut libc::c_void,
+                            mmap.len(),
+                            libc::MADV_HUGEPAGE,
+                        );
+                    }
+                }
+            }
+            Ok(hash_bytes(algo, &mmap))
+        }
+        Err(_) => {
+            // mmap failed — fall back to buffered read from the same fd
+            let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
+            hash_reader(algo, reader)
+        }
+    }
+}
+
+/// Mmap a file and hash with BLAKE2b. Shared helper for blake2b_hash_file.
+fn mmap_and_hash_blake2b(file: &File, output_bytes: usize) -> io::Result<String> {
+    match unsafe { MmapOptions::new().populate().map(file) } {
+        Ok(mmap) => {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                if mmap.len() >= 2 * 1024 * 1024 {
+                    unsafe {
+                        libc::madvise(
+                            mmap.as_ptr() as *mut libc::c_void,
+                            mmap.len(),
+                            libc::MADV_HUGEPAGE,
+                        );
+                    }
+                }
+            }
+            Ok(blake2b_hash_data(&mmap, output_bytes))
+        }
+        Err(_) => {
+            let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
+            blake2b_hash_reader(reader, output_bytes)
+        }
+    }
 }
 
 /// Hash stdin. Reads all data first, then hashes in one pass for optimal throughput.
@@ -147,18 +237,50 @@ pub fn hash_stdin(algo: HashAlgorithm) -> io::Result<String> {
     Ok(hash_bytes(algo, &data))
 }
 
+/// Parallel hashing threshold: only use rayon when total data exceeds this.
+/// Below this, sequential processing avoids rayon overhead (thread pool, work stealing).
+const PARALLEL_THRESHOLD: u64 = 8 * 1024 * 1024; // 8MB
+
+/// Estimate total file size for parallel/sequential decision.
+/// Uses a quick heuristic: samples first file and extrapolates.
+/// Returns 0 if estimation fails.
+pub fn estimate_total_size(paths: &[&Path]) -> u64 {
+    if paths.is_empty() {
+        return 0;
+    }
+    // Sample first file to estimate
+    if let Ok(meta) = fs::metadata(paths[0]) {
+        meta.len().saturating_mul(paths.len() as u64)
+    } else {
+        0
+    }
+}
+
+/// Check if parallel hashing is worthwhile for the given file paths.
+pub fn should_use_parallel(paths: &[&Path]) -> bool {
+    if paths.len() < 2 {
+        return false;
+    }
+    estimate_total_size(paths) >= PARALLEL_THRESHOLD
+}
+
 /// Issue readahead hints for a list of file paths to warm the page cache.
-/// This should be called before parallel hashing to reduce I/O stalls.
+/// Uses POSIX_FADV_WILLNEED which is non-blocking and batches efficiently.
 #[cfg(target_os = "linux")]
 pub fn readahead_files(paths: &[&Path]) {
     use std::os::unix::io::AsRawFd;
     for path in paths {
-        if let Ok(file) = File::open(path) {
+        if let Ok(file) = open_noatime(path) {
             if let Ok(meta) = file.metadata() {
                 let len = meta.len();
                 if meta.file_type().is_file() && len > 0 {
                     unsafe {
-                        libc::readahead(file.as_raw_fd(), 0, len as usize);
+                        libc::posix_fadvise(
+                            file.as_raw_fd(),
+                            0,
+                            len as i64,
+                            libc::POSIX_FADV_WILLNEED,
+                        );
                     }
                 }
             }
@@ -198,52 +320,71 @@ pub fn blake2b_hash_reader<R: Read>(mut reader: R, output_bytes: usize) -> io::R
     Ok(hex_encode(state.finalize().as_bytes()))
 }
 
-/// Hash a file with BLAKE2b variable output length using mmap.
+/// Hash a file with BLAKE2b variable output length. Single open + fstat.
+/// Uses read() for small files, mmap for large.
 pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String> {
-    let metadata = fs::metadata(path)?;
+    // Single open — reuse fd for fstat + read/mmap
+    let file = open_noatime(path)?;
+    let metadata = file.metadata()?;
     let len = metadata.len();
     let is_regular = metadata.file_type().is_file();
 
-    // mmap fast path for all regular files with data
-    if is_regular && len > 0 {
-        let file = File::open(path)?;
-        match unsafe { MmapOptions::new().populate().map(&file) } {
-            Ok(mmap) => {
-                #[cfg(target_os = "linux")]
-                {
-                    let _ = mmap.advise(memmap2::Advice::Sequential);
-                    if len >= 2 * 1024 * 1024 {
-                        unsafe {
-                            libc::madvise(
-                                mmap.as_ptr() as *mut libc::c_void,
-                                mmap.len(),
-                                libc::MADV_HUGEPAGE,
-                            );
-                        }
-                    }
-                }
-                return Ok(blake2b_hash_data(&mmap, output_bytes));
-            }
-            Err(_) => {
-                let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
-                return blake2b_hash_reader(reader, output_bytes);
-            }
-        }
-    }
-
-    // Empty regular files
-    if is_regular {
+    if is_regular && len == 0 {
         return Ok(blake2b_hash_data(&[], output_bytes));
     }
 
-    let file = File::open(path)?;
+    if is_regular && len > 0 {
+        // Small files: read into thread-local buffer (zero allocation after first call)
+        if len < MMAP_THRESHOLD {
+            return READ_BUF.with(|cell| {
+                let mut buf = cell.borrow_mut();
+                buf.clear();
+                buf.reserve(len as usize);
+                Read::read_to_end(&mut &file, &mut buf)?;
+                Ok(blake2b_hash_data(&buf, output_bytes))
+            });
+        }
+
+        // Large files: mmap the already-open fd for zero-copy
+        return mmap_and_hash_blake2b(&file, output_bytes);
+    }
+
+    // Fallback: buffered read — fd already open
     let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
     blake2b_hash_reader(reader, output_bytes)
 }
 
 /// Hash stdin with BLAKE2b variable output length.
+/// Tries mmap if stdin is a regular file (shell redirect), falls back to read.
 pub fn blake2b_hash_stdin(output_bytes: usize) -> io::Result<String> {
-    blake2b_hash_reader(io::stdin().lock(), output_bytes)
+    // Try to mmap stdin if it's a regular file (shell redirect)
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let stdin = io::stdin();
+        let fd = stdin.as_raw_fd();
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut stat) } == 0
+            && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && stat.st_size > 0
+        {
+            use std::os::unix::io::FromRawFd;
+            let file = unsafe { File::from_raw_fd(fd) };
+            let result = unsafe { MmapOptions::new().populate().map(&file) };
+            std::mem::forget(file); // Don't close stdin
+            if let Ok(mmap) = result {
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = mmap.advise(memmap2::Advice::Sequential);
+                }
+                return Ok(blake2b_hash_data(&mmap, output_bytes));
+            }
+        }
+    }
+    // Fallback: read all then hash in one pass
+    let mut data = Vec::new();
+    io::stdin().lock().read_to_end(&mut data)?;
+    Ok(blake2b_hash_data(&data, output_bytes))
 }
 
 /// Print hash result in GNU format: "hash  filename\n"
@@ -520,17 +661,20 @@ const fn generate_hex_table() -> [[u8; 2]; 256] {
 const HEX_TABLE: [[u8; 2]; 256] = generate_hex_table();
 
 /// Fast hex encoding using 2-byte pair lookup table — one lookup per input byte.
+/// Uses String directly instead of Vec<u8> to avoid the from_utf8 conversion overhead.
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    let mut hex = vec![0u8; bytes.len() * 2];
-    let mut i = 0;
-    for &b in bytes {
-        let pair = unsafe { *HEX_TABLE.get_unchecked(b as usize) };
-        unsafe {
-            *hex.get_unchecked_mut(i) = pair[0];
-            *hex.get_unchecked_mut(i + 1) = pair[1];
+    let len = bytes.len() * 2;
+    let mut hex = String::with_capacity(len);
+    // SAFETY: We write exactly `len` valid ASCII hex bytes into the String's buffer.
+    unsafe {
+        let buf = hex.as_mut_vec();
+        buf.set_len(len);
+        let ptr = buf.as_mut_ptr();
+        for (i, &b) in bytes.iter().enumerate() {
+            let pair = *HEX_TABLE.get_unchecked(b as usize);
+            *ptr.add(i * 2) = pair[0];
+            *ptr.add(i * 2 + 1) = pair[1];
         }
-        i += 2;
     }
-    // SAFETY: All bytes are ASCII hex digits [0-9a-f]
-    unsafe { String::from_utf8_unchecked(hex) }
+    hex
 }

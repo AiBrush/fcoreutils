@@ -11,13 +11,13 @@ use rayon::prelude::*;
 
 use coreutils_rs::hash::{self, HashAlgorithm};
 
-const TOOL_NAME: &str = "fsha256sum";
+const TOOL_NAME: &str = "sha256sum";
 /// SHA256 hex digest is always 64 characters.
 const SHA256_HEX_LEN: usize = 64;
 
 #[derive(Parser)]
 #[command(
-    name = "fsha256sum",
+    name = "sha256sum",
     about = "Compute and check SHA256 message digest",
     after_help = "With no FILE, or when FILE is -, read standard input."
 )]
@@ -196,28 +196,44 @@ fn run_hash_mode(
             }
         }
     } else {
-        // Pre-warm page cache for all files before parallel hashing
         let paths: Vec<_> = files.iter().map(|f| Path::new(f.as_str())).collect();
-        hash::readahead_files(&paths.to_vec());
 
-        // Parallel hashing for multiple files
-        let results: Vec<(&str, Result<String, io::Error>)> = files
-            .par_iter()
-            .map(|filename| {
-                let result = hash::hash_file(algo, Path::new(filename));
-                (filename.as_str(), result)
-            })
-            .collect();
+        if hash::should_use_parallel(&paths) {
+            // Large total data: parallel hashing with rayon + readahead
+            hash::readahead_files(&paths);
 
-        for (filename, result) in results {
-            match result {
-                Ok(h) => {
-                    write_output(out, cli, algo, &h, filename);
+            let results: Vec<(&str, Result<String, io::Error>)> = files
+                .par_iter()
+                .map(|filename| {
+                    let result = hash::hash_file(algo, Path::new(filename));
+                    (filename.as_str(), result)
+                })
+                .collect();
+
+            for (filename, result) in results {
+                match result {
+                    Ok(h) => {
+                        write_output(out, cli, algo, &h, filename);
+                    }
+                    Err(e) => {
+                        let _ = out.flush();
+                        eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
+                        *had_error = true;
+                    }
                 }
-                Err(e) => {
-                    let _ = out.flush();
-                    eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
-                    *had_error = true;
+            }
+        } else {
+            // Small total data: sequential avoids rayon overhead
+            for filename in files {
+                match hash::hash_file(algo, Path::new(filename)) {
+                    Ok(h) => {
+                        write_output(out, cli, algo, &h, filename);
+                    }
+                    Err(e) => {
+                        let _ = out.flush();
+                        eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
+                        *had_error = true;
+                    }
                 }
             }
         }
@@ -325,8 +341,10 @@ fn run_check_mode(
 
         // GNU compat: when --ignore-missing is used and no file was verified
         if cli.ignore_missing && file_ok == 0 && file_fail == 0 && file_ignored > 0 {
-            let _ = out.flush();
-            eprintln!("{}: {}: no file was verified", TOOL_NAME, display_name);
+            if !cli.status {
+                let _ = out.flush();
+                eprintln!("{}: {}: no file was verified", TOOL_NAME, display_name);
+            }
             *had_error = true;
         }
     }

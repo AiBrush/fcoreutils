@@ -15,7 +15,7 @@ use coreutils_rs::uniq::{
 
 #[derive(Parser)]
 #[command(
-    name = "funiq",
+    name = "uniq",
     about = "Report or omit repeated lines",
     after_help = "A field is a run of blanks (usually spaces and/or TABs), then non-blank \
                   characters. Fields are skipped before chars.\n\n\
@@ -107,7 +107,7 @@ fn main() {
             "append" => GroupMethod::Append,
             "both" => GroupMethod::Both,
             other => {
-                eprintln!("funiq: invalid argument '{}' for '--group'", other);
+                eprintln!("uniq: invalid argument '{}' for '--group'", other);
                 eprintln!(
                     "Valid arguments are:\n  - 'separate'\n  - 'prepend'\n  - 'append'\n  - 'both'"
                 );
@@ -121,7 +121,7 @@ fn main() {
             || cli.all_repeated.is_some()
             || cli.unique
         {
-            eprintln!("funiq: --group is mutually exclusive with -c/-d/-D/-u");
+            eprintln!("uniq: --group is mutually exclusive with -c/-d/-D/-u");
             process::exit(1);
         }
         OutputMode::Group(method)
@@ -132,7 +132,7 @@ fn main() {
                 "prepend" => AllRepeatedMethod::Prepend,
                 "separate" => AllRepeatedMethod::Separate,
                 other => {
-                    eprintln!("funiq: invalid argument '{}' for '--all-repeated'", other);
+                    eprintln!("uniq: invalid argument '{}' for '--all-repeated'", other);
                     eprintln!("Valid arguments are:\n  - 'none'\n  - 'prepend'\n  - 'separate'");
                     process::exit(1);
                 }
@@ -151,7 +151,7 @@ fn main() {
 
     // -c is incompatible with -D/--all-repeated and --group
     if cli.count && matches!(mode, OutputMode::AllRepeated(_) | OutputMode::Group(_)) {
-        eprintln!("funiq: printing all duplicated lines and repeat counts is meaningless");
+        eprintln!("uniq: printing all duplicated lines and repeat counts is meaningless");
         process::exit(1);
     }
 
@@ -172,7 +172,7 @@ fn main() {
         let output = match File::create(path) {
             Ok(f) => BufWriter::new(f),
             Err(e) => {
-                eprintln!("funiq: {}: {}", path, e);
+                eprintln!("uniq: {}: {}", path, e);
                 process::exit(1);
             }
         };
@@ -202,14 +202,14 @@ fn run_uniq(cli: &Cli, config: &UniqConfig, output: impl Write) {
             let file = match File::open(path) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("funiq: {}: {}", path, e);
+                    eprintln!("uniq: {}: {}", path, e);
                     process::exit(1);
                 }
             };
             let metadata = match file.metadata() {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("funiq: {}: {}", path, e);
+                    eprintln!("uniq: {}: {}", path, e);
                     process::exit(1);
                 }
             };
@@ -229,7 +229,7 @@ fn run_uniq(cli: &Cli, config: &UniqConfig, output: impl Write) {
                     m
                 }
                 Err(e) => {
-                    eprintln!("funiq: {}: {}", path, e);
+                    eprintln!("uniq: {}: {}", path, e);
                     process::exit(1);
                 }
             };
@@ -241,7 +241,7 @@ fn run_uniq(cli: &Cli, config: &UniqConfig, output: impl Write) {
     if let Err(e) = result {
         // Ignore broken pipe
         if e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("funiq: {}", e);
+            eprintln!("uniq: {}", e);
             process::exit(1);
         }
     }

@@ -9,7 +9,7 @@ use coreutils_rs::wc;
 
 #[derive(Parser)]
 #[command(
-    name = "fwc",
+    name = "wc",
     about = "Print newline, word, and byte counts for each FILE"
 )]
 struct Cli {
@@ -98,7 +98,7 @@ fn main() {
     // Collect files to process
     let files: Vec<String> = if let Some(ref f0f) = cli.files0_from {
         if !cli.files.is_empty() {
-            eprintln!("fwc: extra operand '{}'", cli.files[0]);
+            eprintln!("wc: extra operand '{}'", cli.files[0]);
             eprintln!("file operands cannot be combined with --files0-from");
             process::exit(1);
         }
@@ -133,7 +133,7 @@ fn main() {
                     continue;
                 }
                 Err(e) => {
-                    eprintln!("fwc: {}: {}", filename, e);
+                    eprintln!("wc: {}: {}", filename, e);
                     had_error = true;
                     continue;
                 }
@@ -145,7 +145,7 @@ fn main() {
             match read_stdin() {
                 Ok(d) => FileData::Owned(d),
                 Err(e) => {
-                    eprintln!("fwc: standard input: {}", e);
+                    eprintln!("wc: standard input: {}", e);
                     had_error = true;
                     continue;
                 }
@@ -154,7 +154,7 @@ fn main() {
             match read_file(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("fwc: {}: {}", filename, e);
+                    eprintln!("wc: {}: {}", filename, e);
                     had_error = true;
                     continue;
                 }
@@ -372,7 +372,7 @@ fn read_files0_from(path: &str) -> Vec<String> {
         read_stdin().unwrap_or_default()
     } else {
         std::fs::read(path).unwrap_or_else(|e| {
-            eprintln!("fwc: cannot open '{}' for reading: {}", path, e);
+            eprintln!("wc: cannot open '{}' for reading: {}", path, e);
             process::exit(1);
         })
     };
