@@ -273,107 +273,155 @@ impl<'a> Iterator for LineIter<'a> {
     }
 }
 
+/// Get line content (without terminator) from pre-computed positions.
+#[inline(always)]
+fn line_content_at<'a>(data: &'a [u8], line_starts: &[usize], idx: usize) -> &'a [u8] {
+    let start = line_starts[idx];
+    let end = if idx + 1 < line_starts.len() {
+        line_starts[idx + 1] - 1 // exclude terminator
+    } else {
+        data.len() // last line (may not have terminator)
+    };
+    &data[start..end]
+}
+
+/// Get full line (with terminator) from pre-computed positions.
+#[inline(always)]
+fn line_full_at<'a>(data: &'a [u8], line_starts: &[usize], idx: usize) -> &'a [u8] {
+    let start = line_starts[idx];
+    let end = if idx + 1 < line_starts.len() {
+        line_starts[idx + 1] // include terminator
+    } else {
+        data.len()
+    };
+    &data[start..end]
+}
+
+/// Binary search for the end of a duplicate group.
+/// Returns the index of the first line that differs from line_starts[group_start].
+/// All lines from group_start..result are equal.
+#[inline]
+fn binary_search_group_end(
+    data: &[u8],
+    line_starts: &[usize],
+    group_start: usize,
+    num_lines: usize,
+) -> usize {
+    let key = line_content_at(data, line_starts, group_start);
+    let mut lo = group_start + 1;
+    let mut hi = num_lines;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if lines_equal_fast(key, line_content_at(data, line_starts, mid)) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 /// Standard processing for Default, RepeatedOnly, UniqueOnly on byte slices.
+/// Uses pre-computed line positions for faster iteration and binary search
+/// for duplicate group sizes on repetitive data.
 fn process_standard_bytes(
     data: &[u8],
     writer: &mut impl Write,
     config: &UniqConfig,
     term: u8,
 ) -> io::Result<()> {
-    let mut lines = LineIter::new(data, term);
-
-    let (prev_content, prev_full) = match lines.next() {
-        Some(v) => v,
-        None => return Ok(()), // empty input
-    };
+    if data.is_empty() {
+        return Ok(());
+    }
 
     let fast = !needs_key_extraction(config) && !config.ignore_case;
 
-    // Ultra-fast path: default mode, no count, no key extraction
-    // Zero-copy: writes contiguous spans directly from mmap data, no intermediate Vec
-    if fast && !config.count && matches!(config.mode, OutputMode::Default) {
-        let data_base = data.as_ptr() as usize;
-        let mut prev_content = prev_content;
+    // Pre-compute all line start positions in a single SIMD pass.
+    // memchr_iter precomputes SIMD state once (vs per-call recomputation in LineIter).
+    let estimated_lines = (data.len() / 40).max(64);
+    let mut line_starts: Vec<usize> = Vec::with_capacity(estimated_lines);
+    line_starts.push(0); // first line starts at offset 0
+    for pos in memchr::memchr_iter(term, data) {
+        if pos + 1 < data.len() {
+            line_starts.push(pos + 1);
+        }
+    }
+    let num_lines = line_starts.len();
+    if num_lines == 0 {
+        return Ok(());
+    }
 
+    // Ultra-fast path: default mode, no count, no key extraction
+    if fast && !config.count && matches!(config.mode, OutputMode::Default) {
         // Write first line
-        write_all_raw(writer, prev_full)?;
-        if prev_full.len() == prev_content.len() {
+        let first_full = line_full_at(data, &line_starts, 0);
+        let first_content = line_content_at(data, &line_starts, 0);
+        write_all_raw(writer, first_full)?;
+        if first_full.len() == first_content.len() {
             writer.write_all(&[term])?;
         }
 
-        // Track contiguous output spans in mmap data
-        let mut span_start: usize = usize::MAX; // sentinel = no active span
-        let mut span_end: usize = 0;
+        let mut i = 1;
+        while i < num_lines {
+            let prev = line_content_at(data, &line_starts, i - 1);
+            let cur = line_content_at(data, &line_starts, i);
 
-        for (cur_content, cur_full) in lines {
-            if lines_equal_fast(prev_content, cur_content) {
-                // Duplicate — flush any active span, skip line
-                if span_start != usize::MAX {
-                    write_all_raw(writer, &data[span_start..span_end])?;
-                    span_start = usize::MAX;
-                }
-                prev_content = cur_content;
+            if lines_equal_fast(prev, cur) {
+                // Duplicate detected — binary search for end of group
+                let group_end = binary_search_group_end(data, &line_starts, i - 1, num_lines);
+                i = group_end;
                 continue;
             }
 
-            let cur_offset = cur_full.as_ptr() as usize - data_base;
-
-            if span_start == usize::MAX {
-                // Start new span
-                span_start = cur_offset;
-                span_end = cur_offset + cur_full.len();
-            } else if cur_offset == span_end {
-                // Extend contiguous span (common case — unique lines are adjacent)
-                span_end += cur_full.len();
-            } else {
-                // Non-contiguous — flush and start new span
-                write_all_raw(writer, &data[span_start..span_end])?;
-                span_start = cur_offset;
-                span_end = cur_offset + cur_full.len();
-            }
-
-            // Handle last line without terminator
-            if cur_full.len() == cur_content.len() {
-                write_all_raw(writer, &data[span_start..span_end])?;
+            // Unique line — write it
+            let cur_full = line_full_at(data, &line_starts, i);
+            write_all_raw(writer, cur_full)?;
+            if cur_full.len() == cur.len() {
                 writer.write_all(&[term])?;
-                span_start = usize::MAX;
             }
-
-            prev_content = cur_content;
-        }
-
-        // Flush remaining span
-        if span_start != usize::MAX {
-            write_all_raw(writer, &data[span_start..span_end])?;
+            i += 1;
         }
         return Ok(());
     }
 
-    // General path with count tracking
-    let mut prev_content = prev_content;
-    let mut prev_full = prev_full;
-    let mut count: u64 = 1;
+    // General path with count tracking + binary search for duplicate groups
+    let mut i = 0;
+    while i < num_lines {
+        let content = line_content_at(data, &line_starts, i);
+        let full = line_full_at(data, &line_starts, i);
 
-    for (cur_content, cur_full) in lines {
-        let equal = if fast {
-            lines_equal_fast(prev_content, cur_content)
+        // Find group size: check next line, if equal use binary search
+        let group_end = if fast
+            && i + 1 < num_lines
+            && lines_equal_fast(content, line_content_at(data, &line_starts, i + 1))
+        {
+            // Duplicate detected — binary search for end
+            binary_search_group_end(data, &line_starts, i, num_lines)
+        } else if !fast
+            && i + 1 < num_lines
+            && lines_equal(content, line_content_at(data, &line_starts, i + 1), config)
+        {
+            // Slow path binary search with key extraction
+            let mut lo = i + 2;
+            let mut hi = num_lines;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if lines_equal(content, line_content_at(data, &line_starts, mid), config) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
         } else {
-            lines_equal(prev_content, cur_content, config)
+            i + 1
         };
 
-        if equal {
-            count += 1;
-        } else {
-            // Output previous group
-            output_group_bytes(writer, prev_content, prev_full, count, config, term)?;
-            prev_content = cur_content;
-            prev_full = cur_full;
-            count = 1;
-        }
+        let count = (group_end - i) as u64;
+        output_group_bytes(writer, content, full, count, config, term)?;
+        i = group_end;
     }
 
-    // Output last group
-    output_group_bytes(writer, prev_content, prev_full, count, config, term)?;
     Ok(())
 }
 
