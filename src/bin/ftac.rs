@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
 #[cfg(unix)]
@@ -163,18 +163,22 @@ fn main() {
         cli.files.clone()
     };
 
-    // Raw fd stdout — tac's batched writev sends IoSlice directly to kernel.
-    // BufWriter would copy mmap data into its buffer, defeating zero-copy.
+    // BufWriter batches small per-record write_all calls into 1MB flushes.
     #[cfg(unix)]
     let had_error = {
         let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        run(&cli, &files, &mut *raw)
+        let mut writer = BufWriter::with_capacity(1024 * 1024, &mut *raw);
+        let result = run(&cli, &files, &mut writer);
+        let _ = writer.flush();
+        result
     };
     #[cfg(not(unix))]
     let had_error = {
         let stdout = io::stdout();
-        let mut lock = stdout.lock();
-        run(&cli, &files, &mut lock)
+        let mut writer = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+        let result = run(&cli, &files, &mut writer);
+        let _ = writer.flush();
+        result
     };
 
     if had_error {
