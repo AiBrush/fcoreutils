@@ -198,10 +198,11 @@ fn count_words_c(data: &[u8]) -> u64 {
     words
 }
 
-/// Count words in a C locale chunk, returning word count plus boundary info.
+/// Count words + lines in a C locale chunk, returning counts plus boundary info.
 /// Used by parallel word counting.
-/// Returns (word_count, first_active_is_printable, ends_in_word).
-fn count_words_c_chunk(data: &[u8]) -> (u64, bool, bool) {
+/// Returns (line_count, word_count, first_active_is_printable, ends_in_word).
+fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
+    let mut lines = 0u64;
     let mut words = 0u64;
     let mut in_word = false;
     let mut first_active_is_printable = false;
@@ -231,6 +232,13 @@ fn count_words_c_chunk(data: &[u8]) -> (u64, bool, bool) {
                     break;
                 }
             }
+        } else if b == b'\n' {
+            lines += 1;
+            if !seen_active {
+                seen_active = true;
+            }
+            in_word = false;
+            i += 1;
         } else {
             let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
             if class == 1 {
@@ -242,7 +250,7 @@ fn count_words_c_chunk(data: &[u8]) -> (u64, bool, bool) {
             i += 1;
         }
     }
-    (words, first_active_is_printable, in_word)
+    (lines, words, first_active_is_printable, in_word)
 }
 
 /// Count words in UTF-8 locale using a state machine with 3-state logic.
@@ -1150,13 +1158,15 @@ pub fn count_all(data: &[u8], utf8: bool) -> WcCounts {
 // ──────────────────────────────────────────────────
 
 /// Count newlines in parallel using SIMD memchr + rayon.
+/// Each thread gets at least 1MB (to amortize rayon scheduling overhead).
 pub fn count_lines_parallel(data: &[u8]) -> u64 {
     if data.len() < PARALLEL_THRESHOLD {
         return count_lines(data);
     }
 
     let num_threads = rayon::current_num_threads().max(1);
-    let chunk_size = (data.len() / num_threads).max(1024 * 1024);
+    // Ensure chunks are large enough to amortize SIMD setup overhead
+    let chunk_size = (data.len() / num_threads).max(2 * 1024 * 1024);
 
     data.par_chunks(chunk_size)
         .map(|chunk| memchr_iter(b'\n', chunk).count() as u64)
@@ -1177,19 +1187,19 @@ pub fn count_words_parallel(data: &[u8], utf8: bool) -> u64 {
 
     let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
 
-    // Each chunk returns (word_count, first_active_is_printable, ends_in_word)
-    let results: Vec<(u64, bool, bool)> = chunks
+    // Each chunk returns (lines, word_count, first_active_is_printable, ends_in_word)
+    let results: Vec<(u64, u64, bool, bool)> = chunks
         .par_iter()
-        .map(|chunk| count_words_c_chunk(chunk))
+        .map(|chunk| count_lw_c_chunk(chunk))
         .collect();
 
     let mut total = 0u64;
     for i in 0..results.len() {
-        total += results[i].0;
+        total += results[i].1;
         // Boundary adjustment: if previous chunk ended in_word AND
         // current chunk's first non-transparent byte is printable,
         // the word was split across chunks — subtract the overcount.
-        if i > 0 && results[i - 1].2 && results[i].1 {
+        if i > 0 && results[i - 1].3 && results[i].2 {
             total -= 1;
         }
     }
@@ -1220,6 +1230,7 @@ pub fn count_lwb(data: &[u8], utf8: bool) -> (u64, u64, u64) {
 
 /// Parallel counting of lines + words + bytes only (no chars).
 /// Optimized for the default `wc` mode: avoids unnecessary char-counting pass.
+/// C locale: single fused pass per chunk counts BOTH lines and words.
 pub fn count_lwb_parallel(data: &[u8], utf8: bool) -> (u64, u64, u64) {
     if data.len() < PARALLEL_THRESHOLD {
         // Small file: use fused single-pass
@@ -1227,32 +1238,28 @@ pub fn count_lwb_parallel(data: &[u8], utf8: bool) -> (u64, u64, u64) {
     }
 
     // Word counting must be sequential for UTF-8 (state machine across chunks)
-    // But we use the fused lines+words approach to avoid a separate memchr pass
     let (lines, words) = if utf8 {
         count_lines_words_utf8_fused(data)
     } else {
-        // C locale: parallel 3-state word counting with boundary adjustment
+        // C locale: FUSED parallel lines+words counting — single pass per chunk
         let num_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / num_threads).max(1024 * 1024);
 
         let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
-        let results: Vec<(u64, bool, bool)> = chunks
+        let results: Vec<(u64, u64, bool, bool)> = chunks
             .par_iter()
-            .map(|chunk| count_words_c_chunk(chunk))
+            .map(|chunk| count_lw_c_chunk(chunk))
             .collect();
 
+        let mut line_total = 0u64;
         let mut word_total = 0u64;
         for i in 0..results.len() {
-            word_total += results[i].0;
-            if i > 0 && results[i - 1].2 && results[i].1 {
+            line_total += results[i].0;
+            word_total += results[i].1;
+            if i > 0 && results[i - 1].3 && results[i].2 {
                 word_total -= 1;
             }
         }
-
-        let line_total: u64 = data
-            .par_chunks(chunk_size)
-            .map(|chunk| memchr_iter(b'\n', chunk).count() as u64)
-            .sum();
 
         (line_total, word_total)
     };
