@@ -1,5 +1,11 @@
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
+/// Write a large contiguous buffer, retrying on partial writes.
+#[inline]
+fn write_all_raw(writer: &mut impl Write, buf: &[u8]) -> io::Result<()> {
+    writer.write_all(buf)
+}
+
 /// How to delimit groups when using --all-repeated
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllRepeatedMethod {
