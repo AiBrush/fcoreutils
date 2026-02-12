@@ -466,6 +466,19 @@ fn line_prefix(data: &[u8], start: usize, end: usize) -> u64 {
     }
 }
 
+/// Extract an 8-byte uppercase prefix for case-insensitive comparison.
+/// Big-endian byte order ensures u64 comparison matches lexicographic order.
+#[inline]
+fn line_prefix_upper(data: &[u8], start: usize, end: usize) -> u64 {
+    let len = end - start;
+    let mut bytes = [0u8; 8];
+    let take = len.min(8);
+    for i in 0..take {
+        bytes[i] = data[start + i].to_ascii_uppercase();
+    }
+    u64::from_be_bytes(bytes)
+}
+
 /// Pre-extract key byte offsets into the data buffer for all lines.
 /// Avoids repeated key extraction during sort comparisons.
 /// Parallelized with rayon for large inputs (>10K lines).
@@ -885,6 +898,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         && !gopts.ignore_nonprinting
         && !gopts.ignore_leading_blanks;
 
+    // Case-insensitive lexicographic (sort -f, optionally with -b)
+    let is_fold_case_lex = no_keys
+        && !gopts.has_sort_type()
+        && !gopts.dictionary_order
+        && gopts.ignore_case
+        && !gopts.ignore_nonprinting;
+
     let is_numeric_only = no_keys
         && (gopts.numeric || gopts.general_numeric || gopts.human_numeric)
         && !gopts.dictionary_order
@@ -989,6 +1009,112 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         if !buf.is_empty() {
             writer.write_all(&buf)?;
         }
+    } else if is_fold_case_lex && num_lines > 256 {
+        // FAST PATH 1b: Case-insensitive prefix sort (sort -f)
+        // Pre-computes uppercase 8-byte prefix, radix sorts on it.
+        // Avoids per-comparison case folding in O(n log n) comparisons.
+        let reverse = gopts.reverse;
+        let needs_blank = gopts.ignore_leading_blanks;
+        let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+            offsets
+                .par_iter()
+                .enumerate()
+                .map(|(i, &(s, e))| {
+                    let (s, e) = if needs_blank {
+                        let trimmed = super::compare::skip_leading_blanks(&data[s..e]);
+                        let new_s = unsafe { trimmed.as_ptr().offset_from(data.as_ptr()) as usize };
+                        (new_s, new_s + trimmed.len())
+                    } else {
+                        (s, e)
+                    };
+                    (line_prefix_upper(data, s, e), i)
+                })
+                .collect()
+        } else {
+            offsets
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, e))| {
+                    let (s, e) = if needs_blank {
+                        let trimmed = super::compare::skip_leading_blanks(&data[s..e]);
+                        let new_s = unsafe { trimmed.as_ptr().offset_from(data.as_ptr()) as usize };
+                        (new_s, new_s + trimmed.len())
+                    } else {
+                        (s, e)
+                    };
+                    (line_prefix_upper(data, s, e), i)
+                })
+                .collect()
+        };
+
+        let n = entries.len();
+        if n > 1000 {
+            radix_sort_entries(&mut entries, reverse);
+            // Tie-break: full case-insensitive compare, then last-resort raw compare
+            let mut i = 0;
+            while i < n {
+                let key = entries[i].0;
+                let mut j = i + 1;
+                while j < n && entries[j].0 == key {
+                    j += 1;
+                }
+                if j - i > 1 {
+                    entries[i..j].sort_unstable_by(|a, b| {
+                        let la = &data[offsets[a.1].0..offsets[a.1].1];
+                        let lb = &data[offsets[b.1].0..offsets[b.1].1];
+                        let la = if needs_blank {
+                            super::compare::skip_leading_blanks(la)
+                        } else {
+                            la
+                        };
+                        let lb = if needs_blank {
+                            super::compare::skip_leading_blanks(lb)
+                        } else {
+                            lb
+                        };
+                        let ord = super::compare::compare_ignore_case(la, lb);
+                        let ord = if reverse { ord.reverse() } else { ord };
+                        if ord != Ordering::Equal && !config.stable {
+                            return ord;
+                        }
+                        if ord == Ordering::Equal && !config.stable {
+                            data[offsets[a.1].0..offsets[a.1].1]
+                                .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                        } else {
+                            ord
+                        }
+                    });
+                }
+                i = j;
+            }
+        } else {
+            entries.sort_unstable_by(|a, b| {
+                let la = &data[offsets[a.1].0..offsets[a.1].1];
+                let lb = &data[offsets[b.1].0..offsets[b.1].1];
+                let la = if needs_blank {
+                    super::compare::skip_leading_blanks(la)
+                } else {
+                    la
+                };
+                let lb = if needs_blank {
+                    super::compare::skip_leading_blanks(lb)
+                } else {
+                    lb
+                };
+                let ord = match a.0.cmp(&b.0) {
+                    Ordering::Equal => super::compare::compare_ignore_case(la, lb),
+                    ord => ord,
+                };
+                let ord = if reverse { ord.reverse() } else { ord };
+                if ord == Ordering::Equal && !config.stable {
+                    data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                } else {
+                    ord
+                }
+            });
+        }
+
+        write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
     } else if is_numeric_only {
         // FAST PATH 2: Pre-parsed numeric sort with u64 comparison
         // float_to_sortable_u64 enables branchless u64::cmp instead of f64::partial_cmp
