@@ -72,11 +72,13 @@ pub fn read_file(path: &Path) -> io::Result<FileData> {
     let len = metadata.len();
 
     if len > 0 && metadata.file_type().is_file() {
-        // Small files: read from already-open fd (avoids double open + page table overhead)
+        // Small files: exact-size read from already-open fd.
+        // Uses read_full into pre-sized buffer instead of read_to_end,
+        // which avoids the grow-and-probe pattern (saves 1-2 extra read() syscalls).
         if len < MMAP_THRESHOLD {
-            let mut buf = Vec::with_capacity(len as usize);
-            let mut reader = file;
-            reader.read_to_end(&mut buf)?;
+            let mut buf = vec![0u8; len as usize];
+            let n = read_full(&mut &file, &mut buf)?;
+            buf.truncate(n);
             return Ok(FileData::Owned(buf));
         }
 
@@ -119,4 +121,21 @@ pub fn read_stdin() -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     io::stdin().lock().read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+/// Read as many bytes as possible into buf, retrying on partial reads.
+/// Ensures the full buffer is filled (or EOF reached), avoiding the
+/// probe-read overhead of read_to_end.
+#[inline]
+fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        match reader.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
 }
