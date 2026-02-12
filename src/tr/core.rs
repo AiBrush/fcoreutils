@@ -716,6 +716,11 @@ pub fn delete(
         return delete_single_streaming(delete_chars[0], reader, writer);
     }
 
+    // Fast paths: 2-3 char delete using SIMD memchr2/memchr3
+    if delete_chars.len() <= 3 {
+        return delete_multi_streaming(delete_chars, reader, writer);
+    }
+
     let member = build_member_set(delete_chars);
     let mut outbuf = vec![0u8; STREAM_BUF];
     let mut inbuf = vec![0u8; STREAM_BUF];
@@ -762,6 +767,44 @@ fn delete_single_streaming(
                 writer.write_all(&chunk[last..pos])?;
             }
             last = pos + 1;
+        }
+        if last < n {
+            writer.write_all(&chunk[last..n])?;
+        }
+    }
+    Ok(())
+}
+
+/// Multi-character delete (2-3 chars) from a reader using SIMD memchr2/memchr3.
+fn delete_multi_streaming(
+    chars: &[u8],
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let mut buf = vec![0u8; STREAM_BUF];
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        let chunk = &buf[..n];
+        let mut last = 0;
+        if chars.len() == 2 {
+            for pos in memchr::memchr2_iter(chars[0], chars[1], chunk) {
+                if pos > last {
+                    writer.write_all(&chunk[last..pos])?;
+                }
+                last = pos + 1;
+            }
+        } else {
+            for pos in memchr::memchr3_iter(chars[0], chars[1], chars[2], chunk) {
+                if pos > last {
+                    writer.write_all(&chunk[last..pos])?;
+                }
+                last = pos + 1;
+            }
         }
         if last < n {
             writer.write_all(&chunk[last..n])?;
@@ -1028,6 +1071,16 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         return delete_single_char_mmap(delete_chars[0], data, writer);
     }
 
+    // Fast path: 2-char delete uses SIMD memchr2 (bulk copy between matches)
+    if delete_chars.len() == 2 {
+        return delete_multi_memchr_mmap::<2>(delete_chars, data, writer);
+    }
+
+    // Fast path: 3-char delete uses SIMD memchr3 (bulk copy between matches)
+    if delete_chars.len() == 3 {
+        return delete_multi_memchr_mmap::<3>(delete_chars, data, writer);
+    }
+
     let member = build_member_set(delete_chars);
     let mut outbuf = vec![0u8; BUF_SIZE];
 
@@ -1096,6 +1149,35 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         }
 
         writer.write_all(&outbuf[..out_pos])?;
+    }
+    Ok(())
+}
+
+/// Multi-character delete (2-3 chars) using SIMD memchr2/memchr3.
+/// Bulk-copies runs of non-matching bytes, far faster than byte-at-a-time.
+fn delete_multi_memchr_mmap<const N: usize>(
+    chars: &[u8],
+    data: &[u8],
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let mut last = 0;
+    if N == 2 {
+        for pos in memchr::memchr2_iter(chars[0], chars[1], data) {
+            if pos > last {
+                writer.write_all(&data[last..pos])?;
+            }
+            last = pos + 1;
+        }
+    } else {
+        for pos in memchr::memchr3_iter(chars[0], chars[1], chars[2], data) {
+            if pos > last {
+                writer.write_all(&data[last..pos])?;
+            }
+            last = pos + 1;
+        }
+    }
+    if last < data.len() {
+        writer.write_all(&data[last..])?;
     }
     Ok(())
 }
