@@ -206,16 +206,13 @@ fn count_words_c_chunk(data: &[u8]) -> (u64, bool, bool) {
     let mut in_word = false;
     let mut first_active_is_printable = false;
     let mut seen_active = false;
+    let mut i = 0;
+    let len = data.len();
 
-    for &b in data {
-        let class = BYTE_CLASS_C[b as usize];
-        if class == 1 {
-            if !seen_active {
-                seen_active = true;
-                // first_active_is_printable stays false
-            }
-            in_word = false;
-        } else if class == 0 {
+    while i < len {
+        let b = unsafe { *data.get_unchecked(i) };
+        if b >= 0x21 && b <= 0x7E {
+            // Printable ASCII
             if !seen_active {
                 seen_active = true;
                 first_active_is_printable = true;
@@ -224,6 +221,25 @@ fn count_words_c_chunk(data: &[u8]) -> (u64, bool, bool) {
                 in_word = true;
                 words += 1;
             }
+            i += 1;
+            // Skip remaining printable ASCII
+            while i < len {
+                let b = unsafe { *data.get_unchecked(i) };
+                if b >= 0x21 && b <= 0x7E {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+        } else {
+            let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
+            if class == 1 {
+                if !seen_active {
+                    seen_active = true;
+                }
+                in_word = false;
+            }
+            i += 1;
         }
     }
     (words, first_active_is_printable, in_word)
@@ -929,50 +945,72 @@ fn is_wide_char(cp: u32) -> bool {
 /// - `\f`: form feed (acts as line terminator like \n)
 /// - Printable ASCII (0x20..0x7E): width 1
 /// - Everything else (controls, high bytes): width 0
+///
+/// Optimized with printable ASCII run counting: for runs of bytes in
+/// 0x21-0x7E (no space/tab/newline), counts the entire run length at once.
 pub fn max_line_length_c(data: &[u8]) -> u64 {
     let mut max_len: u64 = 0;
-    let mut line_len: u64 = 0; // max position seen on current line
-    let mut linepos: u64 = 0; // current cursor position
+    let mut line_len: u64 = 0;
+    let mut linepos: u64 = 0;
+    let mut i = 0;
+    let len = data.len();
 
-    for &b in data {
-        match b {
-            b'\n' => {
-                if line_len > max_len {
-                    max_len = line_len;
+    while i < len {
+        let b = unsafe { *data.get_unchecked(i) };
+        if b >= 0x21 && b <= 0x7E {
+            // Printable non-space ASCII — count run length
+            i += 1;
+            let mut run = 1u64;
+            while i < len {
+                let b = unsafe { *data.get_unchecked(i) };
+                if b >= 0x21 && b <= 0x7E {
+                    run += 1;
+                    i += 1;
+                } else {
+                    break;
                 }
-                linepos = 0;
-                line_len = 0;
             }
-            b'\t' => {
-                linepos = (linepos + 8) & !7;
-                if linepos > line_len {
-                    line_len = linepos;
-                }
+            linepos += run;
+            if linepos > line_len {
+                line_len = linepos;
             }
-            b'\r' => {
-                linepos = 0;
-            }
-            0x0C => {
-                // Form feed: acts as line terminator
-                if line_len > max_len {
-                    max_len = line_len;
-                }
-                linepos = 0;
-                line_len = 0;
-            }
-            _ => {
-                if PRINTABLE_TABLE[b as usize] != 0 {
+        } else {
+            match b {
+                b' ' => {
                     linepos += 1;
                     if linepos > line_len {
                         line_len = linepos;
                     }
                 }
-                // Non-printable: width 0
+                b'\n' => {
+                    if line_len > max_len {
+                        max_len = line_len;
+                    }
+                    linepos = 0;
+                    line_len = 0;
+                }
+                b'\t' => {
+                    linepos = (linepos + 8) & !7;
+                    if linepos > line_len {
+                        line_len = linepos;
+                    }
+                }
+                b'\r' => {
+                    linepos = 0;
+                }
+                0x0C => {
+                    if line_len > max_len {
+                        max_len = line_len;
+                    }
+                    linepos = 0;
+                    line_len = 0;
+                }
+                _ => {} // Non-printable: width 0
             }
+            i += 1;
         }
     }
 
-    // Handle last line (may not end with \n)
     if line_len > max_len {
         max_len = line_len;
     }

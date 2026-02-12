@@ -564,6 +564,7 @@ fn process_bytes_chunk(
 }
 
 /// Extract byte ranges from a line into the output buffer.
+/// For the common non-complement case with contiguous ranges, uses bulk copy.
 #[inline(always)]
 fn cut_bytes_to_buf(
     line: &[u8],
@@ -572,10 +573,10 @@ fn cut_bytes_to_buf(
     output_delim: &[u8],
     buf: &mut Vec<u8>,
 ) {
+    let len = line.len();
     let mut first_range = true;
 
     if complement {
-        let len = line.len();
         let mut pos: usize = 1;
         for r in ranges {
             let rs = r.start;
@@ -598,11 +599,18 @@ fn cut_bytes_to_buf(
             }
             buf.extend_from_slice(&line[pos - 1..len]);
         }
+    } else if output_delim.is_empty() && ranges.len() == 1 {
+        // Ultra-fast path: single range, no output delimiter
+        let start = ranges[0].start.saturating_sub(1);
+        let end = ranges[0].end.min(len);
+        if start < len {
+            buf.extend_from_slice(&line[start..end]);
+        }
     } else {
         for r in ranges {
             let start = r.start.saturating_sub(1);
-            let end = r.end.min(line.len());
-            if start >= line.len() {
+            let end = r.end.min(len);
+            if start >= len {
                 break;
             }
             if !first_range && !output_delim.is_empty() {
