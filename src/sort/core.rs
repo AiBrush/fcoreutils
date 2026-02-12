@@ -697,9 +697,9 @@ fn write_sorted_output(
     Ok(())
 }
 
-/// Build a single output buffer from sorted indices and write it all at once.
-/// Eliminates ~2N write_all function calls — one memcpy loop + one write syscall.
-/// The single large write bypasses BufWriter's buffer entirely (>4MB direct write).
+/// Build output from sorted indices using parallel sub-buffer construction.
+/// Each rayon thread builds its portion independently, then writes in order.
+/// Eliminates ~2N write_all function calls and parallelizes the memcpy phase.
 fn write_sorted_single_buf_idx(
     data: &[u8],
     offsets: &[(usize, usize)],
@@ -708,33 +708,63 @@ fn write_sorted_single_buf_idx(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let tl = terminator.len();
+    let n = sorted_indices.len();
 
-    // Compute total output size
+    // For large outputs, split into per-thread sub-buffers
+    if n > 50_000 {
+        let num_threads = rayon::current_num_threads().max(1);
+        let chunk_size = (n + num_threads - 1) / num_threads;
+
+        let buffers: Vec<Vec<u8>> = sorted_indices
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                let total: usize = chunk
+                    .iter()
+                    .map(|&idx| (offsets[idx].1 - offsets[idx].0) + tl)
+                    .sum();
+                let mut buf = vec![0u8; total];
+                let buf_ptr = buf.as_mut_ptr();
+                let data_ptr = data.as_ptr();
+                let mut wp = 0usize;
+                for &idx in chunk {
+                    let (s, e) = offsets[idx];
+                    let ll = e - s;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(data_ptr.add(s), buf_ptr.add(wp), ll);
+                        wp += ll;
+                        std::ptr::copy_nonoverlapping(terminator.as_ptr(), buf_ptr.add(wp), tl);
+                        wp += tl;
+                    }
+                }
+                buf
+            })
+            .collect();
+
+        for buf in &buffers {
+            writer.write_all(buf)?;
+        }
+        return Ok(());
+    }
+
+    // Small output: single sequential buffer
     let total: usize = sorted_indices
         .iter()
-        .map(|&idx| {
-            let (s, e) = offsets[idx];
-            (e - s) + tl
-        })
+        .map(|&idx| (offsets[idx].1 - offsets[idx].0) + tl)
         .sum();
-
-    // Allocate and fill output buffer with copy_nonoverlapping for max throughput
     let mut output = vec![0u8; total];
     let out_ptr = output.as_mut_ptr();
     let data_ptr = data.as_ptr();
     let mut wp = 0usize;
-
     for &idx in sorted_indices {
         let (s, e) = offsets[idx];
-        let line_len = e - s;
+        let ll = e - s;
         unsafe {
-            std::ptr::copy_nonoverlapping(data_ptr.add(s), out_ptr.add(wp), line_len);
-            wp += line_len;
+            std::ptr::copy_nonoverlapping(data_ptr.add(s), out_ptr.add(wp), ll);
+            wp += ll;
             std::ptr::copy_nonoverlapping(terminator.as_ptr(), out_ptr.add(wp), tl);
             wp += tl;
         }
     }
-
     writer.write_all(&output)
 }
 
@@ -779,7 +809,7 @@ fn write_sorted_entries(
     Ok(())
 }
 
-/// Build a single output buffer from sorted (key, index) entries and write at once.
+/// Build output from sorted (key, index) entries using parallel sub-buffer construction.
 fn write_sorted_single_buf_entries(
     data: &[u8],
     offsets: &[(usize, usize)],
@@ -788,33 +818,63 @@ fn write_sorted_single_buf_entries(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let tl = terminator.len();
+    let n = entries.len();
 
-    // Compute total output size
+    // For large outputs, split into per-thread sub-buffers
+    if n > 50_000 {
+        let num_threads = rayon::current_num_threads().max(1);
+        let chunk_size = (n + num_threads - 1) / num_threads;
+
+        let buffers: Vec<Vec<u8>> = entries
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                let total: usize = chunk
+                    .iter()
+                    .map(|&(_, idx)| (offsets[idx].1 - offsets[idx].0) + tl)
+                    .sum();
+                let mut buf = vec![0u8; total];
+                let buf_ptr = buf.as_mut_ptr();
+                let data_ptr = data.as_ptr();
+                let mut wp = 0usize;
+                for &(_, idx) in chunk {
+                    let (s, e) = offsets[idx];
+                    let ll = e - s;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(data_ptr.add(s), buf_ptr.add(wp), ll);
+                        wp += ll;
+                        std::ptr::copy_nonoverlapping(terminator.as_ptr(), buf_ptr.add(wp), tl);
+                        wp += tl;
+                    }
+                }
+                buf
+            })
+            .collect();
+
+        for buf in &buffers {
+            writer.write_all(buf)?;
+        }
+        return Ok(());
+    }
+
+    // Small output: single sequential buffer
     let total: usize = entries
         .iter()
-        .map(|&(_, idx)| {
-            let (s, e) = offsets[idx];
-            (e - s) + tl
-        })
+        .map(|&(_, idx)| (offsets[idx].1 - offsets[idx].0) + tl)
         .sum();
-
-    // Allocate and fill output buffer with copy_nonoverlapping for max throughput
     let mut output = vec![0u8; total];
     let out_ptr = output.as_mut_ptr();
     let data_ptr = data.as_ptr();
     let mut wp = 0usize;
-
     for &(_, idx) in entries {
         let (s, e) = offsets[idx];
-        let line_len = e - s;
+        let ll = e - s;
         unsafe {
-            std::ptr::copy_nonoverlapping(data_ptr.add(s), out_ptr.add(wp), line_len);
-            wp += line_len;
+            std::ptr::copy_nonoverlapping(data_ptr.add(s), out_ptr.add(wp), ll);
+            wp += ll;
             std::ptr::copy_nonoverlapping(terminator.as_ptr(), out_ptr.add(wp), tl);
             wp += tl;
         }
     }
-
     writer.write_all(&output)
 }
 
