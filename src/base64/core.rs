@@ -254,7 +254,14 @@ fn strip_whitespace_inplace(data: &mut Vec<u8>) {
 /// For large inputs, decodes in parallel chunks for maximum throughput.
 fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<()> {
     // Quick check: any whitespace at all?
-    if memchr::memchr(b'\n', data).is_none() && !data.iter().any(|&b| is_whitespace(b)) {
+    // Use SIMD memchr2 to check for both \n and \r simultaneously
+    if memchr::memchr2(b'\n', b'\r', data).is_none()
+        && !data.iter().any(|&b| b == b' ' || b == b'\t')
+    {
+        // No whitespace — decode directly from borrowed data
+        if data.len() >= PARALLEL_ENCODE_THRESHOLD {
+            return decode_parallel(data, out);
+        }
         return decode_borrowed_clean(out, data);
     }
 

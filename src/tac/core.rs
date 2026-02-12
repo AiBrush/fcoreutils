@@ -7,7 +7,16 @@ const OUT_BUF: usize = 16 * 1024 * 1024;
 const IOV_BATCH: usize = 1024;
 
 /// Write all IoSlices to the writer, handling partial writes.
+/// For large numbers of slices, batches into IOV_BATCH-sized groups.
 fn write_all_slices(out: &mut impl Write, slices: &[IoSlice<'_>]) -> io::Result<()> {
+    // Small number of slices: use simple write_all for each
+    if slices.len() <= 4 {
+        for s in slices {
+            out.write_all(s)?;
+        }
+        return Ok(());
+    }
+
     let mut offset = 0;
     while offset < slices.len() {
         let end = (offset + IOV_BATCH).min(slices.len());

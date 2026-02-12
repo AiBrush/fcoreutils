@@ -692,6 +692,8 @@ pub fn translate_mmap(
 }
 
 /// Translate + squeeze from mmap'd byte slice.
+/// Uses a two-pass approach for the common case where few bytes are squeezed:
+/// translate first (using SIMD when possible), then squeeze.
 pub fn translate_squeeze_mmap(
     set1: &[u8],
     set2: &[u8],
@@ -700,13 +702,25 @@ pub fn translate_squeeze_mmap(
 ) -> io::Result<()> {
     let table = build_translate_table(set1, set2);
     let squeeze_set = build_member_set(set2);
+    let kind = analyze_table(&table);
+    #[cfg(target_arch = "x86_64")]
+    let use_simd = has_avx2();
+    #[cfg(not(target_arch = "x86_64"))]
+    let use_simd = false;
+
+    // Pre-allocate output buffer for translation
+    let mut trans_buf = vec![0u8; BUF_SIZE];
     let mut outbuf = vec![0u8; BUF_SIZE];
     let mut last_squeezed: u16 = 256;
 
     for chunk in data.chunks(BUF_SIZE) {
+        // Phase 1: Translate (may use SIMD)
+        translate_chunk_dispatch(chunk, &mut trans_buf[..chunk.len()], &table, &kind, use_simd);
+
+        // Phase 2: Squeeze
         let mut out_pos = 0;
-        for &b in chunk {
-            let translated = unsafe { *table.get_unchecked(b as usize) };
+        for i in 0..chunk.len() {
+            let translated = unsafe { *trans_buf.get_unchecked(i) };
             if is_member(&squeeze_set, translated) {
                 if last_squeezed == translated as u16 {
                     continue;
