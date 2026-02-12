@@ -1,4 +1,8 @@
 use std::io::{self, BufWriter, Write};
+#[cfg(unix)]
+use std::mem::ManuallyDrop;
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
 use std::process;
 
 use clap::Parser;
@@ -32,6 +36,13 @@ struct Cli {
     /// Character sets
     #[arg(required = true)]
     sets: Vec<String>,
+}
+
+/// Raw fd stdout for zero-overhead writes on Unix.
+#[cfg(unix)]
+#[inline]
+fn raw_stdout() -> ManuallyDrop<std::fs::File> {
+    unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) }
 }
 
 /// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
@@ -80,9 +91,16 @@ fn main() {
 
     let set1_str = &cli.sets[0];
 
-    // 4MB BufWriter for stdout — batches write syscalls
+    // Raw fd stdout on Unix with 4MB BufWriter for batching.
+    // Raw fd bypasses StdoutLock overhead; BufWriter handles small writes efficiently.
+    #[cfg(unix)]
+    let mut raw = raw_stdout();
+    #[cfg(unix)]
+    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, &mut *raw);
+    #[cfg(not(unix))]
     let stdout = io::stdout();
-    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, stdout.lock());
+    #[cfg(not(unix))]
+    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, stdout.lock());
 
     // Try to mmap stdin for zero-copy reads
     let mmap = try_mmap_stdin();

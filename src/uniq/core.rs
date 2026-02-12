@@ -123,43 +123,49 @@ fn lines_equal_fast(a: &[u8], b: &[u8]) -> bool {
 
 /// Write a count-prefixed line in GNU uniq format.
 /// GNU format: "%7lu " — right-aligned in 7-char field, followed by space.
+/// Uses a single write_all by building the prefix in a stack buffer.
 #[inline(always)]
 fn write_count_line(out: &mut impl Write, count: u64, line: &[u8], term: u8) -> io::Result<()> {
-    // Fast path for small counts (vast majority of cases)
-    // Manually format to avoid write!() macro overhead
-    let mut buf = [b' '; 20]; // Enough for u64 max
-    let count_len = {
-        let count_str = itoa_right_aligned(&mut buf, count);
-        count_str.len()
-    };
-    let start = 20 - count_len;
-    if count_len < 7 {
-        // Pad with spaces to width 7
-        let pad = 7 - count_len;
-        out.write_all(&buf[..pad])?; // spaces
-    }
-    out.write_all(&buf[start..])?;
-    out.write_all(b" ")?;
+    // Build prefix "     N " in a stack buffer (max 21 bytes for u64 + spaces)
+    let mut prefix = [b' '; 28]; // Enough for u64 max + padding + space
+    let digits = itoa_right_aligned_into(&mut prefix, count);
+    let width = digits.max(7); // minimum 7 chars
+    let prefix_len = width + 1; // +1 for trailing space
+    prefix[width] = b' ';
+    // Write prefix + line + term in as few calls as possible
+    out.write_all(&prefix[..prefix_len])?;
     out.write_all(line)?;
     out.write_all(&[term])?;
     Ok(())
 }
 
-/// Convert u64 to decimal string in a stack buffer, right-aligned.
-/// Returns the slice of the buffer containing the decimal digits.
+/// Write u64 decimal right-aligned into prefix buffer.
+/// Buffer is pre-filled with spaces. Returns number of digits written.
 #[inline(always)]
-fn itoa_right_aligned(buf: &mut [u8; 20], mut val: u64) -> &[u8] {
+fn itoa_right_aligned_into(buf: &mut [u8; 28], mut val: u64) -> usize {
     if val == 0 {
-        buf[19] = b'0';
-        return &buf[19..20];
+        buf[6] = b'0';
+        return 7; // 6 spaces + '0' = 7 chars
     }
-    let mut pos = 20;
+    // Write digits right-to-left from position 27 (leaving room for trailing space)
+    let mut pos = 27;
     while val > 0 {
         pos -= 1;
         buf[pos] = b'0' + (val % 10) as u8;
         val /= 10;
     }
-    &buf[pos..20]
+    let num_digits = 27 - pos;
+    if num_digits >= 7 {
+        // Number is wide enough, shift to front
+        buf.copy_within(pos..27, 0);
+        num_digits
+    } else {
+        // Right-align in 7-char field: spaces then digits
+        let pad = 7 - num_digits;
+        buf.copy_within(pos..27, pad);
+        // buf[0..pad] is already spaces from initialization
+        7
+    }
 }
 
 // ============================================================================
@@ -168,7 +174,7 @@ fn itoa_right_aligned(buf: &mut [u8; 20], mut val: u64) -> &[u8] {
 
 /// Process uniq from a byte slice (mmap'd file). Zero-copy, no per-line allocation.
 pub fn process_uniq_bytes(data: &[u8], output: impl Write, config: &UniqConfig) -> io::Result<()> {
-    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, output);
+    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, output);
     let term = if config.zero_terminated { b'\0' } else { b'\n' };
 
     match config.mode {
@@ -235,9 +241,6 @@ impl<'a> Iterator for LineIter<'a> {
     }
 }
 
-/// Batched output buffer size for uniq.
-const UNIQ_BUF_SIZE: usize = 4 * 1024 * 1024;
-
 /// Standard processing for Default, RepeatedOnly, UniqueOnly on byte slices.
 fn process_standard_bytes(
     data: &[u8],
@@ -255,29 +258,61 @@ fn process_standard_bytes(
     let fast = !needs_key_extraction(config) && !config.ignore_case;
 
     // Ultra-fast path: default mode, no count, no key extraction
-    // Uses batched Vec output to avoid per-line write_all overhead
+    // Zero-copy: writes contiguous spans directly from mmap data, no intermediate Vec
     if fast && !config.count && matches!(config.mode, OutputMode::Default) {
+        let data_base = data.as_ptr() as usize;
         let mut prev_content = prev_content;
-        let mut out_buf = Vec::with_capacity(UNIQ_BUF_SIZE);
-        out_buf.extend_from_slice(prev_full);
+
+        // Write first line
+        writer.write_all(prev_full)?;
         if prev_full.len() == prev_content.len() {
-            out_buf.push(term);
+            writer.write_all(&[term])?;
         }
+
+        // Track contiguous output spans in mmap data
+        let mut span_start: usize = usize::MAX; // sentinel = no active span
+        let mut span_end: usize = 0;
+
         for (cur_content, cur_full) in lines {
-            if !lines_equal_fast(prev_content, cur_content) {
-                out_buf.extend_from_slice(cur_full);
-                if cur_full.len() == cur_content.len() {
-                    out_buf.push(term);
-                }
-                if out_buf.len() >= UNIQ_BUF_SIZE {
-                    writer.write_all(&out_buf)?;
-                    out_buf.clear();
+            if lines_equal_fast(prev_content, cur_content) {
+                // Duplicate — flush any active span, skip line
+                if span_start != usize::MAX {
+                    writer.write_all(&data[span_start..span_end])?;
+                    span_start = usize::MAX;
                 }
                 prev_content = cur_content;
+                continue;
             }
+
+            let cur_offset = cur_full.as_ptr() as usize - data_base;
+
+            if span_start == usize::MAX {
+                // Start new span
+                span_start = cur_offset;
+                span_end = cur_offset + cur_full.len();
+            } else if cur_offset == span_end {
+                // Extend contiguous span (common case — unique lines are adjacent)
+                span_end += cur_full.len();
+            } else {
+                // Non-contiguous — flush and start new span
+                writer.write_all(&data[span_start..span_end])?;
+                span_start = cur_offset;
+                span_end = cur_offset + cur_full.len();
+            }
+
+            // Handle last line without terminator
+            if cur_full.len() == cur_content.len() {
+                writer.write_all(&data[span_start..span_end])?;
+                writer.write_all(&[term])?;
+                span_start = usize::MAX;
+            }
+
+            prev_content = cur_content;
         }
-        if !out_buf.is_empty() {
-            writer.write_all(&out_buf)?;
+
+        // Flush remaining span
+        if span_start != usize::MAX {
+            writer.write_all(&data[span_start..span_end])?;
         }
         return Ok(());
     }
@@ -488,8 +523,8 @@ fn process_group_bytes(
 /// Main streaming uniq processor.
 /// Reads from `input`, writes to `output`.
 pub fn process_uniq<R: Read, W: Write>(input: R, output: W, config: &UniqConfig) -> io::Result<()> {
-    let reader = BufReader::with_capacity(4 * 1024 * 1024, input);
-    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, output);
+    let reader = BufReader::with_capacity(8 * 1024 * 1024, input);
+    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, output);
     let term = if config.zero_terminated { b'\0' } else { b'\n' };
 
     match config.mode {
