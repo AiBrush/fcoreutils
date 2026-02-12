@@ -13,7 +13,7 @@ use coreutils_rs::tac;
 
 #[derive(Parser)]
 #[command(
-    name = "ftac",
+    name = "tac",
     about = "Concatenate and print files in reverse",
     version
 )]
@@ -47,7 +47,7 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             match read_stdin() {
                 Ok(d) => FileData::Owned(d),
                 Err(e) => {
-                    eprintln!("ftac: standard input: {}", e);
+                    eprintln!("tac: standard input: {}", e);
                     had_error = true;
                     continue;
                 }
@@ -56,7 +56,7 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             match read_file(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("ftac: {}: {}", filename, e);
+                    eprintln!("tac: {}: {}", filename, e);
                     had_error = true;
                     continue;
                 }
@@ -92,7 +92,7 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 process::exit(0);
             }
-            eprintln!("ftac: write error: {}", e);
+            eprintln!("tac: write error: {}", e);
             had_error = true;
         }
     }

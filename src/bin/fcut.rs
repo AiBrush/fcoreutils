@@ -12,7 +12,7 @@ use coreutils_rs::common::io::read_file;
 use coreutils_rs::cut::{self, CutMode};
 
 #[derive(Parser)]
-#[command(name = "fcut", about = "Remove sections from each line of files")]
+#[command(name = "cut", about = "Remove sections from each line of files")]
 struct Cli {
     /// Select only these bytes
     #[arg(short = 'b', long = "bytes", value_name = "LIST")]
@@ -61,13 +61,13 @@ fn main() {
     let mode_count =
         cli.bytes.is_some() as u8 + cli.characters.is_some() as u8 + cli.fields.is_some() as u8;
     if mode_count == 0 {
-        eprintln!("fcut: you must specify a list of bytes, characters, or fields");
-        eprintln!("Try 'fcut --help' for more information.");
+        eprintln!("cut: you must specify a list of bytes, characters, or fields");
+        eprintln!("Try 'cut --help' for more information.");
         process::exit(1);
     }
     if mode_count > 1 {
-        eprintln!("fcut: only one type of list may be specified");
-        eprintln!("Try 'fcut --help' for more information.");
+        eprintln!("cut: only one type of list may be specified");
+        eprintln!("Try 'cut --help' for more information.");
         process::exit(1);
     }
 
@@ -82,15 +82,15 @@ fn main() {
     let ranges = match cut::parse_ranges(spec) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("fcut: {}", e);
+            eprintln!("cut: {}", e);
             process::exit(1);
         }
     };
 
     let delim = if let Some(ref d) = cli.delimiter {
         if d.len() != 1 {
-            eprintln!("fcut: the delimiter must be a single character");
-            eprintln!("Try 'fcut --help' for more information.");
+            eprintln!("cut: the delimiter must be a single character");
+            eprintln!("Try 'cut --help' for more information.");
             process::exit(1);
         }
         d.as_bytes()[0]
@@ -145,7 +145,7 @@ fn main() {
             match read_file(Path::new(filename)) {
                 Ok(data) => cut::process_cut_data(&data, &cfg, &mut out),
                 Err(e) => {
-                    eprintln!("fcut: {}: {}", filename, e);
+                    eprintln!("cut: {}: {}", filename, e);
                     had_error = true;
                     continue;
                 }
@@ -156,7 +156,7 @@ fn main() {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 process::exit(0);
             }
-            eprintln!("fcut: write error: {}", e);
+            eprintln!("cut: write error: {}", e);
             had_error = true;
         }
     }
@@ -165,7 +165,7 @@ fn main() {
         if e.kind() == io::ErrorKind::BrokenPipe {
             process::exit(0);
         }
-        eprintln!("fcut: write error: {}", e);
+        eprintln!("cut: write error: {}", e);
         had_error = true;
     }
 

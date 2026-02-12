@@ -7,7 +7,7 @@ use coreutils_rs::sort::{
 };
 
 #[derive(Parser)]
-#[command(name = "fsort", about = "Sort lines of text files")]
+#[command(name = "sort", about = "Sort lines of text files")]
 struct Cli {
     /// Ignore leading blanks
     #[arg(short = 'b', long = "ignore-leading-blanks")]
@@ -114,7 +114,7 @@ fn main() {
         match KeyDef::parse(key_spec) {
             Ok(k) => keys.push(k),
             Err(e) => {
-                eprintln!("fsort: invalid key specification '{}': {}", key_spec, e);
+                eprintln!("sort: invalid key specification '{}': {}", key_spec, e);
                 process::exit(2);
             }
         }
@@ -129,7 +129,7 @@ fn main() {
         } else if s == "\\t" {
             b'\t'
         } else {
-            eprintln!("fsort: multi-character tab '{}'", s);
+            eprintln!("sort: multi-character tab '{}'", s);
             process::exit(2);
         }
     });
@@ -164,7 +164,7 @@ fn main() {
     // Parse buffer size
     let buffer_size = cli.buffer_size.as_ref().map(|s| {
         parse_buffer_size(s).unwrap_or_else(|e| {
-            eprintln!("fsort: invalid buffer size: {}", e);
+            eprintln!("sort: invalid buffer size: {}", e);
             process::exit(2);
         })
     });
@@ -203,11 +203,11 @@ fn main() {
 
     if let Err(e) = sort_and_output(&inputs, &config) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
-            eprintln!("fsort: write failed: 'standard output': Broken pipe");
-            eprintln!("fsort: write error");
+            eprintln!("sort: write failed: 'standard output': Broken pipe");
+            eprintln!("sort: write error");
             process::exit(2);
         }
-        eprintln!("fsort: {}", e);
+        eprintln!("sort: {}", e);
         process::exit(2);
     }
 }

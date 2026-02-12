@@ -11,13 +11,13 @@ use rayon::prelude::*;
 
 use coreutils_rs::hash::{self, HashAlgorithm};
 
-const TOOL_NAME: &str = "fsha256sum";
+const TOOL_NAME: &str = "sha256sum";
 /// SHA256 hex digest is always 64 characters.
 const SHA256_HEX_LEN: usize = 64;
 
 #[derive(Parser)]
 #[command(
-    name = "fsha256sum",
+    name = "sha256sum",
     about = "Compute and check SHA256 message digest",
     after_help = "With no FILE, or when FILE is -, read standard input."
 )]

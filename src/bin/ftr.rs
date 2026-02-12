@@ -11,9 +11,9 @@ use coreutils_rs::tr;
 
 #[derive(Parser)]
 #[command(
-    name = "ftr",
+    name = "tr",
     about = "Translate, squeeze, and/or delete characters",
-    override_usage = "ftr [OPTION]... SET1 [SET2]"
+    override_usage = "tr [OPTION]... SET1 [SET2]"
 )]
 struct Cli {
     /// Use the complement of SET1
@@ -109,7 +109,7 @@ fn main() {
     let result = if cli.delete && cli.squeeze {
         // -d -s: delete SET1 chars, then squeeze SET2 chars
         if cli.sets.len() < 2 {
-            eprintln!("ftr: missing operand after '{}'", set1_str);
+            eprintln!("tr: missing operand after '{}'", set1_str);
             eprintln!("Two strings must be given when both deleting and squeezing repeats.");
             process::exit(1);
         }
@@ -130,7 +130,7 @@ fn main() {
     } else if cli.delete {
         // -d only: delete SET1 chars
         if cli.sets.len() > 1 {
-            eprintln!("ftr: extra operand '{}'", cli.sets[1]);
+            eprintln!("tr: extra operand '{}'", cli.sets[1]);
             eprintln!("Only one string may be given when deleting without squeezing.");
             process::exit(1);
         }
@@ -183,7 +183,7 @@ fn main() {
     } else {
         // Default: translate SET1 -> SET2
         if cli.sets.len() < 2 {
-            eprintln!("ftr: missing operand after '{}'", set1_str);
+            eprintln!("tr: missing operand after '{}'", set1_str);
             eprintln!("Two strings must be given when translating.");
             process::exit(1);
         }
@@ -213,7 +213,7 @@ fn main() {
     if let Err(e) = result
         && e.kind() != io::ErrorKind::BrokenPipe
     {
-        eprintln!("ftr: {}", e);
+        eprintln!("tr: {}", e);
         process::exit(1);
     }
 }

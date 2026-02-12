@@ -11,10 +11,10 @@ use rayon::prelude::*;
 
 use coreutils_rs::hash::{self, HashAlgorithm};
 
-const TOOL_NAME: &str = "fmd5sum";
+const TOOL_NAME: &str = "md5sum";
 
 #[derive(Parser)]
-#[command(name = "fmd5sum", about = "Compute and check MD5 message digest")]
+#[command(name = "md5sum", about = "Compute and check MD5 message digest")]
 struct Cli {
     /// Read in binary mode
     #[arg(short = 'b', long = "binary")]

@@ -287,7 +287,7 @@ pub fn check_sorted(inputs: &[String], config: &SortConfig) -> io::Result<bool> 
                 } else {
                     &inputs[0]
                 };
-                eprintln!("fsort: {}:{}: disorder: {}", filename, i + 1, line_display);
+                eprintln!("sort: {}:{}: disorder: {}", filename, i + 1, line_display);
             }
             return Ok(false);
         }

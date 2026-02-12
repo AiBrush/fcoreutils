@@ -11,11 +11,11 @@ use rayon::prelude::*;
 
 use coreutils_rs::hash;
 
-const TOOL_NAME: &str = "fb2sum";
+const TOOL_NAME: &str = "b2sum";
 
 #[derive(Parser)]
 #[command(
-    name = "fb2sum",
+    name = "b2sum",
     about = "Compute and check BLAKE2b message digest",
     after_help = "With no FILE, or when FILE is -, read standard input."
 )]
