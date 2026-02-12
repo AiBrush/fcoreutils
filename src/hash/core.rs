@@ -71,8 +71,10 @@ pub fn hash_reader<R: Read>(algo: HashAlgorithm, reader: R) -> io::Result<String
 }
 
 /// Threshold below which read() is faster than mmap() due to mmap setup overhead.
-/// For small files, the page table setup + madvise syscalls cost more than a simple read.
-const MMAP_THRESHOLD: u64 = 256 * 1024; // 256KB
+/// mmap creates page table entries (one per 4KB page), issues madvise syscalls,
+/// and requires munmap cleanup. For files under 1MB, the total mmap overhead
+/// (~50-200μs) is significant relative to hash time (~500μs for 1MB at 2GB/s).
+const MMAP_THRESHOLD: u64 = 1024 * 1024; // 1MB
 
 // Thread-local reusable buffer for small file reads.
 // Avoids per-file heap allocation when processing many small files sequentially or in parallel.
