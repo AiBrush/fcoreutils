@@ -181,6 +181,21 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
     let output_delim = cfg.output_delim;
     let suppress = cfg.suppress_no_delim;
 
+    // Zero-copy fast path: if delimiter never appears in data, output = input unchanged.
+    // Single SIMD memchr scan of entire data (~10 GB/s) to detect no-delimiter case.
+    if !complement && memchr::memchr(delim, data).is_none() {
+        if suppress {
+            return Ok(()); // All lines suppressed (no delimiter found on any line)
+        }
+        // Output is identical to input (every line has no delimiter -> output whole line)
+        out.write_all(data)?;
+        // GNU cut ensures trailing newline
+        if !data.is_empty() && *data.last().unwrap() != line_delim {
+            out.write_all(&[line_delim])?;
+        }
+        return Ok(());
+    }
+
     // Ultra-fast path: single field extraction (e.g., cut -f5)
     if !complement && ranges.len() == 1 && ranges[0].start == ranges[0].end {
         return process_single_field(data, delim, line_delim, ranges[0].start, suppress, out);
