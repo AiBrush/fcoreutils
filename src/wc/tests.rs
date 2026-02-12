@@ -488,9 +488,10 @@ fn test_count_all_binary_data() {
     let counts = count_all(data, false);
     assert_eq!(counts.lines, 2);
     assert_eq!(counts.bytes, 7);
-    // C locale: all bytes here are non-printable or space — 0 words
-    // (NUL, SOH, STX are transparent; \n is space; \xFF, \xFE are transparent)
-    assert_eq!(counts.words, 0);
+    // C locale: NUL is printable (like GNU), SOH/STX are transparent, \n is space,
+    // \xFF/\xFE are transparent. NUL starts a word, SOH/STX continue it → 1 word before \n.
+    // After \n, \xFF/\xFE are transparent (no new word) → total 1 word.
+    assert_eq!(counts.words, 1);
     // C locale: each byte is a char
     assert_eq!(counts.chars, 7);
 }
