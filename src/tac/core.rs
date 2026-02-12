@@ -104,11 +104,13 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
         total += end - start;
     }
 
-    // Allocate output buffer (no zero-init needed since we'll fill it completely)
-    let mut outbuf: Vec<u8> = Vec::with_capacity(total);
-    unsafe {
-        outbuf.set_len(total);
-    }
+    // Allocate output buffer
+    #[allow(clippy::uninit_vec)]
+    let mut outbuf: Vec<u8> = unsafe {
+        let mut v = Vec::with_capacity(total);
+        v.set_len(total); // SAFETY: fully overwritten by copy_nonoverlapping below
+        v
+    };
 
     // For large data: parallel copy using rayon
     if data.len() >= PAR_THRESHOLD && records.len() > 64 {
@@ -213,10 +215,12 @@ pub fn tac_string_separator(
     }
 
     // Allocate and fill output buffer
-    let mut outbuf: Vec<u8> = Vec::with_capacity(total);
-    unsafe {
-        outbuf.set_len(total);
-    }
+    #[allow(clippy::uninit_vec)]
+    let mut outbuf: Vec<u8> = unsafe {
+        let mut v = Vec::with_capacity(total);
+        v.set_len(total); // SAFETY: fully overwritten by copy_nonoverlapping below
+        v
+    };
 
     if data.len() >= PAR_THRESHOLD && records.len() > 64 {
         let out_base = outbuf.as_mut_ptr() as usize;

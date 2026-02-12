@@ -528,10 +528,8 @@ fn process_filter_fast_singlepass(
     let mut outbuf = Vec::with_capacity(data.len() / 2);
 
     let prev_start: usize = 0;
-    let prev_end: usize;
-
-    match memchr::memchr(term, data) {
-        Some(pos) => prev_end = pos,
+    let prev_end: usize = match memchr::memchr(term, data) {
+        Some(pos) => pos,
         None => {
             // Single line: unique (count=1)
             if !repeated {
@@ -540,7 +538,7 @@ fn process_filter_fast_singlepass(
             }
             return writer.write_all(&outbuf);
         }
-    }
+    };
 
     let mut prev_start_mut = prev_start;
     let mut prev_end_mut = prev_end;
