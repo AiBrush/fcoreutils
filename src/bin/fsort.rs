@@ -203,8 +203,7 @@ fn main() {
 
     if let Err(e) = sort_and_output(&inputs, &config) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
-            eprintln!("sort: write failed: 'standard output': Broken pipe");
-            eprintln!("sort: write error");
+            eprintln!("sort: write error: Broken pipe");
             process::exit(2);
         }
         eprintln!("sort: {}", e);
