@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
+
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use md5::Md5;
