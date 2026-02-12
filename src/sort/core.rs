@@ -177,8 +177,8 @@ fn read_all_input(
             .map_err(|e| io::Error::new(e.kind(), format!("open failed: {}: {}", &inputs[0], e)))?;
         let metadata = file.metadata()?;
         if metadata.len() > 0 {
-            let mmap = unsafe { Mmap::map(&file)? };
-            // Start with Sequential for line scanning, caller switches to Random for sort
+            let mmap = unsafe { memmap2::MmapOptions::new().populate().map(&file)? };
+            // Sequential for line scanning; caller switches to Random for sort phase
             #[cfg(target_os = "linux")]
             {
                 let _ = mmap.advise(memmap2::Advice::Sequential);
