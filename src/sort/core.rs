@@ -896,11 +896,19 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
     if is_plain_lex && num_lines > 256 {
         // FAST PATH 1: Prefix-based lexicographic sort
         let reverse = gopts.reverse;
-        let mut entries: Vec<(u64, usize)> = offsets
-            .iter()
-            .enumerate()
-            .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
-            .collect();
+        let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+            offsets
+                .par_iter()
+                .enumerate()
+                .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
+                .collect()
+        } else {
+            offsets
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
+                .collect()
+        };
 
         let n = entries.len();
         if n > 1000 {
@@ -1117,11 +1125,22 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             if !has_flags {
                 // Prefix-based sort: cache 8-byte key prefix as u64
                 // Most comparisons resolve at the u64 level (no data[] access)
-                let mut entries: Vec<(u64, usize)> = key_offs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(s, e))| (if s < e { line_prefix(data, s, e) } else { 0u64 }, i))
-                    .collect();
+                let pfx = |i: usize, &(s, e): &(usize, usize)| -> (u64, usize) {
+                    (if s < e { line_prefix(data, s, e) } else { 0u64 }, i)
+                };
+                let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+                    key_offs
+                        .par_iter()
+                        .enumerate()
+                        .map(|(i, ko)| pfx(i, ko))
+                        .collect()
+                } else {
+                    key_offs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ko)| pfx(i, ko))
+                        .collect()
+                };
 
                 let n = entries.len();
                 if n > 1000 {
@@ -1214,11 +1233,20 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         // FAST PATH 4: Multi-key sort with pre-extracted key offsets for ALL keys.
         // Eliminates per-comparison key extraction (O(n log n) calls to extract_key).
         let mut indices: Vec<usize> = (0..num_lines).collect();
-        let all_key_offs: Vec<Vec<(usize, usize)>> = config
-            .keys
-            .iter()
-            .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
-            .collect();
+        let all_key_offs: Vec<Vec<(usize, usize)>> = if config.keys.len() > 1 && num_lines > 10_000
+        {
+            config
+                .keys
+                .par_iter()
+                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .collect()
+        } else {
+            config
+                .keys
+                .iter()
+                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .collect()
+        };
 
         let stable = config.stable;
         let random_seed = config.random_seed;
