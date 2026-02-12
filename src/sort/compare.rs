@@ -202,11 +202,11 @@ pub fn parse_general_numeric(s: &[u8]) -> f64 {
         }
     }
 
-    // Use fast-float for the numeric prefix — avoids UTF-8 validation overhead
-    match fast_float::parse_partial::<f64, _>(&s[start..i]) {
-        Ok((v, _)) => v,
-        Err(_) => f64::NAN,
-    }
+    // Parse the numeric prefix using standard library
+    std::str::from_utf8(&s[start..i])
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(f64::NAN)
 }
 
 /// Human numeric sort (-h): handles suffixes K, M, G, T, P, E, Z, Y.

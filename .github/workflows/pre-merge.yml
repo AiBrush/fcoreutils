@@ -2,7 +2,6 @@ name: Pre-merge
 
 on:
   merge_group:
-  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -15,7 +14,6 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     env:
       RUSTFLAGS: ""
@@ -64,15 +62,10 @@ jobs:
   pre-merge:
     name: Pre-merge
     needs: [build]
-    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "Builds will run when added to merge queue"
-            exit 0
-          fi
           if [[ "${{ needs.build.result }}" != "success" ]]; then
             echo "Build failed"
             exit 1
