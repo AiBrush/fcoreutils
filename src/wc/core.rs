@@ -177,6 +177,12 @@ fn count_words_c(data: &[u8]) -> u64 {
             let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
             if class == 1 {
                 in_word = false;
+            } else if class == 0 {
+                // NUL is printable in C locale — starts/continues word
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
             }
             // class == 2: transparent — in_word unchanged
             i += 1;
@@ -233,6 +239,16 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
                     seen_active = true;
                 }
                 in_word = false;
+            } else if class == 0 {
+                // NUL is printable in C locale — starts/continues word
+                if !seen_active {
+                    seen_active = true;
+                    first_active_is_printable = true;
+                }
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
             }
             i += 1;
         }
