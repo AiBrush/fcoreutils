@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -71,6 +72,13 @@ pub fn hash_reader<R: Read>(algo: HashAlgorithm, reader: R) -> io::Result<String
 /// For small files, the page table setup + madvise syscalls cost more than a simple read.
 const MMAP_THRESHOLD: u64 = 256 * 1024; // 256KB
 
+/// Thread-local reusable buffer for small file reads.
+/// Avoids per-file heap allocation when processing many small files sequentially or in parallel.
+/// Each rayon worker thread gets its own buffer automatically.
+thread_local! {
+    static READ_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(MMAP_THRESHOLD as usize));
+}
+
 /// Track whether O_NOATIME is supported to avoid repeated failed open() attempts.
 /// After the first EPERM, we never try O_NOATIME again (saves one syscall per file).
 #[cfg(target_os = "linux")]
@@ -117,46 +125,86 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     }
 
     if is_regular && len > 0 {
-        // Small files: read from already-open fd (avoids second open from fs::read)
+        // Small files: read into thread-local buffer (zero allocation after first call)
         if len < MMAP_THRESHOLD {
-            let mut data = Vec::with_capacity(len as usize);
-            Read::read_to_end(&mut &file, &mut data)?;
-            return Ok(hash_bytes(algo, &data));
+            return READ_BUF.with(|cell| {
+                let mut buf = cell.borrow_mut();
+                buf.clear();
+                // Reserve is a no-op if capacity >= len (which it is after first call)
+                buf.reserve(len as usize);
+                Read::read_to_end(&mut &file, &mut *buf)?;
+                Ok(hash_bytes(algo, &buf))
+            });
         }
 
         // Large files: mmap the already-open fd for zero-copy
-        match unsafe {
-            MmapOptions::new()
-                .populate() // Eagerly populate page tables — avoids page faults
-                .map(&file)
-        } {
-            Ok(mmap) => {
-                #[cfg(target_os = "linux")]
-                {
-                    let _ = mmap.advise(memmap2::Advice::Sequential);
-                    // Request transparent huge pages for TLB efficiency on large files
-                    if len >= 2 * 1024 * 1024 {
-                        unsafe {
-                            libc::madvise(
-                                mmap.as_ptr() as *mut libc::c_void,
-                                mmap.len(),
-                                libc::MADV_HUGEPAGE,
-                            );
-                        }
-                    }
-                }
-                return Ok(hash_bytes(algo, &mmap));
-            }
-            Err(_) => {
-                let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
-                return hash_reader(algo, reader);
-            }
-        }
+        return mmap_and_hash(algo, &file);
     }
 
     // Fallback: buffered read (special files, pipes, etc.) — fd already open
     let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
     hash_reader(algo, reader)
+}
+
+/// Mmap a file and hash it. Shared by hash_file and blake2b_hash_file.
+fn mmap_and_hash(algo: HashAlgorithm, file: &File) -> io::Result<String> {
+    match unsafe {
+        MmapOptions::new()
+            .populate() // Eagerly populate page tables — avoids page faults during hash
+            .map(file)
+    } {
+        Ok(mmap) => {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                if mmap.len() >= 2 * 1024 * 1024 {
+                    unsafe {
+                        libc::madvise(
+                            mmap.as_ptr() as *mut libc::c_void,
+                            mmap.len(),
+                            libc::MADV_HUGEPAGE,
+                        );
+                    }
+                }
+            }
+            Ok(hash_bytes(algo, &mmap))
+        }
+        Err(_) => {
+            // mmap failed — fall back to buffered read from the same fd
+            let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
+            hash_reader(algo, reader)
+        }
+    }
+}
+
+/// Mmap a file and hash with BLAKE2b. Shared helper for blake2b_hash_file.
+fn mmap_and_hash_blake2b(file: &File, output_bytes: usize) -> io::Result<String> {
+    match unsafe {
+        MmapOptions::new()
+            .populate()
+            .map(file)
+    } {
+        Ok(mmap) => {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                if mmap.len() >= 2 * 1024 * 1024 {
+                    unsafe {
+                        libc::madvise(
+                            mmap.as_ptr() as *mut libc::c_void,
+                            mmap.len(),
+                            libc::MADV_HUGEPAGE,
+                        );
+                    }
+                }
+            }
+            Ok(blake2b_hash_data(&mmap, output_bytes))
+        }
+        Err(_) => {
+            let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
+            blake2b_hash_reader(reader, output_bytes)
+        }
+    }
 }
 
 /// Hash stdin. Reads all data first, then hashes in one pass for optimal throughput.
@@ -288,36 +336,19 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
     }
 
     if is_regular && len > 0 {
-        // Small files: read from already-open fd
+        // Small files: read into thread-local buffer (zero allocation after first call)
         if len < MMAP_THRESHOLD {
-            let mut data = Vec::with_capacity(len as usize);
-            Read::read_to_end(&mut &file, &mut data)?;
-            return Ok(blake2b_hash_data(&data, output_bytes));
+            return READ_BUF.with(|cell| {
+                let mut buf = cell.borrow_mut();
+                buf.clear();
+                buf.reserve(len as usize);
+                Read::read_to_end(&mut &file, &mut *buf)?;
+                Ok(blake2b_hash_data(&buf, output_bytes))
+            });
         }
 
         // Large files: mmap the already-open fd for zero-copy
-        match unsafe { MmapOptions::new().populate().map(&file) } {
-            Ok(mmap) => {
-                #[cfg(target_os = "linux")]
-                {
-                    let _ = mmap.advise(memmap2::Advice::Sequential);
-                    if len >= 2 * 1024 * 1024 {
-                        unsafe {
-                            libc::madvise(
-                                mmap.as_ptr() as *mut libc::c_void,
-                                mmap.len(),
-                                libc::MADV_HUGEPAGE,
-                            );
-                        }
-                    }
-                }
-                return Ok(blake2b_hash_data(&mmap, output_bytes));
-            }
-            Err(_) => {
-                let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
-                return blake2b_hash_reader(reader, output_bytes);
-            }
-        }
+        return mmap_and_hash_blake2b(&file, output_bytes);
     }
 
     // Fallback: buffered read — fd already open
@@ -632,17 +663,20 @@ const fn generate_hex_table() -> [[u8; 2]; 256] {
 const HEX_TABLE: [[u8; 2]; 256] = generate_hex_table();
 
 /// Fast hex encoding using 2-byte pair lookup table — one lookup per input byte.
+/// Uses String directly instead of Vec<u8> to avoid the from_utf8 conversion overhead.
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    let mut hex = vec![0u8; bytes.len() * 2];
-    let mut i = 0;
-    for &b in bytes {
-        let pair = unsafe { *HEX_TABLE.get_unchecked(b as usize) };
-        unsafe {
-            *hex.get_unchecked_mut(i) = pair[0];
-            *hex.get_unchecked_mut(i + 1) = pair[1];
+    let len = bytes.len() * 2;
+    let mut hex = String::with_capacity(len);
+    // SAFETY: We write exactly `len` valid ASCII hex bytes into the String's buffer.
+    unsafe {
+        let buf = hex.as_mut_vec();
+        buf.set_len(len);
+        let ptr = buf.as_mut_ptr();
+        for (i, &b) in bytes.iter().enumerate() {
+            let pair = *HEX_TABLE.get_unchecked(b as usize);
+            *ptr.add(i * 2) = pair[0];
+            *ptr.add(i * 2 + 1) = pair[1];
         }
-        i += 2;
     }
-    // SAFETY: All bytes are ASCII hex digits [0-9a-f]
-    unsafe { String::from_utf8_unchecked(hex) }
+    hex
 }
