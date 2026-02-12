@@ -420,22 +420,19 @@ fn process_standard_bytes(
                 config,
             )
         {
-            // Slow path binary search with key extraction
-            let mut lo = i + 2;
-            let mut hi = num_lines;
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                if lines_equal(
+            // Slow path linear scan with key extraction
+            let mut j = i + 2;
+            while j < num_lines {
+                if !lines_equal(
                     content,
-                    line_content_at(data, &line_starts, mid, content_end),
+                    line_content_at(data, &line_starts, j, content_end),
                     config,
                 ) {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
+                    break;
                 }
+                j += 1;
             }
-            lo
+            j
         } else {
             i + 1
         };
