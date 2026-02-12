@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, IoSlice, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::sync::Arc;
 
 use memmap2::Mmap;
@@ -17,6 +17,7 @@ use rayon::prelude::*;
 
 use super::compare::{
     compare_with_opts, parse_general_numeric, parse_human_numeric, parse_numeric_value,
+    select_comparator, skip_leading_blanks,
 };
 use super::key::{KeyDef, KeyOpts, extract_key};
 
@@ -456,10 +457,8 @@ impl Ord for MergeEntryOrd {
 fn line_prefix(data: &[u8], start: usize, end: usize) -> u64 {
     let len = end - start;
     if len >= 8 {
-        let slice = &data[start..start + 8];
-        u64::from_be_bytes([
-            slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
-        ])
+        // Unaligned u64 load + bswap: single instruction on x86_64
+        u64::from_be_bytes(unsafe { *(data.as_ptr().add(start) as *const [u8; 8]) })
     } else {
         let mut bytes = [0u8; 8];
         bytes[..len].copy_from_slice(&data[start..end]);
@@ -518,36 +517,8 @@ fn float_to_sortable_u64(f: f64) -> u64 {
     }
 }
 
-/// Maximum IoSlices per writev call (Linux IOV_MAX = 1024).
-const IOV_BATCH: usize = 1024;
-
-/// Write all IoSlices, handling partial writes and batching.
-fn write_all_slices(out: &mut impl Write, slices: &[IoSlice<'_>]) -> io::Result<()> {
-    let mut offset = 0;
-    while offset < slices.len() {
-        let end = (offset + IOV_BATCH).min(slices.len());
-        let n = out.write_vectored(&slices[offset..end])?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "failed to write any data",
-            ));
-        }
-        let mut remaining = n;
-        while offset < end && remaining >= slices[offset].len() {
-            remaining -= slices[offset].len();
-            offset += 1;
-        }
-        if remaining > 0 && offset < end {
-            out.write_all(&slices[offset][remaining..])?;
-            offset += 1;
-        }
-    }
-    Ok(())
-}
-
 /// Write sorted indices to output, with optional unique dedup.
-/// Uses writev (vectored I/O) to write directly from mmap — zero intermediate copies.
+/// Uses contiguous output buffer with batched write_all for efficient I/O.
 fn write_sorted_output(
     data: &[u8],
     offsets: &[(usize, usize)],
@@ -556,8 +527,7 @@ fn write_sorted_output(
     writer: &mut impl Write,
     terminator: &[u8],
 ) -> io::Result<()> {
-    // Build IoSlice entries pointing directly into mmap data
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(sorted_indices.len() * 2);
+    let mut buf = Vec::with_capacity(OUTPUT_BUF_SIZE);
 
     if config.unique {
         let mut prev: Option<usize> = None;
@@ -572,29 +542,28 @@ fn write_sorted_output(
                 None => true,
             };
             if should_output {
-                slices.push(IoSlice::new(line));
-                slices.push(IoSlice::new(terminator));
+                buf.extend_from_slice(line);
+                buf.extend_from_slice(terminator);
                 prev = Some(idx);
             }
-            // Flush batch to avoid excessive memory
-            if slices.len() >= IOV_BATCH {
-                write_all_slices(writer, &slices)?;
-                slices.clear();
+            if buf.len() >= OUTPUT_BUF_SIZE {
+                writer.write_all(&buf)?;
+                buf.clear();
             }
         }
     } else {
         for &idx in sorted_indices {
             let (s, e) = offsets[idx];
-            slices.push(IoSlice::new(&data[s..e]));
-            slices.push(IoSlice::new(terminator));
-            if slices.len() >= IOV_BATCH {
-                write_all_slices(writer, &slices)?;
-                slices.clear();
+            buf.extend_from_slice(&data[s..e]);
+            buf.extend_from_slice(terminator);
+            if buf.len() >= OUTPUT_BUF_SIZE {
+                writer.write_all(&buf)?;
+                buf.clear();
             }
         }
     }
-    if !slices.is_empty() {
-        write_all_slices(writer, &slices)?;
+    if !buf.is_empty() {
+        writer.write_all(&buf)?;
     }
     Ok(())
 }
@@ -676,6 +645,64 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
     }
 
     let terminator: &[u8] = if config.zero_terminated { b"\0" } else { b"\n" };
+
+    // === Already-sorted detection: O(n) scan before sorting ===
+    // If data is already in order, skip the O(n log n) sort entirely.
+    // This turns the "already sorted" benchmark from 2.1x to near-instant.
+    if num_lines > 1 {
+        let mut is_sorted = true;
+        for i in 1..num_lines {
+            let (s1, e1) = offsets[i - 1];
+            let (s2, e2) = offsets[i];
+            let cmp = compare_lines(&data[s1..e1], &data[s2..e2], config);
+            if cmp == Ordering::Greater {
+                is_sorted = false;
+                break;
+            }
+        }
+        if is_sorted {
+            // Data is already sorted — output directly without sorting
+            let mut buf = Vec::with_capacity(OUTPUT_BUF_SIZE);
+            if config.unique {
+                let mut prev: Option<usize> = None;
+                for i in 0..num_lines {
+                    let (s, e) = offsets[i];
+                    let emit = match prev {
+                        Some(p) => {
+                            let (ps, pe) = offsets[p];
+                            compare_lines(&data[ps..pe], &data[s..e], config) != Ordering::Equal
+                        }
+                        None => true,
+                    };
+                    if emit {
+                        buf.extend_from_slice(&data[s..e]);
+                        buf.extend_from_slice(terminator);
+                        prev = Some(i);
+                    }
+                    if buf.len() >= OUTPUT_BUF_SIZE {
+                        writer.write_all(&buf)?;
+                        buf.clear();
+                    }
+                }
+            } else {
+                for i in 0..num_lines {
+                    let (s, e) = offsets[i];
+                    buf.extend_from_slice(&data[s..e]);
+                    buf.extend_from_slice(terminator);
+                    if buf.len() >= OUTPUT_BUF_SIZE {
+                        writer.write_all(&buf)?;
+                        buf.clear();
+                    }
+                }
+            }
+            if !buf.is_empty() {
+                writer.write_all(&buf)?;
+            }
+            writer.flush()?;
+            return Ok(());
+        }
+    }
+
     let mut indices: Vec<usize> = (0..num_lines).collect();
 
     // Switch to random access for sort phase (comparisons jump to arbitrary lines)
@@ -737,14 +764,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             entries.sort_unstable_by(prefix_cmp);
         }
 
-        // Output using writev — zero-copy from mmap
         // Switch to sequential for output phase
         #[cfg(target_os = "linux")]
         if let FileData::Mmap(ref mmap) = buffer {
             let _ = mmap.advise(memmap2::Advice::Sequential);
         }
 
-        let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(entries.len().min(IOV_BATCH) * 2);
+        let mut buf = Vec::with_capacity(OUTPUT_BUF_SIZE);
         if config.unique {
             let mut prev: Option<usize> = None;
             for &(_, idx) in &entries {
@@ -758,28 +784,28 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     None => true,
                 };
                 if emit {
-                    slices.push(IoSlice::new(line));
-                    slices.push(IoSlice::new(terminator));
+                    buf.extend_from_slice(line);
+                    buf.extend_from_slice(terminator);
                     prev = Some(idx);
                 }
-                if slices.len() >= IOV_BATCH {
-                    write_all_slices(&mut writer, &slices)?;
-                    slices.clear();
+                if buf.len() >= OUTPUT_BUF_SIZE {
+                    writer.write_all(&buf)?;
+                    buf.clear();
                 }
             }
         } else {
             for &(_, idx) in &entries {
                 let (s, e) = offsets[idx];
-                slices.push(IoSlice::new(&data[s..e]));
-                slices.push(IoSlice::new(terminator));
-                if slices.len() >= IOV_BATCH {
-                    write_all_slices(&mut writer, &slices)?;
-                    slices.clear();
+                buf.extend_from_slice(&data[s..e]);
+                buf.extend_from_slice(terminator);
+                if buf.len() >= OUTPUT_BUF_SIZE {
+                    writer.write_all(&buf)?;
+                    buf.clear();
                 }
             }
         }
-        if !slices.is_empty() {
-            write_all_slices(&mut writer, &slices)?;
+        if !buf.is_empty() {
+            writer.write_all(&buf)?;
         }
     } else if is_numeric_only {
         // FAST PATH 2: Pre-parsed numeric sort with u64 comparison
@@ -947,20 +973,27 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     indices[i] = idx;
                 }
             } else {
+                // Pre-select comparator: eliminates per-comparison option branching
+                let (cmp_fn, needs_blank, needs_reverse) = select_comparator(opts, random_seed);
                 do_sort(&mut indices, stable, |&a, &b| {
                     let (sa, ea) = key_offs[a];
                     let (sb, eb) = key_offs[b];
                     let ka = if sa == ea {
                         &[] as &[u8]
+                    } else if needs_blank {
+                        skip_leading_blanks(&data[sa..ea])
                     } else {
                         &data[sa..ea]
                     };
                     let kb = if sb == eb {
                         &[] as &[u8]
+                    } else if needs_blank {
+                        skip_leading_blanks(&data[sb..eb])
                     } else {
                         &data[sb..eb]
                     };
-                    let ord = compare_with_opts(ka, kb, opts, random_seed);
+                    let ord = cmp_fn(ka, kb);
+                    let ord = if needs_reverse { ord.reverse() } else { ord };
                     if ord == Ordering::Equal && !stable {
                         data[offsets[a].0..offsets[a].1].cmp(&data[offsets[b].0..offsets[b].1])
                     } else {
@@ -985,21 +1018,10 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         let keys = &config.keys;
         let global_opts = &config.global_opts;
 
-        do_sort(&mut indices, stable, |&a, &b| {
-            for (ki, key) in keys.iter().enumerate() {
-                let (sa, ea) = all_key_offs[ki][a];
-                let (sb, eb) = all_key_offs[ki][b];
-                let ka = if sa == ea {
-                    &[] as &[u8]
-                } else {
-                    &data[sa..ea]
-                };
-                let kb = if sb == eb {
-                    &[] as &[u8]
-                } else {
-                    &data[sb..eb]
-                };
-
+        // Pre-select comparators: eliminates per-comparison option branching
+        let comparators: Vec<_> = keys
+            .iter()
+            .map(|key| {
                 let opts = if key.opts.has_sort_type()
                     || key.opts.ignore_case
                     || key.opts.dictionary_order
@@ -1011,8 +1033,35 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 } else {
                     global_opts
                 };
+                select_comparator(opts, random_seed)
+            })
+            .collect();
 
-                let result = compare_with_opts(ka, kb, opts, random_seed);
+        do_sort(&mut indices, stable, |&a, &b| {
+            for (ki, &(cmp_fn, needs_blank, needs_reverse)) in comparators.iter().enumerate() {
+                let (sa, ea) = all_key_offs[ki][a];
+                let (sb, eb) = all_key_offs[ki][b];
+                let ka = if sa == ea {
+                    &[] as &[u8]
+                } else if needs_blank {
+                    skip_leading_blanks(&data[sa..ea])
+                } else {
+                    &data[sa..ea]
+                };
+                let kb = if sb == eb {
+                    &[] as &[u8]
+                } else if needs_blank {
+                    skip_leading_blanks(&data[sb..eb])
+                } else {
+                    &data[sb..eb]
+                };
+
+                let result = cmp_fn(ka, kb);
+                let result = if needs_reverse {
+                    result.reverse()
+                } else {
+                    result
+                };
                 if result != Ordering::Equal {
                     return result;
                 }
@@ -1027,12 +1076,77 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         });
 
         write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+    } else if !config.keys.is_empty() {
+        // GENERAL PATH: Key-based sort with pre-selected comparators (fallback for unusual configs)
+        let stable = config.stable;
+        let random_seed = config.random_seed;
+        let keys = &config.keys;
+        let global_opts = &config.global_opts;
+
+        let comparators: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                let opts = if key.opts.has_any_option() {
+                    &key.opts
+                } else {
+                    global_opts
+                };
+                select_comparator(opts, random_seed)
+            })
+            .collect();
+
+        do_sort(&mut indices, stable, |&a, &b| {
+            let la = &data[offsets[a].0..offsets[a].1];
+            let lb = &data[offsets[b].0..offsets[b].1];
+
+            for (ki, &(cmp_fn, needs_blank, needs_reverse)) in comparators.iter().enumerate() {
+                let ka = extract_key(la, &keys[ki], config.separator);
+                let kb = extract_key(lb, &keys[ki], config.separator);
+                let ka = if needs_blank {
+                    skip_leading_blanks(ka)
+                } else {
+                    ka
+                };
+                let kb = if needs_blank {
+                    skip_leading_blanks(kb)
+                } else {
+                    kb
+                };
+                let result = cmp_fn(ka, kb);
+                let result = if needs_reverse {
+                    result.reverse()
+                } else {
+                    result
+                };
+                if result != Ordering::Equal {
+                    return result;
+                }
+            }
+            if !stable { la.cmp(lb) } else { Ordering::Equal }
+        });
+
+        write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
     } else {
-        // GENERAL PATH: Index-based sort with full comparison (fallback)
-        do_sort(&mut indices, config.stable, |&a, &b| {
-            let (sa, ea) = offsets[a];
-            let (sb, eb) = offsets[b];
-            compare_lines(&data[sa..ea], &data[sb..eb], config)
+        // GENERAL PATH: No keys, non-lex sort with pre-selected comparator
+        let (cmp_fn, needs_blank, needs_reverse) =
+            select_comparator(&config.global_opts, config.random_seed);
+        let stable = config.stable;
+
+        do_sort(&mut indices, stable, |&a, &b| {
+            let la = &data[offsets[a].0..offsets[a].1];
+            let lb = &data[offsets[b].0..offsets[b].1];
+            let la = if needs_blank {
+                skip_leading_blanks(la)
+            } else {
+                la
+            };
+            let lb = if needs_blank {
+                skip_leading_blanks(lb)
+            } else {
+                lb
+            };
+            let ord = cmp_fn(la, lb);
+            if needs_reverse { ord.reverse() } else { ord }
         });
 
         write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
