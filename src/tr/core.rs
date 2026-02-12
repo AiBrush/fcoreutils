@@ -1180,7 +1180,8 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         let len = chunk.len();
         let mut i = 0;
 
-        // 8-byte unrolled scan for better ILP
+        // 8-byte branchless unrolled scan: always write, conditionally advance pointer.
+        // Eliminates 8 branches per iteration for better throughput with large delete sets.
         while i + 8 <= len {
             unsafe {
                 let b0 = *chunk.get_unchecked(i);
@@ -1192,38 +1193,22 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
                 let b6 = *chunk.get_unchecked(i + 6);
                 let b7 = *chunk.get_unchecked(i + 7);
 
-                if !is_member(&member, b0) {
-                    *outbuf.get_unchecked_mut(out_pos) = b0;
-                    out_pos += 1;
-                }
-                if !is_member(&member, b1) {
-                    *outbuf.get_unchecked_mut(out_pos) = b1;
-                    out_pos += 1;
-                }
-                if !is_member(&member, b2) {
-                    *outbuf.get_unchecked_mut(out_pos) = b2;
-                    out_pos += 1;
-                }
-                if !is_member(&member, b3) {
-                    *outbuf.get_unchecked_mut(out_pos) = b3;
-                    out_pos += 1;
-                }
-                if !is_member(&member, b4) {
-                    *outbuf.get_unchecked_mut(out_pos) = b4;
-                    out_pos += 1;
-                }
-                if !is_member(&member, b5) {
-                    *outbuf.get_unchecked_mut(out_pos) = b5;
-                    out_pos += 1;
-                }
-                if !is_member(&member, b6) {
-                    *outbuf.get_unchecked_mut(out_pos) = b6;
-                    out_pos += 1;
-                }
-                if !is_member(&member, b7) {
-                    *outbuf.get_unchecked_mut(out_pos) = b7;
-                    out_pos += 1;
-                }
+                *outbuf.get_unchecked_mut(out_pos) = b0;
+                out_pos += !is_member(&member, b0) as usize;
+                *outbuf.get_unchecked_mut(out_pos) = b1;
+                out_pos += !is_member(&member, b1) as usize;
+                *outbuf.get_unchecked_mut(out_pos) = b2;
+                out_pos += !is_member(&member, b2) as usize;
+                *outbuf.get_unchecked_mut(out_pos) = b3;
+                out_pos += !is_member(&member, b3) as usize;
+                *outbuf.get_unchecked_mut(out_pos) = b4;
+                out_pos += !is_member(&member, b4) as usize;
+                *outbuf.get_unchecked_mut(out_pos) = b5;
+                out_pos += !is_member(&member, b5) as usize;
+                *outbuf.get_unchecked_mut(out_pos) = b6;
+                out_pos += !is_member(&member, b6) as usize;
+                *outbuf.get_unchecked_mut(out_pos) = b7;
+                out_pos += !is_member(&member, b7) as usize;
             }
             i += 8;
         }
@@ -1231,10 +1216,8 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         while i < len {
             unsafe {
                 let b = *chunk.get_unchecked(i);
-                if !is_member(&member, b) {
-                    *outbuf.get_unchecked_mut(out_pos) = b;
-                    out_pos += 1;
-                }
+                *outbuf.get_unchecked_mut(out_pos) = b;
+                out_pos += !is_member(&member, b) as usize;
             }
             i += 1;
         }
