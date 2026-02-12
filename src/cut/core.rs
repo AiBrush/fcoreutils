@@ -204,6 +204,18 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
         );
     }
 
+    // Fast path: contiguous from-start field range (e.g., cut -f1-5, cut -f-3)
+    // with default output delimiter. Just find the N-th delimiter and copy.
+    if !complement
+        && ranges.len() == 1
+        && ranges[0].start == 1
+        && output_delim.len() == 1
+        && output_delim[0] == delim
+        && ranges[0].end < usize::MAX
+    {
+        return process_fields_prefix(data, delim, line_delim, ranges[0].end, suppress, out);
+    }
+
     // Pre-compute for general field extraction
     let max_field = if complement {
         usize::MAX
@@ -501,6 +513,109 @@ fn complement_single_field_line(
     }
 }
 
+/// Contiguous from-start field range extraction (e.g., `cut -f1-5`).
+/// Finds the N-th delimiter and copies everything before it (preserving original delimiters).
+/// Much faster than per-field selection: one memchr_iter scan with early exit.
+fn process_fields_prefix(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    last_field: usize,
+    suppress: bool,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    if data.len() >= PARALLEL_THRESHOLD {
+        let chunks = split_into_chunks(data, line_delim);
+        let results: Vec<Vec<u8>> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut buf = Vec::with_capacity(chunk.len());
+                fields_prefix_chunk(chunk, delim, line_delim, last_field, suppress, &mut buf);
+                buf
+            })
+            .collect();
+        for result in &results {
+            if !result.is_empty() {
+                out.write_all(result)?;
+            }
+        }
+    } else {
+        let mut buf = Vec::with_capacity(data.len());
+        fields_prefix_chunk(data, delim, line_delim, last_field, suppress, &mut buf);
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for contiguous from-start field range extraction.
+fn fields_prefix_chunk(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    last_field: usize,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    let mut start = 0;
+    for end_pos in memchr_iter(line_delim, data) {
+        let line = &data[start..end_pos];
+        fields_prefix_line(line, delim, line_delim, last_field, suppress, buf);
+        start = end_pos + 1;
+    }
+    if start < data.len() {
+        fields_prefix_line(&data[start..], delim, line_delim, last_field, suppress, buf);
+    }
+}
+
+/// Extract first N fields from one line (contiguous from-start range).
+/// Finds the N-th delimiter using memchr_iter with early exit.
+#[inline(always)]
+fn fields_prefix_line(
+    line: &[u8],
+    delim: u8,
+    line_delim: u8,
+    last_field: usize,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    if line.is_empty() {
+        if !suppress {
+            buf.push(line_delim);
+        }
+        return;
+    }
+
+    // Count delimiters; stop at last_field (we need fields 1..last_field)
+    let mut field_count = 1;
+    let mut has_delim = false;
+
+    for pos in memchr_iter(delim, line) {
+        has_delim = true;
+        if field_count >= last_field {
+            // Found enough fields — output up to this delimiter
+            buf.extend_from_slice(&line[..pos]);
+            buf.push(line_delim);
+            return;
+        }
+        field_count += 1;
+    }
+
+    if !has_delim {
+        if !suppress {
+            buf.extend_from_slice(line);
+            buf.push(line_delim);
+        }
+        return;
+    }
+
+    // Fewer fields than requested — output the entire line
+    // (all fields are within range since we have < last_field fields)
+    buf.extend_from_slice(line);
+    buf.push(line_delim);
+}
+
 /// First-field extraction using combined delimiter+newline SIMD scan.
 /// Single memchr2_iter pass finds both delimiter and newline positions,
 /// eliminating per-line memchr overhead (saves ~250K function calls for 10MB).
@@ -734,12 +849,76 @@ fn extract_fields_to_buf(
 
 // ── Fast path: byte/char extraction with batched output ──────────────────
 
+/// Ultra-fast path for `cut -b1-N`: single from-start byte range.
+/// Scans for newlines with SIMD memchr, truncates each line to N bytes.
+/// Avoids per-line function call + range check overhead entirely.
+fn process_bytes_from_start(
+    data: &[u8],
+    max_bytes: usize,
+    line_delim: u8,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    if data.len() >= PARALLEL_THRESHOLD {
+        let chunks = split_into_chunks(data, line_delim);
+        let results: Vec<Vec<u8>> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut buf = Vec::with_capacity(chunk.len());
+                bytes_from_start_chunk(chunk, max_bytes, line_delim, &mut buf);
+                buf
+            })
+            .collect();
+        for result in &results {
+            if !result.is_empty() {
+                out.write_all(result)?;
+            }
+        }
+    } else {
+        let mut buf = Vec::with_capacity(data.len());
+        bytes_from_start_chunk(data, max_bytes, line_delim, &mut buf);
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for from-start byte range extraction.
+/// For each line, outputs min(line_len, max_bytes) bytes + line delimiter.
+#[inline]
+fn bytes_from_start_chunk(data: &[u8], max_bytes: usize, line_delim: u8, buf: &mut Vec<u8>) {
+    let mut start = 0;
+    for pos in memchr_iter(line_delim, data) {
+        let line_len = pos - start;
+        let take = line_len.min(max_bytes);
+        buf.extend_from_slice(&data[start..start + take]);
+        buf.push(line_delim);
+        start = pos + 1;
+    }
+    // Handle last line without terminator
+    if start < data.len() {
+        let line_len = data.len() - start;
+        let take = line_len.min(max_bytes);
+        buf.extend_from_slice(&data[start..start + take]);
+        buf.push(line_delim);
+    }
+}
+
 /// Optimized byte/char extraction with batched output and parallel processing.
 fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io::Result<()> {
     let line_delim = cfg.line_delim;
     let ranges = cfg.ranges;
     let complement = cfg.complement;
     let output_delim = cfg.output_delim;
+
+    // Ultra-fast path: single range from byte 1 (e.g., cut -b1-10, cut -b-20)
+    // Avoids per-line function call overhead by scanning newlines and truncating inline.
+    if !complement && ranges.len() == 1 && ranges[0].start == 1 && output_delim.is_empty() {
+        let max_bytes = ranges[0].end;
+        if max_bytes < usize::MAX {
+            return process_bytes_from_start(data, max_bytes, line_delim, out);
+        }
+    }
 
     if data.len() >= PARALLEL_THRESHOLD {
         let chunks = split_into_chunks(data, line_delim);
