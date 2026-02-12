@@ -1156,6 +1156,65 @@ pub fn count_all(data: &[u8], utf8: bool) -> WcCounts {
     }
 }
 
+/// Quick check if data is likely all-ASCII by sampling three regions.
+/// Checks first 256 bytes, middle 256 bytes, and last 256 bytes.
+/// If any byte >= 0x80 is found, returns false.
+#[inline]
+fn check_ascii_sample(data: &[u8]) -> bool {
+    let len = data.len();
+    if len == 0 {
+        return true;
+    }
+
+    // Check in 8-byte blocks using OR-accumulation for speed
+    let check_region = |start: usize, end: usize| -> bool {
+        let mut or_acc = 0u8;
+        let region = &data[start..end];
+        let mut i = 0;
+        while i + 8 <= region.len() {
+            unsafe {
+                or_acc |= *region.get_unchecked(i);
+                or_acc |= *region.get_unchecked(i + 1);
+                or_acc |= *region.get_unchecked(i + 2);
+                or_acc |= *region.get_unchecked(i + 3);
+                or_acc |= *region.get_unchecked(i + 4);
+                or_acc |= *region.get_unchecked(i + 5);
+                or_acc |= *region.get_unchecked(i + 6);
+                or_acc |= *region.get_unchecked(i + 7);
+            }
+            i += 8;
+        }
+        while i < region.len() {
+            or_acc |= region[i];
+            i += 1;
+        }
+        or_acc < 0x80
+    };
+
+    let sample = 256.min(len);
+
+    // Check beginning
+    if !check_region(0, sample) {
+        return false;
+    }
+    // Check middle
+    if len > sample * 2 {
+        let mid = len / 2;
+        let mid_start = mid.saturating_sub(sample / 2);
+        if !check_region(mid_start, (mid_start + sample).min(len)) {
+            return false;
+        }
+    }
+    // Check end
+    if len > sample {
+        if !check_region(len - sample, len) {
+            return false;
+        }
+    }
+
+    true
+}
+
 // ──────────────────────────────────────────────────
 // Parallel counting for large files
 // ──────────────────────────────────────────────────
@@ -1234,14 +1293,30 @@ pub fn count_lwb(data: &[u8], utf8: bool) -> (u64, u64, u64) {
 /// Parallel counting of lines + words + bytes only (no chars).
 /// Optimized for the default `wc` mode: avoids unnecessary char-counting pass.
 /// C locale: single fused pass per chunk counts BOTH lines and words.
+/// UTF-8 with pure ASCII data: falls back to parallel C locale path.
 pub fn count_lwb_parallel(data: &[u8], utf8: bool) -> (u64, u64, u64) {
     if data.len() < PARALLEL_THRESHOLD {
         // Small file: use fused single-pass
         return count_lwb(data, utf8);
     }
 
-    // Word counting must be sequential for UTF-8 (state machine across chunks)
-    let (lines, words) = if utf8 {
+    // For UTF-8 locale: check if data is pure ASCII first.
+    // If so, UTF-8 and C locale produce identical word counts,
+    // and we can use the parallelizable C locale path.
+    let effective_utf8 = if utf8 {
+        // Quick ASCII check: sample first, middle, last 256 bytes
+        let is_ascii = check_ascii_sample(data);
+        if is_ascii {
+            false // Use C locale parallel path
+        } else {
+            true // Need sequential UTF-8 path
+        }
+    } else {
+        false
+    };
+
+    let (lines, words) = if effective_utf8 {
+        // Must be sequential for UTF-8 with non-ASCII data
         count_lines_words_utf8_fused(data)
     } else {
         // C locale: FUSED parallel lines+words counting — single pass per chunk
