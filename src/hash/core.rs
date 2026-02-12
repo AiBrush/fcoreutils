@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use digest::Digest;
 use md5::Md5;
+use memmap2::MmapOptions;
 
 /// Supported hash algorithms.
 #[derive(Debug, Clone, Copy)]
@@ -198,8 +199,6 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         // Files up to 8MB: read entirely + single-shot hash.
         // Contiguous data enables optimal CPU prefetching and avoids
         // per-chunk hasher.update() overhead.
-        // Use read_full into exact-size buffer instead of read_to_end
-        // to avoid the grow-and-probe loop (saves 1-2 extra read() syscalls).
         if len <= SINGLE_SHOT_THRESHOLD {
             fadvise_sequential(&file, len);
             let mut buf = vec![0u8; len as usize];
@@ -207,10 +206,27 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
             return Ok(hash_bytes(algo, &buf[..n]));
         }
 
-        // Large files (>8MB): streaming read with kernel readahead hint.
-        // fadvise(SEQUENTIAL) enables aggressive readahead (2x default).
-        fadvise_sequential(&file, len);
-        return hash_reader(algo, file);
+        // Large files (>8MB): zero-copy mmap + single-shot hash.
+        // Eliminates read() syscalls and memcpy from kernel→user space.
+        // With MAP_POPULATE, pages are pre-faulted; MADV_HUGEPAGE reduces
+        // TLB misses by ~500x for 100MB+ files.
+        match unsafe { MmapOptions::new().populate().map(&file) } {
+            Ok(mmap) => {
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = mmap.advise(memmap2::Advice::Sequential);
+                    if len >= 2 * 1024 * 1024 {
+                        let _ = mmap.advise(memmap2::Advice::HugePage);
+                    }
+                }
+                return Ok(hash_bytes(algo, &mmap));
+            }
+            Err(_) => {
+                // mmap failed — fall back to streaming read
+                fadvise_sequential(&file, len);
+                return hash_reader(algo, file);
+            }
+        }
     }
 
     // Fallback: streaming read (special files, pipes, etc.) — fd already open
@@ -350,9 +366,23 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
             return Ok(blake2b_hash_data(&buf[..n], output_bytes));
         }
 
-        // Large files (>8MB): streaming read with kernel readahead hint
-        fadvise_sequential(&file, len);
-        return blake2b_hash_reader(file, output_bytes);
+        // Large files (>8MB): zero-copy mmap + single-shot hash.
+        match unsafe { MmapOptions::new().populate().map(&file) } {
+            Ok(mmap) => {
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = mmap.advise(memmap2::Advice::Sequential);
+                    if len >= 2 * 1024 * 1024 {
+                        let _ = mmap.advise(memmap2::Advice::HugePage);
+                    }
+                }
+                return Ok(blake2b_hash_data(&mmap, output_bytes));
+            }
+            Err(_) => {
+                fadvise_sequential(&file, len);
+                return blake2b_hash_reader(file, output_bytes);
+            }
+        }
     }
 
     // Fallback: streaming read — fd already open
