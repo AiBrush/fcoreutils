@@ -5,8 +5,10 @@ use rayon::prelude::*;
 
 const BASE64_ENGINE: &base64_simd::Base64 = &base64_simd::STANDARD;
 
-/// Streaming encode chunk: 12MB aligned to 3 bytes for maximum throughput.
-const STREAM_ENCODE_CHUNK: usize = 12 * 1024 * 1024 - (12 * 1024 * 1024 % 3);
+/// Streaming encode chunk: 4MB aligned to 3 bytes.
+/// Smaller than 12MB for less memory pressure while keeping syscall count low
+/// (25 reads for 100MB). SIMD encode is fast enough that I/O dominates.
+const STREAM_ENCODE_CHUNK: usize = 4 * 1024 * 1024 - (4 * 1024 * 1024 % 3);
 
 /// Chunk size for no-wrap encoding: 2MB aligned to 3 bytes.
 /// Smaller than before (was 8MB) for better L2 cache behavior and
