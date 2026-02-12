@@ -472,3 +472,68 @@ pub fn compare_with_opts(a: &[u8], b: &[u8], opts: &KeyOpts, random_seed: u64) -
         result
     }
 }
+
+/// Concrete comparison function type. Selected once at setup time to avoid
+/// per-comparison flag checking in hot sort loops.
+pub type CompareFn = fn(&[u8], &[u8]) -> Ordering;
+
+/// Select a concrete comparison function based on KeyOpts.
+/// Returns (compare_fn, needs_leading_blank_strip, needs_reverse).
+/// The caller applies blank-stripping and reversal outside the function pointer,
+/// eliminating all per-comparison branching.
+pub fn select_comparator(opts: &KeyOpts, random_seed: u64) -> (CompareFn, bool, bool) {
+    let needs_blank = opts.ignore_leading_blanks;
+    let needs_reverse = opts.reverse;
+
+    let cmp: CompareFn = if opts.numeric {
+        compare_numeric
+    } else if opts.general_numeric {
+        compare_general_numeric
+    } else if opts.human_numeric {
+        compare_human_numeric
+    } else if opts.month {
+        compare_month
+    } else if opts.version {
+        compare_version
+    } else if opts.random {
+        // Random needs seed — wrap in a closure-like pattern
+        // Since we need random_seed, we use a special case
+        return (
+            make_random_comparator(random_seed),
+            needs_blank,
+            needs_reverse,
+        );
+    } else if opts.dictionary_order || opts.ignore_nonprinting || opts.ignore_case {
+        // Text filtering: select specialized variant
+        match (
+            opts.dictionary_order,
+            opts.ignore_nonprinting,
+            opts.ignore_case,
+        ) {
+            (false, false, true) => compare_ignore_case,
+            (true, false, false) => |a: &[u8], b: &[u8]| compare_dictionary(a, b, false),
+            (true, false, true) => |a: &[u8], b: &[u8]| compare_dictionary(a, b, true),
+            (false, true, false) => |a: &[u8], b: &[u8]| compare_ignore_nonprinting(a, b, false),
+            (false, true, true) => |a: &[u8], b: &[u8]| compare_ignore_nonprinting(a, b, true),
+            _ => |a: &[u8], b: &[u8]| a.cmp(b),
+        }
+    } else {
+        |a: &[u8], b: &[u8]| a.cmp(b)
+    };
+
+    (cmp, needs_blank, needs_reverse)
+}
+
+fn make_random_comparator(seed: u64) -> CompareFn {
+    // We can't capture the seed in a function pointer, so we use a static.
+    // This is safe because sort is single-process and seed doesn't change during a sort.
+    RANDOM_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+    random_compare_with_static_seed
+}
+
+static RANDOM_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn random_compare_with_static_seed(a: &[u8], b: &[u8]) -> Ordering {
+    let seed = RANDOM_SEED.load(std::sync::atomic::Ordering::Relaxed);
+    compare_random(a, b, seed)
+}

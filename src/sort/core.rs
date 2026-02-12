@@ -917,8 +917,64 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         }
 
         write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+    } else if config.keys.len() > 1 {
+        // FAST PATH 4: Multi-key sort with pre-extracted key offsets for ALL keys.
+        // Eliminates per-comparison key extraction (O(n log n) calls to extract_key).
+        let all_key_offs: Vec<Vec<(usize, usize)>> = config
+            .keys
+            .iter()
+            .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+            .collect();
+
+        let stable = config.stable;
+        let random_seed = config.random_seed;
+        let keys = &config.keys;
+        let global_opts = &config.global_opts;
+
+        do_sort(&mut indices, stable, |&a, &b| {
+            for (ki, key) in keys.iter().enumerate() {
+                let (sa, ea) = all_key_offs[ki][a];
+                let (sb, eb) = all_key_offs[ki][b];
+                let ka = if sa == ea {
+                    &[] as &[u8]
+                } else {
+                    &data[sa..ea]
+                };
+                let kb = if sb == eb {
+                    &[] as &[u8]
+                } else {
+                    &data[sb..eb]
+                };
+
+                let opts = if key.opts.has_sort_type()
+                    || key.opts.ignore_case
+                    || key.opts.dictionary_order
+                    || key.opts.ignore_nonprinting
+                    || key.opts.ignore_leading_blanks
+                    || key.opts.reverse
+                {
+                    &key.opts
+                } else {
+                    global_opts
+                };
+
+                let result = compare_with_opts(ka, kb, opts, random_seed);
+                if result != Ordering::Equal {
+                    return result;
+                }
+            }
+
+            // All keys equal: last-resort whole-line comparison unless stable
+            if !stable {
+                data[offsets[a].0..offsets[a].1].cmp(&data[offsets[b].0..offsets[b].1])
+            } else {
+                Ordering::Equal
+            }
+        });
+
+        write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
     } else {
-        // GENERAL PATH: Index-based sort with full comparison
+        // GENERAL PATH: Index-based sort with full comparison (fallback)
         do_sort(&mut indices, config.stable, |&a, &b| {
             let (sa, ea) = offsets[a];
             let (sb, eb) = offsets[b];
