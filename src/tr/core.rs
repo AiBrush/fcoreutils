@@ -11,9 +11,9 @@ const BUF_SIZE: usize = 1024 * 1024; // 1MB — fits L2/L3 cache for locality
 const STREAM_BUF: usize = 256 * 1024;
 
 /// Minimum size for parallel translation.
-/// Set high to avoid rayon overhead (thread wake + per-chunk Vec allocation)
-/// for medium-sized files. Parallel only helps for very large inputs (>32MB).
-const PARALLEL_TRANSLATE_THRESHOLD: usize = 32 * 1024 * 1024;
+/// Lowered to 4MB since rayon overhead is small (~10μs) compared to
+/// translation time per chunk (~400μs at 10GB/s).
+const PARALLEL_TRANSLATE_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Build a 256-byte lookup table mapping set1[i] -> set2[i].
 #[inline]
