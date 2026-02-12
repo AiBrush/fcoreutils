@@ -54,36 +54,25 @@ fn main() {
 
     let filename = cli.file.as_deref().unwrap_or("-");
 
-    // Use raw fd stdout on Unix for maximum write throughput.
-    // Our encode/decode paths already batch output into large chunks,
-    // so BufWriter overhead is pure waste.
+    // Raw fd stdout with BufWriter for batching small writes (wrapped encoding)
     #[cfg(unix)]
-    let mut out = raw_stdout();
+    let mut raw = raw_stdout();
+    #[cfg(unix)]
+    let mut out = io::BufWriter::with_capacity(2 * 1024 * 1024, &mut *raw);
     #[cfg(not(unix))]
     let mut out = io::BufWriter::with_capacity(2 * 1024 * 1024, io::stdout().lock());
 
-    // ManuallyDrop<File> needs deref to &mut File for Write;
-    // BufWriter implements Write directly.
-    #[cfg(unix)]
-    let result = if filename == "-" {
-        process_stdin(&cli, &mut *out)
-    } else {
-        process_file(filename, &cli, &mut *out)
-    };
-    #[cfg(not(unix))]
     let result = if filename == "-" {
         process_stdin(&cli, &mut out)
     } else {
         process_file(filename, &cli, &mut out)
     };
 
-    // Flush on non-unix (raw fd doesn't need flushing)
-    #[cfg(not(unix))]
-    if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe
-    {
-        eprintln!("base64: {}", e);
-        process::exit(1);
+    if let Err(e) = out.flush() {
+        if e.kind() != io::ErrorKind::BrokenPipe {
+            eprintln!("base64: {}", e);
+            process::exit(1);
+        }
     }
 
     if let Err(e) = result {

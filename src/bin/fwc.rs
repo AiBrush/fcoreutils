@@ -1,4 +1,8 @@
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
+#[cfg(unix)]
+use std::mem::ManuallyDrop;
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
@@ -297,9 +301,13 @@ fn main() {
         num_width(max_val).max(min_width)
     };
 
-    // Phase 3: Print results
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    // Phase 3: Print results — raw fd stdout for zero-overhead writes
+    #[cfg(unix)]
+    let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+    #[cfg(unix)]
+    let mut out = BufWriter::with_capacity(64 * 1024, &mut *raw);
+    #[cfg(not(unix))]
+    let mut out = BufWriter::with_capacity(64 * 1024, io::stdout().lock());
 
     // --total=only: suppress individual file output
     if total_mode != "only" {
@@ -312,6 +320,8 @@ fn main() {
         let label = if total_mode == "only" { "" } else { "total" };
         print_counts_fmt(&mut out, &total, label, width, &show);
     }
+
+    let _ = out.flush();
 
     if had_error {
         process::exit(1);
