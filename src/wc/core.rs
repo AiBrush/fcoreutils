@@ -1017,18 +1017,44 @@ pub fn max_line_length_c(data: &[u8]) -> u64 {
 ///
 /// GNU wc -L in UTF-8 locale uses mbrtowc() + wcwidth() for display width.
 /// East Asian Wide/Fullwidth characters get width 2, most others get width 1.
+///
+/// Optimized with printable ASCII run counting for common text.
 pub fn max_line_length_utf8(data: &[u8]) -> u64 {
     let mut max_len: u64 = 0;
     let mut line_len: u64 = 0;
     let mut linepos: u64 = 0;
     let mut i = 0;
+    let len = data.len();
 
-    while i < data.len() {
-        let b = data[i];
+    while i < len {
+        let b = unsafe { *data.get_unchecked(i) };
 
-        // Fast path for common ASCII
-        if b < 0x80 {
+        if b >= 0x21 && b <= 0x7E {
+            // Printable non-space ASCII (most common) — count run length
+            i += 1;
+            let mut run = 1u64;
+            while i < len {
+                let b = unsafe { *data.get_unchecked(i) };
+                if b >= 0x21 && b <= 0x7E {
+                    run += 1;
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            linepos += run;
+            if linepos > line_len {
+                line_len = linepos;
+            }
+        } else if b < 0x80 {
+            // Other ASCII: space, tab, newline, controls
             match b {
+                b' ' => {
+                    linepos += 1;
+                    if linepos > line_len {
+                        line_len = linepos;
+                    }
+                }
                 b'\n' => {
                     if line_len > max_len {
                         max_len = line_len;
@@ -1046,23 +1072,13 @@ pub fn max_line_length_utf8(data: &[u8]) -> u64 {
                     linepos = 0;
                 }
                 0x0C => {
-                    // Form feed: line terminator
                     if line_len > max_len {
                         max_len = line_len;
                     }
                     linepos = 0;
                     line_len = 0;
                 }
-                0x20..=0x7E => {
-                    // Printable ASCII
-                    linepos += 1;
-                    if linepos > line_len {
-                        line_len = linepos;
-                    }
-                }
-                _ => {
-                    // Non-printable ASCII control chars: width 0
-                }
+                _ => {} // Non-printable: width 0
             }
             i += 1;
         } else {
