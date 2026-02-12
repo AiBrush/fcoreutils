@@ -63,6 +63,20 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             }
         };
 
+        // tac reads backward — use MADV_RANDOM instead of SEQUENTIAL
+        #[cfg(unix)]
+        {
+            if let FileData::Mmap(ref mmap) = data {
+                unsafe {
+                    libc::madvise(
+                        mmap.as_ptr() as *mut libc::c_void,
+                        mmap.len(),
+                        libc::MADV_RANDOM,
+                    );
+                }
+            }
+        }
+
         let bytes: &[u8] = &data;
 
         let result = if cli.regex {
