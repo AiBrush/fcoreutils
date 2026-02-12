@@ -402,7 +402,7 @@ fn fmt_u64(val: u64, width: usize, buf: &mut [u8]) -> usize {
             digits.copy_within(pos..20, 20 - dlen);
         }
     }
-    let pad = if width > dlen { width - dlen } else { 0 };
+    let pad = width.saturating_sub(dlen);
     let total = pad + dlen;
     // Write padding spaces
     for b in &mut buf[..pad] {

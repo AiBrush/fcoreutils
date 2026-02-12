@@ -68,11 +68,11 @@ fn main() {
         process_file(filename, &cli, &mut out)
     };
 
-    if let Err(e) = out.flush() {
-        if e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("base64: {}", e);
-            process::exit(1);
-        }
+    if let Err(e) = out.flush()
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("base64: {}", e);
+        process::exit(1);
     }
 
     if let Err(e) = result {
