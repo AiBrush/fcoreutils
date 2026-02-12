@@ -354,8 +354,9 @@ fn process_single_field_chunk(
     }
 }
 
-/// Extract a single field from one line using SIMD memchr_iter with early exit.
-/// Tracks field boundaries directly — no stack array needed.
+/// Extract a single field from one line.
+/// For target_idx == 0 (first field), uses single memchr instead of memchr_iter.
+/// For other fields, uses SIMD memchr_iter with early exit.
 #[inline(always)]
 fn extract_single_field_line(
     line: &[u8],
@@ -368,6 +369,24 @@ fn extract_single_field_line(
     if line.is_empty() {
         if !suppress {
             buf.push(line_delim);
+        }
+        return;
+    }
+
+    // Ultra-fast path for first field (target_idx == 0): single memchr
+    if target_idx == 0 {
+        match memchr::memchr(delim, line) {
+            Some(pos) => {
+                buf.extend_from_slice(&line[..pos]);
+                buf.push(line_delim);
+            }
+            None => {
+                // No delimiter — output whole line or suppress
+                if !suppress {
+                    buf.extend_from_slice(line);
+                    buf.push(line_delim);
+                }
+            }
         }
         return;
     }

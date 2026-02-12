@@ -568,6 +568,57 @@ fn write_sorted_output(
     Ok(())
 }
 
+/// Write sorted (key, index) entries to output. Like write_sorted_output but
+/// iterates (u64, usize) entries directly, avoiding the O(n) copy-back to indices.
+fn write_sorted_entries(
+    data: &[u8],
+    offsets: &[(usize, usize)],
+    entries: &[(u64, usize)],
+    config: &SortConfig,
+    writer: &mut impl Write,
+    terminator: &[u8],
+) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(OUTPUT_BUF_SIZE);
+
+    if config.unique {
+        let mut prev: Option<usize> = None;
+        for &(_, idx) in entries {
+            let (s, e) = offsets[idx];
+            let line = &data[s..e];
+            let should_output = match prev {
+                Some(p) => {
+                    let (ps, pe) = offsets[p];
+                    compare_lines(&data[ps..pe], line, config) != Ordering::Equal
+                }
+                None => true,
+            };
+            if should_output {
+                buf.extend_from_slice(line);
+                buf.extend_from_slice(terminator);
+                prev = Some(idx);
+            }
+            if buf.len() >= OUTPUT_BUF_SIZE {
+                writer.write_all(&buf)?;
+                buf.clear();
+            }
+        }
+    } else {
+        for &(_, idx) in entries {
+            let (s, e) = offsets[idx];
+            buf.extend_from_slice(&data[s..e]);
+            buf.extend_from_slice(terminator);
+            if buf.len() >= OUTPUT_BUF_SIZE {
+                writer.write_all(&buf)?;
+                buf.clear();
+            }
+        }
+    }
+    if !buf.is_empty() {
+        writer.write_all(&buf)?;
+    }
+    Ok(())
+}
+
 /// Helper: perform a parallel or sequential sort on indices.
 fn do_sort(
     indices: &mut [usize],
@@ -661,7 +712,20 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             }
         }
         if is_sorted {
-            // Data is already sorted — output directly without sorting
+            // Zero-copy fast path: write mmap data directly when possible.
+            // Conditions: non-unique, newline-terminated, no \r in data.
+            if !config.unique && !config.zero_terminated && memchr::memchr(b'\r', data).is_none() {
+                if data.last() == Some(&b'\n') {
+                    writer.write_all(data)?;
+                } else if !data.is_empty() {
+                    writer.write_all(data)?;
+                    writer.write_all(b"\n")?;
+                }
+                writer.flush()?;
+                return Ok(());
+            }
+
+            // Line-by-line output for unique/\r\n/zero-terminated cases
             let mut buf = Vec::with_capacity(OUTPUT_BUF_SIZE);
             if config.unique {
                 let mut prev: Option<usize> = None;
@@ -702,8 +766,6 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             return Ok(());
         }
     }
-
-    let mut indices: Vec<usize> = (0..num_lines).collect();
 
     // Switch to random access for sort phase (comparisons jump to arbitrary lines)
     #[cfg(target_os = "linux")]
@@ -848,11 +910,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             entries.sort_unstable_by(cmp);
         }
 
-        for (i, &(_, idx)) in entries.iter().enumerate() {
-            indices[i] = idx;
-        }
-
-        write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+        write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
     } else if is_single_key {
         // FAST PATH 3: Single-key sort with pre-extracted key offsets
         let key = &config.keys[0];
@@ -913,9 +971,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 entries.sort_unstable_by(cmp);
             }
 
-            for (i, &(_, idx)) in entries.iter().enumerate() {
-                indices[i] = idx;
-            }
+            write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
         } else {
             // Single key, non-numeric: direct comparison of pre-extracted keys
             let stable = config.stable;
@@ -969,11 +1025,10 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     entries.sort_unstable_by(cmp);
                 }
 
-                for (i, &(_, idx)) in entries.iter().enumerate() {
-                    indices[i] = idx;
-                }
+                write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
             } else {
                 // Pre-select comparator: eliminates per-comparison option branching
+                let mut indices: Vec<usize> = (0..num_lines).collect();
                 let (cmp_fn, needs_blank, needs_reverse) = select_comparator(opts, random_seed);
                 do_sort(&mut indices, stable, |&a, &b| {
                     let (sa, ea) = key_offs[a];
@@ -1000,13 +1055,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         ord
                     }
                 });
+                write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
             }
         }
-
-        write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
     } else if config.keys.len() > 1 {
         // FAST PATH 4: Multi-key sort with pre-extracted key offsets for ALL keys.
         // Eliminates per-comparison key extraction (O(n log n) calls to extract_key).
+        let mut indices: Vec<usize> = (0..num_lines).collect();
         let all_key_offs: Vec<Vec<(usize, usize)>> = config
             .keys
             .iter()
@@ -1078,6 +1133,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
     } else if !config.keys.is_empty() {
         // GENERAL PATH: Key-based sort with pre-selected comparators (fallback for unusual configs)
+        let mut indices: Vec<usize> = (0..num_lines).collect();
         let stable = config.stable;
         let random_seed = config.random_seed;
         let keys = &config.keys;
@@ -1128,6 +1184,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
     } else {
         // GENERAL PATH: No keys, non-lex sort with pre-selected comparator
+        let mut indices: Vec<usize> = (0..num_lines).collect();
         let (cmp_fn, needs_blank, needs_reverse) =
             select_comparator(&config.global_opts, config.random_seed);
         let stable = config.stable;
