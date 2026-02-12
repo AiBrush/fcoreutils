@@ -82,7 +82,7 @@ pub fn read_file(path: &Path) -> io::Result<FileData> {
 
         // SAFETY: Read-only mapping. MADV_SEQUENTIAL lets the kernel
         // prefetch ahead of our sequential access pattern.
-        match unsafe { MmapOptions::new().map(&file) } {
+        match unsafe { MmapOptions::new().populate().map(&file) } {
             Ok(mmap) => {
                 #[cfg(target_os = "linux")]
                 {

@@ -177,8 +177,8 @@ fn read_all_input(
             .map_err(|e| io::Error::new(e.kind(), format!("open failed: {}: {}", &inputs[0], e)))?;
         let metadata = file.metadata()?;
         if metadata.len() > 0 {
-            let mmap = unsafe { Mmap::map(&file)? };
-            // Start with Sequential for line scanning, caller switches to Random for sort
+            let mmap = unsafe { memmap2::MmapOptions::new().populate().map(&file)? };
+            // Sequential for line scanning; caller switches to Random for sort phase
             #[cfg(target_os = "linux")]
             {
                 let _ = mmap.advise(memmap2::Advice::Sequential);
@@ -466,28 +466,44 @@ fn line_prefix(data: &[u8], start: usize, end: usize) -> u64 {
     }
 }
 
+/// Extract an 8-byte uppercase prefix for case-insensitive comparison.
+/// Big-endian byte order ensures u64 comparison matches lexicographic order.
+#[inline]
+fn line_prefix_upper(data: &[u8], start: usize, end: usize) -> u64 {
+    let len = end - start;
+    let mut bytes = [0u8; 8];
+    let take = len.min(8);
+    for i in 0..take {
+        bytes[i] = data[start + i].to_ascii_uppercase();
+    }
+    u64::from_be_bytes(bytes)
+}
+
 /// Pre-extract key byte offsets into the data buffer for all lines.
 /// Avoids repeated key extraction during sort comparisons.
+/// Parallelized with rayon for large inputs (>10K lines).
 fn pre_extract_key_offsets(
     data: &[u8],
     offsets: &[(usize, usize)],
     key: &KeyDef,
     separator: Option<u8>,
 ) -> Vec<(usize, usize)> {
-    offsets
-        .iter()
-        .map(|&(s, e)| {
-            let line = &data[s..e];
-            let extracted = extract_key(line, key, separator);
-            if extracted.is_empty() {
-                (0, 0)
-            } else {
-                let offset_in_data =
-                    unsafe { extracted.as_ptr().offset_from(data.as_ptr()) as usize };
-                (offset_in_data, offset_in_data + extracted.len())
-            }
-        })
-        .collect()
+    let extract = |&(s, e): &(usize, usize)| {
+        let line = &data[s..e];
+        let extracted = extract_key(line, key, separator);
+        if extracted.is_empty() {
+            (0, 0)
+        } else {
+            let offset_in_data = unsafe { extracted.as_ptr().offset_from(data.as_ptr()) as usize };
+            (offset_in_data, offset_in_data + extracted.len())
+        }
+    };
+
+    if offsets.len() > 10_000 {
+        offsets.par_iter().map(extract).collect()
+    } else {
+        offsets.iter().map(extract).collect()
+    }
 }
 
 /// Select the right numeric parser for pre-parsing.
@@ -514,6 +530,104 @@ fn float_to_sortable_u64(f: f64) -> u64 {
         bits ^ 0x8000000000000000 // positive: flip sign bit
     } else {
         !bits // negative: flip all bits
+    }
+}
+
+/// LSD Radix sort for (u64, usize) entries.
+/// 4 passes on 16-bit digits: O(4n) time, O(n) space, stable.
+/// Avoids O(n log n) comparison overhead entirely.
+/// For reverse: inverts keys before sorting (bitwise NOT flips u64 order).
+fn radix_sort_entries(entries: &mut Vec<(u64, usize)>, reverse: bool) {
+    let n = entries.len();
+
+    // Invert keys for descending sort (ascending on inverted = descending on original)
+    if reverse {
+        for e in entries.iter_mut() {
+            e.0 = !e.0;
+        }
+    }
+
+    let mut aux: Vec<(u64, usize)> = vec![(0, 0); n];
+
+    for pass in 0..4u32 {
+        let shift = pass * 16;
+
+        // Build histogram
+        let mut histogram = [0u32; 65536];
+        for &(key, _) in entries.iter() {
+            unsafe {
+                let digit = ((key >> shift) & 0xFFFF) as usize;
+                *histogram.get_unchecked_mut(digit) += 1;
+            }
+        }
+
+        // Check if all entries have the same digit — skip this pass
+        let mut non_zero = 0u32;
+        for &c in histogram.iter() {
+            non_zero += (c != 0) as u32;
+        }
+        if non_zero <= 1 {
+            continue; // All same digit, no reordering needed
+        }
+
+        // Prefix sum
+        let mut offset = 0u32;
+        for count in histogram.iter_mut() {
+            let c = *count;
+            *count = offset;
+            offset += c;
+        }
+
+        // Scatter
+        for &entry in entries.iter() {
+            unsafe {
+                let digit = ((entry.0 >> shift) & 0xFFFF) as usize;
+                let pos = *histogram.get_unchecked(digit) as usize;
+                *aux.get_unchecked_mut(pos) = entry;
+                *histogram.get_unchecked_mut(digit) += 1;
+            }
+        }
+
+        std::mem::swap(entries, &mut aux);
+    }
+
+    // Restore original keys
+    if reverse {
+        for e in entries.iter_mut() {
+            e.0 = !e.0;
+        }
+    }
+}
+
+/// Break ties in radix-sorted entries by running comparison sort on equal-key groups.
+/// After radix sort, entries with equal u64 keys are adjacent (and in input order, stable).
+/// For non-stable sort, GNU requires last-resort whole-line comparison for deterministic output.
+/// Uses par_sort_unstable_by for large tied groups (>5000) to parallelize tie-breaking.
+fn break_ties_line_cmp(entries: &mut [(u64, usize)], data: &[u8], offsets: &[(usize, usize)]) {
+    if entries.len() <= 1 {
+        return;
+    }
+    let mut i = 0;
+    while i < entries.len() {
+        let key = entries[i].0;
+        let mut j = i + 1;
+        while j < entries.len() && entries[j].0 == key {
+            j += 1;
+        }
+        if j - i > 5000 {
+            entries[i..j].par_sort_unstable_by(|a, b| {
+                let (sa, ea) = offsets[a.1];
+                let (sb, eb) = offsets[b.1];
+                data[sa..ea].cmp(&data[sb..eb])
+            });
+        } else if j - i > 1 {
+            entries[i..j].sort_unstable_by(|a, b| {
+                let (sa, ea) = offsets[a.1];
+                let (sb, eb) = offsets[b.1];
+                data[sa..ea].cmp(&data[sb..eb])
+            });
+        }
+        i = j;
     }
 }
 
@@ -784,6 +898,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         && !gopts.ignore_nonprinting
         && !gopts.ignore_leading_blanks;
 
+    // Case-insensitive lexicographic (sort -f, optionally with -b)
+    let is_fold_case_lex = no_keys
+        && !gopts.has_sort_type()
+        && !gopts.dictionary_order
+        && gopts.ignore_case
+        && !gopts.ignore_nonprinting;
+
     let is_numeric_only = no_keys
         && (gopts.numeric || gopts.general_numeric || gopts.human_numeric)
         && !gopts.dictionary_order
@@ -795,34 +916,53 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
     if is_plain_lex && num_lines > 256 {
         // FAST PATH 1: Prefix-based lexicographic sort
         let reverse = gopts.reverse;
-        let mut entries: Vec<(u64, usize)> = offsets
-            .iter()
-            .enumerate()
-            .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
-            .collect();
-
-        let prefix_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
-            let ord = match a.0.cmp(&b.0) {
-                Ordering::Equal => {
-                    let (sa, ea) = offsets[a.1];
-                    let (sb, eb) = offsets[b.1];
-                    data[sa..ea].cmp(&data[sb..eb])
-                }
-                ord => ord,
-            };
-            if reverse { ord.reverse() } else { ord }
+        let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+            offsets
+                .par_iter()
+                .enumerate()
+                .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
+                .collect()
+        } else {
+            offsets
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
+                .collect()
         };
 
         let n = entries.len();
-        if config.stable {
-            if n > 10_000 {
-                entries.par_sort_by(prefix_cmp);
-            } else {
-                entries.sort_by(prefix_cmp);
+        if n > 1000 {
+            // Radix sort on 8-byte prefixes: O(n) vs O(n log n)
+            radix_sort_entries(&mut entries, reverse);
+            // Break ties: entries with same prefix need full line comparison
+            let mut i = 0;
+            while i < n {
+                let key = entries[i].0;
+                let mut j = i + 1;
+                while j < n && entries[j].0 == key {
+                    j += 1;
+                }
+                if j - i > 1 {
+                    entries[i..j].sort_unstable_by(|a, b| {
+                        let ord = data[offsets[a.1].0..offsets[a.1].1]
+                            .cmp(&data[offsets[b.1].0..offsets[b.1].1]);
+                        if reverse { ord.reverse() } else { ord }
+                    });
+                }
+                i = j;
             }
-        } else if n > 10_000 {
-            entries.par_sort_unstable_by(prefix_cmp);
         } else {
+            let prefix_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                let ord = match a.0.cmp(&b.0) {
+                    Ordering::Equal => {
+                        let (sa, ea) = offsets[a.1];
+                        let (sb, eb) = offsets[b.1];
+                        data[sa..ea].cmp(&data[sb..eb])
+                    }
+                    ord => ord,
+                };
+                if reverse { ord.reverse() } else { ord }
+            };
             entries.sort_unstable_by(prefix_cmp);
         }
 
@@ -869,44 +1009,161 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         if !buf.is_empty() {
             writer.write_all(&buf)?;
         }
-    } else if is_numeric_only {
-        // FAST PATH 2: Pre-parsed numeric sort with u64 comparison
-        // float_to_sortable_u64 enables branchless u64::cmp instead of f64::partial_cmp
-        let mut entries: Vec<(u64, usize)> = offsets
-            .iter()
-            .enumerate()
-            .map(|(i, &(s, e))| {
-                (
-                    float_to_sortable_u64(parse_value_for_opts(&data[s..e], gopts)),
-                    i,
-                )
-            })
-            .collect();
+    } else if is_fold_case_lex && num_lines > 256 {
+        // FAST PATH 1b: Case-insensitive prefix sort (sort -f)
+        // Pre-computes uppercase 8-byte prefix, radix sorts on it.
+        // Avoids per-comparison case folding in O(n log n) comparisons.
         let reverse = gopts.reverse;
-        let stable = config.stable;
-
-        let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
-            let ord = a.0.cmp(&b.0);
-            if ord != Ordering::Equal {
-                return if reverse { ord.reverse() } else { ord };
-            }
-            if !stable {
-                data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
-            } else {
-                Ordering::Equal
-            }
+        let needs_blank = gopts.ignore_leading_blanks;
+        let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+            offsets
+                .par_iter()
+                .enumerate()
+                .map(|(i, &(s, e))| {
+                    let (s, e) = if needs_blank {
+                        let trimmed = super::compare::skip_leading_blanks(&data[s..e]);
+                        let new_s = unsafe { trimmed.as_ptr().offset_from(data.as_ptr()) as usize };
+                        (new_s, new_s + trimmed.len())
+                    } else {
+                        (s, e)
+                    };
+                    (line_prefix_upper(data, s, e), i)
+                })
+                .collect()
+        } else {
+            offsets
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, e))| {
+                    let (s, e) = if needs_blank {
+                        let trimmed = super::compare::skip_leading_blanks(&data[s..e]);
+                        let new_s = unsafe { trimmed.as_ptr().offset_from(data.as_ptr()) as usize };
+                        (new_s, new_s + trimmed.len())
+                    } else {
+                        (s, e)
+                    };
+                    (line_prefix_upper(data, s, e), i)
+                })
+                .collect()
         };
 
         let n = entries.len();
-        if stable {
-            if n > 10_000 {
-                entries.par_sort_by(cmp);
-            } else {
-                entries.sort_by(cmp);
+        if n > 1000 {
+            radix_sort_entries(&mut entries, reverse);
+            // Tie-break: full case-insensitive compare, then last-resort raw compare
+            let mut i = 0;
+            while i < n {
+                let key = entries[i].0;
+                let mut j = i + 1;
+                while j < n && entries[j].0 == key {
+                    j += 1;
+                }
+                if j - i > 1 {
+                    entries[i..j].sort_unstable_by(|a, b| {
+                        let la = &data[offsets[a.1].0..offsets[a.1].1];
+                        let lb = &data[offsets[b.1].0..offsets[b.1].1];
+                        let la = if needs_blank {
+                            super::compare::skip_leading_blanks(la)
+                        } else {
+                            la
+                        };
+                        let lb = if needs_blank {
+                            super::compare::skip_leading_blanks(lb)
+                        } else {
+                            lb
+                        };
+                        let ord = super::compare::compare_ignore_case(la, lb);
+                        let ord = if reverse { ord.reverse() } else { ord };
+                        if ord != Ordering::Equal && !config.stable {
+                            return ord;
+                        }
+                        if ord == Ordering::Equal && !config.stable {
+                            data[offsets[a.1].0..offsets[a.1].1]
+                                .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                        } else {
+                            ord
+                        }
+                    });
+                }
+                i = j;
             }
-        } else if n > 10_000 {
-            entries.par_sort_unstable_by(cmp);
         } else {
+            entries.sort_unstable_by(|a, b| {
+                let la = &data[offsets[a.1].0..offsets[a.1].1];
+                let lb = &data[offsets[b.1].0..offsets[b.1].1];
+                let la = if needs_blank {
+                    super::compare::skip_leading_blanks(la)
+                } else {
+                    la
+                };
+                let lb = if needs_blank {
+                    super::compare::skip_leading_blanks(lb)
+                } else {
+                    lb
+                };
+                let ord = match a.0.cmp(&b.0) {
+                    Ordering::Equal => super::compare::compare_ignore_case(la, lb),
+                    ord => ord,
+                };
+                let ord = if reverse { ord.reverse() } else { ord };
+                if ord == Ordering::Equal && !config.stable {
+                    data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                } else {
+                    ord
+                }
+            });
+        }
+
+        write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
+    } else if is_numeric_only {
+        // FAST PATH 2: Pre-parsed numeric sort with u64 comparison
+        // float_to_sortable_u64 enables branchless u64::cmp instead of f64::partial_cmp
+        // Parallelize numeric parsing for large inputs (parsing is CPU-bound)
+        let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+            offsets
+                .par_iter()
+                .enumerate()
+                .map(|(i, &(s, e))| {
+                    (
+                        float_to_sortable_u64(parse_value_for_opts(&data[s..e], gopts)),
+                        i,
+                    )
+                })
+                .collect()
+        } else {
+            offsets
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, e))| {
+                    (
+                        float_to_sortable_u64(parse_value_for_opts(&data[s..e], gopts)),
+                        i,
+                    )
+                })
+                .collect()
+        };
+        let reverse = gopts.reverse;
+        let stable = config.stable;
+
+        let n = entries.len();
+        if n > 1000 {
+            // Radix sort: O(n) vs O(n log n) comparison sort
+            radix_sort_entries(&mut entries, reverse);
+            if !stable {
+                break_ties_line_cmp(&mut entries, data, &offsets);
+            }
+        } else {
+            let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                let ord = a.0.cmp(&b.0);
+                if ord != Ordering::Equal {
+                    return if reverse { ord.reverse() } else { ord };
+                }
+                if !stable {
+                    data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                } else {
+                    Ordering::Equal
+                }
+            };
             entries.sort_unstable_by(cmp);
         }
 
@@ -931,43 +1188,51 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
 
         if is_key_numeric {
             // Single key, numeric: u64-based branchless comparison
-            let mut entries: Vec<(u64, usize)> = key_offs
-                .iter()
-                .enumerate()
-                .map(|(i, &(s, e))| {
-                    let f = if s == e {
-                        if opts.general_numeric { f64::NAN } else { 0.0 }
-                    } else {
-                        parse_value_for_opts(&data[s..e], opts)
-                    };
-                    (float_to_sortable_u64(f), i)
-                })
-                .collect();
+            // Parallelize numeric parsing for large inputs
+            let is_gen = opts.general_numeric;
+            let parse_entry = |i: usize, &(s, e): &(usize, usize)| {
+                let f = if s == e {
+                    if is_gen { f64::NAN } else { 0.0 }
+                } else {
+                    parse_value_for_opts(&data[s..e], opts)
+                };
+                (float_to_sortable_u64(f), i)
+            };
+            let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+                key_offs
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, ko)| parse_entry(i, ko))
+                    .collect()
+            } else {
+                key_offs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ko)| parse_entry(i, ko))
+                    .collect()
+            };
             let reverse = opts.reverse;
             let stable = config.stable;
 
-            let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
-                let ord = a.0.cmp(&b.0);
-                if ord != Ordering::Equal {
-                    return if reverse { ord.reverse() } else { ord };
-                }
-                if !stable {
-                    data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
-                } else {
-                    Ordering::Equal
-                }
-            };
-
             let n = entries.len();
-            if stable {
-                if n > 10_000 {
-                    entries.par_sort_by(cmp);
-                } else {
-                    entries.sort_by(cmp);
+            if n > 1000 {
+                radix_sort_entries(&mut entries, reverse);
+                if !stable {
+                    break_ties_line_cmp(&mut entries, data, &offsets);
                 }
-            } else if n > 10_000 {
-                entries.par_sort_unstable_by(cmp);
             } else {
+                let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                    let ord = a.0.cmp(&b.0);
+                    if ord != Ordering::Equal {
+                        return if reverse { ord.reverse() } else { ord };
+                    }
+                    if !stable {
+                        data[offsets[a.1].0..offsets[a.1].1]
+                            .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                    } else {
+                        Ordering::Equal
+                    }
+                };
                 entries.sort_unstable_by(cmp);
             }
 
@@ -986,42 +1251,74 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             if !has_flags {
                 // Prefix-based sort: cache 8-byte key prefix as u64
                 // Most comparisons resolve at the u64 level (no data[] access)
-                let mut entries: Vec<(u64, usize)> = key_offs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(s, e))| (if s < e { line_prefix(data, s, e) } else { 0u64 }, i))
-                    .collect();
-
-                let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
-                    let ord = match a.0.cmp(&b.0) {
-                        Ordering::Equal => {
-                            let (sa, ea) = key_offs[a.1];
-                            let (sb, eb) = key_offs[b.1];
-                            data[sa..ea].cmp(&data[sb..eb])
-                        }
-                        ord => ord,
-                    };
-                    if ord != Ordering::Equal {
-                        return if reverse { ord.reverse() } else { ord };
-                    }
-                    if !stable {
-                        data[offsets[a.1].0..offsets[a.1].1]
-                            .cmp(&data[offsets[b.1].0..offsets[b.1].1])
-                    } else {
-                        Ordering::Equal
-                    }
+                let pfx = |i: usize, &(s, e): &(usize, usize)| -> (u64, usize) {
+                    (if s < e { line_prefix(data, s, e) } else { 0u64 }, i)
+                };
+                let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+                    key_offs
+                        .par_iter()
+                        .enumerate()
+                        .map(|(i, ko)| pfx(i, ko))
+                        .collect()
+                } else {
+                    key_offs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ko)| pfx(i, ko))
+                        .collect()
                 };
 
                 let n = entries.len();
-                if stable {
-                    if n > 10_000 {
-                        entries.par_sort_by(cmp);
-                    } else {
-                        entries.sort_by(cmp);
+                if n > 1000 {
+                    // Radix sort on key prefixes
+                    radix_sort_entries(&mut entries, reverse);
+                    // Break ties: full key + last-resort whole-line comparison
+                    let mut ti = 0;
+                    while ti < n {
+                        let key = entries[ti].0;
+                        let mut tj = ti + 1;
+                        while tj < n && entries[tj].0 == key {
+                            tj += 1;
+                        }
+                        if tj - ti > 1 {
+                            entries[ti..tj].sort_unstable_by(|a, b| {
+                                let (ska, eka) = key_offs[a.1];
+                                let (skb, ekb) = key_offs[b.1];
+                                let ord = data[ska..eka].cmp(&data[skb..ekb]);
+                                let ord = if reverse { ord.reverse() } else { ord };
+                                if ord != Ordering::Equal {
+                                    return ord;
+                                }
+                                if !stable {
+                                    data[offsets[a.1].0..offsets[a.1].1]
+                                        .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                                } else {
+                                    Ordering::Equal
+                                }
+                            });
+                        }
+                        ti = tj;
                     }
-                } else if n > 10_000 {
-                    entries.par_sort_unstable_by(cmp);
                 } else {
+                    let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                        let ord = match a.0.cmp(&b.0) {
+                            Ordering::Equal => {
+                                let (sa, ea) = key_offs[a.1];
+                                let (sb, eb) = key_offs[b.1];
+                                data[sa..ea].cmp(&data[sb..eb])
+                            }
+                            ord => ord,
+                        };
+                        if ord != Ordering::Equal {
+                            return if reverse { ord.reverse() } else { ord };
+                        }
+                        if !stable {
+                            data[offsets[a.1].0..offsets[a.1].1]
+                                .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                        } else {
+                            Ordering::Equal
+                        }
+                    };
                     entries.sort_unstable_by(cmp);
                 }
 
@@ -1062,11 +1359,20 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         // FAST PATH 4: Multi-key sort with pre-extracted key offsets for ALL keys.
         // Eliminates per-comparison key extraction (O(n log n) calls to extract_key).
         let mut indices: Vec<usize> = (0..num_lines).collect();
-        let all_key_offs: Vec<Vec<(usize, usize)>> = config
-            .keys
-            .iter()
-            .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
-            .collect();
+        let all_key_offs: Vec<Vec<(usize, usize)>> = if config.keys.len() > 1 && num_lines > 10_000
+        {
+            config
+                .keys
+                .par_iter()
+                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .collect()
+        } else {
+            config
+                .keys
+                .iter()
+                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .collect()
+        };
 
         let stable = config.stable;
         let random_seed = config.random_seed;
