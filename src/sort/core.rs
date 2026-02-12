@@ -1075,7 +1075,9 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 Ordering::Equal => {
                     let (sa, ea) = offsets[a.1];
                     let (sb, eb) = offsets[b.1];
-                    data[sa..ea].cmp(&data[sb..eb])
+                    // Skip first 8 bytes (already compared via u64 prefix)
+                    let skip = 8.min(ea - sa).min(eb - sb);
+                    data[sa + skip..ea].cmp(&data[sb + skip..eb])
                 }
                 ord => ord,
             };
@@ -1094,7 +1096,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             let _ = mmap.advise(memmap2::Advice::Sequential);
         }
 
-        // Output phase: single-buffer for large files, per-line for small
+        // Output phase: parallel buffer construction for large, per-line for small
         if config.unique {
             let mut prev: Option<usize> = None;
             for &(_, idx) in &entries {
@@ -1344,7 +1346,9 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         Ordering::Equal => {
                             let (sa, ea) = key_offs[a.1];
                             let (sb, eb) = key_offs[b.1];
-                            data[sa..ea].cmp(&data[sb..eb])
+                            // Skip first 8 bytes (already compared via u64 prefix)
+                            let skip = 8.min(ea - sa).min(eb - sb);
+                            data[sa + skip..ea].cmp(&data[sb + skip..eb])
                         }
                         ord => ord,
                     };
