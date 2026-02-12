@@ -1,11 +1,5 @@
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
-/// Write a large contiguous buffer, retrying on partial writes.
-#[inline]
-fn write_all_raw(writer: &mut impl Write, buf: &[u8]) -> io::Result<()> {
-    writer.write_all(buf)
-}
-
 /// How to delimit groups when using --all-repeated
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllRepeatedMethod {
@@ -327,8 +321,8 @@ fn linear_scan_group_end(
 }
 
 /// Standard processing for Default, RepeatedOnly, UniqueOnly on byte slices.
-/// Uses pre-computed line positions for faster iteration and binary search
-/// for duplicate group sizes on repetitive data.
+/// Ultra-fast path: single-pass inline scanning with memchr, no line_starts Vec.
+/// General path: pre-computed line positions with binary search for groups.
 fn process_standard_bytes(
     data: &[u8],
     writer: &mut impl Write,
@@ -341,11 +335,28 @@ fn process_standard_bytes(
 
     let fast = !needs_key_extraction(config) && !config.ignore_case;
 
-    // Pre-compute all line start positions in a single SIMD pass.
-    // memchr_iter precomputes SIMD state once (vs per-call recomputation in LineIter).
+    // Ultra-fast path: default mode, no count, no key extraction.
+    // Single-pass: scan with memchr, compare adjacent lines inline.
+    // Avoids the 20MB+ line_starts allocation + cache misses from random access.
+    if fast && !config.count && matches!(config.mode, OutputMode::Default) {
+        return process_default_fast_singlepass(data, writer, term);
+    }
+
+    // Ultra-fast path: repeated-only or unique-only, no count, no key extraction
+    if fast
+        && !config.count
+        && matches!(
+            config.mode,
+            OutputMode::RepeatedOnly | OutputMode::UniqueOnly
+        )
+    {
+        return process_filter_fast_singlepass(data, writer, config, term);
+    }
+
+    // General path: pre-computed line positions for binary search on groups
     let estimated_lines = (data.len() / 40).max(64);
     let mut line_starts: Vec<usize> = Vec::with_capacity(estimated_lines);
-    line_starts.push(0); // first line starts at offset 0
+    line_starts.push(0);
     for pos in memchr::memchr_iter(term, data) {
         if pos + 1 < data.len() {
             line_starts.push(pos + 1);
@@ -379,7 +390,7 @@ fn process_standard_bytes(
             let cur = line_content_at(data, &line_starts, i, content_end);
 
             if lines_equal_fast(prev, cur) {
-                // Duplicate detected — binary search for end of group
+                // Duplicate detected — linear scan for end of group
                 let group_end =
                     linear_scan_group_end(data, &line_starts, i - 1, num_lines, content_end);
                 i = group_end;
@@ -397,20 +408,19 @@ fn process_standard_bytes(
         return Ok(());
     }
 
-    // General path with count tracking + binary search for duplicate groups
+    // General path with count tracking
     let mut i = 0;
     while i < num_lines {
         let content = line_content_at(data, &line_starts, i, content_end);
         let full = line_full_at(data, &line_starts, i);
 
-        // Find group size: check next line, if equal use binary search
         let group_end = if fast
             && i + 1 < num_lines
             && lines_equal_fast(
                 content,
                 line_content_at(data, &line_starts, i + 1, content_end),
             ) {
-            // Duplicate detected — binary search for end
+            // Duplicate detected — linear scan for end
             linear_scan_group_end(data, &line_starts, i, num_lines, content_end)
         } else if !fast
             && i + 1 < num_lines
@@ -443,6 +453,146 @@ fn process_standard_bytes(
     }
 
     Ok(())
+}
+
+/// Ultra-fast single-pass default mode: scan with memchr, compare adjacent lines inline.
+/// No pre-computed positions, no binary search, no Vec allocation.
+/// Outputs each line that differs from the previous.
+fn process_default_fast_singlepass(
+    data: &[u8],
+    writer: &mut impl Write,
+    term: u8,
+) -> io::Result<()> {
+    // Batch output into a contiguous buffer for fewer write() syscalls.
+    let mut outbuf = Vec::with_capacity(data.len());
+
+    let mut prev_start: usize = 0;
+    let mut prev_end: usize; // exclusive, without terminator
+
+    // Find end of first line
+    match memchr::memchr(term, data) {
+        Some(pos) => {
+            prev_end = pos;
+            // Write first line (always output)
+            outbuf.extend_from_slice(&data[0..pos + 1]);
+        }
+        None => {
+            // Single line, no terminator
+            outbuf.extend_from_slice(data);
+            outbuf.push(term);
+            return writer.write_all(&outbuf);
+        }
+    }
+
+    let mut cur_start = prev_end + 1;
+
+    while cur_start < data.len() {
+        let cur_end = match memchr::memchr(term, &data[cur_start..]) {
+            Some(offset) => cur_start + offset,
+            None => data.len(), // last line without terminator
+        };
+
+        let prev_content = &data[prev_start..prev_end];
+        let cur_content = &data[cur_start..cur_end];
+
+        if !lines_equal_fast(prev_content, cur_content) {
+            // Different line — output it
+            if cur_end < data.len() {
+                outbuf.extend_from_slice(&data[cur_start..cur_end + 1]);
+            } else {
+                outbuf.extend_from_slice(&data[cur_start..cur_end]);
+                outbuf.push(term);
+            }
+            prev_start = cur_start;
+            prev_end = cur_end;
+        }
+
+        if cur_end < data.len() {
+            cur_start = cur_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    writer.write_all(&outbuf)
+}
+
+/// Fast single-pass for RepeatedOnly (-d) and UniqueOnly (-u) modes.
+fn process_filter_fast_singlepass(
+    data: &[u8],
+    writer: &mut impl Write,
+    config: &UniqConfig,
+    term: u8,
+) -> io::Result<()> {
+    let repeated = matches!(config.mode, OutputMode::RepeatedOnly);
+    let mut outbuf = Vec::with_capacity(data.len() / 2);
+
+    let prev_start: usize = 0;
+    let prev_end: usize;
+
+    match memchr::memchr(term, data) {
+        Some(pos) => prev_end = pos,
+        None => {
+            // Single line: unique (count=1)
+            if !repeated {
+                outbuf.extend_from_slice(data);
+                outbuf.push(term);
+            }
+            return writer.write_all(&outbuf);
+        }
+    }
+
+    let mut prev_start_mut = prev_start;
+    let mut prev_end_mut = prev_end;
+    let mut count: u64 = 1;
+    let mut cur_start = prev_end + 1;
+
+    while cur_start < data.len() {
+        let cur_end = match memchr::memchr(term, &data[cur_start..]) {
+            Some(offset) => cur_start + offset,
+            None => data.len(),
+        };
+
+        let prev_content = &data[prev_start_mut..prev_end_mut];
+        let cur_content = &data[cur_start..cur_end];
+
+        if lines_equal_fast(prev_content, cur_content) {
+            count += 1;
+        } else {
+            // Output previous group based on mode
+            let should_print = if repeated { count > 1 } else { count == 1 };
+            if should_print {
+                if prev_end_mut < data.len() && data.get(prev_end_mut) == Some(&term) {
+                    outbuf.extend_from_slice(&data[prev_start_mut..prev_end_mut + 1]);
+                } else {
+                    outbuf.extend_from_slice(&data[prev_start_mut..prev_end_mut]);
+                    outbuf.push(term);
+                }
+            }
+            prev_start_mut = cur_start;
+            prev_end_mut = cur_end;
+            count = 1;
+        }
+
+        if cur_end < data.len() {
+            cur_start = cur_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Output last group
+    let should_print = if repeated { count > 1 } else { count == 1 };
+    if should_print {
+        if prev_end_mut < data.len() && data.get(prev_end_mut) == Some(&term) {
+            outbuf.extend_from_slice(&data[prev_start_mut..prev_end_mut + 1]);
+        } else {
+            outbuf.extend_from_slice(&data[prev_start_mut..prev_end_mut]);
+            outbuf.push(term);
+        }
+    }
+
+    writer.write_all(&outbuf)
 }
 
 /// Output a group for standard modes (bytes path).

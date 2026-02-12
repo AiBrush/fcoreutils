@@ -1,12 +1,17 @@
+use rayon::prelude::*;
 use std::io::{self, Read, Write};
 
-const BUF_SIZE: usize = 1024 * 1024; // 1MB — fits L2/L3 cache for locality
+/// Main processing buffer: 4MB — large enough to amortize write() syscall overhead
+/// while still fitting in L3 cache.
+const BUF_SIZE: usize = 4 * 1024 * 1024;
 
-/// Stream buffer: 256KB — process data immediately after each read().
-/// Stays in L2 cache, matches typical kernel pipe buffer size.
-/// Unlike fill_buf (which loops to accumulate 8MB = ~128 syscalls for pipes),
-/// we read once and process immediately, matching GNU tr's approach.
-const STREAM_BUF: usize = 256 * 1024;
+/// Stream buffer: 1MB — process data immediately after each read().
+/// Larger than typical pipe buffer (64KB) to batch multiple reads into one process cycle.
+const STREAM_BUF: usize = 1024 * 1024;
+
+/// Minimum data size for parallel processing (2MB).
+/// Below this, rayon thread pool overhead (~5-10μs) exceeds the benefit.
+const PAR_THRESHOLD: usize = 2 * 1024 * 1024;
 
 /// Build a 256-byte lookup table mapping set1[i] -> set2[i].
 #[inline]
@@ -1074,9 +1079,8 @@ fn squeeze_single_stream(
 
 /// Translate bytes from an mmap'd byte slice — zero syscall reads.
 /// Uses SIMD AVX2 for range-delta patterns (e.g., a-z → A-Z).
-/// Chunked approach: 1MB buffer fits in L2 cache, avoids large allocations.
-/// Translation is memory-bandwidth-bound (not compute-bound), so parallel
-/// offers minimal gain but costs 100MB+ allocation + zero-init overhead.
+/// For large data: parallel translation with rayon + single write_all syscall.
+/// For small data: sequential chunked processing.
 pub fn translate_mmap(
     set1: &[u8],
     set2: &[u8],
@@ -1094,8 +1098,23 @@ pub fn translate_mmap(
         return writer.write_all(data);
     }
 
-    // Chunked path — reuses single buffer across chunks.
-    // Size buffer to min(data.len(), 1MB) to avoid over-allocating for small files.
+    // Parallel path for large data: translate all chunks in parallel with rayon,
+    // then single write_all. Eliminates per-chunk write() syscalls (100→1 for 100MB).
+    if data.len() >= PAR_THRESHOLD {
+        let mut out = vec![0u8; data.len()];
+        let n = rayon::current_num_threads().max(1);
+        let cs = (data.len() / n).max(BUF_SIZE);
+        {
+            data.par_chunks(cs)
+                .zip(out.par_chunks_mut(cs))
+                .for_each(|(inp, outp)| {
+                    translate_chunk_dispatch(inp, &mut outp[..inp.len()], &table, &kind, use_simd);
+                });
+        }
+        return writer.write_all(&out);
+    }
+
+    // Small files: sequential chunked
     let buf_size = data.len().min(BUF_SIZE);
     let mut out = vec![0u8; buf_size];
     for chunk in data.chunks(buf_size) {
@@ -1106,8 +1125,8 @@ pub fn translate_mmap(
 }
 
 /// Translate + squeeze from mmap'd byte slice.
-/// Single buffer: translate into buffer, then squeeze in-place (wp <= i always holds).
-/// Eliminates second buffer allocation and reduces memory traffic.
+/// For large data: parallel translate with rayon, then sequential squeeze + write.
+/// For small data: sequential translate + squeeze in-place.
 pub fn translate_squeeze_mmap(
     set1: &[u8],
     set2: &[u8],
@@ -1122,16 +1141,52 @@ pub fn translate_squeeze_mmap(
     #[cfg(not(target_arch = "x86_64"))]
     let use_simd = false;
 
-    // Single buffer: translate chunk→buf, then squeeze in-place within buf
+    // Large data: parallel translate, then sequential squeeze
+    if data.len() >= PAR_THRESHOLD {
+        let mut buf = vec![0u8; data.len()];
+        let n = rayon::current_num_threads().max(1);
+        let cs = (data.len() / n).max(BUF_SIZE);
+        {
+            data.par_chunks(cs)
+                .zip(buf.par_chunks_mut(cs))
+                .for_each(|(inp, outp)| {
+                    translate_chunk_dispatch(inp, &mut outp[..inp.len()], &table, &kind, use_simd);
+                });
+        }
+        // Sequential squeeze + write in chunks (squeeze has cross-boundary state)
+        let mut last_squeezed: u16 = 256;
+        let mut outbuf = vec![0u8; BUF_SIZE];
+        for chunk in buf.chunks(BUF_SIZE) {
+            let mut wp = 0;
+            unsafe {
+                let ptr = chunk.as_ptr();
+                let outp = outbuf.as_mut_ptr();
+                for i in 0..chunk.len() {
+                    let b = *ptr.add(i);
+                    if is_member(&squeeze_set, b) {
+                        if last_squeezed == b as u16 {
+                            continue;
+                        }
+                        last_squeezed = b as u16;
+                    } else {
+                        last_squeezed = 256;
+                    }
+                    *outp.add(wp) = b;
+                    wp += 1;
+                }
+            }
+            writer.write_all(&outbuf[..wp])?;
+        }
+        return Ok(());
+    }
+
+    // Small data: sequential translate + squeeze in-place
     let buf_size = data.len().min(BUF_SIZE);
     let mut buf = vec![0u8; buf_size];
     let mut last_squeezed: u16 = 256;
 
     for chunk in data.chunks(buf_size) {
-        // Phase 1: Translate into buf (may use SIMD)
         translate_chunk_dispatch(chunk, &mut buf[..chunk.len()], &table, &kind, use_simd);
-
-        // Phase 2: Squeeze in-place (wp <= i always, safe for overlapping writes)
         let mut wp = 0;
         unsafe {
             let ptr = buf.as_mut_ptr();
@@ -1155,8 +1210,7 @@ pub fn translate_squeeze_mmap(
 }
 
 /// Delete from mmap'd byte slice.
-/// Uses SIMD memchr for single-character delete (common case).
-/// For multi-char delete, uses 8-byte unrolled scan with bitset lookup.
+/// Uses parallel processing + SIMD memchr for maximum throughput.
 pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) -> io::Result<()> {
     // Fast path: single character delete uses SIMD memchr
     if delete_chars.len() == 1 {
@@ -1174,6 +1228,68 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
     }
 
     let member = build_member_set(delete_chars);
+
+    // Parallel path: each thread processes its chunk independently
+    if data.len() >= PAR_THRESHOLD {
+        let n = rayon::current_num_threads().max(1);
+        let cs = (data.len() / n).max(BUF_SIZE);
+        let results: Vec<Vec<u8>> = data
+            .par_chunks(cs)
+            .map(|chunk| {
+                let mut outbuf: Vec<u8> = Vec::with_capacity(chunk.len());
+                let len = chunk.len();
+                let mut i = 0;
+                unsafe {
+                    outbuf.set_len(chunk.len());
+                    let mut out_pos = 0;
+                    let outp: *mut u8 = outbuf.as_mut_ptr();
+                    while i + 8 <= len {
+                        let b0 = *chunk.get_unchecked(i);
+                        let b1 = *chunk.get_unchecked(i + 1);
+                        let b2 = *chunk.get_unchecked(i + 2);
+                        let b3 = *chunk.get_unchecked(i + 3);
+                        let b4 = *chunk.get_unchecked(i + 4);
+                        let b5 = *chunk.get_unchecked(i + 5);
+                        let b6 = *chunk.get_unchecked(i + 6);
+                        let b7 = *chunk.get_unchecked(i + 7);
+                        *outp.add(out_pos) = b0;
+                        out_pos += !is_member(&member, b0) as usize;
+                        *outp.add(out_pos) = b1;
+                        out_pos += !is_member(&member, b1) as usize;
+                        *outp.add(out_pos) = b2;
+                        out_pos += !is_member(&member, b2) as usize;
+                        *outp.add(out_pos) = b3;
+                        out_pos += !is_member(&member, b3) as usize;
+                        *outp.add(out_pos) = b4;
+                        out_pos += !is_member(&member, b4) as usize;
+                        *outp.add(out_pos) = b5;
+                        out_pos += !is_member(&member, b5) as usize;
+                        *outp.add(out_pos) = b6;
+                        out_pos += !is_member(&member, b6) as usize;
+                        *outp.add(out_pos) = b7;
+                        out_pos += !is_member(&member, b7) as usize;
+                        i += 8;
+                    }
+                    while i < len {
+                        let b = *chunk.get_unchecked(i);
+                        *outp.add(out_pos) = b;
+                        out_pos += !is_member(&member, b) as usize;
+                        i += 1;
+                    }
+                    outbuf.set_len(out_pos);
+                }
+                outbuf
+            })
+            .collect();
+        for r in &results {
+            if !r.is_empty() {
+                writer.write_all(r)?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Small data: sequential
     let buf_size = data.len().min(BUF_SIZE);
     let mut outbuf = vec![0u8; buf_size];
 
@@ -1182,8 +1298,6 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         let len = chunk.len();
         let mut i = 0;
 
-        // 8-byte branchless unrolled scan: always write, conditionally advance pointer.
-        // Eliminates 8 branches per iteration for better throughput with large delete sets.
         while i + 8 <= len {
             unsafe {
                 let b0 = *chunk.get_unchecked(i);
@@ -1230,13 +1344,55 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
 }
 
 /// Multi-character delete (2-3 chars) using SIMD memchr2/memchr3.
-/// Chunked: processes 1MB at a time into contiguous output buffer, single write_all per chunk.
-/// Eliminates millions of small BufWriter write_all calls.
+/// Parallel: each thread processes a chunk independently.
 fn delete_multi_memchr_mmap<const N: usize>(
     chars: &[u8],
     data: &[u8],
     writer: &mut impl Write,
 ) -> io::Result<()> {
+    let c0 = chars[0];
+    let c1 = if N >= 2 { chars[1] } else { 0 };
+    let c2 = if N >= 3 { chars[2] } else { 0 };
+
+    // Parallel path
+    if data.len() >= PAR_THRESHOLD {
+        let n = rayon::current_num_threads().max(1);
+        let cs = (data.len() / n).max(BUF_SIZE);
+        let results: Vec<Vec<u8>> = data
+            .par_chunks(cs)
+            .map(|chunk| {
+                let mut out = Vec::with_capacity(chunk.len());
+                let mut last = 0;
+                macro_rules! process_iter {
+                    ($iter:expr) => {
+                        for pos in $iter {
+                            if pos > last {
+                                out.extend_from_slice(&chunk[last..pos]);
+                            }
+                            last = pos + 1;
+                        }
+                    };
+                }
+                if N == 2 {
+                    process_iter!(memchr::memchr2_iter(c0, c1, chunk));
+                } else {
+                    process_iter!(memchr::memchr3_iter(c0, c1, c2, chunk));
+                }
+                if last < chunk.len() {
+                    out.extend_from_slice(&chunk[last..]);
+                }
+                out
+            })
+            .collect();
+        for r in &results {
+            if !r.is_empty() {
+                writer.write_all(r)?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Small data: sequential
     let buf_size = data.len().min(BUF_SIZE);
     let mut outbuf = vec![0u8; buf_size];
 
@@ -1258,9 +1414,9 @@ fn delete_multi_memchr_mmap<const N: usize>(
         }
 
         if N == 2 {
-            process_iter!(memchr::memchr2_iter(chars[0], chars[1], chunk));
+            process_iter!(memchr::memchr2_iter(c0, c1, chunk));
         } else {
-            process_iter!(memchr::memchr3_iter(chars[0], chars[1], chars[2], chunk));
+            process_iter!(memchr::memchr3_iter(c0, c1, c2, chunk));
         }
 
         if last < chunk.len() {
@@ -1274,9 +1430,38 @@ fn delete_multi_memchr_mmap<const N: usize>(
 }
 
 /// Single-character delete from mmap using SIMD memchr.
-/// Chunked: processes 1MB at a time into contiguous output buffer, single write_all per chunk.
-/// Uses memchr_iter (precomputed SIMD state for entire chunk) + bulk copy_from_slice.
+/// Parallel: each thread processes a chunk independently with memchr_iter + bulk copy.
 fn delete_single_char_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Result<()> {
+    // Parallel path: each chunk independently processed
+    if data.len() >= PAR_THRESHOLD {
+        let n = rayon::current_num_threads().max(1);
+        let cs = (data.len() / n).max(BUF_SIZE);
+        let results: Vec<Vec<u8>> = data
+            .par_chunks(cs)
+            .map(|chunk| {
+                let mut out = Vec::with_capacity(chunk.len());
+                let mut last = 0;
+                for pos in memchr::memchr_iter(ch, chunk) {
+                    if pos > last {
+                        out.extend_from_slice(&chunk[last..pos]);
+                    }
+                    last = pos + 1;
+                }
+                if last < chunk.len() {
+                    out.extend_from_slice(&chunk[last..]);
+                }
+                out
+            })
+            .collect();
+        for r in &results {
+            if !r.is_empty() {
+                writer.write_all(r)?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Small data: sequential
     let buf_size = data.len().min(BUF_SIZE);
     let mut outbuf = vec![0u8; buf_size];
 
@@ -1476,7 +1661,6 @@ fn squeeze_multi_mmap<const N: usize>(
 
 /// Squeeze a single repeated character from mmap'd data.
 /// Uses SIMD memchr for fast scanning + bulk copy of non-squeeze regions.
-/// For each squeeze run: copy gap in bulk, emit one squeeze char, skip duplicates.
 fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -1487,6 +1671,36 @@ fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Resu
         return writer.write_all(data);
     }
 
+    // For large data: process into a single output buffer and write once.
+    // Squeeze has cross-boundary state, so we can't easily parallelize.
+    // But a single large output buffer + one write() is faster than many small writes.
+    if data.len() >= PAR_THRESHOLD {
+        let mut outbuf = Vec::with_capacity(data.len());
+        let len = data.len();
+        let mut cursor = 0;
+        while cursor < len {
+            match memchr::memchr(ch, &data[cursor..]) {
+                Some(offset) => {
+                    let pos = cursor + offset;
+                    if pos > cursor {
+                        outbuf.extend_from_slice(&data[cursor..pos]);
+                    }
+                    outbuf.push(ch);
+                    cursor = pos + 1;
+                    while cursor < len && data[cursor] == ch {
+                        cursor += 1;
+                    }
+                }
+                None => {
+                    outbuf.extend_from_slice(&data[cursor..]);
+                    break;
+                }
+            }
+        }
+        return writer.write_all(&outbuf);
+    }
+
+    // Small data: chunked output
     let buf_size = data.len().min(BUF_SIZE);
     let mut outbuf = vec![0u8; buf_size];
     let len = data.len();
@@ -1494,12 +1708,9 @@ fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Resu
     let mut cursor = 0;
 
     while cursor < len {
-        // SIMD scan for next occurrence of squeeze char
         match memchr::memchr(ch, &data[cursor..]) {
             Some(offset) => {
                 let pos = cursor + offset;
-
-                // Bulk copy non-squeeze region [cursor..pos]
                 let gap = pos - cursor;
                 if gap > 0 {
                     if wp + gap > buf_size {
@@ -1507,30 +1718,24 @@ fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Resu
                         wp = 0;
                     }
                     if gap > buf_size {
-                        // Huge gap: write directly
                         writer.write_all(&data[cursor..pos])?;
                     } else {
                         outbuf[wp..wp + gap].copy_from_slice(&data[cursor..pos]);
                         wp += gap;
                     }
                 }
-
-                // Emit one squeeze char
                 if wp >= buf_size {
                     writer.write_all(&outbuf[..wp])?;
                     wp = 0;
                 }
                 outbuf[wp] = ch;
                 wp += 1;
-
-                // Skip consecutive duplicates
                 cursor = pos + 1;
                 while cursor < len && data[cursor] == ch {
                     cursor += 1;
                 }
             }
             None => {
-                // No more squeeze chars — bulk copy remainder
                 let remaining = len - cursor;
                 if remaining > 0 {
                     if wp + remaining > buf_size {

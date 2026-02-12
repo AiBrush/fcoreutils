@@ -2,10 +2,10 @@ use memchr::memchr_iter;
 use rayon::prelude::*;
 use std::io::{self, BufRead, Write};
 
-/// Minimum file size for parallel processing (1MB).
-/// Rayon overhead is ~5-10μs per task; at 1MB per chunk,
-/// each chunk takes ~100μs+ to process, so overhead is < 10%.
-const PARALLEL_THRESHOLD: usize = 1024 * 1024;
+/// Minimum file size for parallel processing (2MB).
+/// Rayon overhead is ~5-10μs per task; at 2MB per chunk,
+/// each chunk takes ~200μs+ to process, so overhead is < 5%.
+const PARALLEL_THRESHOLD: usize = 2 * 1024 * 1024;
 
 /// Configuration for cut operations.
 pub struct CutConfig<'a> {
@@ -242,7 +242,7 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
         let results: Vec<Vec<u8>> = chunks
             .par_iter()
             .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len() / 2);
+                let mut buf = Vec::with_capacity(chunk.len());
                 process_fields_chunk(
                     chunk,
                     delim,
@@ -265,7 +265,7 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
         }
     } else {
         // Sequential path
-        let mut buf = Vec::with_capacity(data.len() / 2);
+        let mut buf = Vec::with_capacity(data.len());
         process_fields_chunk(
             data,
             delim,
@@ -355,7 +355,7 @@ fn process_single_field(
             let results: Vec<Vec<u8>> = chunks
                 .par_iter()
                 .map(|chunk| {
-                    let mut buf = Vec::with_capacity(chunk.len() / 4);
+                    let mut buf = Vec::with_capacity(chunk.len());
                     process_first_field_combined(chunk, delim, line_delim, suppress, &mut buf);
                     buf
                 })
@@ -366,7 +366,7 @@ fn process_single_field(
                 }
             }
         } else {
-            let mut buf = Vec::with_capacity(data.len() / 4);
+            let mut buf = Vec::with_capacity(data.len());
             process_first_field_combined(data, delim, line_delim, suppress, &mut buf);
             if !buf.is_empty() {
                 out.write_all(&buf)?;
@@ -1109,7 +1109,7 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
         let results: Vec<Vec<u8>> = chunks
             .par_iter()
             .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len() / 2);
+                let mut buf = Vec::with_capacity(chunk.len());
                 process_bytes_chunk(
                     chunk,
                     ranges,
@@ -1127,7 +1127,7 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
             }
         }
     } else {
-        let mut buf = Vec::with_capacity(data.len() / 2);
+        let mut buf = Vec::with_capacity(data.len());
         process_bytes_chunk(data, ranges, complement, output_delim, line_delim, &mut buf);
         if !buf.is_empty() {
             out.write_all(&buf)?;
