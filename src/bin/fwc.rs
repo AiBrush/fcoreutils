@@ -9,9 +9,9 @@ use std::process;
 use clap::Parser;
 
 use coreutils_rs::common::io::{FileData, file_size, read_file, read_stdin};
+use coreutils_rs::wc;
 #[cfg(unix)]
 use memmap2::MmapOptions;
-use coreutils_rs::wc;
 
 #[derive(Parser)]
 #[command(

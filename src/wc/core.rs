@@ -289,7 +289,8 @@ fn count_words_utf8(data: &[u8]) -> u64 {
             i += 1;
         } else if b < 0xE0 {
             if i + 1 < len && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80 {
-                let cp = ((b as u32 & 0x1F) << 6) | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
+                let cp = ((b as u32 & 0x1F) << 6)
+                    | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
                 } else if is_unicode_printable(cp) {
@@ -303,7 +304,10 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                 i += 1;
             }
         } else if b < 0xF0 {
-            if i + 2 < len && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80 && (unsafe { *data.get_unchecked(i + 2) } & 0xC0) == 0x80 {
+            if i + 2 < len
+                && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80
+                && (unsafe { *data.get_unchecked(i + 2) } & 0xC0) == 0x80
+            {
                 let cp = ((b as u32 & 0x0F) << 12)
                     | ((unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F) << 6)
                     | (unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F);
@@ -446,7 +450,8 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
             i += 1;
         } else if b < 0xE0 {
             if i + 1 < len && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80 {
-                let cp = ((b as u32 & 0x1F) << 6) | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
+                let cp = ((b as u32 & 0x1F) << 6)
+                    | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
                 } else if is_unicode_printable(cp) {
@@ -460,7 +465,10 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                 i += 1;
             }
         } else if b < 0xF0 {
-            if i + 2 < len && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80 && (unsafe { *data.get_unchecked(i + 2) } & 0xC0) == 0x80 {
+            if i + 2 < len
+                && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80
+                && (unsafe { *data.get_unchecked(i + 2) } & 0xC0) == 0x80
+            {
                 let cp = ((b as u32 & 0x0F) << 12)
                     | ((unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F) << 6)
                     | (unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F);

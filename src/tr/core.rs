@@ -723,7 +723,13 @@ pub fn translate_squeeze_mmap(
 
     for chunk in data.chunks(BUF_SIZE) {
         // Phase 1: Translate (may use SIMD)
-        translate_chunk_dispatch(chunk, &mut trans_buf[..chunk.len()], &table, &kind, use_simd);
+        translate_chunk_dispatch(
+            chunk,
+            &mut trans_buf[..chunk.len()],
+            &table,
+            &kind,
+            use_simd,
+        );
 
         // Phase 2: Squeeze
         let mut out_pos = 0;
