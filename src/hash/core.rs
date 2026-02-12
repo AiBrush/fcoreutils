@@ -256,10 +256,6 @@ pub fn hash_stdin(algo: HashAlgorithm) -> io::Result<String> {
     Ok(hash_bytes(algo, &data))
 }
 
-/// Parallel hashing threshold: only use rayon when total data exceeds this.
-/// Below this, sequential processing avoids rayon overhead (thread pool, work stealing).
-const PARALLEL_THRESHOLD: u64 = 8 * 1024 * 1024; // 8MB
-
 /// Estimate total file size for parallel/sequential decision.
 /// Uses a quick heuristic: samples first file and extrapolates.
 /// Returns 0 if estimation fails.
