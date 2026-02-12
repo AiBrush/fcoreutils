@@ -304,6 +304,35 @@ fn process_single_field(
 ) -> io::Result<()> {
     let target_idx = target - 1;
 
+    // Ultra-fast path: first field with combined delimiter+newline scan.
+    // Uses memchr2_iter to find both delimiter and newline in a single SIMD pass,
+    // eliminating the per-line memchr call overhead.
+    if target_idx == 0 && delim != line_delim {
+        if data.len() >= PARALLEL_THRESHOLD {
+            let chunks = split_into_chunks(data, line_delim);
+            let results: Vec<Vec<u8>> = chunks
+                .par_iter()
+                .map(|chunk| {
+                    let mut buf = Vec::with_capacity(chunk.len() / 4);
+                    process_first_field_combined(chunk, delim, line_delim, suppress, &mut buf);
+                    buf
+                })
+                .collect();
+            for result in &results {
+                if !result.is_empty() {
+                    out.write_all(result)?;
+                }
+            }
+        } else {
+            let mut buf = Vec::with_capacity(data.len() / 4);
+            process_first_field_combined(data, delim, line_delim, suppress, &mut buf);
+            if !buf.is_empty() {
+                out.write_all(&buf)?;
+            }
+        }
+        return Ok(());
+    }
+
     if data.len() >= PARALLEL_THRESHOLD {
         // Parallel path: split into chunks aligned to line boundaries
         let chunks = split_into_chunks(data, line_delim);
@@ -331,6 +360,65 @@ fn process_single_field(
         }
     }
     Ok(())
+}
+
+/// First-field extraction using combined delimiter+newline SIMD scan.
+/// Single memchr2_iter pass finds both delimiter and newline positions,
+/// eliminating per-line memchr overhead (saves ~250K function calls for 10MB).
+fn process_first_field_combined(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    let mut line_start = 0;
+    let mut found_delim = false; // true if we already found delimiter for current line
+
+    for pos in memchr::memchr2_iter(delim, line_delim, data) {
+        let byte = data[pos];
+        if byte == line_delim {
+            // End of line
+            if !found_delim {
+                // No delimiter on this line — output whole line or suppress
+                if !suppress {
+                    buf.extend_from_slice(&data[line_start..pos]);
+                    buf.push(line_delim);
+                }
+            }
+            line_start = pos + 1;
+            found_delim = false;
+        } else {
+            // Delimiter found
+            if !found_delim {
+                // First delimiter — output field before it
+                buf.extend_from_slice(&data[line_start..pos]);
+                buf.push(line_delim);
+                found_delim = true;
+            }
+            // Subsequent delimiters on same line — ignore
+        }
+    }
+
+    // Handle last line without trailing newline
+    if line_start < data.len() {
+        if !found_delim {
+            // No delimiter found — output whole line or suppress
+            if !suppress {
+                // Check if there's a delimiter in the remaining data
+                match memchr::memchr(delim, &data[line_start..]) {
+                    Some(offset) => {
+                        buf.extend_from_slice(&data[line_start..line_start + offset]);
+                        buf.push(line_delim);
+                    }
+                    None => {
+                        buf.extend_from_slice(&data[line_start..]);
+                        buf.push(line_delim);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Process a chunk of data for single-field extraction.
