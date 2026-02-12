@@ -1,4 +1,8 @@
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
+#[cfg(unix)]
+use std::mem::ManuallyDrop;
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
@@ -6,6 +10,8 @@ use clap::Parser;
 
 use coreutils_rs::common::io::{FileData, file_size, read_file, read_stdin};
 use coreutils_rs::wc;
+#[cfg(unix)]
+use memmap2::MmapOptions;
 
 #[derive(Parser)]
 #[command(
@@ -76,6 +82,38 @@ fn num_width(n: u64) -> usize {
     width
 }
 
+/// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
+/// Returns None if stdin is a pipe/terminal.
+#[cfg(unix)]
+fn try_mmap_stdin() -> Option<memmap2::Mmap> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return None;
+    }
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
+        return None;
+    }
+
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
+    std::mem::forget(file); // Don't close stdin
+    #[cfg(target_os = "linux")]
+    if let Some(ref m) = mmap {
+        unsafe {
+            libc::madvise(
+                m.as_ptr() as *mut libc::c_void,
+                m.len(),
+                libc::MADV_SEQUENTIAL,
+            );
+        }
+    }
+    mmap
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -141,7 +179,23 @@ fn main() {
         }
 
         // Read file data (zero-copy mmap for large files)
+        // For stdin: try mmap if it's a regular file redirect (< file)
         let data: FileData = if filename == "-" {
+            #[cfg(unix)]
+            {
+                match try_mmap_stdin() {
+                    Some(mmap) => FileData::Mmap(mmap),
+                    None => match read_stdin() {
+                        Ok(d) => FileData::Owned(d),
+                        Err(e) => {
+                            eprintln!("wc: standard input: {}", e);
+                            had_error = true;
+                            continue;
+                        }
+                    },
+                }
+            }
+            #[cfg(not(unix))]
             match read_stdin() {
                 Ok(d) => FileData::Owned(d),
                 Err(e) => {
@@ -297,9 +351,13 @@ fn main() {
         num_width(max_val).max(min_width)
     };
 
-    // Phase 3: Print results
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    // Phase 3: Print results — raw fd stdout for zero-overhead writes
+    #[cfg(unix)]
+    let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+    #[cfg(unix)]
+    let mut out = BufWriter::with_capacity(64 * 1024, &mut *raw);
+    #[cfg(not(unix))]
+    let mut out = BufWriter::with_capacity(64 * 1024, io::stdout().lock());
 
     // --total=only: suppress individual file output
     if total_mode != "only" {
@@ -313,12 +371,49 @@ fn main() {
         print_counts_fmt(&mut out, &total, label, width, &show);
     }
 
+    let _ = out.flush();
+
     if had_error {
         process::exit(1);
     }
 }
 
-/// Print count values in GNU-compatible format.
+/// Format a u64 right-aligned into a stack buffer. Returns number of bytes written.
+/// Avoids the overhead of write! format machinery.
+#[inline]
+fn fmt_u64(val: u64, width: usize, buf: &mut [u8]) -> usize {
+    // Convert to decimal digits right-to-left
+    let mut digits = [0u8; 20];
+    let mut n = val;
+    let mut dlen = 0;
+    if n == 0 {
+        digits[19] = b'0';
+        dlen = 1;
+    } else {
+        let mut pos = 20;
+        while n > 0 {
+            pos -= 1;
+            digits[pos] = b'0' + (n % 10) as u8;
+            n /= 10;
+            dlen += 1;
+        }
+        // Shift digits to end of array
+        if pos > 0 {
+            digits.copy_within(pos..20, 20 - dlen);
+        }
+    }
+    let pad = width.saturating_sub(dlen);
+    let total = pad + dlen;
+    // Write padding spaces
+    for b in &mut buf[..pad] {
+        *b = b' ';
+    }
+    // Write digits
+    buf[pad..total].copy_from_slice(&digits[20 - dlen..20]);
+    total
+}
+
+/// Print count values in GNU-compatible format using fast manual formatting.
 /// GNU wc order: newline, word, character, byte, maximum line length.
 fn print_counts_fmt(
     out: &mut impl Write,
@@ -327,15 +422,18 @@ fn print_counts_fmt(
     width: usize,
     show: &ShowFlags,
 ) {
+    // Stack buffer for the entire output line (max ~120 bytes)
+    let mut line = [0u8; 256];
+    let mut pos = 0;
     let mut first = true;
 
     macro_rules! field {
         ($val:expr) => {
-            if first {
-                let _ = write!(out, "{:>w$}", $val, w = width);
-            } else {
-                let _ = write!(out, " {:>w$}", $val, w = width);
+            if !first {
+                line[pos] = b' ';
+                pos += 1;
             }
+            pos += fmt_u64($val, width, &mut line[pos..]);
             #[allow(unused_assignments)]
             {
                 first = false;
@@ -361,9 +459,16 @@ fn print_counts_fmt(
     }
 
     if !filename.is_empty() {
-        let _ = write!(out, " {}", filename);
+        line[pos] = b' ';
+        pos += 1;
+        let name_bytes = filename.as_bytes();
+        line[pos..pos + name_bytes.len()].copy_from_slice(name_bytes);
+        pos += name_bytes.len();
     }
-    let _ = writeln!(out);
+    line[pos] = b'\n';
+    pos += 1;
+
+    let _ = out.write_all(&line[..pos]);
 }
 
 /// Read NUL-terminated filenames from a file (or stdin if "-").

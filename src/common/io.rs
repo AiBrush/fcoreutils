@@ -23,20 +23,64 @@ impl Deref for FileData {
     }
 }
 
-/// Read a file with zero-copy mmap. Uses populate() for eager page table setup
-/// and MADV_HUGEPAGE for TLB efficiency on large files.
+/// Threshold below which we use read() instead of mmap.
+/// For small files, read() is faster since mmap has setup/teardown overhead
+/// (page table creation, TLB flush on munmap) that exceeds the zero-copy benefit.
+const MMAP_THRESHOLD: u64 = 256 * 1024;
+
+/// Open a file with O_NOATIME on Linux to avoid atime inode writes.
+/// Falls back to normal open if O_NOATIME fails (e.g., not file owner).
+#[cfg(target_os = "linux")]
+fn open_noatime(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NOATIME = 0o1000000 on Linux
+    match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOATIME)
+        .open(path)
+    {
+        Ok(f) => Ok(f),
+        Err(_) => File::open(path),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_noatime(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+/// Read a file with zero-copy mmap for large files or read() for small files.
+/// Opens once with O_NOATIME, uses fstat for metadata to save a syscall.
 pub fn read_file(path: &Path) -> io::Result<FileData> {
-    let metadata = fs::metadata(path)?;
+    let file = open_noatime(path)?;
+    let metadata = file.metadata()?;
     let len = metadata.len();
 
     if len > 0 && metadata.file_type().is_file() {
-        let file = File::open(path)?;
+        // Small files: read from already-open fd (avoids double open + page table overhead)
+        if len < MMAP_THRESHOLD {
+            let mut buf = Vec::with_capacity(len as usize);
+            let mut reader = file;
+            reader.read_to_end(&mut buf)?;
+            return Ok(FileData::Owned(buf));
+        }
+
         // SAFETY: Read-only mapping. File must not be truncated during use.
-        match unsafe { MmapOptions::new().populate().map(&file) } {
+        // Don't use populate() — it blocks until all pages are loaded.
+        // Instead, MADV_SEQUENTIAL triggers async readahead which overlaps with processing.
+        match unsafe { MmapOptions::new().map(&file) } {
             Ok(mmap) => {
                 #[cfg(target_os = "linux")]
                 {
                     let _ = mmap.advise(memmap2::Advice::Sequential);
+                    // WILLNEED triggers immediate async readahead
+                    unsafe {
+                        libc::madvise(
+                            mmap.as_ptr() as *mut libc::c_void,
+                            mmap.len(),
+                            libc::MADV_WILLNEED,
+                        );
+                    }
                     if len >= 2 * 1024 * 1024 {
                         unsafe {
                             libc::madvise(
@@ -49,11 +93,20 @@ pub fn read_file(path: &Path) -> io::Result<FileData> {
                 }
                 Ok(FileData::Mmap(mmap))
             }
-            Err(_) => Ok(FileData::Owned(fs::read(path)?)),
+            Err(_) => {
+                // mmap failed — fall back to read
+                let mut buf = Vec::with_capacity(len as usize);
+                let mut reader = file;
+                reader.read_to_end(&mut buf)?;
+                Ok(FileData::Owned(buf))
+            }
         }
     } else if len > 0 {
-        // Non-regular file (special files)
-        Ok(FileData::Owned(fs::read(path)?))
+        // Non-regular file (special files) — read from open fd
+        let mut buf = Vec::new();
+        let mut reader = file;
+        reader.read_to_end(&mut buf)?;
+        Ok(FileData::Owned(buf))
     } else {
         Ok(FileData::Owned(Vec::new()))
     }

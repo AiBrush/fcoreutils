@@ -7,6 +7,8 @@ use std::path::Path;
 use std::process;
 
 use clap::Parser;
+#[cfg(unix)]
+use memmap2::MmapOptions;
 
 use coreutils_rs::base64::core as b64;
 use coreutils_rs::common::io::read_file;
@@ -54,31 +56,20 @@ fn main() {
 
     let filename = cli.file.as_deref().unwrap_or("-");
 
-    // Use raw fd stdout on Unix for maximum write throughput.
-    // Our encode/decode paths already batch output into large chunks,
-    // so BufWriter overhead is pure waste.
+    // Raw fd stdout with BufWriter for batching small writes (wrapped encoding)
     #[cfg(unix)]
-    let mut out = raw_stdout();
+    let mut raw = raw_stdout();
+    #[cfg(unix)]
+    let mut out = io::BufWriter::with_capacity(2 * 1024 * 1024, &mut *raw);
     #[cfg(not(unix))]
     let mut out = io::BufWriter::with_capacity(2 * 1024 * 1024, io::stdout().lock());
 
-    // ManuallyDrop<File> needs deref to &mut File for Write;
-    // BufWriter implements Write directly.
-    #[cfg(unix)]
-    let result = if filename == "-" {
-        process_stdin(&cli, &mut *out)
-    } else {
-        process_file(filename, &cli, &mut *out)
-    };
-    #[cfg(not(unix))]
     let result = if filename == "-" {
         process_stdin(&cli, &mut out)
     } else {
         process_file(filename, &cli, &mut out)
     };
 
-    // Flush on non-unix (raw fd doesn't need flushing)
-    #[cfg(not(unix))]
     if let Err(e) = out.flush()
         && e.kind() != io::ErrorKind::BrokenPipe
     {
@@ -96,7 +87,50 @@ fn main() {
     }
 }
 
+/// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
+#[cfg(unix)]
+fn try_mmap_stdin() -> Option<memmap2::Mmap> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return None;
+    }
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
+        return None;
+    }
+
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
+    std::mem::forget(file);
+    #[cfg(target_os = "linux")]
+    if let Some(ref m) = mmap {
+        unsafe {
+            libc::madvise(
+                m.as_ptr() as *mut libc::c_void,
+                m.len(),
+                libc::MADV_SEQUENTIAL,
+            );
+        }
+    }
+    mmap
+}
+
 fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
+    // Try mmap for zero-copy stdin when redirected from a file
+    #[cfg(unix)]
+    if let Some(mmap) = try_mmap_stdin() {
+        if cli.decode {
+            // For decode from mmap: need owned copy for in-place strip
+            let mut data = mmap.to_vec();
+            return b64::decode_owned(&mut data, cli.ignore_garbage, out);
+        } else {
+            return b64::encode_to_writer(&mmap, cli.wrap, out);
+        }
+    }
+
     if cli.decode {
         let mut stdin = io::stdin().lock();
         b64::decode_stream(&mut stdin, cli.ignore_garbage, out)

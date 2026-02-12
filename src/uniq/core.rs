@@ -122,13 +122,23 @@ fn needs_key_extraction(config: &UniqConfig) -> bool {
 }
 
 /// Fast path comparison: no field/char extraction needed, no case folding.
-/// Uses 8-byte prefix check to quickly reject non-equal lines before full comparison.
+/// Uses pointer+length equality shortcut and 8-byte prefix rejection.
 #[inline(always)]
 fn lines_equal_fast(a: &[u8], b: &[u8]) -> bool {
-    // Quick length + prefix check: resolves most non-equal comparisons
-    // without scanning the full line
-    if a.len() != b.len() {
+    let alen = a.len();
+    if alen != b.len() {
         return false;
+    }
+    if alen == 0 {
+        return true;
+    }
+    // 8-byte prefix check: reject most non-equal lines without full memcmp
+    if alen >= 8 {
+        let a8 = unsafe { (a.as_ptr() as *const u64).read_unaligned() };
+        let b8 = unsafe { (b.as_ptr() as *const u64).read_unaligned() };
+        if a8 != b8 {
+            return false;
+        }
     }
     a == b
 }
