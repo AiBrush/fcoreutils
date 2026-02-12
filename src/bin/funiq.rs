@@ -112,6 +112,7 @@ fn main() {
                 eprintln!(
                     "Valid arguments are:\n  - 'separate'\n  - 'prepend'\n  - 'append'\n  - 'both'"
                 );
+                eprintln!("Try 'uniq --help' for more information.");
                 process::exit(1);
             }
         };
@@ -123,6 +124,7 @@ fn main() {
             || cli.unique
         {
             eprintln!("uniq: --group is mutually exclusive with -c/-d/-D/-u");
+            eprintln!("Try 'uniq --help' for more information.");
             process::exit(1);
         }
         OutputMode::Group(method)
@@ -135,6 +137,7 @@ fn main() {
                 other => {
                     eprintln!("uniq: invalid argument '{}' for '--all-repeated'", other);
                     eprintln!("Valid arguments are:\n  - 'none'\n  - 'prepend'\n  - 'separate'");
+                    eprintln!("Try 'uniq --help' for more information.");
                     process::exit(1);
                 }
             }
@@ -153,6 +156,7 @@ fn main() {
     // -c is incompatible with -D/--all-repeated and --group
     if cli.count && matches!(mode, OutputMode::AllRepeated(_) | OutputMode::Group(_)) {
         eprintln!("uniq: printing all duplicated lines and repeat counts is meaningless");
+        eprintln!("Try 'uniq --help' for more information.");
         process::exit(1);
     }
 

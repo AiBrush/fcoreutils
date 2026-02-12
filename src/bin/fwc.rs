@@ -202,6 +202,7 @@ fn main() {
         if !cli.files.is_empty() {
             eprintln!("wc: extra operand '{}'", cli.files[0]);
             eprintln!("file operands cannot be combined with --files0-from");
+            eprintln!("Try 'wc --help' for more information.");
             process::exit(1);
         }
         read_files0_from(f0f)
