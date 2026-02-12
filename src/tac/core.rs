@@ -51,11 +51,24 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
         return tac_bytes_small(data, separator, before, out);
     }
 
+    // Pre-estimate line count to avoid Vec reallocation.
+    // Conservative estimate: ~40 bytes per line for typical text.
+    let estimated_lines = (data.len() / 40).max(64);
+
     // Single forward SIMD scan — O(n) with memchr auto-vectorization
-    let positions: Vec<usize> = memchr::memchr_iter(separator, data).collect();
+    let mut positions: Vec<usize> = Vec::with_capacity(estimated_lines);
+    for pos in memchr::memchr_iter(separator, data) {
+        positions.push(pos);
+    }
 
     if positions.is_empty() {
         return out.write_all(data);
+    }
+
+    // For medium files (< 32MB), build contiguous reversed output buffer
+    // and write once. Single write() syscall vs many writev() calls.
+    if data.len() <= 32 * 1024 * 1024 {
+        return tac_bytes_contiguous(data, &positions, separator, before, out);
     }
 
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(positions.len() + 2);
@@ -149,6 +162,52 @@ fn tac_bytes_small(
     Ok(())
 }
 
+/// Medium-file path: build reversed output in a contiguous buffer and write once.
+/// Single write() syscall instead of many writev() calls.
+/// Uses memcpy from mmap pages into the output buffer.
+fn tac_bytes_contiguous(
+    data: &[u8],
+    positions: &[usize],
+    _separator: u8,
+    before: bool,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let mut result = Vec::with_capacity(data.len());
+
+    if !before {
+        // separator-after mode: records end with separator
+        let last_pos = *positions.last().unwrap();
+
+        // Trailing content without separator — output first
+        if last_pos < data.len() - 1 {
+            result.extend_from_slice(&data[last_pos + 1..]);
+        }
+
+        // Records in reverse order (each includes its trailing separator)
+        for i in (0..positions.len()).rev() {
+            let start = if i == 0 { 0 } else { positions[i - 1] + 1 };
+            result.extend_from_slice(&data[start..positions[i] + 1]);
+        }
+    } else {
+        // separator-before mode: records start with separator
+        for i in (0..positions.len()).rev() {
+            let end = if i + 1 < positions.len() {
+                positions[i + 1]
+            } else {
+                data.len()
+            };
+            result.extend_from_slice(&data[positions[i]..end]);
+        }
+
+        // Leading content before first separator
+        if positions[0] > 0 {
+            result.extend_from_slice(&data[..positions[0]]);
+        }
+    }
+
+    out.write_all(&result)
+}
+
 /// Reverse records using a multi-byte string separator.
 /// Uses SIMD-accelerated memmem for substring search.
 pub fn tac_string_separator(
@@ -166,7 +225,11 @@ pub fn tac_string_separator(
     }
 
     // Find all occurrences of the separator using SIMD-accelerated memmem
-    let positions: Vec<usize> = memchr::memmem::find_iter(data, separator).collect();
+    let estimated = (data.len() / separator.len().max(40)).max(64);
+    let mut positions: Vec<usize> = Vec::with_capacity(estimated);
+    for pos in memchr::memmem::find_iter(data, separator) {
+        positions.push(pos);
+    }
 
     if positions.is_empty() {
         out.write_all(data)?;

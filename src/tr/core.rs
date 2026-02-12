@@ -621,7 +621,8 @@ pub fn translate(
     #[cfg(not(target_arch = "x86_64"))]
     let use_simd = false;
 
-    let mut buf = vec![0u8; STREAM_BUF];
+    // Use 1MB buffer for fewer read() syscalls on pipes
+    let mut buf = vec![0u8; BUF_SIZE];
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) => break,
@@ -643,34 +644,45 @@ pub fn translate_squeeze(
 ) -> io::Result<()> {
     let table = build_translate_table(set1, set2);
     let squeeze_set = build_member_set(set2);
-    let mut outbuf = vec![0u8; STREAM_BUF];
-    let mut inbuf = vec![0u8; STREAM_BUF];
+    let kind = analyze_table(&table);
+    #[cfg(target_arch = "x86_64")]
+    let use_simd = has_avx2();
+    #[cfg(not(target_arch = "x86_64"))]
+    let use_simd = false;
+
+    // Single buffer: SIMD translate in-place, then squeeze in-place compaction.
+    // Eliminates outbuf allocation and saves one full memcpy of data.
+    let mut buf = vec![0u8; STREAM_BUF];
     let mut last_squeezed: u16 = 256;
 
     loop {
-        let n = match reader.read(&mut inbuf) {
+        let n = match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        let mut out_pos = 0;
-        for &b in &inbuf[..n] {
-            let translated = unsafe { *table.get_unchecked(b as usize) };
-            if is_member(&squeeze_set, translated) {
-                if last_squeezed == translated as u16 {
-                    continue;
+        // Phase 1: SIMD translate in-place (uses AVX2 when available)
+        translate_inplace_dispatch(&mut buf[..n], &table, &kind, use_simd);
+        // Phase 2: squeeze in-place compaction (wp <= i always, safe)
+        let mut wp = 0;
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            for i in 0..n {
+                let b = *ptr.add(i);
+                if is_member(&squeeze_set, b) {
+                    if last_squeezed == b as u16 {
+                        continue;
+                    }
+                    last_squeezed = b as u16;
+                } else {
+                    last_squeezed = 256;
                 }
-                last_squeezed = translated as u16;
-            } else {
-                last_squeezed = 256;
+                *ptr.add(wp) = b;
+                wp += 1;
             }
-            unsafe {
-                *outbuf.get_unchecked_mut(out_pos) = translated;
-            }
-            out_pos += 1;
         }
-        writer.write_all(&outbuf[..out_pos])?;
+        writer.write_all(&buf[..wp])?;
     }
     Ok(())
 }
@@ -691,26 +703,75 @@ pub fn delete(
     }
 
     let member = build_member_set(delete_chars);
-    let mut outbuf = vec![0u8; STREAM_BUF];
-    let mut inbuf = vec![0u8; STREAM_BUF];
+    // Single buffer with in-place compaction — eliminates outbuf allocation + memcpy
+    let mut buf = vec![0u8; STREAM_BUF];
 
     loop {
-        let n = match reader.read(&mut inbuf) {
+        let n = match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        let mut out_pos = 0;
-        for &b in &inbuf[..n] {
-            if !is_member(&member, b) {
-                unsafe {
-                    *outbuf.get_unchecked_mut(out_pos) = b;
+        let mut wp = 0;
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            let mut i = 0;
+            // 8-byte unrolled in-place compaction
+            while i + 8 <= n {
+                let b0 = *ptr.add(i);
+                let b1 = *ptr.add(i + 1);
+                let b2 = *ptr.add(i + 2);
+                let b3 = *ptr.add(i + 3);
+                let b4 = *ptr.add(i + 4);
+                let b5 = *ptr.add(i + 5);
+                let b6 = *ptr.add(i + 6);
+                let b7 = *ptr.add(i + 7);
+
+                if !is_member(&member, b0) {
+                    *ptr.add(wp) = b0;
+                    wp += 1;
                 }
-                out_pos += 1;
+                if !is_member(&member, b1) {
+                    *ptr.add(wp) = b1;
+                    wp += 1;
+                }
+                if !is_member(&member, b2) {
+                    *ptr.add(wp) = b2;
+                    wp += 1;
+                }
+                if !is_member(&member, b3) {
+                    *ptr.add(wp) = b3;
+                    wp += 1;
+                }
+                if !is_member(&member, b4) {
+                    *ptr.add(wp) = b4;
+                    wp += 1;
+                }
+                if !is_member(&member, b5) {
+                    *ptr.add(wp) = b5;
+                    wp += 1;
+                }
+                if !is_member(&member, b6) {
+                    *ptr.add(wp) = b6;
+                    wp += 1;
+                }
+                if !is_member(&member, b7) {
+                    *ptr.add(wp) = b7;
+                    wp += 1;
+                }
+                i += 8;
+            }
+            while i < n {
+                let b = *ptr.add(i);
+                if !is_member(&member, b) {
+                    *ptr.add(wp) = b;
+                    wp += 1;
+                }
+                i += 1;
             }
         }
-        writer.write_all(&outbuf[..out_pos])?;
+        writer.write_all(&buf[..wp])?;
     }
     Ok(())
 }
@@ -790,36 +851,38 @@ pub fn delete_squeeze(
 ) -> io::Result<()> {
     let delete_set = build_member_set(delete_chars);
     let squeeze_set = build_member_set(squeeze_chars);
-    let mut outbuf = vec![0u8; STREAM_BUF];
-    let mut inbuf = vec![0u8; STREAM_BUF];
+    // Single buffer with in-place compaction
+    let mut buf = vec![0u8; STREAM_BUF];
     let mut last_squeezed: u16 = 256;
 
     loop {
-        let n = match reader.read(&mut inbuf) {
+        let n = match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        let mut out_pos = 0;
-        for &b in &inbuf[..n] {
-            if is_member(&delete_set, b) {
-                continue;
-            }
-            if is_member(&squeeze_set, b) {
-                if last_squeezed == b as u16 {
+        let mut wp = 0;
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            for i in 0..n {
+                let b = *ptr.add(i);
+                if is_member(&delete_set, b) {
                     continue;
                 }
-                last_squeezed = b as u16;
-            } else {
-                last_squeezed = 256;
+                if is_member(&squeeze_set, b) {
+                    if last_squeezed == b as u16 {
+                        continue;
+                    }
+                    last_squeezed = b as u16;
+                } else {
+                    last_squeezed = 256;
+                }
+                *ptr.add(wp) = b;
+                wp += 1;
             }
-            unsafe {
-                *outbuf.get_unchecked_mut(out_pos) = b;
-            }
-            out_pos += 1;
         }
-        writer.write_all(&outbuf[..out_pos])?;
+        writer.write_all(&buf[..wp])?;
     }
     Ok(())
 }
@@ -835,83 +898,114 @@ pub fn squeeze(
     }
 
     let member = build_member_set(squeeze_chars);
-    let mut outbuf = vec![0u8; STREAM_BUF];
-    let mut inbuf = vec![0u8; STREAM_BUF];
+    // Single buffer with in-place compaction — eliminates outbuf allocation + memcpy
+    let mut buf = vec![0u8; STREAM_BUF];
     let mut last_squeezed: u16 = 256;
 
     loop {
-        let n = match reader.read(&mut inbuf) {
+        let n = match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        let mut out_pos = 0;
-        for &b in &inbuf[..n] {
-            if is_member(&member, b) {
-                if last_squeezed == b as u16 {
-                    continue;
+        let mut wp = 0;
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            for i in 0..n {
+                let b = *ptr.add(i);
+                if is_member(&member, b) {
+                    if last_squeezed == b as u16 {
+                        continue;
+                    }
+                    last_squeezed = b as u16;
+                } else {
+                    last_squeezed = 256;
                 }
-                last_squeezed = b as u16;
-            } else {
-                last_squeezed = 256;
+                *ptr.add(wp) = b;
+                wp += 1;
             }
-            unsafe {
-                *outbuf.get_unchecked_mut(out_pos) = b;
-            }
-            out_pos += 1;
         }
-        writer.write_all(&outbuf[..out_pos])?;
+        writer.write_all(&buf[..wp])?;
     }
     Ok(())
 }
 
-/// Squeeze a single character from a stream — optimized with bulk copy.
+/// Squeeze a single character from a stream — in-place compaction with SIMD memchr.
+/// Single buffer: eliminates outbuf allocation and saves one full memcpy.
+/// Uses memchr for fast SIMD scanning, ptr::copy for in-place shift.
 fn squeeze_single_stream(
     ch: u8,
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    let mut inbuf = vec![0u8; STREAM_BUF];
-    let mut outbuf = vec![0u8; STREAM_BUF];
+    let mut buf = vec![0u8; STREAM_BUF];
     let mut was_squeeze_char = false;
 
     loop {
-        let n = match reader.read(&mut inbuf) {
+        let n = match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        let chunk = &inbuf[..n];
-        let mut out_pos = 0;
+
+        // In-place squeeze compaction using memchr for SIMD scanning
+        let mut wp = 0;
         let mut i = 0;
 
         while i < n {
-            if chunk[i] == ch {
-                if !was_squeeze_char {
-                    // First in run — keep it
-                    unsafe {
-                        *outbuf.get_unchecked_mut(out_pos) = ch;
-                    }
-                    out_pos += 1;
-                    was_squeeze_char = true;
-                }
-                // Skip rest of run
+            if was_squeeze_char && buf[i] == ch {
+                // Skip consecutive squeeze chars
                 i += 1;
-            } else {
-                was_squeeze_char = false;
-                // Find next squeeze char using SIMD memchr
-                let remaining = &chunk[i..];
-                let run_end = memchr::memchr(ch, remaining).unwrap_or(remaining.len());
-                // Bulk copy the non-match run
-                outbuf[out_pos..out_pos + run_end].copy_from_slice(&chunk[i..i + run_end]);
-                out_pos += run_end;
-                i += run_end;
+                while i < n && buf[i] == ch {
+                    i += 1;
+                }
+                was_squeeze_char = i < n || true; // still in squeeze state
+                if i >= n {
+                    break;
+                }
+            }
+
+            // Find next occurrence of squeeze char using SIMD memchr
+            let remaining = &buf[i..n];
+            match memchr::memchr(ch, remaining) {
+                Some(offset) => {
+                    let run_len = offset;
+                    // Shift non-squeeze run left in-place (only if needed)
+                    if wp != i && run_len > 0 {
+                        unsafe {
+                            std::ptr::copy(buf.as_ptr().add(i), buf.as_mut_ptr().add(wp), run_len);
+                        }
+                    }
+                    wp += run_len;
+                    i += run_len;
+
+                    // Write one squeeze char, skip consecutive duplicates
+                    buf[wp] = ch;
+                    wp += 1;
+                    was_squeeze_char = true;
+                    i += 1;
+                    while i < n && buf[i] == ch {
+                        i += 1;
+                    }
+                }
+                None => {
+                    // No more squeeze chars — shift remaining data
+                    let run_len = n - i;
+                    if wp != i && run_len > 0 {
+                        unsafe {
+                            std::ptr::copy(buf.as_ptr().add(i), buf.as_mut_ptr().add(wp), run_len);
+                        }
+                    }
+                    wp += run_len;
+                    was_squeeze_char = false;
+                    break;
+                }
             }
         }
 
-        writer.write_all(&outbuf[..out_pos])?;
+        writer.write_all(&buf[..wp])?;
     }
     Ok(())
 }
