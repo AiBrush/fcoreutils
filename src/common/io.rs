@@ -80,9 +80,6 @@ pub fn read_file(path: &Path) -> io::Result<FileData> {
             return Ok(FileData::Owned(buf));
         }
 
-        // SAFETY: Read-only mapping. File must not be truncated during use.
-        // Don't use populate() — it blocks until all pages are loaded.
-        // Instead, MADV_SEQUENTIAL triggers async readahead which overlaps with processing.
         // SAFETY: Read-only mapping. MADV_SEQUENTIAL lets the kernel
         // prefetch ahead of our sequential access pattern.
         match unsafe { MmapOptions::new().map(&file) } {
