@@ -203,28 +203,44 @@ fn run_hash_mode(cli: &Cli, files: &[String], output_bytes: usize, out: &mut imp
             }
         }
     } else {
-        // Pre-warm page cache for all files before parallel hashing
         let paths: Vec<_> = files.iter().map(|f| Path::new(f.as_str())).collect();
-        hash::readahead_files(&paths.to_vec());
 
-        // Parallel hashing for multiple files using rayon
-        let results: Vec<(&str, Result<String, io::Error>)> = files
-            .par_iter()
-            .map(|filename| {
-                let result = hash::blake2b_hash_file(Path::new(filename), output_bytes);
-                (filename.as_str(), result)
-            })
-            .collect();
+        if hash::should_use_parallel(&paths) {
+            // Large total data: parallel hashing with rayon + readahead
+            hash::readahead_files(&paths);
 
-        for (filename, result) in results {
-            match result {
-                Ok(h) => {
-                    write_output(out, cli, &h, filename, output_bytes);
+            let results: Vec<(&str, Result<String, io::Error>)> = files
+                .par_iter()
+                .map(|filename| {
+                    let result = hash::blake2b_hash_file(Path::new(filename), output_bytes);
+                    (filename.as_str(), result)
+                })
+                .collect();
+
+            for (filename, result) in results {
+                match result {
+                    Ok(h) => {
+                        write_output(out, cli, &h, filename, output_bytes);
+                    }
+                    Err(e) => {
+                        let _ = out.flush();
+                        eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
+                        had_error = true;
+                    }
                 }
-                Err(e) => {
-                    let _ = out.flush();
-                    eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
-                    had_error = true;
+            }
+        } else {
+            // Small total data: sequential avoids rayon overhead
+            for filename in files {
+                match hash::blake2b_hash_file(Path::new(filename), output_bytes) {
+                    Ok(h) => {
+                        write_output(out, cli, &h, filename, output_bytes);
+                    }
+                    Err(e) => {
+                        let _ = out.flush();
+                        eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
+                        had_error = true;
+                    }
                 }
             }
         }

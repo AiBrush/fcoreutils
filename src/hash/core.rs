@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use md5::Md5;
 use memmap2::MmapOptions;
@@ -70,19 +71,31 @@ pub fn hash_reader<R: Read>(algo: HashAlgorithm, reader: R) -> io::Result<String
 /// For small files, the page table setup + madvise syscalls cost more than a simple read.
 const MMAP_THRESHOLD: u64 = 256 * 1024; // 256KB
 
+/// Track whether O_NOATIME is supported to avoid repeated failed open() attempts.
+/// After the first EPERM, we never try O_NOATIME again (saves one syscall per file).
+#[cfg(target_os = "linux")]
+static NOATIME_SUPPORTED: AtomicBool = AtomicBool::new(true);
+
 /// Open a file with O_NOATIME on Linux to avoid atime update overhead.
+/// Caches whether O_NOATIME works to avoid double-open on every file.
 #[cfg(target_os = "linux")]
 fn open_noatime(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
-    // Try O_NOATIME first (requires ownership or CAP_FOWNER)
-    match fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOATIME)
-        .open(path)
-    {
-        Ok(f) => Ok(f),
-        Err(_) => File::open(path), // Fall back to normal open
+    if NOATIME_SUPPORTED.load(Ordering::Relaxed) {
+        match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOATIME)
+            .open(path)
+        {
+            Ok(f) => return Ok(f),
+            Err(ref e) if e.raw_os_error() == Some(libc::EPERM) => {
+                // O_NOATIME requires file ownership or CAP_FOWNER — disable globally
+                NOATIME_SUPPORTED.store(false, Ordering::Relaxed);
+            }
+            Err(e) => return Err(e), // Real error, propagate
+        }
     }
+    File::open(path)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -90,9 +103,12 @@ fn open_noatime(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
-/// Hash a file by path. Uses read() for small files, mmap for large files.
+/// Hash a file by path. Single open + fstat to minimize syscalls.
+/// Uses read() for small files, mmap for large files.
 pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
-    let metadata = fs::metadata(path)?;
+    // Single open — reuse fd for fstat + read/mmap (saves separate stat + open)
+    let file = open_noatime(path)?;
+    let metadata = file.metadata()?; // fstat on existing fd, cheaper than stat(path)
     let len = metadata.len();
     let is_regular = metadata.file_type().is_file();
 
@@ -101,14 +117,14 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     }
 
     if is_regular && len > 0 {
-        // Small files: read() is faster than mmap due to lower syscall overhead
+        // Small files: read from already-open fd (avoids second open from fs::read)
         if len < MMAP_THRESHOLD {
-            let data = fs::read(path)?;
+            let mut data = Vec::with_capacity(len as usize);
+            Read::read_to_end(&mut &file, &mut data)?;
             return Ok(hash_bytes(algo, &data));
         }
 
-        // Large files: mmap for zero-copy
-        let file = open_noatime(path)?;
+        // Large files: mmap the already-open fd for zero-copy
         match unsafe {
             MmapOptions::new()
                 .populate() // Eagerly populate page tables — avoids page faults
@@ -138,8 +154,7 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         }
     }
 
-    // Fallback: buffered read (special files, pipes, etc.)
-    let file = File::open(path)?;
+    // Fallback: buffered read (special files, pipes, etc.) — fd already open
     let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
     hash_reader(algo, reader)
 }
@@ -176,6 +191,33 @@ pub fn hash_stdin(algo: HashAlgorithm) -> io::Result<String> {
     Ok(hash_bytes(algo, &data))
 }
 
+/// Parallel hashing threshold: only use rayon when total data exceeds this.
+/// Below this, sequential processing avoids rayon overhead (thread pool, work stealing).
+const PARALLEL_THRESHOLD: u64 = 8 * 1024 * 1024; // 8MB
+
+/// Estimate total file size for parallel/sequential decision.
+/// Uses a quick heuristic: samples first file and extrapolates.
+/// Returns 0 if estimation fails.
+pub fn estimate_total_size(paths: &[&Path]) -> u64 {
+    if paths.is_empty() {
+        return 0;
+    }
+    // Sample first file to estimate
+    if let Ok(meta) = fs::metadata(paths[0]) {
+        meta.len().saturating_mul(paths.len() as u64)
+    } else {
+        0
+    }
+}
+
+/// Check if parallel hashing is worthwhile for the given file paths.
+pub fn should_use_parallel(paths: &[&Path]) -> bool {
+    if paths.len() < 2 {
+        return false;
+    }
+    estimate_total_size(paths) >= PARALLEL_THRESHOLD
+}
+
 /// Issue readahead hints for a list of file paths to warm the page cache.
 /// Uses POSIX_FADV_WILLNEED which is non-blocking and batches efficiently.
 #[cfg(target_os = "linux")]
@@ -187,8 +229,12 @@ pub fn readahead_files(paths: &[&Path]) {
                 let len = meta.len();
                 if meta.file_type().is_file() && len > 0 {
                     unsafe {
-                        // posix_fadvise is non-blocking and more portable than readahead
-                        libc::posix_fadvise(file.as_raw_fd(), 0, len as i64, libc::POSIX_FADV_WILLNEED);
+                        libc::posix_fadvise(
+                            file.as_raw_fd(),
+                            0,
+                            len as i64,
+                            libc::POSIX_FADV_WILLNEED,
+                        );
                     }
                 }
             }
@@ -228,9 +274,12 @@ pub fn blake2b_hash_reader<R: Read>(mut reader: R, output_bytes: usize) -> io::R
     Ok(hex_encode(state.finalize().as_bytes()))
 }
 
-/// Hash a file with BLAKE2b variable output length. Uses read() for small files, mmap for large.
+/// Hash a file with BLAKE2b variable output length. Single open + fstat.
+/// Uses read() for small files, mmap for large.
 pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String> {
-    let metadata = fs::metadata(path)?;
+    // Single open — reuse fd for fstat + read/mmap
+    let file = open_noatime(path)?;
+    let metadata = file.metadata()?;
     let len = metadata.len();
     let is_regular = metadata.file_type().is_file();
 
@@ -239,14 +288,14 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
     }
 
     if is_regular && len > 0 {
-        // Small files: read() is faster than mmap
+        // Small files: read from already-open fd
         if len < MMAP_THRESHOLD {
-            let data = fs::read(path)?;
+            let mut data = Vec::with_capacity(len as usize);
+            Read::read_to_end(&mut &file, &mut data)?;
             return Ok(blake2b_hash_data(&data, output_bytes));
         }
 
-        // Large files: mmap for zero-copy
-        let file = open_noatime(path)?;
+        // Large files: mmap the already-open fd for zero-copy
         match unsafe { MmapOptions::new().populate().map(&file) } {
             Ok(mmap) => {
                 #[cfg(target_os = "linux")]
@@ -271,14 +320,42 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
         }
     }
 
-    let file = File::open(path)?;
+    // Fallback: buffered read — fd already open
     let reader = BufReader::with_capacity(16 * 1024 * 1024, file);
     blake2b_hash_reader(reader, output_bytes)
 }
 
 /// Hash stdin with BLAKE2b variable output length.
+/// Tries mmap if stdin is a regular file (shell redirect), falls back to read.
 pub fn blake2b_hash_stdin(output_bytes: usize) -> io::Result<String> {
-    blake2b_hash_reader(io::stdin().lock(), output_bytes)
+    // Try to mmap stdin if it's a regular file (shell redirect)
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let stdin = io::stdin();
+        let fd = stdin.as_raw_fd();
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut stat) } == 0
+            && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && stat.st_size > 0
+        {
+            use std::os::unix::io::FromRawFd;
+            let file = unsafe { File::from_raw_fd(fd) };
+            let result = unsafe { MmapOptions::new().populate().map(&file) };
+            std::mem::forget(file); // Don't close stdin
+            if let Ok(mmap) = result {
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = mmap.advise(memmap2::Advice::Sequential);
+                }
+                return Ok(blake2b_hash_data(&mmap, output_bytes));
+            }
+        }
+    }
+    // Fallback: read all then hash in one pass
+    let mut data = Vec::new();
+    io::stdin().lock().read_to_end(&mut data)?;
+    Ok(blake2b_hash_data(&data, output_bytes))
 }
 
 /// Print hash result in GNU format: "hash  filename\n"
