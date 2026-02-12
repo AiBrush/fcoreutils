@@ -51,8 +51,15 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
         return tac_bytes_small(data, separator, before, out);
     }
 
+    // Pre-estimate line count to avoid Vec reallocation.
+    // Conservative estimate: ~40 bytes per line for typical text.
+    let estimated_lines = (data.len() / 40).max(64);
+
     // Single forward SIMD scan — O(n) with memchr auto-vectorization
-    let positions: Vec<usize> = memchr::memchr_iter(separator, data).collect();
+    let mut positions: Vec<usize> = Vec::with_capacity(estimated_lines);
+    for pos in memchr::memchr_iter(separator, data) {
+        positions.push(pos);
+    }
 
     if positions.is_empty() {
         return out.write_all(data);
@@ -166,7 +173,11 @@ pub fn tac_string_separator(
     }
 
     // Find all occurrences of the separator using SIMD-accelerated memmem
-    let positions: Vec<usize> = memchr::memmem::find_iter(data, separator).collect();
+    let estimated = (data.len() / separator.len().max(40)).max(64);
+    let mut positions: Vec<usize> = Vec::with_capacity(estimated);
+    for pos in memchr::memmem::find_iter(data, separator) {
+        positions.push(pos);
+    }
 
     if positions.is_empty() {
         out.write_all(data)?;

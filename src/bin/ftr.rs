@@ -99,20 +99,64 @@ fn main() {
 
     let set1_str = &cli.sets[0];
 
-    // Raw fd stdout on Unix with 64KB BufWriter for batching.
-    // Raw fd bypasses StdoutLock overhead; small BufWriter avoids double-buffering
-    // since our streaming functions already process and write 256KB chunks.
+    // Try to mmap stdin for zero-copy reads
+    let mmap = try_mmap_stdin();
+
     #[cfg(unix)]
     let mut raw = raw_stdout();
+
+    // Pure translate mode: bypass BufWriter entirely.
+    // translate() writes 1MB chunks directly, so no buffering needed.
+    // This saves one full memcpy of the data through BufWriter's internal buffer.
+    let is_pure_translate = !cli.delete && !cli.squeeze && cli.sets.len() >= 2;
+
+    if is_pure_translate {
+        let set2_str = &cli.sets[1];
+        let mut set1 = tr::parse_set(set1_str);
+        if cli.complement {
+            set1 = tr::complement(&set1);
+        }
+        let set2 = if cli.truncate {
+            let raw_set = tr::parse_set(set2_str);
+            set1.truncate(raw_set.len());
+            raw_set
+        } else {
+            tr::expand_set2(set2_str, set1.len())
+        };
+        #[cfg(unix)]
+        let result = if let Some(ref data) = mmap {
+            tr::translate_mmap(&set1, &set2, data, &mut *raw)
+        } else {
+            let mut stdin = io::stdin().lock();
+            tr::translate(&set1, &set2, &mut stdin, &mut *raw)
+        };
+        #[cfg(not(unix))]
+        let result = {
+            let stdout = io::stdout();
+            let mut lock = stdout.lock();
+            if let Some(ref data) = mmap {
+                tr::translate_mmap(&set1, &set2, data, &mut lock)
+            } else {
+                let mut stdin = io::stdin().lock();
+                tr::translate(&set1, &set2, &mut stdin, &mut lock)
+            }
+        };
+        if let Err(e) = result
+            && e.kind() != io::ErrorKind::BrokenPipe
+        {
+            eprintln!("tr: {}", e);
+            process::exit(1);
+        }
+        return;
+    }
+
+    // All other modes: use BufWriter for batching variable-size writes
     #[cfg(unix)]
     let mut writer = BufWriter::with_capacity(1024 * 1024, &mut *raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
     let mut writer = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-
-    // Try to mmap stdin for zero-copy reads
-    let mmap = try_mmap_stdin();
 
     let result = if cli.delete && cli.squeeze {
         // -d -s: delete SET1 chars, then squeeze SET2 chars
@@ -176,9 +220,9 @@ fn main() {
             set1 = tr::complement(&set1);
         }
         let set2 = if cli.truncate {
-            let raw = tr::parse_set(set2_str);
-            set1.truncate(raw.len());
-            raw
+            let raw_set = tr::parse_set(set2_str);
+            set1.truncate(raw_set.len());
+            raw_set
         } else {
             tr::expand_set2(set2_str, set1.len())
         };
@@ -189,30 +233,10 @@ fn main() {
             tr::translate_squeeze(&set1, &set2, &mut stdin, &mut writer)
         }
     } else {
-        // Default: translate SET1 -> SET2
-        if cli.sets.len() < 2 {
-            eprintln!("tr: missing operand after '{}'", set1_str);
-            eprintln!("Two strings must be given when translating.");
-            process::exit(1);
-        }
-        let set2_str = &cli.sets[1];
-        let mut set1 = tr::parse_set(set1_str);
-        if cli.complement {
-            set1 = tr::complement(&set1);
-        }
-        let set2 = if cli.truncate {
-            let raw = tr::parse_set(set2_str);
-            set1.truncate(raw.len());
-            raw
-        } else {
-            tr::expand_set2(set2_str, set1.len())
-        };
-        if let Some(ref data) = mmap {
-            tr::translate_mmap(&set1, &set2, data, &mut writer)
-        } else {
-            let mut stdin = io::stdin().lock();
-            tr::translate(&set1, &set2, &mut stdin, &mut writer)
-        }
+        // Missing operand for translate
+        eprintln!("tr: missing operand after '{}'", set1_str);
+        eprintln!("Two strings must be given when translating.");
+        process::exit(1);
     };
 
     // Flush buffered output
