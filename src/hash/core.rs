@@ -35,12 +35,14 @@ fn hash_digest<D: Digest>(data: &[u8]) -> String {
 
 /// Streaming hash using thread-local 1MB buffer for optimal L2 cache behavior.
 /// 1MB fits in L2 cache on most CPUs, keeping data hot during hash update.
+/// Uses read_full to ensure each update() gets a full buffer, minimizing
+/// per-chunk hasher overhead and maximizing SIMD-friendly aligned updates.
 fn hash_reader_impl<D: Digest>(mut reader: impl Read) -> io::Result<String> {
     STREAM_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         let mut hasher = D::new();
         loop {
-            let n = reader.read(&mut buf)?;
+            let n = read_full(&mut reader, &mut buf)?;
             if n == 0 {
                 break;
             }
@@ -277,7 +279,7 @@ pub fn blake2b_hash_reader<R: Read>(mut reader: R, output_bytes: usize) -> io::R
             .hash_length(output_bytes)
             .to_state();
         loop {
-            let n = reader.read(&mut buf)?;
+            let n = read_full(&mut reader, &mut buf)?;
             if n == 0 {
                 break;
             }
@@ -595,6 +597,22 @@ pub fn parse_check_line_tag(line: &str) -> Option<(&str, &str, Option<usize>)> {
     };
 
     Some((hash, filename, bits))
+}
+
+/// Read as many bytes as possible into buf, retrying on partial reads.
+/// Ensures each hash update gets a full buffer (fewer update calls = less overhead).
+#[inline]
+fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        match reader.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
 }
 
 /// Compile-time generated 2-byte hex pair lookup table.
