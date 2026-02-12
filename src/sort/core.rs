@@ -518,36 +518,8 @@ fn float_to_sortable_u64(f: f64) -> u64 {
     }
 }
 
-/// Maximum IoSlices per writev call (Linux IOV_MAX = 1024).
-const IOV_BATCH: usize = 1024;
-
-/// Write all IoSlices, handling partial writes and batching.
-fn write_all_slices(out: &mut impl Write, slices: &[IoSlice<'_>]) -> io::Result<()> {
-    let mut offset = 0;
-    while offset < slices.len() {
-        let end = (offset + IOV_BATCH).min(slices.len());
-        let n = out.write_vectored(&slices[offset..end])?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "failed to write any data",
-            ));
-        }
-        let mut remaining = n;
-        while offset < end && remaining >= slices[offset].len() {
-            remaining -= slices[offset].len();
-            offset += 1;
-        }
-        if remaining > 0 && offset < end {
-            out.write_all(&slices[offset][remaining..])?;
-            offset += 1;
-        }
-    }
-    Ok(())
-}
-
 /// Write sorted indices to output, with optional unique dedup.
-/// Uses writev (vectored I/O) to write directly from mmap — zero intermediate copies.
+/// Uses contiguous output buffer with batched write_all for efficient I/O.
 fn write_sorted_output(
     data: &[u8],
     offsets: &[(usize, usize)],
@@ -556,8 +528,7 @@ fn write_sorted_output(
     writer: &mut impl Write,
     terminator: &[u8],
 ) -> io::Result<()> {
-    // Build IoSlice entries pointing directly into mmap data
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(sorted_indices.len() * 2);
+    let mut buf = Vec::with_capacity(OUTPUT_BUF_SIZE);
 
     if config.unique {
         let mut prev: Option<usize> = None;
@@ -572,29 +543,28 @@ fn write_sorted_output(
                 None => true,
             };
             if should_output {
-                slices.push(IoSlice::new(line));
-                slices.push(IoSlice::new(terminator));
+                buf.extend_from_slice(line);
+                buf.extend_from_slice(terminator);
                 prev = Some(idx);
             }
-            // Flush batch to avoid excessive memory
-            if slices.len() >= IOV_BATCH {
-                write_all_slices(writer, &slices)?;
-                slices.clear();
+            if buf.len() >= OUTPUT_BUF_SIZE {
+                writer.write_all(&buf)?;
+                buf.clear();
             }
         }
     } else {
         for &idx in sorted_indices {
             let (s, e) = offsets[idx];
-            slices.push(IoSlice::new(&data[s..e]));
-            slices.push(IoSlice::new(terminator));
-            if slices.len() >= IOV_BATCH {
-                write_all_slices(writer, &slices)?;
-                slices.clear();
+            buf.extend_from_slice(&data[s..e]);
+            buf.extend_from_slice(terminator);
+            if buf.len() >= OUTPUT_BUF_SIZE {
+                writer.write_all(&buf)?;
+                buf.clear();
             }
         }
     }
-    if !slices.is_empty() {
-        write_all_slices(writer, &slices)?;
+    if !buf.is_empty() {
+        writer.write_all(&buf)?;
     }
     Ok(())
 }
@@ -693,8 +663,42 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         }
         if is_sorted {
             // Data is already sorted — output directly without sorting
-            let indices: Vec<usize> = (0..num_lines).collect();
-            write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+            let mut buf = Vec::with_capacity(OUTPUT_BUF_SIZE);
+            if config.unique {
+                let mut prev: Option<usize> = None;
+                for i in 0..num_lines {
+                    let (s, e) = offsets[i];
+                    let emit = match prev {
+                        Some(p) => {
+                            let (ps, pe) = offsets[p];
+                            compare_lines(&data[ps..pe], &data[s..e], config) != Ordering::Equal
+                        }
+                        None => true,
+                    };
+                    if emit {
+                        buf.extend_from_slice(&data[s..e]);
+                        buf.extend_from_slice(terminator);
+                        prev = Some(i);
+                    }
+                    if buf.len() >= OUTPUT_BUF_SIZE {
+                        writer.write_all(&buf)?;
+                        buf.clear();
+                    }
+                }
+            } else {
+                for i in 0..num_lines {
+                    let (s, e) = offsets[i];
+                    buf.extend_from_slice(&data[s..e]);
+                    buf.extend_from_slice(terminator);
+                    if buf.len() >= OUTPUT_BUF_SIZE {
+                        writer.write_all(&buf)?;
+                        buf.clear();
+                    }
+                }
+            }
+            if !buf.is_empty() {
+                writer.write_all(&buf)?;
+            }
             writer.flush()?;
             return Ok(());
         }
@@ -761,14 +765,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             entries.sort_unstable_by(prefix_cmp);
         }
 
-        // Output using writev — zero-copy from mmap
         // Switch to sequential for output phase
         #[cfg(target_os = "linux")]
         if let FileData::Mmap(ref mmap) = buffer {
             let _ = mmap.advise(memmap2::Advice::Sequential);
         }
 
-        let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(entries.len().min(IOV_BATCH) * 2);
+        let mut buf = Vec::with_capacity(OUTPUT_BUF_SIZE);
         if config.unique {
             let mut prev: Option<usize> = None;
             for &(_, idx) in &entries {
@@ -782,28 +785,28 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     None => true,
                 };
                 if emit {
-                    slices.push(IoSlice::new(line));
-                    slices.push(IoSlice::new(terminator));
+                    buf.extend_from_slice(line);
+                    buf.extend_from_slice(terminator);
                     prev = Some(idx);
                 }
-                if slices.len() >= IOV_BATCH {
-                    write_all_slices(&mut writer, &slices)?;
-                    slices.clear();
+                if buf.len() >= OUTPUT_BUF_SIZE {
+                    writer.write_all(&buf)?;
+                    buf.clear();
                 }
             }
         } else {
             for &(_, idx) in &entries {
                 let (s, e) = offsets[idx];
-                slices.push(IoSlice::new(&data[s..e]));
-                slices.push(IoSlice::new(terminator));
-                if slices.len() >= IOV_BATCH {
-                    write_all_slices(&mut writer, &slices)?;
-                    slices.clear();
+                buf.extend_from_slice(&data[s..e]);
+                buf.extend_from_slice(terminator);
+                if buf.len() >= OUTPUT_BUF_SIZE {
+                    writer.write_all(&buf)?;
+                    buf.clear();
                 }
             }
         }
-        if !slices.is_empty() {
-            write_all_slices(&mut writer, &slices)?;
+        if !buf.is_empty() {
+            writer.write_all(&buf)?;
         }
     } else if is_numeric_only {
         // FAST PATH 2: Pre-parsed numeric sort with u64 comparison
