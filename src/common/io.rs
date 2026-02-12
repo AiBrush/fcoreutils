@@ -42,11 +42,21 @@ pub fn read_file(path: &Path) -> io::Result<FileData> {
 
         let file = File::open(path)?;
         // SAFETY: Read-only mapping. File must not be truncated during use.
-        match unsafe { MmapOptions::new().populate().map(&file) } {
+        // Don't use populate() — it blocks until all pages are loaded.
+        // Instead, MADV_SEQUENTIAL triggers async readahead which overlaps with processing.
+        match unsafe { MmapOptions::new().map(&file) } {
             Ok(mmap) => {
                 #[cfg(target_os = "linux")]
                 {
                     let _ = mmap.advise(memmap2::Advice::Sequential);
+                    // WILLNEED triggers immediate async readahead
+                    unsafe {
+                        libc::madvise(
+                            mmap.as_ptr() as *mut libc::c_void,
+                            mmap.len(),
+                            libc::MADV_WILLNEED,
+                        );
+                    }
                     if len >= 2 * 1024 * 1024 {
                         unsafe {
                             libc::madvise(

@@ -219,12 +219,19 @@ fn run_uniq(cli: &Cli, config: &UniqConfig, output: impl Write) {
                 return;
             }
 
-            // Use mmap for files — populate() for eager page table setup
-            let mmap = match unsafe { MmapOptions::new().populate().map(&file) } {
+            // Use mmap for files — MADV_SEQUENTIAL for async readahead
+            let mmap = match unsafe { MmapOptions::new().map(&file) } {
                 Ok(m) => {
                     #[cfg(target_os = "linux")]
                     {
                         let _ = m.advise(memmap2::Advice::Sequential);
+                        unsafe {
+                            libc::madvise(
+                                m.as_ptr() as *mut libc::c_void,
+                                m.len(),
+                                libc::MADV_WILLNEED,
+                            );
+                        }
                     }
                     m
                 }
