@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, IoSlice, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::sync::Arc;
 
 use memmap2::Mmap;
