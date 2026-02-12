@@ -65,12 +65,6 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
         return out.write_all(data);
     }
 
-    // For medium files (< 32MB), build contiguous reversed output buffer
-    // and write once. Single write() syscall vs many writev() calls.
-    if data.len() <= 32 * 1024 * 1024 {
-        return tac_bytes_contiguous(data, &positions, separator, before, out);
-    }
-
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(positions.len() + 2);
 
     if !before {
@@ -160,52 +154,6 @@ fn tac_bytes_small(
         }
     }
     Ok(())
-}
-
-/// Medium-file path: build reversed output in a contiguous buffer and write once.
-/// Single write() syscall instead of many writev() calls.
-/// Uses memcpy from mmap pages into the output buffer.
-fn tac_bytes_contiguous(
-    data: &[u8],
-    positions: &[usize],
-    _separator: u8,
-    before: bool,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    let mut result = Vec::with_capacity(data.len());
-
-    if !before {
-        // separator-after mode: records end with separator
-        let last_pos = *positions.last().unwrap();
-
-        // Trailing content without separator — output first
-        if last_pos < data.len() - 1 {
-            result.extend_from_slice(&data[last_pos + 1..]);
-        }
-
-        // Records in reverse order (each includes its trailing separator)
-        for i in (0..positions.len()).rev() {
-            let start = if i == 0 { 0 } else { positions[i - 1] + 1 };
-            result.extend_from_slice(&data[start..positions[i] + 1]);
-        }
-    } else {
-        // separator-before mode: records start with separator
-        for i in (0..positions.len()).rev() {
-            let end = if i + 1 < positions.len() {
-                positions[i + 1]
-            } else {
-                data.len()
-            };
-            result.extend_from_slice(&data[positions[i]..end]);
-        }
-
-        // Leading content before first separator
-        if positions[0] > 0 {
-            result.extend_from_slice(&data[..positions[0]]);
-        }
-    }
-
-    out.write_all(&result)
 }
 
 /// Reverse records using a multi-byte string separator.
