@@ -159,7 +159,13 @@ pub fn compare_lines(a: &[u8], b: &[u8], config: &SortConfig) -> Ordering {
         Ordering::Equal
     } else {
         // No keys: compare whole line with global opts
-        compare_with_opts(a, b, &config.global_opts, config.random_seed)
+        let result = compare_with_opts(a, b, &config.global_opts, config.random_seed);
+        // Last-resort whole-line comparison for deterministic order (unless -s)
+        if result == Ordering::Equal && !config.stable {
+            a.cmp(b)
+        } else {
+            result
+        }
     }
 }
 
@@ -1509,7 +1515,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 lb
             };
             let ord = cmp_fn(la, lb);
-            if needs_reverse { ord.reverse() } else { ord }
+            let ord = if needs_reverse { ord.reverse() } else { ord };
+            // Last-resort whole-line comparison for deterministic order (unless -s)
+            if ord == Ordering::Equal && !stable {
+                data[offsets[a].0..offsets[a].1].cmp(&data[offsets[b].0..offsets[b].1])
+            } else {
+                ord
+            }
         });
 
         write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
