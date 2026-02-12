@@ -480,11 +480,10 @@ fn process_default_fast_singlepass(
     process_default_sequential(data, writer, term)
 }
 
-/// Sequential single-pass dedup for small files.
+/// Sequential single-pass dedup with zero-copy output.
+/// Instead of copying data to a buffer, tracks contiguous output runs and writes
+/// directly from the original data. For all-unique data, this is a single write_all.
 fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) -> io::Result<()> {
-    // Batch output into a contiguous buffer for fewer write() syscalls.
-    let mut outbuf = Vec::with_capacity(data.len());
-
     let mut prev_start: usize = 0;
     let mut prev_end: usize; // exclusive, without terminator
 
@@ -492,18 +491,19 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
     match memchr::memchr(term, data) {
         Some(pos) => {
             prev_end = pos;
-            // Write first line (always output)
-            outbuf.extend_from_slice(&data[0..pos + 1]);
         }
         None => {
             // Single line, no terminator
-            outbuf.extend_from_slice(data);
-            outbuf.push(term);
-            return writer.write_all(&outbuf);
+            writer.write_all(data)?;
+            return writer.write_all(&[term]);
         }
     }
 
+    // run_start tracks the beginning of the current contiguous output region.
+    // When a duplicate is found, we flush the run up to the duplicate and skip it.
+    let mut run_start: usize = 0;
     let mut cur_start = prev_end + 1;
+    let mut last_output_end = prev_end + 1; // exclusive end including terminator
 
     while cur_start < data.len() {
         let cur_end = match memchr::memchr(term, &data[cur_start..]) {
@@ -514,16 +514,26 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
         let prev_content = &data[prev_start..prev_end];
         let cur_content = &data[cur_start..cur_end];
 
-        if !lines_equal_fast(prev_content, cur_content) {
-            // Different line — output it
-            if cur_end < data.len() {
-                outbuf.extend_from_slice(&data[cur_start..cur_end + 1]);
-            } else {
-                outbuf.extend_from_slice(&data[cur_start..cur_end]);
-                outbuf.push(term);
+        if lines_equal_fast(prev_content, cur_content) {
+            // Duplicate — flush the current run up to this line, then skip it
+            if run_start < cur_start {
+                writer.write_all(&data[run_start..cur_start])?;
             }
+            // Start new run after this duplicate
+            if cur_end < data.len() {
+                run_start = cur_end + 1;
+            } else {
+                run_start = cur_end;
+            }
+        } else {
+            // Different line — extend the current run
             prev_start = cur_start;
             prev_end = cur_end;
+            last_output_end = if cur_end < data.len() {
+                cur_end + 1
+            } else {
+                cur_end
+            };
         }
 
         if cur_end < data.len() {
@@ -533,11 +543,22 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
         }
     }
 
-    writer.write_all(&outbuf)
+    // Flush remaining run
+    if run_start < data.len() {
+        writer.write_all(&data[run_start..last_output_end.max(run_start)])?;
+    }
+
+    // Ensure trailing terminator
+    if !data.is_empty() && *data.last().unwrap() != term {
+        writer.write_all(&[term])?;
+    }
+
+    Ok(())
 }
 
-/// Parallel dedup for large files: split into chunks, dedup each in parallel,
-/// then resolve cross-chunk boundaries. Each chunk produces its own output buffer.
+/// Parallel zero-copy dedup for large files: split into chunks, find duplicate
+/// positions in each chunk in parallel, then write output runs directly from
+/// the original data. No per-chunk buffer allocation needed.
 fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> io::Result<()> {
     use rayon::prelude::*;
 
@@ -566,11 +587,14 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
         return process_default_sequential(data, writer, term);
     }
 
-    // Process each chunk in parallel: dedup within chunk, record first/last line
+    // Each chunk produces: output runs (zero-copy refs to data) + first/last line info
     struct ChunkResult {
-        buf: Vec<u8>,
+        /// Byte ranges in the original data to output (contiguous runs)
+        runs: Vec<(usize, usize)>,
+        /// First line in chunk (absolute offsets into data, content without term)
         first_line_start: usize,
         first_line_end: usize,
+        /// Last *output* line in chunk (content without term)
         last_line_start: usize,
         last_line_end: usize,
     }
@@ -584,53 +608,55 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
             let chunk_end = w[1];
             let chunk = &data[chunk_start..chunk_end];
 
-            let mut buf = Vec::with_capacity(chunk.len());
-            let mut prev_start = 0usize;
-            let mut prev_end = match memchr::memchr(term, chunk) {
+            let first_term = match memchr::memchr(term, chunk) {
                 Some(pos) => pos,
                 None => {
-                    buf.extend_from_slice(chunk);
-                    buf.push(term);
                     return ChunkResult {
-                        buf,
+                        runs: vec![(chunk_start, chunk_end)],
                         first_line_start: chunk_start,
-                        first_line_end: chunk_start + chunk.len(),
+                        first_line_end: chunk_end,
                         last_line_start: chunk_start,
-                        last_line_end: chunk_start + chunk.len(),
+                        last_line_end: chunk_end,
                     };
                 }
             };
 
-            // Always output first line of chunk
-            buf.extend_from_slice(&chunk[0..prev_end + 1]);
             let first_line_start = chunk_start;
-            let first_line_end = chunk_start + prev_end;
+            let first_line_end = chunk_start + first_term;
 
-            let mut cur_start = prev_end + 1;
-            let mut last_output_start = prev_start;
-            let mut last_output_end = prev_end;
+            let mut runs: Vec<(usize, usize)> = Vec::new();
+            let mut run_start = chunk_start;
+            let mut prev_start = 0usize;
+            let mut prev_end = first_term;
+            let mut last_out_start = chunk_start;
+            let mut last_out_end = first_line_end;
 
+            let mut cur_start = first_term + 1;
             while cur_start < chunk.len() {
                 let cur_end = match memchr::memchr(term, &chunk[cur_start..]) {
                     Some(offset) => cur_start + offset,
                     None => chunk.len(),
                 };
 
-                if !lines_equal_fast(&chunk[prev_start..prev_end], &chunk[cur_start..cur_end]) {
-                    if cur_end < chunk.len() {
-                        buf.extend_from_slice(&chunk[cur_start..cur_end + 1]);
-                    } else {
-                        buf.extend_from_slice(&chunk[cur_start..cur_end]);
-                        buf.push(term);
+                if lines_equal_fast(&chunk[prev_start..prev_end], &chunk[cur_start..cur_end]) {
+                    // Duplicate — flush current run up to this line
+                    let abs_cur = chunk_start + cur_start;
+                    if run_start < abs_cur {
+                        runs.push((run_start, abs_cur));
                     }
-                    last_output_start = cur_start;
-                    last_output_end = cur_end;
-                    prev_start = cur_start;
-                    prev_end = cur_end;
+                    // New run starts after this duplicate
+                    run_start = chunk_start
+                        + if cur_end < chunk.len() {
+                            cur_end + 1
+                        } else {
+                            cur_end
+                        };
                 } else {
-                    prev_start = cur_start;
-                    prev_end = cur_end;
+                    last_out_start = chunk_start + cur_start;
+                    last_out_end = chunk_start + cur_end;
                 }
+                prev_start = cur_start;
+                prev_end = cur_end;
 
                 if cur_end < chunk.len() {
                     cur_start = cur_end + 1;
@@ -639,35 +665,50 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
                 }
             }
 
+            // Close final run
+            if run_start < chunk_end {
+                runs.push((run_start, chunk_end));
+            }
+
             ChunkResult {
-                buf,
+                runs,
                 first_line_start,
                 first_line_end,
-                last_line_start: chunk_start + last_output_start,
-                last_line_end: chunk_start + last_output_end,
+                last_line_start: last_out_start,
+                last_line_end: last_out_end,
             }
         })
         .collect();
 
-    // Write results, skipping first line of chunk[i] if it equals last line of chunk[i-1]
+    // Write results, adjusting cross-chunk boundaries
     for (i, result) in results.iter().enumerate() {
-        if i == 0 {
-            writer.write_all(&result.buf)?;
-        } else {
+        let skip_first = if i > 0 {
             let prev = &results[i - 1];
             let prev_last = &data[prev.last_line_start..prev.last_line_end];
             let cur_first = &data[result.first_line_start..result.first_line_end];
+            lines_equal_fast(prev_last, cur_first)
+        } else {
+            false
+        };
 
-            if lines_equal_fast(prev_last, cur_first) {
-                // Skip the first line of this chunk (already output in previous chunk)
-                let first_line_with_term = result.first_line_end - result.first_line_start + 1;
-                if first_line_with_term < result.buf.len() {
-                    writer.write_all(&result.buf[first_line_with_term..])?;
-                }
-            } else {
-                writer.write_all(&result.buf)?;
+        let skip_end = if skip_first {
+            // Skip bytes up to and including the first line's terminator
+            result.first_line_end + 1
+        } else {
+            0
+        };
+
+        for &(rs, re) in &result.runs {
+            let actual_start = rs.max(skip_end);
+            if actual_start < re {
+                writer.write_all(&data[actual_start..re])?;
             }
         }
+    }
+
+    // Ensure trailing terminator
+    if !data.is_empty() && *data.last().unwrap() != term {
+        writer.write_all(&[term])?;
     }
 
     Ok(())

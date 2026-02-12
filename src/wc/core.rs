@@ -275,13 +275,92 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
     (total_lines, total_words, first_is_word, prev_was_word)
 }
 
-/// Dispatch to AVX2 or scalar chunk counter.
+/// SSE2-accelerated fused line+word counter for C locale chunks.
+/// Same algorithm as AVX2 but processes 16 bytes per iteration.
+/// Available on all x86_64 CPUs (SSE2 is baseline for x86_64).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
+    use std::arch::x86_64::*;
+
+    let len = data.len();
+    let ptr = data.as_ptr();
+    let mut i = 0usize;
+    let mut total_lines = 0u64;
+    let mut total_words = 0u64;
+    let mut prev_was_word = false;
+
+    unsafe {
+        let space_thr = _mm_set1_epi8(0x20i8);
+        let nl_byte = _mm_set1_epi8(b'\n' as i8);
+        let zero = _mm_setzero_si128();
+        let ones = _mm_set1_epi8(1);
+
+        let mut line_acc = _mm_setzero_si128();
+        let mut batch = 0u32;
+
+        while i + 16 <= len {
+            let v = _mm_loadu_si128(ptr.add(i) as *const __m128i);
+            let is_word = _mm_cmpgt_epi8(v, space_thr);
+            let is_nl = _mm_cmpeq_epi8(v, nl_byte);
+            line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
+
+            let word_mask = _mm_movemask_epi8(is_word) as u32;
+            let prev_mask = (word_mask << 1) | (prev_was_word as u32);
+            total_words += (word_mask & !prev_mask).count_ones() as u64;
+            prev_was_word = (word_mask >> 15) & 1 == 1;
+
+            batch += 1;
+            if batch >= 255 {
+                let sad = _mm_sad_epu8(line_acc, zero);
+                let hi = _mm_unpackhi_epi64(sad, sad);
+                let t = _mm_add_epi64(sad, hi);
+                total_lines += _mm_cvtsi128_si64(t) as u64;
+                line_acc = _mm_setzero_si128();
+                batch = 0;
+            }
+            i += 16;
+        }
+
+        if batch > 0 {
+            let sad = _mm_sad_epu8(line_acc, zero);
+            let hi = _mm_unpackhi_epi64(sad, sad);
+            let t = _mm_add_epi64(sad, hi);
+            total_lines += _mm_cvtsi128_si64(t) as u64;
+        }
+
+        // Scalar tail
+        while i < len {
+            let b = *ptr.add(i);
+            if b == b'\n' {
+                total_lines += 1;
+                prev_was_word = false;
+            } else if b > 0x20 {
+                if !prev_was_word {
+                    total_words += 1;
+                }
+                prev_was_word = true;
+            } else {
+                prev_was_word = false;
+            }
+            i += 1;
+        }
+    }
+
+    let first_is_word = !data.is_empty() && data[0] > 0x20;
+    (total_lines, total_words, first_is_word, prev_was_word)
+}
+
+/// Dispatch to AVX2, SSE2, or scalar chunk counter.
 #[inline]
 fn count_lw_c_chunk_fast(data: &[u8]) -> (u64, u64, bool, bool) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") && data.len() >= 64 {
             return unsafe { count_lw_c_chunk_avx2(data) };
+        }
+        if data.len() >= 32 {
+            return unsafe { count_lw_c_chunk_sse2(data) };
         }
     }
     count_lw_c_chunk(data)
