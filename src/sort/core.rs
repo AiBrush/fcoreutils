@@ -729,10 +729,15 @@ fn write_sorted_output(
             }
         }
     } else {
+        let term_byte = terminator[0];
         for &idx in sorted_indices {
             let (s, e) = offsets[idx];
-            writer.write_all(&data[s..e])?;
-            writer.write_all(terminator)?;
+            if e < data.len() && data[e] == term_byte {
+                writer.write_all(&data[s..e + 1])?;
+            } else {
+                writer.write_all(&data[s..e])?;
+                writer.write_all(terminator)?;
+            }
         }
     }
     Ok(())
@@ -766,10 +771,15 @@ fn write_sorted_entries(
             }
         }
     } else {
+        let term_byte = terminator[0];
         for &(_, idx) in entries {
             let (s, e) = offsets[idx];
-            writer.write_all(&data[s..e])?;
-            writer.write_all(terminator)?;
+            if e < data.len() && data[e] == term_byte {
+                writer.write_all(&data[s..e + 1])?;
+            } else {
+                writer.write_all(&data[s..e])?;
+                writer.write_all(terminator)?;
+            }
         }
     }
     Ok(())
@@ -1050,10 +1060,16 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 }
             }
         } else {
+            let term_byte = terminator[0];
             for &(_, idx) in &entries {
                 let (s, e) = offsets[idx];
-                writer.write_all(&data[s..e])?;
-                writer.write_all(terminator)?;
+                // Include trailing terminator from original data when possible (single write)
+                if e < data.len() && data[e] == term_byte {
+                    writer.write_all(&data[s..e + 1])?;
+                } else {
+                    writer.write_all(&data[s..e])?;
+                    writer.write_all(terminator)?;
+                }
             }
         }
     } else if is_fold_case_lex && num_lines > 256 {
