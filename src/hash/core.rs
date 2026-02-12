@@ -71,8 +71,10 @@ pub fn hash_reader<R: Read>(algo: HashAlgorithm, reader: R) -> io::Result<String
 }
 
 /// Threshold below which read() is faster than mmap() due to mmap setup overhead.
-/// For small files, the page table setup + madvise syscalls cost more than a simple read.
-const MMAP_THRESHOLD: u64 = 256 * 1024; // 256KB
+/// mmap creates page table entries (one per 4KB page), issues madvise syscalls,
+/// and requires munmap cleanup. For files under 1MB, the total mmap overhead
+/// (~50-200μs) is significant relative to hash time (~500μs for 1MB at 2GB/s).
+const MMAP_THRESHOLD: u64 = 1024 * 1024; // 1MB
 
 // Thread-local reusable buffer for small file reads.
 // Avoids per-file heap allocation when processing many small files sequentially or in parallel.
@@ -152,13 +154,23 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
 fn mmap_and_hash(algo: HashAlgorithm, file: &File) -> io::Result<String> {
     match unsafe {
         MmapOptions::new()
-            .populate() // Eagerly populate page tables — avoids page faults during hash
+            // No populate() — lazy faults with async readahead avoids blocking
+            // until all pages are loaded. MADV_WILLNEED below triggers non-blocking
+            // readahead so pages are ready by the time we access them.
             .map(file)
     } {
         Ok(mmap) => {
             #[cfg(target_os = "linux")]
             {
                 let _ = mmap.advise(memmap2::Advice::Sequential);
+                // WILLNEED triggers async readahead without blocking (unlike populate)
+                unsafe {
+                    libc::madvise(
+                        mmap.as_ptr() as *mut libc::c_void,
+                        mmap.len(),
+                        libc::MADV_WILLNEED,
+                    );
+                }
                 if mmap.len() >= 2 * 1024 * 1024 {
                     unsafe {
                         libc::madvise(
@@ -181,11 +193,18 @@ fn mmap_and_hash(algo: HashAlgorithm, file: &File) -> io::Result<String> {
 
 /// Mmap a file and hash with BLAKE2b. Shared helper for blake2b_hash_file.
 fn mmap_and_hash_blake2b(file: &File, output_bytes: usize) -> io::Result<String> {
-    match unsafe { MmapOptions::new().populate().map(file) } {
+    match unsafe { MmapOptions::new().map(file) } {
         Ok(mmap) => {
             #[cfg(target_os = "linux")]
             {
                 let _ = mmap.advise(memmap2::Advice::Sequential);
+                unsafe {
+                    libc::madvise(
+                        mmap.as_ptr() as *mut libc::c_void,
+                        mmap.len(),
+                        libc::MADV_WILLNEED,
+                    );
+                }
                 if mmap.len() >= 2 * 1024 * 1024 {
                     unsafe {
                         libc::madvise(
@@ -220,12 +239,19 @@ pub fn hash_stdin(algo: HashAlgorithm) -> io::Result<String> {
         {
             use std::os::unix::io::FromRawFd;
             let file = unsafe { File::from_raw_fd(fd) };
-            let result = unsafe { MmapOptions::new().populate().map(&file) };
+            let result = unsafe { MmapOptions::new().map(&file) };
             std::mem::forget(file); // Don't close stdin
             if let Ok(mmap) = result {
                 #[cfg(target_os = "linux")]
                 {
                     let _ = mmap.advise(memmap2::Advice::Sequential);
+                    unsafe {
+                        libc::madvise(
+                            mmap.as_ptr() as *mut libc::c_void,
+                            mmap.len(),
+                            libc::MADV_WILLNEED,
+                        );
+                    }
                 }
                 return Ok(hash_bytes(algo, &mmap));
             }
@@ -236,10 +262,6 @@ pub fn hash_stdin(algo: HashAlgorithm) -> io::Result<String> {
     io::stdin().lock().read_to_end(&mut data)?;
     Ok(hash_bytes(algo, &data))
 }
-
-/// Parallel hashing threshold: only use rayon when total data exceeds this.
-/// Below this, sequential processing avoids rayon overhead (thread pool, work stealing).
-const PARALLEL_THRESHOLD: u64 = 8 * 1024 * 1024; // 8MB
 
 /// Estimate total file size for parallel/sequential decision.
 /// Uses a quick heuristic: samples first file and extrapolates.
@@ -257,11 +279,18 @@ pub fn estimate_total_size(paths: &[&Path]) -> u64 {
 }
 
 /// Check if parallel hashing is worthwhile for the given file paths.
+/// Only uses rayon when files are individually large enough for the hash
+/// computation to dominate over rayon overhead (thread pool init + work stealing).
+/// For many small files (e.g., 100 × 100KB), sequential is much faster.
 pub fn should_use_parallel(paths: &[&Path]) -> bool {
     if paths.len() < 2 {
         return false;
     }
-    estimate_total_size(paths) >= PARALLEL_THRESHOLD
+    let total = estimate_total_size(paths);
+    let avg = total / paths.len() as u64;
+    // Only parallelize when average file size >= 1MB.
+    // Below this, rayon overhead exceeds the benefit of parallel hashing.
+    avg >= 1024 * 1024
 }
 
 /// Issue readahead hints for a list of file paths to warm the page cache.
@@ -370,12 +399,19 @@ pub fn blake2b_hash_stdin(output_bytes: usize) -> io::Result<String> {
         {
             use std::os::unix::io::FromRawFd;
             let file = unsafe { File::from_raw_fd(fd) };
-            let result = unsafe { MmapOptions::new().populate().map(&file) };
+            let result = unsafe { MmapOptions::new().map(&file) };
             std::mem::forget(file); // Don't close stdin
             if let Ok(mmap) = result {
                 #[cfg(target_os = "linux")]
                 {
                     let _ = mmap.advise(memmap2::Advice::Sequential);
+                    unsafe {
+                        libc::madvise(
+                            mmap.as_ptr() as *mut libc::c_void,
+                            mmap.len(),
+                            libc::MADV_WILLNEED,
+                        );
+                    }
                 }
                 return Ok(blake2b_hash_data(&mmap, output_bytes));
             }
