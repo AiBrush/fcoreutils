@@ -83,9 +83,14 @@ rayon = "1"
 # Hashing
 blake2b_simd = "1"
 
-# Base sha2/md-5 (always needed)
+# SHA-256 fallback for Apple targets (ring 0.17 doesn't compile on macOS aarch64)
 sha2 = "0.10"
+
+# MD5 hashing (ring doesn't support MD5)
 md-5 = "0.10"
+
+# Digest trait (for generic hash interface used by md-5/sha2)
+digest = "0.10"
 
 # Base64 (SIMD-accelerated)
 base64-simd = "0.8"
@@ -127,6 +132,11 @@ opt-level = 3
 inherits = "release"
 debug = true
 strip = false
+
+# ring for SHA-256 on non-Apple targets: BoringSSL assembly with SHA-NI/AVX2
+# (ring 0.17 has compile error on macOS aarch64 / Apple Silicon)
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+ring = "0.17"
 
 # Enable ASM acceleration for hash crates on non-MSVC targets
 # (sha2-asm/md5-asm use .S assembly files that MSVC cl.exe can't compile)
