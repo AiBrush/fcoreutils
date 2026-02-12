@@ -8,11 +8,15 @@ const BASE64_ENGINE: &base64_simd::Base64 = &base64_simd::STANDARD;
 /// Streaming encode chunk: 12MB aligned to 3 bytes for maximum throughput.
 const STREAM_ENCODE_CHUNK: usize = 12 * 1024 * 1024 - (12 * 1024 * 1024 % 3);
 
-/// Chunk size for no-wrap encoding: 8MB aligned to 3 bytes.
-const NOWRAP_CHUNK: usize = 8 * 1024 * 1024 - (8 * 1024 * 1024 % 3);
+/// Chunk size for no-wrap encoding: 2MB aligned to 3 bytes.
+/// Smaller than before (was 8MB) for better L2 cache behavior and
+/// faster initial buffer allocation (fewer page faults).
+const NOWRAP_CHUNK: usize = 2 * 1024 * 1024 - (2 * 1024 * 1024 % 3);
 
-/// Minimum input size for parallel encoding.
-const PARALLEL_ENCODE_THRESHOLD: usize = 1024 * 1024;
+/// Minimum input size for parallel encoding/decoding.
+/// Set high enough to avoid rayon thread pool init cost (~0.5-1ms per process)
+/// which dominates for inputs under 32MB where SIMD encode is already very fast.
+const PARALLEL_ENCODE_THRESHOLD: usize = 32 * 1024 * 1024;
 
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with reusable buffers for maximum throughput.
@@ -100,8 +104,8 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
         return Ok(());
     }
 
-    // Sequential path
-    let lines_per_chunk = (8 * 1024 * 1024) / bytes_per_line.max(1);
+    // Sequential path: 2MB chunks fit in L2 cache and reduce initial allocation.
+    let lines_per_chunk = (2 * 1024 * 1024) / bytes_per_line.max(1);
     let chunk_input = lines_per_chunk * bytes_per_line.max(1);
     let chunk_encoded_max = BASE64_ENGINE.encoded_length(chunk_input.max(1));
     let mut encode_buf = vec![0u8; chunk_encoded_max];
