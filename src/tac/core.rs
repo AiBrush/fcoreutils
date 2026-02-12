@@ -45,9 +45,9 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
         return tac_bytes_small(data, separator, before, out);
     }
 
-    // Large data: backward scan with backward-fill buffer
+    // Large data: backward scan with forward-fill output buffer
     let mut buf = vec![0u8; OUT_BUF];
-    let mut bp = OUT_BUF; // write position (fills backward)
+    let mut bp = 0; // write position (fills forward)
 
     if !before {
         // separator-after mode: records end with separator
@@ -58,15 +58,15 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
             if last_sep < data.len() - 1 {
                 // Trailing content without separator — output first
                 let record = &data[last_sep + 1..];
-                if record.len() > bp {
-                    out.write_all(&buf[bp..])?;
-                    bp = OUT_BUF;
+                if bp + record.len() > OUT_BUF {
+                    out.write_all(&buf[..bp])?;
+                    bp = 0;
                 }
                 if record.len() > OUT_BUF {
                     out.write_all(record)?;
                 } else {
-                    bp -= record.len();
                     buf[bp..bp + record.len()].copy_from_slice(record);
+                    bp += record.len();
                 }
                 end = last_sep + 1;
             }
@@ -93,15 +93,15 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
             };
 
             let record = &data[start..cursor];
-            if record.len() > bp {
-                out.write_all(&buf[bp..])?;
-                bp = OUT_BUF;
+            if bp + record.len() > OUT_BUF {
+                out.write_all(&buf[..bp])?;
+                bp = 0;
             }
             if record.len() > OUT_BUF {
                 out.write_all(record)?;
             } else {
-                bp -= record.len();
                 buf[bp..bp + record.len()].copy_from_slice(record);
+                bp += record.len();
             }
 
             cursor = start;
@@ -114,30 +114,30 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
             match sep_pos {
                 Some(pos) => {
                     let record = &data[pos..cursor];
-                    if record.len() > bp {
-                        out.write_all(&buf[bp..])?;
-                        bp = OUT_BUF;
+                    if bp + record.len() > OUT_BUF {
+                        out.write_all(&buf[..bp])?;
+                        bp = 0;
                     }
                     if record.len() > OUT_BUF {
                         out.write_all(record)?;
                     } else {
-                        bp -= record.len();
                         buf[bp..bp + record.len()].copy_from_slice(record);
+                        bp += record.len();
                     }
                     cursor = pos;
                 }
                 None => {
                     // Leading content before first separator
                     let record = &data[..cursor];
-                    if record.len() > bp {
-                        out.write_all(&buf[bp..])?;
-                        bp = OUT_BUF;
+                    if bp + record.len() > OUT_BUF {
+                        out.write_all(&buf[..bp])?;
+                        bp = 0;
                     }
                     if record.len() > OUT_BUF {
                         out.write_all(record)?;
                     } else {
-                        bp -= record.len();
                         buf[bp..bp + record.len()].copy_from_slice(record);
+                        bp += record.len();
                     }
                     break;
                 }
@@ -146,8 +146,8 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
     }
 
     // Flush remaining buffer
-    if bp < OUT_BUF {
-        out.write_all(&buf[bp..])?;
+    if bp > 0 {
+        out.write_all(&buf[..bp])?;
     }
 
     Ok(())
