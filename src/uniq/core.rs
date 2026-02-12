@@ -276,7 +276,7 @@ fn process_standard_bytes(
         let mut prev_content = prev_content;
 
         // Write first line
-        write_all_raw(&mut writer, prev_full)?;
+        write_all_raw(writer, prev_full)?;
         if prev_full.len() == prev_content.len() {
             writer.write_all(&[term])?;
         }
@@ -289,7 +289,7 @@ fn process_standard_bytes(
             if lines_equal_fast(prev_content, cur_content) {
                 // Duplicate — flush any active span, skip line
                 if span_start != usize::MAX {
-                    write_all_raw(&mut writer, &data[span_start..span_end])?;
+                    write_all_raw(writer, &data[span_start..span_end])?;
                     span_start = usize::MAX;
                 }
                 prev_content = cur_content;
@@ -307,14 +307,14 @@ fn process_standard_bytes(
                 span_end += cur_full.len();
             } else {
                 // Non-contiguous — flush and start new span
-                write_all_raw(&mut writer, &data[span_start..span_end])?;
+                write_all_raw(writer, &data[span_start..span_end])?;
                 span_start = cur_offset;
                 span_end = cur_offset + cur_full.len();
             }
 
             // Handle last line without terminator
             if cur_full.len() == cur_content.len() {
-                write_all_raw(&mut writer, &data[span_start..span_end])?;
+                write_all_raw(writer, &data[span_start..span_end])?;
                 writer.write_all(&[term])?;
                 span_start = usize::MAX;
             }
@@ -324,7 +324,7 @@ fn process_standard_bytes(
 
         // Flush remaining span
         if span_start != usize::MAX {
-            write_all_raw(&mut writer, &data[span_start..span_end])?;
+            write_all_raw(writer, &data[span_start..span_end])?;
         }
         return Ok(());
     }
