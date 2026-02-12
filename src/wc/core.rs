@@ -41,8 +41,10 @@ const fn make_byte_class_c() -> [u8; 256] {
     t[0x0C] = 1; // \f
     t[0x0D] = 1; // \r
     t[0x20] = 1; // space
-    // NUL byte (0x00) stays at default 2 (transparent).
-    // GNU wc: iswprint(L'\0')=false, iswspace(L'\0')=false → transparent.
+    // GNU compat: null byte is treated as printable (word content) in C locale.
+    // mbrtowc() returns L'\0' for the null byte, and GNU wc treats it as
+    // a non-space printable character that starts/continues words.
+    t[0x00] = 0;
     // Printable ASCII (0x21-0x7E): word content
     let mut i = 0x21u16;
     while i <= 0x7E {
@@ -175,6 +177,12 @@ fn count_words_c(data: &[u8]) -> u64 {
             let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
             if class == 1 {
                 in_word = false;
+            } else if class == 0 {
+                // NUL is printable in C locale — starts/continues word
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
             }
             // class == 2: transparent — in_word unchanged
             i += 1;
@@ -231,8 +239,17 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
                     seen_active = true;
                 }
                 in_word = false;
+            } else if class == 0 {
+                // NUL is printable in C locale — starts/continues word
+                if !seen_active {
+                    seen_active = true;
+                    first_active_is_printable = true;
+                }
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
             }
-            // class == 2: transparent — in_word unchanged
             i += 1;
         }
     }
