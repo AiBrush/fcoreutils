@@ -181,11 +181,7 @@ fn mmap_and_hash(algo: HashAlgorithm, file: &File) -> io::Result<String> {
 
 /// Mmap a file and hash with BLAKE2b. Shared helper for blake2b_hash_file.
 fn mmap_and_hash_blake2b(file: &File, output_bytes: usize) -> io::Result<String> {
-    match unsafe {
-        MmapOptions::new()
-            .populate()
-            .map(file)
-    } {
+    match unsafe { MmapOptions::new().populate().map(file) } {
         Ok(mmap) => {
             #[cfg(target_os = "linux")]
             {
