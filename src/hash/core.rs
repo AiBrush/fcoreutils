@@ -204,35 +204,14 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
 }
 
 /// Mmap a file and hash it. Shared by hash_file and blake2b_hash_file.
+/// With chunked hashing, MADV_SEQUENTIAL is sufficient — the kernel
+/// prefetches ahead of our sequential 4MB chunk access pattern.
 fn mmap_and_hash(algo: HashAlgorithm, file: &File) -> io::Result<String> {
-    match unsafe {
-        MmapOptions::new()
-            // No populate() — lazy faults with async readahead avoids blocking
-            // until all pages are loaded. MADV_WILLNEED below triggers non-blocking
-            // readahead so pages are ready by the time we access them.
-            .map(file)
-    } {
+    match unsafe { MmapOptions::new().map(file) } {
         Ok(mmap) => {
             #[cfg(target_os = "linux")]
             {
                 let _ = mmap.advise(memmap2::Advice::Sequential);
-                // WILLNEED triggers async readahead without blocking (unlike populate)
-                unsafe {
-                    libc::madvise(
-                        mmap.as_ptr() as *mut libc::c_void,
-                        mmap.len(),
-                        libc::MADV_WILLNEED,
-                    );
-                }
-                if mmap.len() >= 2 * 1024 * 1024 {
-                    unsafe {
-                        libc::madvise(
-                            mmap.as_ptr() as *mut libc::c_void,
-                            mmap.len(),
-                            libc::MADV_HUGEPAGE,
-                        );
-                    }
-                }
             }
             Ok(hash_bytes_chunked(algo, &mmap))
         }
@@ -251,22 +230,6 @@ fn mmap_and_hash_blake2b(file: &File, output_bytes: usize) -> io::Result<String>
             #[cfg(target_os = "linux")]
             {
                 let _ = mmap.advise(memmap2::Advice::Sequential);
-                unsafe {
-                    libc::madvise(
-                        mmap.as_ptr() as *mut libc::c_void,
-                        mmap.len(),
-                        libc::MADV_WILLNEED,
-                    );
-                }
-                if mmap.len() >= 2 * 1024 * 1024 {
-                    unsafe {
-                        libc::madvise(
-                            mmap.as_ptr() as *mut libc::c_void,
-                            mmap.len(),
-                            libc::MADV_HUGEPAGE,
-                        );
-                    }
-                }
             }
             Ok(blake2b_hash_data_chunked(&mmap, output_bytes))
         }
@@ -298,13 +261,6 @@ pub fn hash_stdin(algo: HashAlgorithm) -> io::Result<String> {
                 #[cfg(target_os = "linux")]
                 {
                     let _ = mmap.advise(memmap2::Advice::Sequential);
-                    unsafe {
-                        libc::madvise(
-                            mmap.as_ptr() as *mut libc::c_void,
-                            mmap.len(),
-                            libc::MADV_WILLNEED,
-                        );
-                    }
                 }
                 return Ok(hash_bytes_chunked(algo, &mmap));
             }
@@ -458,13 +414,6 @@ pub fn blake2b_hash_stdin(output_bytes: usize) -> io::Result<String> {
                 #[cfg(target_os = "linux")]
                 {
                     let _ = mmap.advise(memmap2::Advice::Sequential);
-                    unsafe {
-                        libc::madvise(
-                            mmap.as_ptr() as *mut libc::c_void,
-                            mmap.len(),
-                            libc::MADV_WILLNEED,
-                        );
-                    }
                 }
                 return Ok(blake2b_hash_data_chunked(&mmap, output_bytes));
             }
