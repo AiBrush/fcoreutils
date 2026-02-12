@@ -1468,10 +1468,8 @@ fn squeeze_multi_mmap<const N: usize>(
 }
 
 /// Squeeze a single repeated character from mmap'd data.
-/// Uses a tight byte-at-a-time copy loop with 1MB output buffer.
-/// Faster than memmem/IoSlice approach because:
-/// - Single pass (no double scan), predictable branches
-/// - Bulk write_all with 1MB chunks (fewer syscalls than writev with many small IoSlices)
+/// Uses SIMD memchr for fast scanning + bulk copy of non-squeeze regions.
+/// For each squeeze run: copy gap in bulk, emit one squeeze char, skip duplicates.
 fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -1485,28 +1483,60 @@ fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Resu
     let mut outbuf = vec![0u8; BUF_SIZE];
     let len = data.len();
     let mut wp = 0;
+    let mut cursor = 0;
 
-    unsafe {
-        let inp = data.as_ptr();
-        let outp = outbuf.as_mut_ptr();
-        let mut i = 0;
+    while cursor < len {
+        // SIMD scan for next occurrence of squeeze char
+        match memchr::memchr(ch, &data[cursor..]) {
+            Some(offset) => {
+                let pos = cursor + offset;
 
-        while i < len {
-            let b = *inp.add(i);
-            i += 1;
-            *outp.add(wp) = b;
-            wp += 1;
+                // Bulk copy non-squeeze region [cursor..pos]
+                let gap = pos - cursor;
+                if gap > 0 {
+                    if wp + gap > BUF_SIZE {
+                        writer.write_all(&outbuf[..wp])?;
+                        wp = 0;
+                    }
+                    if gap > BUF_SIZE {
+                        // Huge gap: write directly
+                        writer.write_all(&data[cursor..pos])?;
+                    } else {
+                        outbuf[wp..wp + gap].copy_from_slice(&data[cursor..pos]);
+                        wp += gap;
+                    }
+                }
 
-            // Skip consecutive duplicates of the squeeze char
-            if b == ch {
-                while i < len && *inp.add(i) == ch {
-                    i += 1;
+                // Emit one squeeze char
+                if wp >= BUF_SIZE {
+                    writer.write_all(&outbuf[..wp])?;
+                    wp = 0;
+                }
+                outbuf[wp] = ch;
+                wp += 1;
+
+                // Skip consecutive duplicates
+                cursor = pos + 1;
+                while cursor < len && data[cursor] == ch {
+                    cursor += 1;
                 }
             }
-
-            if wp == BUF_SIZE {
-                writer.write_all(&outbuf[..wp])?;
-                wp = 0;
+            None => {
+                // No more squeeze chars — bulk copy remainder
+                let remaining = len - cursor;
+                if remaining > 0 {
+                    if wp + remaining > BUF_SIZE {
+                        writer.write_all(&outbuf[..wp])?;
+                        wp = 0;
+                    }
+                    if remaining > BUF_SIZE {
+                        writer.write_all(&data[cursor..])?;
+                    } else {
+                        outbuf[wp..wp + remaining].copy_from_slice(&data[cursor..]);
+                        wp += remaining;
+                    }
+                }
+                break;
             }
         }
     }

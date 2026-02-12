@@ -120,8 +120,9 @@ fn tac_bytes_small(
     before: bool,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    let mut outbuf = vec![0u8; data.len()];
-    let mut wp = 0;
+    // Use extend_from_slice instead of zero-init + index copy.
+    // Avoids zero-initializing the entire buffer (saves memset overhead).
+    let mut outbuf = Vec::with_capacity(data.len());
 
     if !before {
         // separator-after mode: records end with separator
@@ -134,44 +135,36 @@ fn tac_bytes_small(
 
         // Trailing content without separator — output first
         if first_sep + 1 < data.len() {
-            let trail = &data[first_sep + 1..];
-            outbuf[wp..wp + trail.len()].copy_from_slice(trail);
-            wp += trail.len();
+            outbuf.extend_from_slice(&data[first_sep + 1..]);
         }
 
         let mut end = first_sep + 1;
 
         for pos in iter {
-            let record = &data[pos + 1..end];
-            outbuf[wp..wp + record.len()].copy_from_slice(record);
-            wp += record.len();
+            outbuf.extend_from_slice(&data[pos + 1..end]);
             end = pos + 1;
         }
 
         // First record
         if end > 0 {
-            outbuf[wp..wp + end].copy_from_slice(&data[0..end]);
-            wp += end;
+            outbuf.extend_from_slice(&data[0..end]);
         }
     } else {
         // separator-before mode: records start with separator
         let mut end = data.len();
 
         for pos in memchr::memrchr_iter(separator, data) {
-            let record = &data[pos..end];
-            outbuf[wp..wp + record.len()].copy_from_slice(record);
-            wp += record.len();
+            outbuf.extend_from_slice(&data[pos..end]);
             end = pos;
         }
 
         // Leading content before first separator
         if end > 0 {
-            outbuf[wp..wp + end].copy_from_slice(&data[0..end]);
-            wp += end;
+            outbuf.extend_from_slice(&data[0..end]);
         }
     }
 
-    out.write_all(&outbuf[..wp])
+    out.write_all(&outbuf)
 }
 
 /// Reverse records using a multi-byte string separator.
@@ -206,16 +199,13 @@ pub fn tac_string_separator(
 
     // Small data: contiguous buffer + single write (avoids IoSlice/writev overhead)
     if data.len() < 2 * 1024 * 1024 {
-        let mut outbuf = vec![0u8; data.len()];
-        let mut wp = 0;
+        let mut outbuf = Vec::with_capacity(data.len());
 
         if !before {
             let last_end = positions.last().unwrap() + sep_len;
 
             if last_end < data.len() {
-                let trail = &data[last_end..];
-                outbuf[wp..wp + trail.len()].copy_from_slice(trail);
-                wp += trail.len();
+                outbuf.extend_from_slice(&data[last_end..]);
             }
 
             let mut i = positions.len();
@@ -227,9 +217,7 @@ pub fn tac_string_separator(
                 } else {
                     positions[i - 1] + sep_len
                 };
-                let record = &data[rec_start..sep_start + sep_len];
-                outbuf[wp..wp + record.len()].copy_from_slice(record);
-                wp += record.len();
+                outbuf.extend_from_slice(&data[rec_start..sep_start + sep_len]);
             }
         } else {
             let mut i = positions.len();
@@ -241,16 +229,13 @@ pub fn tac_string_separator(
                 } else {
                     data.len()
                 };
-                let record = &data[start..end];
-                outbuf[wp..wp + record.len()].copy_from_slice(record);
-                wp += record.len();
+                outbuf.extend_from_slice(&data[start..end]);
             }
             if positions[0] > 0 {
-                outbuf[wp..wp + positions[0]].copy_from_slice(&data[..positions[0]]);
-                wp += positions[0];
+                outbuf.extend_from_slice(&data[..positions[0]]);
             }
         }
-        return out.write_all(&outbuf[..wp]);
+        return out.write_all(&outbuf);
     }
 
     // Large data: batched IoSlice/writev for zero-copy output
@@ -385,25 +370,20 @@ pub fn tac_regex_separator(
 
     // Small data: contiguous buffer + single write (avoids IoSlice/writev overhead)
     if data.len() < 2 * 1024 * 1024 {
-        let mut outbuf = vec![0u8; data.len()];
-        let mut wp = 0;
+        let mut outbuf = Vec::with_capacity(data.len());
 
         if !before {
             let last_end = matches.last().unwrap().1;
 
             if last_end < data.len() {
-                let trail = &data[last_end..];
-                outbuf[wp..wp + trail.len()].copy_from_slice(trail);
-                wp += trail.len();
+                outbuf.extend_from_slice(&data[last_end..]);
             }
 
             let mut i = matches.len();
             while i > 0 {
                 i -= 1;
                 let rec_start = if i == 0 { 0 } else { matches[i - 1].1 };
-                let record = &data[rec_start..matches[i].1];
-                outbuf[wp..wp + record.len()].copy_from_slice(record);
-                wp += record.len();
+                outbuf.extend_from_slice(&data[rec_start..matches[i].1]);
             }
         } else {
             let mut i = matches.len();
@@ -415,16 +395,13 @@ pub fn tac_regex_separator(
                 } else {
                     data.len()
                 };
-                let record = &data[start..end];
-                outbuf[wp..wp + record.len()].copy_from_slice(record);
-                wp += record.len();
+                outbuf.extend_from_slice(&data[start..end]);
             }
             if matches[0].0 > 0 {
-                outbuf[wp..wp + matches[0].0].copy_from_slice(&data[..matches[0].0]);
-                wp += matches[0].0;
+                outbuf.extend_from_slice(&data[..matches[0].0]);
             }
         }
-        return out.write_all(&outbuf[..wp]);
+        return out.write_all(&outbuf);
     }
 
     // Large data: batched IoSlice/writev for zero-copy output
