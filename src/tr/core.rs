@@ -1519,69 +1519,51 @@ fn write_all_slices(writer: &mut impl Write, slices: &[IoSlice<'_>]) -> io::Resu
 }
 
 /// Squeeze a single repeated character from mmap'd data.
-/// Uses SIMD memmem to find runs of consecutive duplicates, then outputs
-/// the data between runs as zero-copy IoSlice references into the mmap.
-/// For data with no duplicates (common case), outputs the entire mmap directly.
+/// Uses a tight byte-at-a-time copy loop with 1MB output buffer.
+/// Faster than memmem/IoSlice approach because:
+/// - Single pass (no double scan), predictable branches
+/// - Bulk write_all with 1MB chunks (fewer syscalls than writev with many small IoSlices)
 fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
 
-    let needle = [ch, ch];
-    let finder = memchr::memmem::Finder::new(&needle);
-
-    // Fast path: no consecutive duplicates — output entire data as-is (zero copy)
-    if finder.find(data).is_none() {
+    // Fast path: no consecutive duplicates — zero-copy output
+    if memchr::memmem::find(data, &[ch, ch]).is_none() {
         return writer.write_all(data);
     }
 
-    // Build IoSlice segments for zero-copy output directly from mmap.
-    // Each segment spans from the end of the previous squeeze run to the
-    // first byte of the next run (inclusive), skipping duplicate chars.
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(1024);
-    let mut seg_start = 0;
-    let mut search_start = 0;
+    let mut outbuf = vec![0u8; BUF_SIZE];
+    let len = data.len();
+    let mut wp = 0;
 
-    while search_start < data.len() {
-        match finder.find(&data[search_start..]) {
-            Some(offset) => {
-                let abs_pos = search_start + offset;
-                // Include everything up to and including the first squeeze char
-                let include_end = abs_pos + 1;
-                if include_end > seg_start {
-                    slices.push(IoSlice::new(&data[seg_start..include_end]));
-                }
+    unsafe {
+        let inp = data.as_ptr();
+        let outp = outbuf.as_mut_ptr();
+        let mut i = 0;
 
-                // Skip all consecutive duplicates
-                let mut skip = abs_pos + 2;
-                unsafe {
-                    let ptr = data.as_ptr();
-                    let len = data.len();
-                    while skip < len && *ptr.add(skip) == ch {
-                        skip += 1;
-                    }
-                }
-                seg_start = skip;
-                search_start = skip;
+        while i < len {
+            let b = *inp.add(i);
+            i += 1;
+            *outp.add(wp) = b;
+            wp += 1;
 
-                // Flush batch when we have enough slices
-                if slices.len() >= 512 {
-                    write_all_slices(writer, &slices)?;
-                    slices.clear();
+            // Skip consecutive duplicates of the squeeze char
+            if b == ch {
+                while i < len && *inp.add(i) == ch {
+                    i += 1;
                 }
             }
-            None => {
-                // No more duplicate runs — output remaining data
-                if seg_start < data.len() {
-                    slices.push(IoSlice::new(&data[seg_start..]));
-                }
-                break;
+
+            if wp == BUF_SIZE {
+                writer.write_all(&outbuf[..wp])?;
+                wp = 0;
             }
         }
     }
 
-    if !slices.is_empty() {
-        write_all_slices(writer, &slices)?;
+    if wp > 0 {
+        writer.write_all(&outbuf[..wp])?;
     }
     Ok(())
 }
