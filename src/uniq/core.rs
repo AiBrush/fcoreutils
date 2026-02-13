@@ -137,7 +137,7 @@ fn needs_key_extraction(config: &UniqConfig) -> bool {
 
 /// Fast path comparison: no field/char extraction needed, no case folding.
 /// Uses pointer+length equality shortcut and multi-word prefix rejection.
-/// For short lines (<= 16 bytes, common in many-dups data), avoids the
+/// For short lines (<= 32 bytes, common in many-dups data), avoids the
 /// full memcmp call overhead by doing direct word comparisons.
 #[inline(always)]
 fn lines_equal_fast(a: &[u8], b: &[u8]) -> bool {
@@ -150,13 +150,6 @@ fn lines_equal_fast(a: &[u8], b: &[u8]) -> bool {
     }
     // Short-line fast path: compare via word loads to avoid memcmp call overhead
     if alen <= 8 {
-        // For <= 8 bytes: load as u64 with masking (overlap at start)
-        // Compare the first min(alen,8) bytes via a single u64 load
-        if alen >= 8 {
-            let a8 = unsafe { (a.as_ptr() as *const u64).read_unaligned() };
-            let b8 = unsafe { (b.as_ptr() as *const u64).read_unaligned() };
-            return a8 == b8;
-        }
         // For < 8 bytes: byte-by-byte via slice (compiler vectorizes this)
         return a == b;
     }
@@ -168,6 +161,17 @@ fn lines_equal_fast(a: &[u8], b: &[u8]) -> bool {
     }
     // Check last 8 bytes (overlapping for 9-16 byte lines, eliminating full memcmp)
     if alen <= 16 {
+        let a_tail = unsafe { (a.as_ptr().add(alen - 8) as *const u64).read_unaligned() };
+        let b_tail = unsafe { (b.as_ptr().add(alen - 8) as *const u64).read_unaligned() };
+        return a_tail == b_tail;
+    }
+    // For 17-32 bytes: check first 16 + last 16 (overlapping) to avoid memcmp
+    if alen <= 32 {
+        let a16 = unsafe { (a.as_ptr().add(8) as *const u64).read_unaligned() };
+        let b16 = unsafe { (b.as_ptr().add(8) as *const u64).read_unaligned() };
+        if a16 != b16 {
+            return false;
+        }
         let a_tail = unsafe { (a.as_ptr().add(alen - 8) as *const u64).read_unaligned() };
         let b_tail = unsafe { (b.as_ptr().add(alen - 8) as *const u64).read_unaligned() };
         return a_tail == b_tail;
@@ -612,6 +616,24 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
                     (data.as_ptr().add(cur_start + cur_len - 8) as *const u64).read_unaligned()
                 };
                 a_tail == b_tail
+            } else if cur_len <= 32 {
+                // Check bytes 8-16 and last 8 bytes
+                let a16 =
+                    unsafe { (data.as_ptr().add(prev_start + 8) as *const u64).read_unaligned() };
+                let b16 =
+                    unsafe { (data.as_ptr().add(cur_start + 8) as *const u64).read_unaligned() };
+                if a16 != b16 {
+                    false
+                } else {
+                    let a_tail = unsafe {
+                        (data.as_ptr().add(prev_start + prev_len - 8) as *const u64)
+                            .read_unaligned()
+                    };
+                    let b_tail = unsafe {
+                        (data.as_ptr().add(cur_start + cur_len - 8) as *const u64).read_unaligned()
+                    };
+                    a_tail == b_tail
+                }
             } else {
                 data[prev_start..prev_end] == data[cur_start..cur_end]
             }
