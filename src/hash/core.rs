@@ -227,20 +227,26 @@ fn open_noatime(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
+/// Minimum file size to issue fadvise hint (1MB).
+/// For small files, the syscall overhead exceeds the readahead benefit.
+#[cfg(target_os = "linux")]
+const FADVISE_MIN_SIZE: u64 = 1024 * 1024;
+
 /// Hash a file by path. Uses streaming read with sequential fadvise hint.
 /// Streaming avoids MAP_POPULATE blocking (pre-faults all pages upfront)
 /// and mmap setup/teardown overhead for small files.
 pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     let file = open_noatime(path)?;
     let metadata = file.metadata()?;
+    let file_size = metadata.len();
 
-    if metadata.file_type().is_file() && metadata.len() == 0 {
+    if metadata.file_type().is_file() && file_size == 0 {
         return Ok(hash_bytes(algo, &[]));
     }
 
-    // Hint kernel for aggressive sequential readahead — overlaps I/O with hashing
+    // Only hint kernel for files large enough to benefit from readahead
     #[cfg(target_os = "linux")]
-    {
+    if file_size >= FADVISE_MIN_SIZE {
         use std::os::unix::io::AsRawFd;
         unsafe {
             libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
@@ -273,14 +279,17 @@ pub fn hash_stdin(algo: HashAlgorithm) -> io::Result<String> {
 }
 
 /// Check if parallel hashing is worthwhile for the given file paths.
-/// Always parallelize with 2+ files — rayon's thread pool is initialized
-/// lazily once, and work-stealing overhead is negligible compared to I/O.
+/// Always parallelize with 2+ files — rayon's thread pool is lazily initialized
+/// once and reused, so per-file work-stealing overhead is negligible (~1µs).
+/// Removing the stat()-based size check eliminates N extra syscalls for N files.
 pub fn should_use_parallel(paths: &[&Path]) -> bool {
     paths.len() >= 2
 }
 
 /// Issue readahead hints for a list of file paths to warm the page cache.
 /// Uses POSIX_FADV_WILLNEED which is non-blocking and batches efficiently.
+/// Only issues hints for files >= 1MB; small files are read fast enough
+/// that the fadvise syscall overhead isn't worth it.
 #[cfg(target_os = "linux")]
 pub fn readahead_files(paths: &[&Path]) {
     use std::os::unix::io::AsRawFd;
@@ -288,7 +297,7 @@ pub fn readahead_files(paths: &[&Path]) {
         if let Ok(file) = open_noatime(path) {
             if let Ok(meta) = file.metadata() {
                 let len = meta.len();
-                if meta.file_type().is_file() && len > 0 {
+                if meta.file_type().is_file() && len >= FADVISE_MIN_SIZE {
                     unsafe {
                         libc::posix_fadvise(
                             file.as_raw_fd(),
@@ -343,13 +352,15 @@ pub fn blake2b_hash_reader<R: Read>(mut reader: R, output_bytes: usize) -> io::R
 pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String> {
     let file = open_noatime(path)?;
     let metadata = file.metadata()?;
+    let file_size = metadata.len();
 
-    if metadata.file_type().is_file() && metadata.len() == 0 {
+    if metadata.file_type().is_file() && file_size == 0 {
         return Ok(blake2b_hash_data(&[], output_bytes));
     }
 
+    // Only hint kernel for files large enough to benefit from readahead
     #[cfg(target_os = "linux")]
-    {
+    if file_size >= FADVISE_MIN_SIZE {
         use std::os::unix::io::AsRawFd;
         unsafe {
             libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);

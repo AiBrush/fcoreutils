@@ -80,6 +80,22 @@ fn escape_filename(name: &str) -> String {
     out
 }
 
+/// Check if parallel hashing is worthwhile based on total file size.
+/// For many small files, sequential with reused thread-local buffer is faster.
+fn use_parallel(files: &[String]) -> bool {
+    const MIN_TOTAL: u64 = 10 * 1024 * 1024;
+    if files.len() < 2 {
+        return false;
+    }
+    let total: u64 = files
+        .iter()
+        .filter_map(|f| std::fs::metadata(f).ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum();
+    total >= MIN_TOTAL
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
     let cli = Cli::parse();
@@ -256,45 +272,42 @@ fn main() {
                     }
                 }
             }
-        } else {
+        } else if use_parallel(&files) {
+            // Large total data: parallel hashing with rayon + readahead
             let paths: Vec<_> = files.iter().map(|f| Path::new(f.as_str())).collect();
+            hash::readahead_files(&paths);
 
-            if hash::should_use_parallel(&paths) {
-                // Large total data: parallel hashing with rayon + readahead
-                hash::readahead_files(&paths);
+            let results: Vec<(&str, Result<String, io::Error>)> = files
+                .par_iter()
+                .map(|filename| {
+                    let result = hash::hash_file(algo, Path::new(filename));
+                    (filename.as_str(), result)
+                })
+                .collect();
 
-                let results: Vec<(&str, Result<String, io::Error>)> = files
-                    .par_iter()
-                    .map(|filename| {
-                        let result = hash::hash_file(algo, Path::new(filename));
-                        (filename.as_str(), result)
-                    })
-                    .collect();
-
-                for (filename, result) in results {
-                    match result {
-                        Ok(h) => {
-                            write_output(&mut out, &cli, algo, &h, filename);
-                        }
-                        Err(e) => {
-                            let _ = out.flush();
-                            eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
-                            had_error = true;
-                        }
+            for (filename, result) in results {
+                match result {
+                    Ok(h) => {
+                        write_output(&mut out, &cli, algo, &h, filename);
+                    }
+                    Err(e) => {
+                        let _ = out.flush();
+                        eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
+                        had_error = true;
                     }
                 }
-            } else {
-                // Small total data: sequential avoids rayon overhead
-                for filename in &files {
-                    match hash::hash_file(algo, Path::new(filename)) {
-                        Ok(h) => {
-                            write_output(&mut out, &cli, algo, &h, filename);
-                        }
-                        Err(e) => {
-                            let _ = out.flush();
-                            eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
-                            had_error = true;
-                        }
+            }
+        } else {
+            // Small files: sequential avoids rayon overhead
+            for filename in &files {
+                match hash::hash_file(algo, Path::new(filename)) {
+                    Ok(h) => {
+                        write_output(&mut out, &cli, algo, &h, filename);
+                    }
+                    Err(e) => {
+                        let _ = out.flush();
+                        eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
+                        had_error = true;
                     }
                 }
             }
