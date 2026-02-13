@@ -83,9 +83,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            cross: true
           - os: macos-latest
             target: x86_64-apple-darwin
           - os: macos-latest
@@ -109,17 +108,8 @@ jobs:
             sed -i 's/^version = ".*"/version = "${{ needs.calculate-version.outputs.version }}"/' Cargo.toml
           fi
 
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross
-
-      - name: Build (native)
-        if: "!matrix.cross"
+      - name: Build
         run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
 
       - name: Create release archive
         shell: bash
