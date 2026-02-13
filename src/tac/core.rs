@@ -5,10 +5,10 @@ use std::io::{self, IoSlice, Write};
 const MAX_IOV: usize = 1024;
 
 /// Chunk size for the forward-scan-within-backward-chunks strategy.
-/// 2MB gives better SIMD throughput per memchr_iter call (fewer calls needed,
+/// 4MB gives better SIMD throughput per memchr_iter call (fewer calls needed,
 /// each processing a larger contiguous region with full AVX2 pipeline).
-/// For a 10MB file with 50-byte lines, 2MB chunks = 5 calls vs 20 at 512KB.
-const CHUNK: usize = 2 * 1024 * 1024;
+/// For a 10MB file with 50-byte lines, 4MB chunks = 3 calls vs 5 at 2MB.
+const CHUNK: usize = 4 * 1024 * 1024;
 
 /// Flush a batch of IoSlice entries using write_vectored.
 /// Falls back to individual write_all for each slice if write_vectored
