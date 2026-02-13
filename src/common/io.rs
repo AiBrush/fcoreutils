@@ -132,9 +132,16 @@ pub fn read_stdin() -> io::Result<Vec<u8>> {
 /// Read as many bytes as possible into buf, retrying on partial reads.
 /// Ensures the full buffer is filled (or EOF reached), avoiding the
 /// probe-read overhead of read_to_end.
+/// Fast path: regular file reads usually return the full buffer on the first call.
 #[inline]
 fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
-    let mut total = 0;
+    // Fast path: first read() usually fills the entire buffer for regular files
+    let n = reader.read(buf)?;
+    if n == buf.len() || n == 0 {
+        return Ok(n);
+    }
+    // Slow path: partial read — retry to fill buffer (pipes, slow devices)
+    let mut total = n;
     while total < buf.len() {
         match reader.read(&mut buf[total..]) {
             Ok(0) => break,

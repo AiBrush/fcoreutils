@@ -51,8 +51,9 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
     }
 
     // Process in chunks aligned to bytes_per_line for complete output lines.
-    // 6MB input -> ~8MB encoded -> ~8.1MB with newlines
-    let lines_per_chunk = (6 * 1024 * 1024) / bytes_per_line;
+    // 16MB input -> ~21MB encoded -> ~21.3MB with newlines
+    // Large chunks ensure typical files (≤10MB) process in a single pass.
+    let lines_per_chunk = (16 * 1024 * 1024) / bytes_per_line;
     let max_input_chunk = (lines_per_chunk * bytes_per_line).max(bytes_per_line);
     let input_chunk = max_input_chunk.min(data.len());
 
@@ -464,8 +465,17 @@ pub fn decode_stream(
 }
 
 /// Read as many bytes as possible into buf, retrying on partial reads.
+/// Fast path: regular file reads usually return the full buffer on the first call,
+/// avoiding the loop overhead entirely.
+#[inline]
 fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
-    let mut total = 0;
+    // Fast path: first read() usually fills the entire buffer for regular files
+    let n = reader.read(buf)?;
+    if n == buf.len() || n == 0 {
+        return Ok(n);
+    }
+    // Slow path: partial read — retry to fill buffer (pipes, slow devices)
+    let mut total = n;
     while total < buf.len() {
         match reader.read(&mut buf[total..]) {
             Ok(0) => break,
