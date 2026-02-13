@@ -146,8 +146,9 @@ fn main() {
         let result = if let Some(ref data) = mmap {
             tr::translate_mmap(&set1, &set2, data, &mut *raw)
         } else {
-            let mut stdin = io::stdin().lock();
-            tr::translate(&set1, &set2, &mut stdin, &mut *raw)
+            // Use raw fd 0 to bypass StdinLock's internal 8KB BufReader overhead
+            let mut stdin = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(0)) };
+            tr::translate(&set1, &set2, &mut *stdin, &mut *raw)
         };
         #[cfg(not(unix))]
         let result = {
@@ -277,7 +278,75 @@ fn run_mmap_mode(
     }
 }
 
-/// Dispatch streaming modes — uses BufWriter for batching small writes.
+/// Dispatch streaming modes — writes directly to raw fd.
+/// Uses raw fd 0 for reading to bypass StdinLock's internal 8KB BufReader,
+/// which would fragment our 16MB reads into ~2000 8KB buffered reads.
+#[cfg(unix)]
+fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io::Result<()> {
+    let mut stdin = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(0)) };
+
+    if cli.delete && cli.squeeze {
+        if cli.sets.len() < 2 {
+            eprintln!("tr: missing operand after '{}'", set1_str);
+            eprintln!("Two strings must be given when both deleting and squeezing repeats.");
+            eprintln!("Try 'tr --help' for more information.");
+            process::exit(1);
+        }
+        let set2_str = &cli.sets[1];
+        let set1 = tr::parse_set(set1_str);
+        let set2 = tr::parse_set(set2_str);
+        let delete_set = if cli.complement {
+            tr::complement(&set1)
+        } else {
+            set1
+        };
+        tr::delete_squeeze(&delete_set, &set2, &mut *stdin, writer)
+    } else if cli.delete {
+        if cli.sets.len() > 1 {
+            eprintln!("tr: extra operand '{}'", cli.sets[1]);
+            eprintln!("Only one string may be given when deleting without squeezing.");
+            eprintln!("Try 'tr --help' for more information.");
+            process::exit(1);
+        }
+        let set1 = tr::parse_set(set1_str);
+        let delete_set = if cli.complement {
+            tr::complement(&set1)
+        } else {
+            set1
+        };
+        tr::delete(&delete_set, &mut *stdin, writer)
+    } else if cli.squeeze && cli.sets.len() < 2 {
+        let set1 = tr::parse_set(set1_str);
+        let squeeze_set = if cli.complement {
+            tr::complement(&set1)
+        } else {
+            set1
+        };
+        tr::squeeze(&squeeze_set, &mut *stdin, writer)
+    } else if cli.squeeze {
+        let set2_str = &cli.sets[1];
+        let mut set1 = tr::parse_set(set1_str);
+        if cli.complement {
+            set1 = tr::complement(&set1);
+        }
+        let set2 = if cli.truncate {
+            let raw_set = tr::parse_set(set2_str);
+            set1.truncate(raw_set.len());
+            raw_set
+        } else {
+            tr::expand_set2(set2_str, set1.len())
+        };
+        tr::translate_squeeze(&set1, &set2, &mut *stdin, writer)
+    } else {
+        eprintln!("tr: missing operand after '{}'", set1_str);
+        eprintln!("Two strings must be given when translating.");
+        eprintln!("Try 'tr --help' for more information.");
+        process::exit(1);
+    }
+}
+
+/// Dispatch streaming modes — non-Unix fallback with StdinLock.
+#[cfg(not(unix))]
 fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io::Result<()> {
     let mut stdin = io::stdin().lock();
 
