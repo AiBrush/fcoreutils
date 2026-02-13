@@ -64,10 +64,14 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     #[cfg(target_os = "linux")]
     if let Some(ref m) = mmap {
         unsafe {
+            // tac scans backward with memrchr — disable sequential readahead
+            // which would prefetch the wrong pages
+            libc::madvise(m.as_ptr() as *mut libc::c_void, m.len(), libc::MADV_RANDOM);
+            // Pre-fault all pages into page cache
             libc::madvise(
                 m.as_ptr() as *mut libc::c_void,
                 m.len(),
-                libc::MADV_SEQUENTIAL,
+                libc::MADV_WILLNEED,
             );
             if m.len() >= 2 * 1024 * 1024 {
                 libc::madvise(
@@ -120,13 +124,20 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             }
         };
 
-        // tac uses backward SIMD scan (memrchr_iter) for single-byte separator,
-        // so MADV_RANDOM is optimal (no sequential readahead benefit).
+        // tac uses backward SIMD scan (memrchr) for single-byte separator,
+        // so MADV_RANDOM is optimal — disables sequential readahead which
+        // would prefetch the wrong (forward) pages during backward scan.
         // WILLNEED still helps pre-fault all pages, HUGEPAGE reduces TLB misses.
         #[cfg(target_os = "linux")]
         {
             if let FileData::Mmap(ref mmap) = data {
                 unsafe {
+                    // Disable sequential readahead — backward scan makes it counterproductive
+                    libc::madvise(
+                        mmap.as_ptr() as *mut libc::c_void,
+                        mmap.len(),
+                        libc::MADV_RANDOM,
+                    );
                     // Pre-fault all pages for backward scan
                     libc::madvise(
                         mmap.as_ptr() as *mut libc::c_void,
