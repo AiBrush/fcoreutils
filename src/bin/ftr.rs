@@ -63,11 +63,12 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
         return None;
     }
 
-    // mmap the stdin file descriptor
+    // mmap the stdin file descriptor with MAP_POPULATE for pre-faulted pages
     // SAFETY: fd is valid, file is regular, size > 0
     use std::os::unix::io::FromRawFd;
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mmap: Option<memmap2::Mmap> = unsafe { memmap2::MmapOptions::new().map(&file) }.ok();
+    let mmap: Option<memmap2::Mmap> =
+        unsafe { memmap2::MmapOptions::new().populate().map(&file) }.ok();
     std::mem::forget(file); // Don't close stdin
     #[cfg(target_os = "linux")]
     if let Some(ref m) = mmap {
@@ -75,7 +76,7 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
             libc::madvise(
                 m.as_ptr() as *mut libc::c_void,
                 m.len(),
-                libc::MADV_SEQUENTIAL,
+                libc::MADV_SEQUENTIAL | libc::MADV_WILLNEED,
             );
         }
     }
@@ -100,7 +101,7 @@ fn main() {
     let mut raw = raw_stdout();
 
     // Pure translate mode: bypass BufWriter entirely.
-    // translate() writes 1MB chunks directly, so no buffering needed.
+    // translate() writes 4MB chunks directly, so no buffering needed.
     // This saves one full memcpy of the data through BufWriter's internal buffer.
     let is_pure_translate = !cli.delete && !cli.squeeze && cli.sets.len() >= 2;
 

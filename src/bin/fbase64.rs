@@ -58,7 +58,7 @@ fn main() {
 
     let filename = cli.file.as_deref().unwrap_or("-");
 
-    // Raw fd stdout with BufWriter for batching small writes (wrapped encoding)
+    // Raw fd stdout with BufWriter for batching small writes.
     #[cfg(unix)]
     let mut raw = raw_stdout();
     #[cfg(unix)]
@@ -80,12 +80,9 @@ fn main() {
     }
 
     if let Err(e) = result {
-        // SIGPIPE is reset to SIG_DFL, so broken pipe kills the process
-        // before we get here. This is a fallback for edge cases.
         if e.kind() == io::ErrorKind::BrokenPipe {
             process::exit(0);
         }
-        // Include filename in error message (GNU compat)
         if filename != "-" {
             eprintln!("base64: {}: {}", filename, io_error_msg(&e));
         } else {

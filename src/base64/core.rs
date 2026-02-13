@@ -40,22 +40,31 @@ fn encode_no_wrap(data: &[u8], out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
-/// Encode with line wrapping — sequential SIMD encoding in chunks.
+/// Encode with line wrapping.
+/// Encodes in 6MB input chunks aligned to line boundaries, then wraps
+/// and writes each chunk. 6MB input -> ~8MB encoded+wrapped output.
 fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
+    // Calculate bytes_per_line: the input bytes that produce exactly wrap_col encoded chars.
+    // wrap_col base64 chars = (wrap_col * 3 / 4) input bytes (when wrap_col is divisible by 4).
+    // For the default wrap_col=76: 76*3/4 = 57 bytes per line.
     let bytes_per_line = wrap_col * 3 / 4;
 
-    // Use 8MB input chunks for better throughput — the SIMD encoder is fast
-    // enough that we want to minimize the number of encode + wrap cycles.
-    let lines_per_chunk = (8 * 1024 * 1024) / bytes_per_line.max(1);
-    let chunk_input = lines_per_chunk * bytes_per_line.max(1);
-    let effective_chunk = chunk_input.max(1).min(data.len());
-    let chunk_encoded_max = BASE64_ENGINE.encoded_length(effective_chunk);
-    let mut encode_buf = vec![0u8; chunk_encoded_max];
-    let effective_lines = effective_chunk / bytes_per_line.max(1) + 1;
-    let wrapped_max = (effective_lines + 1) * (wrap_col + 1);
+    // Encode in 6MB chunks aligned to bytes_per_line so each chunk produces
+    // complete lines, avoiding column tracking across chunks.
+    // 6MB input -> ~8MB encoded -> ~8.1MB wrapped output.
+    let lines_per_chunk = (6 * 1024 * 1024) / bytes_per_line.max(1);
+    let max_input_chunk = lines_per_chunk * bytes_per_line.max(1);
+    let input_chunk = max_input_chunk.max(bytes_per_line.max(1)).min(data.len());
+
+    let enc_max = BASE64_ENGINE.encoded_length(input_chunk);
+    let mut encode_buf = vec![0u8; enc_max];
+
+    // Output buffer: encoded + newlines. One newline per wrap_col chars.
+    let max_lines = enc_max / wrap_col + 2;
+    let wrapped_max = enc_max + max_lines;
     let mut wrap_buf = vec![0u8; wrapped_max];
 
-    for chunk in data.chunks(chunk_input.max(1)) {
+    for chunk in data.chunks(max_input_chunk.max(1)) {
         let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
         let encoded = BASE64_ENGINE.encode(chunk, encode_buf[..enc_len].as_out());
         let wp = wrap_encoded(encoded, wrap_col, &mut wrap_buf);
@@ -67,6 +76,8 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
 
 /// Wrap encoded base64 data with newlines at `wrap_col` columns.
 /// Returns number of bytes written to `wrap_buf`.
+/// Uses unsafe ptr::copy_nonoverlapping for maximum throughput,
+/// with 4-line unrolling to reduce loop overhead.
 #[inline]
 fn wrap_encoded(encoded: &[u8], wrap_col: usize, wrap_buf: &mut [u8]) -> usize {
     let line_out = wrap_col + 1;
@@ -97,7 +108,13 @@ fn wrap_encoded(encoded: &[u8], wrap_col: usize, wrap_buf: &mut [u8]) -> usize {
 
     // Remaining full lines
     while rp + wrap_col <= encoded.len() {
-        wrap_buf[wp..wp + wrap_col].copy_from_slice(&encoded[rp..rp + wrap_col]);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                encoded.as_ptr().add(rp),
+                wrap_buf.as_mut_ptr().add(wp),
+                wrap_col,
+            );
+        }
         wp += wrap_col;
         wrap_buf[wp] = b'\n';
         wp += 1;
