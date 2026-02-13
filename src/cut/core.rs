@@ -533,11 +533,7 @@ fn complement_single_field_line(
         buf.extend_from_slice(&line[field_start..]);
     }
 
-    if !first_output || field_idx != skip_idx {
-        buf.push(line_delim);
-    } else {
-        buf.push(line_delim);
-    }
+    buf.push(line_delim);
 }
 
 /// Contiguous from-start field range extraction (e.g., `cut -f1-5`).
@@ -762,12 +758,10 @@ fn process_first_field_combined(
             }
             line_start = pos + 1;
             found_delim = false;
-        } else {
-            if !found_delim {
-                buf.extend_from_slice(&data[line_start..pos]);
-                buf.push(line_delim);
-                found_delim = true;
-            }
+        } else if !found_delim {
+            buf.extend_from_slice(&data[line_start..pos]);
+            buf.push(line_delim);
+            found_delim = true;
         }
     }
 
