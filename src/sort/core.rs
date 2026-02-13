@@ -280,10 +280,10 @@ fn read_all_input(
         let metadata = file.metadata()?;
         if metadata.len() > 0 {
             let mmap = unsafe { memmap2::MmapOptions::new().populate().map(&file)? };
-            // Sequential for line scanning; caller switches to Random for sort phase
+            // Advise kernel for optimal page handling
             #[cfg(target_os = "linux")]
             {
-                let _ = mmap.advise(memmap2::Advice::Sequential);
+                let _ = mmap.advise(memmap2::Advice::WillNeed);
                 if metadata.len() >= 2 * 1024 * 1024 {
                     let _ = mmap.advise(memmap2::Advice::HugePage);
                 }
@@ -651,35 +651,6 @@ fn float_to_sortable_u64(f: f64) -> u64 {
     }
 }
 
-/// Full comparison: compare u64 prefix, then remaining bytes.
-/// Optimized: the u64 prefix resolves most comparisons without touching
-/// line data. Only falls through to full comparison when prefixes match.
-#[inline(always)]
-fn prefix_cmp_full(
-    a: &(u64, usize),
-    b: &(u64, usize),
-    data: &[u8],
-    offsets: &[(usize, usize)],
-) -> Ordering {
-    // Fast path: u64 prefix comparison resolves ~95%+ of cases
-    if a.0 != b.0 {
-        return if a.0 < b.0 {
-            Ordering::Less
-        } else {
-            Ordering::Greater
-        };
-    }
-    // Slow path: equal prefixes, compare remaining bytes
-    let (sa, ea) = offsets[a.1];
-    let (sb, eb) = offsets[b.1];
-    let skip = 8.min(ea - sa).min(eb - sb);
-    data[sa + skip..ea].cmp(&data[sb + skip..eb])
-}
-
-/// Minimum output size for single-buffer construction.
-/// Below this, per-line writes through BufWriter are fine.
-const SINGLE_BUF_THRESHOLD: usize = 1024 * 1024; // 1MB
-
 /// Write sorted indices to output, with optional unique dedup.
 /// For large outputs (>1MB), builds a single contiguous output buffer and writes
 /// it in one call, eliminating per-line write_all overhead (~10M function calls
@@ -710,7 +681,7 @@ fn write_sorted_output(
                 prev = Some(idx);
             }
         }
-    } else if data.len() >= SINGLE_BUF_THRESHOLD {
+    } else if sorted_indices.len() > 50_000 {
         write_sorted_single_buf_idx(data, offsets, sorted_indices, terminator, writer)?;
     } else {
         for &idx in sorted_indices {
@@ -830,7 +801,7 @@ fn write_sorted_entries(
                 prev = Some(idx);
             }
         }
-    } else if data.len() >= SINGLE_BUF_THRESHOLD {
+    } else if entries.len() > 50_000 {
         write_sorted_single_buf_entries(data, offsets, entries, terminator, writer)?;
     } else {
         for &(_, idx) in entries {
@@ -842,9 +813,8 @@ fn write_sorted_entries(
     Ok(())
 }
 
-/// Build output from sorted (key, index) entries using single allocation + parallel fill.
-/// One allocation instead of N per-thread allocations reduces mmap/brk overhead.
-/// Parallel fill via rayon uses prefix-sum offsets for each thread's write region.
+/// Build output from sorted (key, index) entries using per-thread parallel copy.
+/// Each thread builds its portion of the output buffer independently.
 fn write_sorted_single_buf_entries(
     data: &[u8],
     offsets: &[(usize, usize)],
@@ -859,35 +829,26 @@ fn write_sorted_single_buf_entries(
         let num_threads = rayon::current_num_threads().max(1);
         let chunk_size = (n + num_threads - 1) / num_threads;
 
-        // Compute per-chunk sizes in parallel
-        let chunk_sizes: Vec<usize> = entries
-            .par_chunks(chunk_size)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .map(|&(_, idx)| (offsets[idx].1 - offsets[idx].0) + tl)
-                    .sum()
-            })
-            .collect();
-
-        // Per-thread sub-buffers with pre-computed sizes
+        // Per-thread sub-buffers built in parallel
         let buffers: Vec<Vec<u8>> = entries
             .par_chunks(chunk_size)
-            .enumerate()
-            .map(|(ci, chunk)| {
-                let sz = chunk_sizes[ci];
-                let mut buf = vec![0u8; sz];
-                let buf_ptr = buf.as_mut_ptr();
+            .map(|chunk| {
+                // Pre-compute size for this chunk
+                let sz: usize = chunk
+                    .iter()
+                    .map(|&(_, idx)| (offsets[idx].1 - offsets[idx].0) + tl)
+                    .sum();
+                let mut buf: Vec<u8> = Vec::with_capacity(sz);
                 let data_ptr = data.as_ptr();
-                let mut wp = 0usize;
                 for &(_, idx) in chunk {
                     let (s, e) = offsets[idx];
                     let ll = e - s;
                     unsafe {
-                        std::ptr::copy_nonoverlapping(data_ptr.add(s), buf_ptr.add(wp), ll);
-                        wp += ll;
-                        std::ptr::copy_nonoverlapping(terminator.as_ptr(), buf_ptr.add(wp), tl);
-                        wp += tl;
+                        let old_len = buf.len();
+                        buf.set_len(old_len + ll + tl);
+                        let buf_ptr = buf.as_mut_ptr().add(old_len);
+                        std::ptr::copy_nonoverlapping(data_ptr.add(s), buf_ptr, ll);
+                        std::ptr::copy_nonoverlapping(terminator.as_ptr(), buf_ptr.add(ll), tl);
                     }
                 }
                 buf
@@ -900,26 +861,13 @@ fn write_sorted_single_buf_entries(
         return Ok(());
     }
 
-    // Small output: single sequential buffer
-    let total: usize = entries
-        .iter()
-        .map(|&(_, idx)| (offsets[idx].1 - offsets[idx].0) + tl)
-        .sum();
-    let mut output = vec![0u8; total];
-    let out_ptr = output.as_mut_ptr();
-    let data_ptr = data.as_ptr();
-    let mut wp = 0usize;
+    // Small output: direct writes to BufWriter
     for &(_, idx) in entries {
         let (s, e) = offsets[idx];
-        let ll = e - s;
-        unsafe {
-            std::ptr::copy_nonoverlapping(data_ptr.add(s), out_ptr.add(wp), ll);
-            wp += ll;
-            std::ptr::copy_nonoverlapping(terminator.as_ptr(), out_ptr.add(wp), tl);
-            wp += tl;
-        }
+        writer.write_all(&data[s..e])?;
+        writer.write_all(terminator)?;
     }
-    writer.write_all(&output)
+    Ok(())
 }
 
 /// Helper: perform a parallel or sequential sort on indices.
@@ -1094,35 +1042,50 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
 
     if is_plain_lex && num_lines > 256 {
         // FAST PATH 1: Prefix-based lexicographic sort
+        // Store (prefix, start, len) to avoid offsets array lookup during comparison.
+        // Entry is 16 bytes: u64 prefix + u32 start + u32 len (same as (u64, usize)).
         let reverse = gopts.reverse;
-        let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+        let mut entries: Vec<(u64, u32, u32)> = if num_lines > 10_000 {
             offsets
                 .par_iter()
-                .enumerate()
-                .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
+                .map(|&(s, e)| (line_prefix(data, s, e), s as u32, (e - s) as u32))
                 .collect()
         } else {
             offsets
                 .iter()
-                .enumerate()
-                .map(|(i, &(s, e))| (line_prefix(data, s, e), i))
+                .map(|&(s, e)| (line_prefix(data, s, e), s as u32, (e - s) as u32))
                 .collect()
         };
 
-        // Parallel prefix-comparison sort: pdqsort on (u64, usize) entries.
-        // The u64 prefix resolves ~99% of comparisons without touching
-        // line data, so the effective comparison cost is very low.
-        // For 1.9M entries on 4 cores, this gives ~500ms wall time.
+        // Comparison function: u64 prefix resolves most cases.
+        // When equal, compare remaining bytes using inline start/len (no offsets lookup).
+        let cmp_fn = |a: &(u64, u32, u32), b: &(u64, u32, u32)| -> Ordering {
+            // Single CMP + conditional branch: resolves ~95%+ of comparisons
+            match a.0.cmp(&b.0) {
+                Ordering::Equal => {
+                    // Slow path: equal prefixes, compare remaining bytes
+                    let sa = a.1 as usize;
+                    let la = a.2 as usize;
+                    let sb = b.1 as usize;
+                    let lb = b.2 as usize;
+                    let skip = 8.min(la).min(lb);
+                    data[sa + skip..sa + la].cmp(&data[sb + skip..sb + lb])
+                }
+                ord => ord,
+            }
+        };
+
+        // Parallel prefix-comparison sort.
         if config.stable {
-            entries.par_sort_by(|a, b| {
-                let ord = prefix_cmp_full(a, b, data, &offsets);
-                if reverse { ord.reverse() } else { ord }
-            });
+            if !reverse {
+                entries.par_sort_by(cmp_fn);
+            } else {
+                entries.par_sort_by(|a, b| cmp_fn(a, b).reverse());
+            }
+        } else if !reverse {
+            entries.par_sort_unstable_by(cmp_fn);
         } else {
-            entries.par_sort_unstable_by(|a, b| {
-                let ord = prefix_cmp_full(a, b, data, &offsets);
-                if reverse { ord.reverse() } else { ord }
-            });
+            entries.par_sort_unstable_by(|a, b| cmp_fn(a, b).reverse());
         }
 
         // Switch to sequential for output phase
@@ -1131,27 +1094,63 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             let _ = mmap.advise(memmap2::Advice::Sequential);
         }
 
-        // Output phase
+        // Output phase: write sorted entries using start/len
         if config.unique {
-            let mut prev: Option<usize> = None;
-            for &(_, idx) in &entries {
-                let (s, e) = offsets[idx];
-                let line = &data[s..e];
-                let emit = match prev {
-                    Some(p) => {
-                        let (ps, pe) = offsets[p];
-                        data[ps..pe] != *line
-                    }
-                    None => true,
+            let mut prev_start = u32::MAX;
+            let mut prev_len = 0u32;
+            for &(_, s, l) in &entries {
+                let su = s as usize;
+                let lu = l as usize;
+                let should_output = if prev_start == u32::MAX {
+                    true
+                } else {
+                    let ps = prev_start as usize;
+                    let pl = prev_len as usize;
+                    compare_lines_for_dedup(&data[ps..ps + pl], &data[su..su + lu], config)
+                        != Ordering::Equal
                 };
-                if emit {
-                    writer.write_all(line)?;
+                if should_output {
+                    writer.write_all(&data[su..su + lu])?;
                     writer.write_all(terminator)?;
-                    prev = Some(idx);
+                    prev_start = s;
+                    prev_len = l;
                 }
             }
+        } else if entries.len() > 50_000 {
+            // Parallel buffer construction for large outputs
+            let tl = terminator.len();
+            let num_threads = rayon::current_num_threads().max(1);
+            let chunk_size = (entries.len() + num_threads - 1) / num_threads;
+
+            let buffers: Vec<Vec<u8>> = entries
+                .par_chunks(chunk_size)
+                .map(|chunk| {
+                    let sz: usize = chunk.iter().map(|&(_, _, l)| l as usize + tl).sum();
+                    let mut buf: Vec<u8> = Vec::with_capacity(sz);
+                    let data_ptr = data.as_ptr();
+                    for &(_, s, l) in chunk {
+                        let su = s as usize;
+                        let lu = l as usize;
+                        unsafe {
+                            let old_len = buf.len();
+                            buf.set_len(old_len + lu + tl);
+                            let bp = buf.as_mut_ptr().add(old_len);
+                            std::ptr::copy_nonoverlapping(data_ptr.add(su), bp, lu);
+                            std::ptr::copy_nonoverlapping(terminator.as_ptr(), bp.add(lu), tl);
+                        }
+                    }
+                    buf
+                })
+                .collect();
+
+            for buf in &buffers {
+                writer.write_all(buf)?;
+            }
         } else {
-            write_sorted_single_buf_entries(data, &offsets, &entries, terminator, &mut writer)?;
+            for &(_, s, l) in &entries {
+                writer.write_all(&data[s as usize..(s + l) as usize])?;
+                writer.write_all(terminator)?;
+            }
         }
     } else if is_fold_case_lex && num_lines > 256 {
         // FAST PATH 1b: Case-insensitive prefix sort (sort -f)
