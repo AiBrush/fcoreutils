@@ -252,7 +252,13 @@ pub fn tac_string_separator(
 /// Copies reversed records into one contiguous buffer, then single write_all.
 /// Eliminates Vec<IoSlice> allocation, writev batching, and kernel per-iov overhead.
 fn tac_bytes_backward_after_alloc(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let mut buf = vec![0u8; data.len()];
+    // SAFETY: every byte in [0..data.len()) is written by copy_nonoverlapping below
+    // before being read. Avoids wasted memset for buffers up to 256MB.
+    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(data.len());
+    }
     let mut wp: usize = 0;
     let mut end = data.len();
 
@@ -305,7 +311,11 @@ fn tac_bytes_backward_after_alloc(data: &[u8], sep: u8, out: &mut impl Write) ->
 
 /// Single-allocation reverse for before-separator mode (single byte).
 fn tac_bytes_backward_before_alloc(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let mut buf = vec![0u8; data.len()];
+    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(data.len());
+    }
     let mut wp: usize = 0;
     let mut end = data.len();
 
@@ -359,7 +369,11 @@ fn tac_string_backward_after_alloc(
 ) -> io::Result<()> {
     let sep_len = separator.len();
     let finder = memchr::memmem::FinderRev::new(separator);
-    let mut buf = vec![0u8; data.len()];
+    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(data.len());
+    }
     let mut wp: usize = 0;
     let mut end = data.len();
 
@@ -419,7 +433,11 @@ fn tac_string_backward_before_alloc(
     out: &mut impl Write,
 ) -> io::Result<()> {
     let finder = memchr::memmem::FinderRev::new(separator);
-    let mut buf = vec![0u8; data.len()];
+    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(data.len());
+    }
     let mut wp: usize = 0;
     let mut end = data.len();
 

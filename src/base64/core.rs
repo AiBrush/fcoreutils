@@ -38,7 +38,12 @@ fn encode_no_wrap(data: &[u8], out: &mut impl Write) -> io::Result<()> {
 
     let actual_chunk = NOWRAP_CHUNK.min(data.len());
     let enc_max = BASE64_ENGINE.encoded_length(actual_chunk);
-    let mut buf = vec![0u8; enc_max];
+    // SAFETY: encode() writes exactly enc_len bytes before we read them.
+    let mut buf: Vec<u8> = Vec::with_capacity(enc_max);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(enc_max);
+    }
 
     for chunk in data.chunks(NOWRAP_CHUNK) {
         let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
@@ -61,7 +66,11 @@ fn encode_no_wrap_parallel(data: &[u8], out: &mut impl Write) -> io::Result<()> 
         .par_iter()
         .map(|chunk| {
             let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
-            let mut buf = vec![0u8; enc_len];
+            let mut buf: Vec<u8> = Vec::with_capacity(enc_len);
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                buf.set_len(enc_len);
+            }
             let _ = BASE64_ENGINE.encode(chunk, buf[..enc_len].as_out());
             buf
         })
@@ -99,12 +108,20 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
     let input_chunk = max_input_chunk.min(data.len());
 
     let enc_max = BASE64_ENGINE.encoded_length(input_chunk);
-    let mut encode_buf = vec![0u8; enc_max];
+    let mut encode_buf: Vec<u8> = Vec::with_capacity(enc_max);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        encode_buf.set_len(enc_max);
+    }
 
     // Fused output buffer: holds encoded data with newlines interleaved
     let max_lines = enc_max / wrap_col + 2;
     let fused_max = enc_max + max_lines;
-    let mut fused_buf = vec![0u8; fused_max];
+    let mut fused_buf: Vec<u8> = Vec::with_capacity(fused_max);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        fused_buf.set_len(fused_max);
+    }
 
     for chunk in data.chunks(max_input_chunk.max(1)) {
         let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
@@ -136,10 +153,18 @@ fn encode_wrapped_parallel(
         .par_iter()
         .map(|chunk| {
             let enc_max = BASE64_ENGINE.encoded_length(chunk.len());
-            let mut encode_buf = vec![0u8; enc_max];
+            let mut encode_buf: Vec<u8> = Vec::with_capacity(enc_max);
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                encode_buf.set_len(enc_max);
+            }
             let encoded = BASE64_ENGINE.encode(chunk, encode_buf[..enc_max].as_out());
             let max_lines = enc_max / wrap_col + 2;
-            let mut fused = vec![0u8; enc_max + max_lines];
+            let mut fused: Vec<u8> = Vec::with_capacity(enc_max + max_lines);
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                fused.set_len(enc_max + max_lines);
+            }
             let wp = fuse_wrap(encoded, wrap_col, &mut fused);
             fused.truncate(wp);
             fused
@@ -252,7 +277,11 @@ fn fuse_wrap(encoded: &[u8], wrap_col: usize, out_buf: &mut [u8]) -> usize {
 /// Fallback for very small wrap columns (< 4 chars).
 fn encode_wrapped_small(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
     let enc_max = BASE64_ENGINE.encoded_length(data.len());
-    let mut buf = vec![0u8; enc_max];
+    let mut buf: Vec<u8> = Vec::with_capacity(enc_max);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(enc_max);
+    }
     let encoded = BASE64_ENGINE.encode(data, buf[..enc_max].as_out());
 
     let wc = wrap_col.max(1);
