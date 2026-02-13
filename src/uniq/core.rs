@@ -115,6 +115,20 @@ fn lines_equal(a: &[u8], b: &[u8], config: &UniqConfig) -> bool {
     }
 }
 
+/// Fast case-insensitive comparison: no field/char extraction, just case-insensitive.
+/// Uses length check + 8-byte prefix rejection before full comparison.
+#[inline(always)]
+fn lines_equal_case_insensitive(a: &[u8], b: &[u8]) -> bool {
+    let alen = a.len();
+    if alen != b.len() {
+        return false;
+    }
+    if alen == 0 {
+        return true;
+    }
+    a.eq_ignore_ascii_case(b)
+}
+
 /// Check if config requires field/char skipping or char limiting.
 #[inline(always)]
 fn needs_key_extraction(config: &UniqConfig) -> bool {
@@ -340,6 +354,7 @@ fn process_standard_bytes(
     }
 
     let fast = !needs_key_extraction(config) && !config.ignore_case;
+    let fast_ci = !needs_key_extraction(config) && config.ignore_case;
 
     // Ultra-fast path: default mode, no count, no key extraction.
     // Single-pass: scan with memchr, compare adjacent lines inline.
@@ -364,6 +379,27 @@ fn process_standard_bytes(
     // Avoids the line_starts Vec allocation (20MB+ for large files).
     if fast && config.count {
         return process_count_fast_singlepass(data, writer, config, term);
+    }
+
+    // Fast path for case-insensitive (-i) mode with no key extraction.
+    // Single-pass: scan with memchr, compare adjacent lines with eq_ignore_ascii_case.
+    // Avoids the general path's line_starts Vec allocation.
+    if fast_ci && !config.count && matches!(config.mode, OutputMode::Default) {
+        return process_default_ci_singlepass(data, writer, term);
+    }
+
+    if fast_ci
+        && !config.count
+        && matches!(
+            config.mode,
+            OutputMode::RepeatedOnly | OutputMode::UniqueOnly
+        )
+    {
+        return process_filter_ci_singlepass(data, writer, config, term);
+    }
+
+    if fast_ci && config.count {
+        return process_count_ci_singlepass(data, writer, config, term);
     }
 
     // General path: pre-computed line positions for binary search on groups
@@ -856,6 +892,197 @@ fn process_count_fast_singlepass(
     }
 
     // Output last group
+    let should_print = match config.mode {
+        OutputMode::Default => true,
+        OutputMode::RepeatedOnly => count > 1,
+        OutputMode::UniqueOnly => count == 1,
+        _ => true,
+    };
+    if should_print {
+        write_count_line(writer, count, &data[prev_start..prev_end], term)?;
+    }
+
+    Ok(())
+}
+
+/// Fast single-pass for case-insensitive (-i) default mode.
+/// Same logic as process_default_sequential but uses eq_ignore_ascii_case.
+fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8) -> io::Result<()> {
+    let mut prev_start: usize = 0;
+    let mut prev_end: usize;
+
+    match memchr::memchr(term, data) {
+        Some(pos) => {
+            prev_end = pos;
+        }
+        None => {
+            writer.write_all(data)?;
+            return writer.write_all(&[term]);
+        }
+    }
+
+    // Write first line
+    writer.write_all(&data[..prev_end + 1])?;
+
+    let mut cur_start = prev_end + 1;
+
+    while cur_start < data.len() {
+        let cur_end = match memchr::memchr(term, &data[cur_start..]) {
+            Some(offset) => cur_start + offset,
+            None => data.len(),
+        };
+
+        let prev_content = &data[prev_start..prev_end];
+        let cur_content = &data[cur_start..cur_end];
+
+        if !lines_equal_case_insensitive(prev_content, cur_content) {
+            // Different line — write it
+            if cur_end < data.len() {
+                writer.write_all(&data[cur_start..cur_end + 1])?;
+            } else {
+                writer.write_all(&data[cur_start..cur_end])?;
+                writer.write_all(&[term])?;
+            }
+            prev_start = cur_start;
+            prev_end = cur_end;
+        }
+
+        if cur_end < data.len() {
+            cur_start = cur_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Fast single-pass for case-insensitive (-i) repeated/unique-only modes.
+fn process_filter_ci_singlepass(
+    data: &[u8],
+    writer: &mut impl Write,
+    config: &UniqConfig,
+    term: u8,
+) -> io::Result<()> {
+    let repeated = matches!(config.mode, OutputMode::RepeatedOnly);
+
+    let first_term = match memchr::memchr(term, data) {
+        Some(pos) => pos,
+        None => {
+            if !repeated {
+                writer.write_all(data)?;
+                writer.write_all(&[term])?;
+            }
+            return Ok(());
+        }
+    };
+
+    let mut prev_start: usize = 0;
+    let mut prev_end: usize = first_term;
+    let mut count: u64 = 1;
+    let mut cur_start = first_term + 1;
+
+    while cur_start < data.len() {
+        let cur_end = match memchr::memchr(term, &data[cur_start..]) {
+            Some(offset) => cur_start + offset,
+            None => data.len(),
+        };
+
+        if lines_equal_case_insensitive(&data[prev_start..prev_end], &data[cur_start..cur_end]) {
+            count += 1;
+        } else {
+            let should_print = if repeated { count > 1 } else { count == 1 };
+            if should_print {
+                if prev_end < data.len() && data[prev_end] == term {
+                    writer.write_all(&data[prev_start..prev_end + 1])?;
+                } else {
+                    writer.write_all(&data[prev_start..prev_end])?;
+                    writer.write_all(&[term])?;
+                }
+            }
+            prev_start = cur_start;
+            prev_end = cur_end;
+            count = 1;
+        }
+
+        if cur_end < data.len() {
+            cur_start = cur_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    let should_print = if repeated { count > 1 } else { count == 1 };
+    if should_print {
+        if prev_end < data.len() && data[prev_end] == term {
+            writer.write_all(&data[prev_start..prev_end + 1])?;
+        } else {
+            writer.write_all(&data[prev_start..prev_end])?;
+            writer.write_all(&[term])?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Fast single-pass for case-insensitive (-i) count (-c) mode.
+fn process_count_ci_singlepass(
+    data: &[u8],
+    writer: &mut impl Write,
+    config: &UniqConfig,
+    term: u8,
+) -> io::Result<()> {
+    let first_term = match memchr::memchr(term, data) {
+        Some(pos) => pos,
+        None => {
+            let should_print = match config.mode {
+                OutputMode::Default => true,
+                OutputMode::RepeatedOnly => false,
+                OutputMode::UniqueOnly => true,
+                _ => true,
+            };
+            if should_print {
+                write_count_line(writer, 1, data, term)?;
+            }
+            return Ok(());
+        }
+    };
+
+    let mut prev_start: usize = 0;
+    let mut prev_end: usize = first_term;
+    let mut count: u64 = 1;
+    let mut cur_start = first_term + 1;
+
+    while cur_start < data.len() {
+        let cur_end = match memchr::memchr(term, &data[cur_start..]) {
+            Some(offset) => cur_start + offset,
+            None => data.len(),
+        };
+
+        if lines_equal_case_insensitive(&data[prev_start..prev_end], &data[cur_start..cur_end]) {
+            count += 1;
+        } else {
+            let should_print = match config.mode {
+                OutputMode::Default => true,
+                OutputMode::RepeatedOnly => count > 1,
+                OutputMode::UniqueOnly => count == 1,
+                _ => true,
+            };
+            if should_print {
+                write_count_line(writer, count, &data[prev_start..prev_end], term)?;
+            }
+            prev_start = cur_start;
+            prev_end = cur_end;
+            count = 1;
+        }
+
+        if cur_end < data.len() {
+            cur_start = cur_end + 1;
+        } else {
+            break;
+        }
+    }
+
     let should_print = match config.mode {
         OutputMode::Default => true,
         OutputMode::RepeatedOnly => count > 1,
