@@ -49,6 +49,35 @@ fn translate_inplace(data: &mut [u8], table: &[u8; 256]) {
     }
 }
 
+/// Translate bytes from source to destination using a 256-byte lookup table.
+/// Avoids the memcpy of copy_from_slice by translating directly src -> dst.
+#[inline(always)]
+fn translate_to(src: &[u8], dst: &mut [u8], table: &[u8; 256]) {
+    debug_assert!(dst.len() >= src.len());
+    unsafe {
+        let sp = src.as_ptr();
+        let dp = dst.as_mut_ptr();
+        let len = src.len();
+        let mut i = 0;
+        // Unrolled: process 8 bytes per iteration to reduce loop overhead
+        while i + 8 <= len {
+            *dp.add(i) = *table.get_unchecked(*sp.add(i) as usize);
+            *dp.add(i + 1) = *table.get_unchecked(*sp.add(i + 1) as usize);
+            *dp.add(i + 2) = *table.get_unchecked(*sp.add(i + 2) as usize);
+            *dp.add(i + 3) = *table.get_unchecked(*sp.add(i + 3) as usize);
+            *dp.add(i + 4) = *table.get_unchecked(*sp.add(i + 4) as usize);
+            *dp.add(i + 5) = *table.get_unchecked(*sp.add(i + 5) as usize);
+            *dp.add(i + 6) = *table.get_unchecked(*sp.add(i + 6) as usize);
+            *dp.add(i + 7) = *table.get_unchecked(*sp.add(i + 7) as usize);
+            i += 8;
+        }
+        while i < len {
+            *dp.add(i) = *table.get_unchecked(*sp.add(i) as usize);
+            i += 1;
+        }
+    }
+}
+
 // ============================================================================
 // Streaming functions (Read + Write)
 // ============================================================================
@@ -516,7 +545,8 @@ fn squeeze_single_stream(
 // ============================================================================
 
 /// Translate bytes from an mmap'd byte slice.
-/// Uses table lookup with unchecked indexing for maximum throughput.
+/// Translates directly from source to destination buffer in 8MB chunks
+/// (eliminates the memcpy of copy_from_slice).
 pub fn translate_mmap(
     set1: &[u8],
     set2: &[u8],
@@ -531,13 +561,12 @@ pub fn translate_mmap(
         return writer.write_all(data);
     }
 
+    // Direct translate src -> dst in 8MB chunks (no intermediate memcpy)
     let buf_size = data.len().min(BUF_SIZE);
     let mut buf = vec![0u8; buf_size];
     for chunk in data.chunks(buf_size) {
-        let len = chunk.len();
-        buf[..len].copy_from_slice(chunk);
-        translate_inplace(&mut buf[..len], &table);
-        writer.write_all(&buf[..len])?;
+        translate_to(chunk, &mut buf[..chunk.len()], &table);
+        writer.write_all(&buf[..chunk.len()])?;
     }
     Ok(())
 }
@@ -556,11 +585,8 @@ pub fn translate_squeeze_mmap(
     let mut last_squeezed: u16 = 256;
 
     for chunk in data.chunks(buf_size) {
-        // Translate chunk into buf
-        let out = &mut buf[..chunk.len()];
-        for (o, &b) in out.iter_mut().zip(chunk) {
-            *o = table[b as usize];
-        }
+        // Translate directly from source to destination (no intermediate copy)
+        translate_to(chunk, &mut buf[..chunk.len()], &table);
         // Squeeze in-place compaction
         let mut wp = 0;
         unsafe {
