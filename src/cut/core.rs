@@ -584,11 +584,13 @@ fn process_single_field(
                     buf
                 })
                 .collect();
-            for result in &results {
-                if !result.is_empty() {
-                    out.write_all(result)?;
-                }
-            }
+            // Use write_vectored (writev) to batch N writes into fewer syscalls
+            let slices: Vec<IoSlice> = results
+                .iter()
+                .filter(|r| !r.is_empty())
+                .map(|r| IoSlice::new(r))
+                .collect();
+            write_ioslices(out, &slices)?;
         } else if target_idx == 0 && !suppress {
             // Zero-copy fast path for field 1 (most common case):
             // For each line, either truncate at the first delimiter, or pass through.
