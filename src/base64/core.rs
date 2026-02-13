@@ -5,14 +5,13 @@ use base64_simd::AsOut;
 const BASE64_ENGINE: &base64_simd::Base64 = &base64_simd::STANDARD;
 
 /// Streaming encode chunk: 24MB aligned to 3 bytes.
-/// Larger chunks = fewer loop iterations = fewer encode setup calls.
 const STREAM_ENCODE_CHUNK: usize = 24 * 1024 * 1024 - (24 * 1024 * 1024 % 3);
 
 /// Chunk size for no-wrap encoding: 24MB aligned to 3 bytes.
 const NOWRAP_CHUNK: usize = 24 * 1024 * 1024 - (24 * 1024 * 1024 % 3);
 
 /// Encode data and write to output with line wrapping.
-/// Uses SIMD encoding with reusable buffers for maximum throughput.
+/// Uses SIMD encoding with fused encode+wrap for maximum throughput.
 pub fn encode_to_writer(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -27,7 +26,6 @@ pub fn encode_to_writer(data: &[u8], wrap_col: usize, out: &mut impl Write) -> i
 
 /// Encode without wrapping — sequential SIMD encoding in chunks.
 fn encode_no_wrap(data: &[u8], out: &mut impl Write) -> io::Result<()> {
-    // Size buffer for actual data, not max chunk size.
     let actual_chunk = NOWRAP_CHUNK.min(data.len());
     let enc_max = BASE64_ENGINE.encoded_length(actual_chunk);
     let mut buf = vec![0u8; enc_max];
@@ -40,47 +38,50 @@ fn encode_no_wrap(data: &[u8], out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
-/// Encode with line wrapping.
-/// Encodes in 6MB input chunks aligned to line boundaries, then wraps
-/// and writes each chunk. 6MB input -> ~8MB encoded+wrapped output.
+/// Encode with line wrapping — fused encode+wrap in a single output buffer.
+/// Encodes aligned input chunks, then interleaves newlines directly into
+/// a single output buffer, eliminating the separate wrap pass.
 fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
-    // Calculate bytes_per_line: the input bytes that produce exactly wrap_col encoded chars.
-    // wrap_col base64 chars = (wrap_col * 3 / 4) input bytes (when wrap_col is divisible by 4).
-    // For the default wrap_col=76: 76*3/4 = 57 bytes per line.
+    // Calculate bytes_per_line: input bytes that produce exactly wrap_col encoded chars.
+    // For default wrap_col=76: 76*3/4 = 57 bytes per line.
     let bytes_per_line = wrap_col * 3 / 4;
+    if bytes_per_line == 0 {
+        // Degenerate case: wrap_col < 4, fall back to byte-at-a-time
+        return encode_wrapped_small(data, wrap_col, out);
+    }
 
-    // Encode in 6MB chunks aligned to bytes_per_line so each chunk produces
-    // complete lines, avoiding column tracking across chunks.
-    // 6MB input -> ~8MB encoded -> ~8.1MB wrapped output.
-    let lines_per_chunk = (6 * 1024 * 1024) / bytes_per_line.max(1);
-    let max_input_chunk = lines_per_chunk * bytes_per_line.max(1);
-    let input_chunk = max_input_chunk.max(bytes_per_line.max(1)).min(data.len());
+    // Process in chunks aligned to bytes_per_line for complete output lines.
+    // 6MB input -> ~8MB encoded -> ~8.1MB with newlines
+    let lines_per_chunk = (6 * 1024 * 1024) / bytes_per_line;
+    let max_input_chunk = (lines_per_chunk * bytes_per_line).max(bytes_per_line);
+    let input_chunk = max_input_chunk.min(data.len());
 
     let enc_max = BASE64_ENGINE.encoded_length(input_chunk);
     let mut encode_buf = vec![0u8; enc_max];
 
-    // Output buffer: encoded + newlines. One newline per wrap_col chars.
+    // Fused output buffer: holds encoded data with newlines interleaved
     let max_lines = enc_max / wrap_col + 2;
-    let wrapped_max = enc_max + max_lines;
-    let mut wrap_buf = vec![0u8; wrapped_max];
+    let fused_max = enc_max + max_lines;
+    let mut fused_buf = vec![0u8; fused_max];
 
     for chunk in data.chunks(max_input_chunk.max(1)) {
         let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
         let encoded = BASE64_ENGINE.encode(chunk, encode_buf[..enc_len].as_out());
-        let wp = wrap_encoded(encoded, wrap_col, &mut wrap_buf);
-        out.write_all(&wrap_buf[..wp])?;
+
+        // Fuse: copy encoded data into fused_buf with newlines interleaved
+        let wp = fuse_wrap(encoded, wrap_col, &mut fused_buf);
+        out.write_all(&fused_buf[..wp])?;
     }
 
     Ok(())
 }
 
-/// Wrap encoded base64 data with newlines at `wrap_col` columns.
-/// Returns number of bytes written to `wrap_buf`.
-/// Uses unsafe ptr::copy_nonoverlapping for maximum throughput,
-/// with 4-line unrolling to reduce loop overhead.
+/// Fuse encoded base64 data with newlines in a single pass.
+/// Uses ptr::copy_nonoverlapping with 4-line unrolling for max throughput.
+/// Returns number of bytes written.
 #[inline]
-fn wrap_encoded(encoded: &[u8], wrap_col: usize, wrap_buf: &mut [u8]) -> usize {
-    let line_out = wrap_col + 1;
+fn fuse_wrap(encoded: &[u8], wrap_col: usize, out_buf: &mut [u8]) -> usize {
+    let line_out = wrap_col + 1; // wrap_col data bytes + 1 newline
     let mut rp = 0;
     let mut wp = 0;
 
@@ -88,7 +89,7 @@ fn wrap_encoded(encoded: &[u8], wrap_col: usize, wrap_buf: &mut [u8]) -> usize {
     while rp + 4 * wrap_col <= encoded.len() {
         unsafe {
             let src = encoded.as_ptr().add(rp);
-            let dst = wrap_buf.as_mut_ptr().add(wp);
+            let dst = out_buf.as_mut_ptr().add(wp);
 
             std::ptr::copy_nonoverlapping(src, dst, wrap_col);
             *dst.add(wrap_col) = b'\n';
@@ -111,12 +112,12 @@ fn wrap_encoded(encoded: &[u8], wrap_col: usize, wrap_buf: &mut [u8]) -> usize {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 encoded.as_ptr().add(rp),
-                wrap_buf.as_mut_ptr().add(wp),
+                out_buf.as_mut_ptr().add(wp),
                 wrap_col,
             );
         }
         wp += wrap_col;
-        wrap_buf[wp] = b'\n';
+        out_buf[wp] = b'\n';
         wp += 1;
         rp += wrap_col;
     }
@@ -124,13 +125,27 @@ fn wrap_encoded(encoded: &[u8], wrap_col: usize, wrap_buf: &mut [u8]) -> usize {
     // Partial last line
     if rp < encoded.len() {
         let remaining = encoded.len() - rp;
-        wrap_buf[wp..wp + remaining].copy_from_slice(&encoded[rp..rp + remaining]);
+        out_buf[wp..wp + remaining].copy_from_slice(&encoded[rp..rp + remaining]);
         wp += remaining;
-        wrap_buf[wp] = b'\n';
+        out_buf[wp] = b'\n';
         wp += 1;
     }
 
     wp
+}
+
+/// Fallback for very small wrap columns (< 4 chars).
+fn encode_wrapped_small(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
+    let enc_max = BASE64_ENGINE.encoded_length(data.len());
+    let mut buf = vec![0u8; enc_max];
+    let encoded = BASE64_ENGINE.encode(data, buf[..enc_max].as_out());
+
+    let wc = wrap_col.max(1);
+    for line in encoded.chunks(wc) {
+        out.write_all(line)?;
+        out.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 /// Decode base64 data and write to output (borrows data, allocates clean buffer).
@@ -143,10 +158,10 @@ pub fn decode_to_writer(data: &[u8], ignore_garbage: bool, out: &mut impl Write)
 
     if ignore_garbage {
         let mut cleaned = strip_non_base64(data);
-        return decode_owned_clean(&mut cleaned, out);
+        return decode_clean_slice(&mut cleaned, out);
     }
 
-    // Fast path: strip newlines with memchr (SIMD), then SIMD decode
+    // Fast path: single-pass strip + decode
     decode_stripping_whitespace(data, out)
 }
 
@@ -166,12 +181,14 @@ pub fn decode_owned(
         strip_whitespace_inplace(data);
     }
 
-    decode_owned_clean(data, out)
+    decode_clean_slice(data, out)
 }
 
-/// Strip all whitespace from a Vec in-place using SIMD memchr for newlines.
+/// Strip all whitespace from a Vec in-place using SIMD memchr.
+/// Single-pass compaction: scan for newlines (most common whitespace in base64),
+/// compact non-newline segments, then handle rare other whitespace.
 fn strip_whitespace_inplace(data: &mut Vec<u8>) {
-    // Quick check for newlines using SIMD
+    // Quick check: no newlines at all?
     if memchr::memchr(b'\n', data).is_none() {
         if data.iter().any(|&b| is_whitespace(b)) {
             data.retain(|&b| !is_whitespace(b));
@@ -179,7 +196,7 @@ fn strip_whitespace_inplace(data: &mut Vec<u8>) {
         return;
     }
 
-    // In-place compaction using raw pointers to avoid borrow conflict.
+    // In-place compaction using raw pointers
     let ptr = data.as_ptr();
     let mut_ptr = data.as_mut_ptr();
     let len = data.len();
@@ -215,8 +232,8 @@ fn strip_whitespace_inplace(data: &mut Vec<u8>) {
     }
 }
 
-/// Decode by stripping all whitespace from the entire input at once,
-/// then performing a single SIMD decode pass.
+/// Decode by stripping whitespace and decoding in a single fused pass.
+/// For data with no whitespace, decodes directly without any copy.
 fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<()> {
     // Quick check: any whitespace at all?
     if memchr::memchr2(b'\n', b'\r', data).is_none()
@@ -226,7 +243,8 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
         return decode_borrowed_clean(out, data);
     }
 
-    // Strip newlines from entire input in a single pass using SIMD memchr.
+    // Fused strip+collect: use SIMD memchr to find newlines,
+    // copy non-newline segments directly into clean buffer.
     let mut clean = Vec::with_capacity(data.len());
     let mut last = 0;
     for pos in memchr::memchr_iter(b'\n', data) {
@@ -244,11 +262,11 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
         clean.retain(|&b| !is_whitespace(b));
     }
 
-    decode_owned_clean(&mut clean, out)
+    decode_clean_slice(&mut clean, out)
 }
 
-/// Decode a clean (no whitespace) owned buffer in-place with SIMD.
-fn decode_owned_clean(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
+/// Decode a clean (no whitespace) buffer in-place with SIMD.
+fn decode_clean_slice(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
@@ -304,7 +322,7 @@ pub fn encode_stream(
     let mut encode_buf = vec![0u8; encode_buf_size];
 
     if wrap_col == 0 {
-        // No wrapping: encode each 4MB chunk and write directly.
+        // No wrapping: encode each chunk and write directly.
         loop {
             let n = read_full(reader, &mut buf)?;
             if n == 0 {
@@ -315,9 +333,9 @@ pub fn encode_stream(
             writer.write_all(encoded)?;
         }
     } else {
-        // Wrapping: batch wrapped output into a pre-allocated buffer.
-        let max_wrapped = encode_buf_size + (encode_buf_size / wrap_col + 2);
-        let mut wrap_buf = vec![0u8; max_wrapped];
+        // Wrapping: fused encode+wrap into a single output buffer.
+        let max_fused = encode_buf_size + (encode_buf_size / wrap_col + 2);
+        let mut fused_buf = vec![0u8; max_fused];
         let mut col = 0usize;
 
         loop {
@@ -328,9 +346,9 @@ pub fn encode_stream(
             let enc_len = BASE64_ENGINE.encoded_length(n);
             let encoded = BASE64_ENGINE.encode(&buf[..n], encode_buf[..enc_len].as_out());
 
-            // Build wrapped output in wrap_buf, then single write.
-            let wp = build_wrapped_output(encoded, wrap_col, &mut col, &mut wrap_buf);
-            writer.write_all(&wrap_buf[..wp])?;
+            // Build fused output in a single buffer, then one write.
+            let wp = build_fused_output(encoded, wrap_col, &mut col, &mut fused_buf);
+            writer.write_all(&fused_buf[..wp])?;
         }
 
         if col > 0 {
@@ -341,15 +359,10 @@ pub fn encode_stream(
     Ok(())
 }
 
-/// Build wrapped output into a pre-allocated buffer.
-/// Returns the number of bytes written to wrap_buf.
+/// Build fused encode+wrap output into a pre-allocated buffer.
+/// Returns the number of bytes written.
 #[inline]
-fn build_wrapped_output(
-    data: &[u8],
-    wrap_col: usize,
-    col: &mut usize,
-    wrap_buf: &mut [u8],
-) -> usize {
+fn build_fused_output(data: &[u8], wrap_col: usize, col: &mut usize, out_buf: &mut [u8]) -> usize {
     let mut rp = 0;
     let mut wp = 0;
 
@@ -358,19 +371,19 @@ fn build_wrapped_output(
         let avail = data.len() - rp;
 
         if avail <= space {
-            wrap_buf[wp..wp + avail].copy_from_slice(&data[rp..rp + avail]);
+            out_buf[wp..wp + avail].copy_from_slice(&data[rp..rp + avail]);
             wp += avail;
             *col += avail;
             if *col == wrap_col {
-                wrap_buf[wp] = b'\n';
+                out_buf[wp] = b'\n';
                 wp += 1;
                 *col = 0;
             }
             break;
         } else {
-            wrap_buf[wp..wp + space].copy_from_slice(&data[rp..rp + space]);
+            out_buf[wp..wp + space].copy_from_slice(&data[rp..rp + space]);
             wp += space;
-            wrap_buf[wp] = b'\n';
+            out_buf[wp] = b'\n';
             wp += 1;
             rp += space;
             *col = 0;
@@ -381,6 +394,7 @@ fn build_wrapped_output(
 }
 
 /// Stream-decode from a reader to a writer. Used for stdin processing.
+/// Fused single-pass: read chunk → strip whitespace in-place → decode immediately.
 pub fn decode_stream(
     reader: &mut impl Read,
     ignore_garbage: bool,
@@ -397,7 +411,7 @@ pub fn decode_stream(
             break;
         }
 
-        // Build clean buffer: carry-over + stripped chunk
+        // Fused: build clean buffer from carry-over + stripped chunk in one pass
         clean.clear();
         clean.extend_from_slice(&carry);
         carry.clear();
@@ -406,7 +420,7 @@ pub fn decode_stream(
         if ignore_garbage {
             clean.extend(chunk.iter().copied().filter(|&b| is_base64_char(b)));
         } else {
-            // Strip newlines using SIMD memchr
+            // Strip newlines using SIMD memchr — single pass
             let mut last = 0;
             for pos in memchr::memchr_iter(b'\n', chunk) {
                 if pos > last {
@@ -427,7 +441,7 @@ pub fn decode_stream(
 
         if is_last {
             // Last chunk: decode everything (including padding)
-            decode_owned_clean(&mut clean, writer)?;
+            decode_clean_slice(&mut clean, writer)?;
         } else {
             // Save incomplete base64 quadruplet for next iteration
             let decode_len = (clean.len() / 4) * 4;
@@ -436,14 +450,14 @@ pub fn decode_stream(
             }
             if decode_len > 0 {
                 clean.truncate(decode_len);
-                decode_owned_clean(&mut clean, writer)?;
+                decode_clean_slice(&mut clean, writer)?;
             }
         }
     }
 
     // Handle any remaining carry-over bytes
     if !carry.is_empty() {
-        decode_owned_clean(&mut carry, writer)?;
+        decode_clean_slice(&mut carry, writer)?;
     }
 
     Ok(())
