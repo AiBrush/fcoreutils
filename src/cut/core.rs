@@ -595,6 +595,16 @@ fn process_single_field(
             // Since most lines have a delimiter, and field 1 is a prefix of each line,
             // we can write contiguous runs directly from the source data.
             single_field1_zerocopy(data, delim, line_delim, out)?;
+        } else if target_idx <= 3 && !suppress {
+            // Optimized path for small field indices (fields 2-4):
+            // Uses successive memchr calls per line instead of the full combined scan.
+            // For field 2: two memchr calls (find first delim, find second).
+            // This avoids the memchr2_iter overhead for every byte in the line.
+            let mut buf = Vec::with_capacity(data.len());
+            process_small_field_combined(data, delim, line_delim, target_idx, &mut buf);
+            if !buf.is_empty() {
+                out.write_all(&buf)?;
+            }
         } else {
             let mut buf = Vec::with_capacity(data.len());
             process_nth_field_combined(data, delim, line_delim, target_idx, suppress, &mut buf);
@@ -1358,6 +1368,101 @@ fn single_field1_zerocopy(
         }
     }
     Ok(())
+}
+
+/// Optimized path for extracting small field indices (2-4) without suppress.
+/// Uses per-line memchr calls to find the target field boundaries.
+/// For field 2: finds the 1st delimiter (start of field 2), then the 2nd (end).
+/// More efficient than memchr2_iter for small field indices since we stop early.
+fn process_small_field_combined(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    target_idx: usize,
+    buf: &mut Vec<u8>,
+) {
+    buf.reserve(data.len());
+    let mut start = 0;
+    for end_pos in memchr_iter(line_delim, data) {
+        let line = &data[start..end_pos];
+        // Find the start of the target field (skip target_idx delimiters)
+        let mut field_start = 0;
+        let mut found_start = target_idx == 0;
+        let mut delim_count = 0;
+        if !found_start {
+            let mut search_start = 0;
+            while let Some(pos) = memchr::memchr(delim, &line[search_start..]) {
+                delim_count += 1;
+                if delim_count == target_idx {
+                    field_start = search_start + pos + 1;
+                    found_start = true;
+                    break;
+                }
+                search_start = search_start + pos + 1;
+            }
+        }
+        if !found_start {
+            // Line has fewer fields than needed - output as-is (no suppress)
+            unsafe {
+                buf_extend(buf, line);
+                buf_push(buf, line_delim);
+            }
+        } else if field_start >= line.len() {
+            // Empty field at end
+            unsafe { buf_push(buf, line_delim) };
+        } else {
+            // Find the end of the target field
+            match memchr::memchr(delim, &line[field_start..]) {
+                Some(pos) => unsafe {
+                    buf_extend(buf, &line[field_start..field_start + pos]);
+                    buf_push(buf, line_delim);
+                },
+                None => unsafe {
+                    buf_extend(buf, &line[field_start..]);
+                    buf_push(buf, line_delim);
+                },
+            }
+        }
+        start = end_pos + 1;
+    }
+    // Handle last line without terminator
+    if start < data.len() {
+        let line = &data[start..];
+        let mut field_start = 0;
+        let mut found_start = target_idx == 0;
+        let mut delim_count = 0;
+        if !found_start {
+            let mut search_start = 0;
+            while let Some(pos) = memchr::memchr(delim, &line[search_start..]) {
+                delim_count += 1;
+                if delim_count == target_idx {
+                    field_start = search_start + pos + 1;
+                    found_start = true;
+                    break;
+                }
+                search_start = search_start + pos + 1;
+            }
+        }
+        if !found_start {
+            unsafe {
+                buf_extend(buf, line);
+                buf_push(buf, line_delim);
+            }
+        } else if field_start >= line.len() {
+            unsafe { buf_push(buf, line_delim) };
+        } else {
+            match memchr::memchr(delim, &line[field_start..]) {
+                Some(pos) => unsafe {
+                    buf_extend(buf, &line[field_start..field_start + pos]);
+                    buf_push(buf, line_delim);
+                },
+                None => unsafe {
+                    buf_extend(buf, &line[field_start..]);
+                    buf_push(buf, line_delim);
+                },
+            }
+        }
+    }
 }
 
 /// Process a chunk of data for single-field extraction.
