@@ -9,12 +9,13 @@ const MAX_IOV: usize = 1024;
 /// Main processing buffer: 4MB (fits in L3 cache, avoids cache thrashing).
 const BUF_SIZE: usize = 4 * 1024 * 1024;
 
-/// Stream buffer: 8MB — tr streaming operations (translate, delete, squeeze)
+/// Stream buffer: 16MB — tr streaming operations (translate, delete, squeeze)
 /// are compute-light (single table lookup or bitset check per byte), so the
-/// bottleneck is I/O syscalls, not cache pressure. 8MB buffer means only
-/// 2 read()/write() syscall pairs for a 10MB input.
+/// bottleneck is I/O syscalls, not cache pressure. 16MB buffer means only
+/// 1 read()/write() syscall pair for a 10MB input, minimizing syscall overhead.
+/// For piped input, read_full retries partial reads to fill the entire buffer.
 /// This applies to ALL streaming modes (delete, squeeze, translate).
-const STREAM_BUF: usize = 8 * 1024 * 1024;
+const STREAM_BUF: usize = 16 * 1024 * 1024;
 
 /// Minimum data size to engage rayon parallel processing for mmap paths.
 /// Below this, single-threaded is faster due to thread pool overhead.

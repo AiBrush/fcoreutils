@@ -676,14 +676,13 @@ pub fn encode_stream(
 }
 
 /// Streaming encode with NO line wrapping — optimized fast path.
-/// Read size is 6MB (divisible by 3): encoded output = 6MB * 4/3 = 8MB.
-/// While 8MB output may need 2 write() calls per chunk, reading 6MB at once
-/// reduces total syscalls for a 10MB file from 4+4 to 2+4 (read+write).
-/// The net effect is fewer total syscalls because read is the bottleneck.
+/// Read size is 12MB (divisible by 3): encoded output = 12MB * 4/3 = 16MB.
+/// 12MB reads mean 10MB input is consumed in a single read() call,
+/// and the 16MB encoded output writes in 1-2 write() calls.
 fn encode_stream_nowrap(reader: &mut impl Read, writer: &mut impl Write) -> io::Result<()> {
-    // 6MB aligned to 3 bytes: encoded output = 6MB * 4/3 = 8MB.
-    // For 10MB input: 2 reads (6MB+4MB) instead of 4 reads (3MB*3+1MB).
-    const NOWRAP_READ: usize = 6 * 1024 * 1024; // exactly divisible by 3
+    // 12MB aligned to 3 bytes: encoded output = 12MB * 4/3 = 16MB.
+    // For 10MB input: 1 read (10MB) instead of 2 reads.
+    const NOWRAP_READ: usize = 12 * 1024 * 1024; // exactly divisible by 3
 
     let mut buf = vec![0u8; NOWRAP_READ];
     let encode_buf_size = BASE64_ENGINE.encoded_length(NOWRAP_READ);
@@ -722,7 +721,7 @@ fn encode_stream_wrapped(
     }
 
     // Fallback: non-aligned wrap columns use IoSlice/writev with column tracking
-    const STREAM_READ: usize = 3 * 1024 * 1024;
+    const STREAM_READ: usize = 12 * 1024 * 1024;
     let mut buf = vec![0u8; STREAM_READ];
     let encode_buf_size = BASE64_ENGINE.encoded_length(STREAM_READ);
     let mut encode_buf = vec![0u8; encode_buf_size];
@@ -749,8 +748,8 @@ fn encode_stream_wrapped(
 
 /// Fused encode+wrap streaming: align reads to bytes_per_line boundaries,
 /// encode chunk, fuse_wrap into contiguous buffer with newlines, single write().
-/// For 76-col wrapping (bytes_per_line=57): 3MB / 57 = ~52K complete lines per chunk.
-/// Output = 52K * 77 bytes = ~4MB, one write() syscall per chunk.
+/// For 76-col wrapping (bytes_per_line=57): 12MB / 57 = ~210K complete lines per chunk.
+/// Output = 210K * 77 bytes = ~16MB, one write() syscall per chunk.
 fn encode_stream_wrapped_fused(
     reader: &mut impl Read,
     wrap_col: usize,
@@ -758,8 +757,8 @@ fn encode_stream_wrapped_fused(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     // Align read size to bytes_per_line for complete output lines per chunk.
-    // ~52K lines * 57 bytes = ~3MB input, ~4MB output.
-    let lines_per_chunk = (3 * 1024 * 1024) / bytes_per_line;
+    // ~210K lines * 57 bytes = ~12MB input, ~16MB output.
+    let lines_per_chunk = (12 * 1024 * 1024) / bytes_per_line;
     let read_size = lines_per_chunk * bytes_per_line;
 
     let mut buf = vec![0u8; read_size];
@@ -804,16 +803,16 @@ fn encode_stream_wrapped_fused(
 
 /// Stream-decode from a reader to a writer. Used for stdin processing.
 /// Fused single-pass: read chunk -> strip whitespace -> decode immediately.
-/// Uses 8MB read buffer for maximum pipe throughput — read_full retries to
-/// fill the entire buffer from the pipe, saturating the 4MB pipe buffer and
-/// reducing syscall count. 8MB means ~2 read+decode+write cycles for 10MB.
+/// Uses 16MB read buffer for maximum pipe throughput — read_full retries to
+/// fill the entire buffer from the pipe, and 16MB means the entire 10MB
+/// benchmark input is read in a single syscall batch, minimizing overhead.
 /// memchr2-based SIMD whitespace stripping handles the common case efficiently.
 pub fn decode_stream(
     reader: &mut impl Read,
     ignore_garbage: bool,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    const READ_CHUNK: usize = 8 * 1024 * 1024;
+    const READ_CHUNK: usize = 16 * 1024 * 1024;
     let mut buf = vec![0u8; READ_CHUNK];
     // Pre-allocate clean buffer once and reuse across iterations.
     // Use Vec with set_len for zero-overhead reset instead of clear() + extend().

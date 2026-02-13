@@ -2113,14 +2113,15 @@ pub fn process_cut_data(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> i
 }
 
 /// Process input from a reader (for stdin).
-/// Uses batch reading: reads large chunks (4MB), then processes them in batch
+/// Uses batch reading: reads large chunks (16MB), then processes them in batch
 /// using the fast mmap-based paths, avoiding per-line read_until syscall overhead.
+/// 16MB chunks mean a 10MB piped input is consumed in a single batch.
 pub fn process_cut_reader<R: BufRead>(
     mut reader: R,
     cfg: &CutConfig,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB read chunks
+    const CHUNK_SIZE: usize = 16 * 1024 * 1024; // 16MB read chunks
     let line_delim = cfg.line_delim;
 
     // Read large chunks and process in batch.
