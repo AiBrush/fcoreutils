@@ -1,4 +1,4 @@
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
 #[cfg(unix)]
@@ -190,14 +190,22 @@ fn main() {
                 if let Some(ref data) = stdin_mmap {
                     cut::process_cut_data(data, &cfg, &mut out)
                 } else {
-                    let reader = BufReader::new(io::stdin().lock());
-                    cut::process_cut_reader(reader, &cfg, &mut out)
+                    // Slurp all stdin into memory for batch processing
+                    // (much faster than line-by-line read_until)
+                    let mut data = Vec::new();
+                    match io::stdin().lock().read_to_end(&mut data) {
+                        Ok(_) => cut::process_cut_data(&data, &cfg, &mut out),
+                        Err(e) => Err(e),
+                    }
                 }
             }
             #[cfg(not(unix))]
             {
-                let reader = BufReader::new(io::stdin().lock());
-                cut::process_cut_reader(reader, &cfg, &mut out)
+                let mut data = Vec::new();
+                match io::stdin().lock().read_to_end(&mut data) {
+                    Ok(_) => cut::process_cut_data(&data, &cfg, &mut out),
+                    Err(e) => Err(e),
+                }
             }
         } else {
             match read_file(Path::new(filename)) {

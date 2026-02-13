@@ -168,11 +168,11 @@ fn main() {
 
     // === Streaming paths (stdin pipe): use BufWriter for batching ===
     #[cfg(unix)]
-    let mut writer = BufWriter::with_capacity(1024 * 1024, &mut *raw);
+    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, &mut *raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut writer = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, stdout.lock());
 
     let result = run_streaming_mode(&cli, set1_str, &mut writer);
 

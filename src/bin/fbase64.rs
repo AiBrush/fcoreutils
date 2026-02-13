@@ -62,9 +62,9 @@ fn main() {
     #[cfg(unix)]
     let mut raw = raw_stdout();
     #[cfg(unix)]
-    let mut out = io::BufWriter::with_capacity(2 * 1024 * 1024, &mut *raw);
+    let mut out = io::BufWriter::with_capacity(16 * 1024 * 1024, &mut *raw);
     #[cfg(not(unix))]
-    let mut out = io::BufWriter::with_capacity(2 * 1024 * 1024, io::stdout().lock());
+    let mut out = io::BufWriter::with_capacity(16 * 1024 * 1024, io::stdout().lock());
 
     let result = if filename == "-" {
         process_stdin(&cli, &mut out)

@@ -129,12 +129,10 @@ pub fn translate_squeeze(
     let mut last_squeezed: u16 = 256;
 
     loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
         // Phase 1: translate in-place
         translate_inplace(&mut buf[..n], &table);
         // Phase 2: squeeze in-place compaction (wp <= i always, safe)
@@ -180,12 +178,10 @@ pub fn delete(
     let mut buf = vec![0u8; STREAM_BUF];
 
     loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
         let mut wp = 0;
         unsafe {
             let ptr = buf.as_mut_ptr();
@@ -257,12 +253,10 @@ fn delete_single_streaming(
 ) -> io::Result<()> {
     let mut buf = vec![0u8; STREAM_BUF];
     loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
         let mut wp = 0;
         let mut i = 0;
         while i < n {
@@ -313,12 +307,10 @@ fn delete_multi_streaming(
 ) -> io::Result<()> {
     let mut buf = vec![0u8; STREAM_BUF];
     loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
         let mut wp = 0;
         let mut i = 0;
         while i < n {
@@ -379,12 +371,10 @@ pub fn delete_squeeze(
     let mut last_squeezed: u16 = 256;
 
     loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
         let mut wp = 0;
         unsafe {
             let ptr = buf.as_mut_ptr();
@@ -426,12 +416,10 @@ pub fn squeeze(
     let mut last_squeezed: u16 = 256;
 
     loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
         let mut wp = 0;
         unsafe {
             let ptr = buf.as_mut_ptr();
@@ -464,12 +452,10 @@ fn squeeze_single_stream(
     let mut was_squeeze_char = false;
 
     loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
 
         let mut wp = 0;
         let mut i = 0;
