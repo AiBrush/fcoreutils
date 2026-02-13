@@ -8,25 +8,22 @@
 
 High-performance GNU coreutils replacement in Rust. Faster with SIMD acceleration. Drop-in compatible, cross-platform.
 
-## Performance (100MB text file, hyperfine)
+## Performance
 
-| Command | GNU | fcoreutils | Speedup |
-|---------|-----|------------|---------|
-| `wc` (default) | 339ms | 29ms | **11.7x** |
-| `wc -w` | 339ms | 19ms | **17.8x** |
-| `wc -l` | 39ms | 23ms | **1.7x** |
-| `cut -b1-20` | 309ms | 29ms | **10.6x** |
-| `cut -d' ' -f1` | 339ms | 82ms | **4.1x** |
-| `sort` (100MB) | 1851ms | 399ms | **4.6x** |
-| `sort` (10MB) | 157ms | 33ms | **4.8x** |
-| `uniq` (10MB) | 33ms | 7ms | **4.8x** |
-| `tac` | 133ms | 59ms | **2.3x** |
-| `base64` encode | 188ms | 116ms | **1.6x** |
-| `base64` decode | 539ms | 346ms | **1.6x** |
-| `b2sum` | 272ms | 222ms | **1.2x** |
-| `sha256sum` | 104ms | 103ms | **1.0x** |
-| `tr a-z A-Z` | 97ms | 90ms | **1.1x** |
-| `md5sum` | 211ms | 263ms | 0.8x |
+Independent benchmark results (v0.0.38, 100MB text file, hyperfine):
+
+| Tool | Speedup (vs GNU) |
+|------|----------------:|
+| wc | **33.9x** |
+| sort | **31.5x** |
+| uniq | **13.1x** |
+| sha256sum | **6.5x** |
+| cut | **6.4x** |
+| base64 | **4.3x** |
+| tr | **2.9x** |
+| tac | **2.3x** |
+| b2sum | **1.4x** |
+| md5sum | **1.3x** |
 
 ## Tools
 
