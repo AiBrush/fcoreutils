@@ -16,6 +16,9 @@ const NOWRAP_CHUNK: usize = 32 * 1024 * 1024 - (32 * 1024 * 1024 % 3);
 /// Below this, single-threaded SIMD is faster than rayon overhead.
 const PARALLEL_ENCODE_THRESHOLD: usize = 4 * 1024 * 1024;
 
+/// Minimum data size for parallel decoding (4MB of base64 data).
+const PARALLEL_DECODE_THRESHOLD: usize = 4 * 1024 * 1024;
+
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with fused encode+wrap for maximum throughput.
 pub fn encode_to_writer(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
@@ -38,7 +41,12 @@ fn encode_no_wrap(data: &[u8], out: &mut impl Write) -> io::Result<()> {
 
     let actual_chunk = NOWRAP_CHUNK.min(data.len());
     let enc_max = BASE64_ENGINE.encoded_length(actual_chunk);
-    let mut buf = vec![0u8; enc_max];
+    // SAFETY: encode() writes exactly enc_len bytes before we read them.
+    let mut buf: Vec<u8> = Vec::with_capacity(enc_max);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(enc_max);
+    }
 
     for chunk in data.chunks(NOWRAP_CHUNK) {
         let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
@@ -61,7 +69,11 @@ fn encode_no_wrap_parallel(data: &[u8], out: &mut impl Write) -> io::Result<()> 
         .par_iter()
         .map(|chunk| {
             let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
-            let mut buf = vec![0u8; enc_len];
+            let mut buf: Vec<u8> = Vec::with_capacity(enc_len);
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                buf.set_len(enc_len);
+            }
             let _ = BASE64_ENGINE.encode(chunk, buf[..enc_len].as_out());
             buf
         })
@@ -99,12 +111,20 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
     let input_chunk = max_input_chunk.min(data.len());
 
     let enc_max = BASE64_ENGINE.encoded_length(input_chunk);
-    let mut encode_buf = vec![0u8; enc_max];
+    let mut encode_buf: Vec<u8> = Vec::with_capacity(enc_max);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        encode_buf.set_len(enc_max);
+    }
 
     // Fused output buffer: holds encoded data with newlines interleaved
     let max_lines = enc_max / wrap_col + 2;
     let fused_max = enc_max + max_lines;
-    let mut fused_buf = vec![0u8; fused_max];
+    let mut fused_buf: Vec<u8> = Vec::with_capacity(fused_max);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        fused_buf.set_len(fused_max);
+    }
 
     for chunk in data.chunks(max_input_chunk.max(1)) {
         let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
@@ -136,10 +156,18 @@ fn encode_wrapped_parallel(
         .par_iter()
         .map(|chunk| {
             let enc_max = BASE64_ENGINE.encoded_length(chunk.len());
-            let mut encode_buf = vec![0u8; enc_max];
+            let mut encode_buf: Vec<u8> = Vec::with_capacity(enc_max);
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                encode_buf.set_len(enc_max);
+            }
             let encoded = BASE64_ENGINE.encode(chunk, encode_buf[..enc_max].as_out());
             let max_lines = enc_max / wrap_col + 2;
-            let mut fused = vec![0u8; enc_max + max_lines];
+            let mut fused: Vec<u8> = Vec::with_capacity(enc_max + max_lines);
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                fused.set_len(enc_max + max_lines);
+            }
             let wp = fuse_wrap(encoded, wrap_col, &mut fused);
             fused.truncate(wp);
             fused
@@ -252,7 +280,11 @@ fn fuse_wrap(encoded: &[u8], wrap_col: usize, out_buf: &mut [u8]) -> usize {
 /// Fallback for very small wrap columns (< 4 chars).
 fn encode_wrapped_small(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
     let enc_max = BASE64_ENGINE.encoded_length(data.len());
-    let mut buf = vec![0u8; enc_max];
+    let mut buf: Vec<u8> = Vec::with_capacity(enc_max);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(enc_max);
+    }
     let encoded = BASE64_ENGINE.encode(data, buf[..enc_max].as_out());
 
     let wc = wrap_col.max(1);
@@ -359,17 +391,33 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
     }
 
     // Fused strip+collect: use SIMD memchr to find newlines,
-    // copy non-newline segments directly into clean buffer.
-    let mut clean = Vec::with_capacity(data.len());
+    // copy non-newline segments via raw pointers (skip bounds checks).
+    let mut clean: Vec<u8> = Vec::with_capacity(data.len());
+    let mut wp = 0usize;
     let mut last = 0;
     for pos in memchr::memchr_iter(b'\n', data) {
         if pos > last {
-            clean.extend_from_slice(&data[last..pos]);
+            let seg = pos - last;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(last),
+                    clean.as_mut_ptr().add(wp),
+                    seg,
+                );
+            }
+            wp += seg;
         }
         last = pos + 1;
     }
     if last < data.len() {
-        clean.extend_from_slice(&data[last..]);
+        let seg = data.len() - last;
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(last), clean.as_mut_ptr().add(wp), seg);
+        }
+        wp += seg;
+    }
+    unsafe {
+        clean.set_len(wp);
     }
 
     // Handle rare non-newline whitespace (CR, tab, etc.)
@@ -387,8 +435,15 @@ fn decode_clean_slice(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
     }
     match BASE64_ENGINE.decode_inplace(data) {
         Ok(decoded) => out.write_all(decoded),
-        Err(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input")),
+        Err(_) => decode_error(),
     }
+}
+
+/// Cold error path — keeps hot decode path tight by moving error construction out of line.
+#[cold]
+#[inline(never)]
+fn decode_error() -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input"))
 }
 
 /// Decode clean base64 data (no whitespace) from a borrowed slice.
@@ -396,13 +451,41 @@ fn decode_borrowed_clean(out: &mut impl Write, data: &[u8]) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
+    // Parallel decode for large data: split at 4-byte boundaries,
+    // decode each chunk independently (base64 is context-free per 4-char group).
+    if data.len() >= PARALLEL_DECODE_THRESHOLD {
+        return decode_borrowed_clean_parallel(out, data);
+    }
     match BASE64_ENGINE.decode_to_vec(data) {
         Ok(decoded) => {
             out.write_all(&decoded)?;
             Ok(())
         }
-        Err(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input")),
+        Err(_) => decode_error(),
     }
+}
+
+/// Parallel decode: split at 4-byte boundaries, decode chunks in parallel via rayon.
+fn decode_borrowed_clean_parallel(out: &mut impl Write, data: &[u8]) -> io::Result<()> {
+    let num_threads = rayon::current_num_threads().max(1);
+    let raw_chunk = data.len() / num_threads;
+    // Align to 4 bytes (each 4 base64 chars = 3 decoded bytes, context-free)
+    let chunk_size = ((raw_chunk + 3) / 4) * 4;
+
+    let chunks: Vec<&[u8]> = data.chunks(chunk_size.max(4)).collect();
+    let decoded_chunks: Result<Vec<Vec<u8>>, io::Error> = chunks
+        .par_iter()
+        .map(|chunk| {
+            BASE64_ENGINE
+                .decode_to_vec(chunk)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid input"))
+        })
+        .collect();
+
+    for chunk in &decoded_chunks? {
+        out.write_all(chunk)?;
+    }
+    Ok(())
 }
 
 /// Strip non-base64 characters (for -i / --ignore-garbage).
