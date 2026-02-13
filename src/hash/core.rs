@@ -55,9 +55,9 @@ fn hash_reader_impl<D: Digest>(mut reader: impl Read) -> io::Result<String> {
 // ── Public hashing API ──────────────────────────────────────────────
 
 /// Buffer size for streaming hash I/O.
-/// 4MB: fits in L3 cache for optimal hash throughput while still amortizing
-/// syscall overhead. Smaller than previous 16MB avoids cache thrashing.
-const HASH_READ_BUF: usize = 4 * 1024 * 1024;
+/// 8MB: amortizes syscall overhead while still fitting in L3 cache on modern CPUs.
+/// Larger buffer means fewer read() calls per file (e.g., 13 reads for 100MB vs 25).
+const HASH_READ_BUF: usize = 8 * 1024 * 1024;
 
 // Thread-local reusable buffer for streaming hash I/O.
 // Allocated once per thread, reused across all hash_reader calls.
@@ -359,14 +359,18 @@ pub fn blake2b_hash_stdin(output_bytes: usize) -> io::Result<String> {
 }
 
 /// Print hash result in GNU format: "hash  filename\n"
+/// Uses raw byte writes to avoid std::fmt overhead.
 pub fn print_hash(
     out: &mut impl Write,
     hash: &str,
     filename: &str,
     binary: bool,
 ) -> io::Result<()> {
-    let mode_char = if binary { '*' } else { ' ' };
-    writeln!(out, "{} {}{}", hash, mode_char, filename)
+    let mode = if binary { b'*' } else { b' ' };
+    out.write_all(hash.as_bytes())?;
+    out.write_all(&[b' ', mode])?;
+    out.write_all(filename.as_bytes())?;
+    out.write_all(b"\n")
 }
 
 /// Print hash in GNU format with NUL terminator instead of newline.
@@ -376,8 +380,11 @@ pub fn print_hash_zero(
     filename: &str,
     binary: bool,
 ) -> io::Result<()> {
-    let mode_char = if binary { '*' } else { ' ' };
-    write!(out, "{} {}{}\0", hash, mode_char, filename)
+    let mode = if binary { b'*' } else { b' ' };
+    out.write_all(hash.as_bytes())?;
+    out.write_all(&[b' ', mode])?;
+    out.write_all(filename.as_bytes())?;
+    out.write_all(b"\0")
 }
 
 /// Print hash result in BSD tag format: "ALGO (filename) = hash\n"
@@ -387,7 +394,12 @@ pub fn print_hash_tag(
     hash: &str,
     filename: &str,
 ) -> io::Result<()> {
-    writeln!(out, "{} ({}) = {}", algo.name(), filename, hash)
+    out.write_all(algo.name().as_bytes())?;
+    out.write_all(b" (")?;
+    out.write_all(filename.as_bytes())?;
+    out.write_all(b") = ")?;
+    out.write_all(hash.as_bytes())?;
+    out.write_all(b"\n")
 }
 
 /// Print hash in BSD tag format with NUL terminator.
@@ -397,7 +409,12 @@ pub fn print_hash_tag_zero(
     hash: &str,
     filename: &str,
 ) -> io::Result<()> {
-    write!(out, "{} ({}) = {}\0", algo.name(), filename, hash)
+    out.write_all(algo.name().as_bytes())?;
+    out.write_all(b" (")?;
+    out.write_all(filename.as_bytes())?;
+    out.write_all(b") = ")?;
+    out.write_all(hash.as_bytes())?;
+    out.write_all(b"\0")
 }
 
 /// Print hash in BSD tag format with BLAKE2b length info:
@@ -410,10 +427,15 @@ pub fn print_hash_tag_b2sum(
     bits: usize,
 ) -> io::Result<()> {
     if bits == 512 {
-        writeln!(out, "BLAKE2b ({}) = {}", filename, hash)
+        out.write_all(b"BLAKE2b (")?;
     } else {
-        writeln!(out, "BLAKE2b-{} ({}) = {}", bits, filename, hash)
+        // Use write! for the rare non-512 path (negligible overhead per file)
+        write!(out, "BLAKE2b-{} (", bits)?;
     }
+    out.write_all(filename.as_bytes())?;
+    out.write_all(b") = ")?;
+    out.write_all(hash.as_bytes())?;
+    out.write_all(b"\n")
 }
 
 /// Print hash in BSD tag format with BLAKE2b length info and NUL terminator.
@@ -424,10 +446,14 @@ pub fn print_hash_tag_b2sum_zero(
     bits: usize,
 ) -> io::Result<()> {
     if bits == 512 {
-        write!(out, "BLAKE2b ({}) = {}\0", filename, hash)
+        out.write_all(b"BLAKE2b (")?;
     } else {
-        write!(out, "BLAKE2b-{} ({}) = {}\0", bits, filename, hash)
+        write!(out, "BLAKE2b-{} (", bits)?;
     }
+    out.write_all(filename.as_bytes())?;
+    out.write_all(b") = ")?;
+    out.write_all(hash.as_bytes())?;
+    out.write_all(b"\0")
 }
 
 /// Options for check mode.
@@ -618,9 +644,16 @@ pub fn parse_check_line_tag(line: &str) -> Option<(&str, &str, Option<usize>)> {
 
 /// Read as many bytes as possible into buf, retrying on partial reads.
 /// Ensures each hash update gets a full buffer (fewer update calls = less overhead).
+/// Fast path: regular file reads usually return the full buffer on the first call.
 #[inline]
 fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
-    let mut total = 0;
+    // Fast path: first read() usually fills the entire buffer for regular files
+    let n = reader.read(buf)?;
+    if n == buf.len() || n == 0 {
+        return Ok(n);
+    }
+    // Slow path: partial read — retry to fill buffer (pipes, slow devices)
+    let mut total = n;
     while total < buf.len() {
         match reader.read(&mut buf[total..]) {
             Ok(0) => break,
