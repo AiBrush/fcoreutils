@@ -121,13 +121,7 @@ pub fn try_parse_integer(s: &[u8]) -> Option<i64> {
     let mut has_digits = false;
     while i < s.len() && s[i].is_ascii_digit() {
         // Check for overflow before multiplying
-        value = match value.checked_mul(10) {
-            Some(v) => match v.checked_add((s[i] - b'0') as i64) {
-                Some(v) => v,
-                None => return None, // overflow, fall back to f64
-            },
-            None => return None,
-        };
+        value = value.checked_mul(10)?.checked_add((s[i] - b'0') as i64)?;
         has_digits = true;
         i += 1;
     }

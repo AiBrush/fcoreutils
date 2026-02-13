@@ -98,7 +98,7 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
 
     // Parallel encoding for large data when bytes_per_line is a multiple of 3.
     // This guarantees each chunk encodes to complete base64 without padding.
-    if data.len() >= PARALLEL_ENCODE_THRESHOLD && bytes_per_line % 3 == 0 {
+    if data.len() >= PARALLEL_ENCODE_THRESHOLD && bytes_per_line.is_multiple_of(3) {
         return encode_wrapped_parallel(data, wrap_col, bytes_per_line, out);
     }
 
