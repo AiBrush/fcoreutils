@@ -89,8 +89,21 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     mmap
 }
 
+/// Enlarge stdout pipe buffer on Linux for higher throughput.
+#[cfg(target_os = "linux")]
+fn enlarge_stdout_pipe() {
+    const PIPE_SIZE: i32 = 4 * 1024 * 1024;
+    unsafe {
+        libc::fcntl(1, libc::F_SETPIPE_SZ, PIPE_SIZE);
+    }
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
+
+    #[cfg(target_os = "linux")]
+    enlarge_stdout_pipe();
+
     let cli = Cli::parse();
 
     // Determine mode

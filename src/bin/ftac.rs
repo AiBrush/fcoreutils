@@ -153,8 +153,21 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
     had_error
 }
 
+/// Enlarge stdout pipe buffer on Linux for higher throughput.
+#[cfg(target_os = "linux")]
+fn enlarge_stdout_pipe() {
+    const PIPE_SIZE: i32 = 4 * 1024 * 1024;
+    unsafe {
+        libc::fcntl(1, libc::F_SETPIPE_SZ, PIPE_SIZE);
+    }
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
+
+    #[cfg(target_os = "linux")]
+    enlarge_stdout_pipe();
+
     let cli = Cli::parse();
 
     let files: Vec<String> = if cli.files.is_empty() {

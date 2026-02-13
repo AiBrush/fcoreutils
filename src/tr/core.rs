@@ -231,6 +231,125 @@ fn translate_range_simd(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, offset: i8) 
 }
 
 // ============================================================================
+// In-place SIMD range translation (saves one buffer allocation in streaming)
+// ============================================================================
+
+/// In-place SIMD-accelerated range translation.
+/// Translates bytes in [lo..=hi] by adding `offset`, leaving others unchanged.
+/// Operates on the buffer in-place, eliminating the need for a separate output buffer.
+#[cfg(target_arch = "x86_64")]
+fn translate_range_simd_inplace(data: &mut [u8], lo: u8, hi: u8, offset: i8) {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { translate_range_avx2_inplace(data, lo, hi, offset) };
+    } else {
+        unsafe { translate_range_sse2_inplace(data, lo, hi, offset) };
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn translate_range_avx2_inplace(data: &mut [u8], lo: u8, hi: u8, offset: i8) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let range = hi - lo;
+        let bias_v = _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let offset_v = _mm256_set1_epi8(offset);
+        let zero = _mm256_setzero_si256();
+
+        let len = data.len();
+        let ptr = data.as_mut_ptr();
+        let mut i = 0;
+
+        while i + 32 <= len {
+            let input = _mm256_loadu_si256(ptr.add(i) as *const _);
+            let biased = _mm256_add_epi8(input, bias_v);
+            let gt = _mm256_cmpgt_epi8(biased, threshold_v);
+            let mask = _mm256_cmpeq_epi8(gt, zero);
+            let offset_masked = _mm256_and_si256(mask, offset_v);
+            let result = _mm256_add_epi8(input, offset_masked);
+            _mm256_storeu_si256(ptr.add(i) as *mut _, result);
+            i += 32;
+        }
+
+        if i + 16 <= len {
+            let bias_v128 = _mm_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+            let threshold_v128 = _mm_set1_epi8(0x80u8.wrapping_add(range) as i8);
+            let offset_v128 = _mm_set1_epi8(offset);
+            let zero128 = _mm_setzero_si128();
+
+            let input = _mm_loadu_si128(ptr.add(i) as *const _);
+            let biased = _mm_add_epi8(input, bias_v128);
+            let gt = _mm_cmpgt_epi8(biased, threshold_v128);
+            let mask = _mm_cmpeq_epi8(gt, zero128);
+            let offset_masked = _mm_and_si128(mask, offset_v128);
+            let result = _mm_add_epi8(input, offset_masked);
+            _mm_storeu_si128(ptr.add(i) as *mut _, result);
+            i += 16;
+        }
+
+        while i < len {
+            let b = *ptr.add(i);
+            *ptr.add(i) = if b >= lo && b <= hi {
+                b.wrapping_add(offset as u8)
+            } else {
+                b
+            };
+            i += 1;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn translate_range_sse2_inplace(data: &mut [u8], lo: u8, hi: u8, offset: i8) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let range = hi - lo;
+        let bias_v = _mm_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let offset_v = _mm_set1_epi8(offset);
+        let zero = _mm_setzero_si128();
+
+        let len = data.len();
+        let ptr = data.as_mut_ptr();
+        let mut i = 0;
+
+        while i + 16 <= len {
+            let input = _mm_loadu_si128(ptr.add(i) as *const _);
+            let biased = _mm_add_epi8(input, bias_v);
+            let gt = _mm_cmpgt_epi8(biased, threshold_v);
+            let mask = _mm_cmpeq_epi8(gt, zero);
+            let offset_masked = _mm_and_si128(mask, offset_v);
+            let result = _mm_add_epi8(input, offset_masked);
+            _mm_storeu_si128(ptr.add(i) as *mut _, result);
+            i += 16;
+        }
+
+        while i < len {
+            let b = *ptr.add(i);
+            *ptr.add(i) = if b >= lo && b <= hi {
+                b.wrapping_add(offset as u8)
+            } else {
+                b
+            };
+            i += 1;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn translate_range_simd_inplace(data: &mut [u8], lo: u8, hi: u8, offset: i8) {
+    for b in data.iter_mut() {
+        if *b >= lo && *b <= hi {
+            *b = b.wrapping_add(offset as u8);
+        }
+    }
+}
+
+// ============================================================================
 // Streaming functions (Read + Write)
 // ============================================================================
 
@@ -242,7 +361,7 @@ pub fn translate(
 ) -> io::Result<()> {
     let table = build_translate_table(set1, set2);
 
-    // Try SIMD fast path for range translations
+    // Try SIMD fast path for range translations (in-place, single buffer)
     if let Some((lo, hi, offset)) = detect_range_offset(&table) {
         return translate_range_stream(lo, hi, offset, reader, writer);
     }
@@ -259,7 +378,8 @@ pub fn translate(
     Ok(())
 }
 
-/// Streaming SIMD range translation.
+/// Streaming SIMD range translation — single buffer, in-place transform.
+/// Saves 16MB allocation + memcpy vs separate src/dst buffers.
 fn translate_range_stream(
     lo: u8,
     hi: u8,
@@ -267,15 +387,14 @@ fn translate_range_stream(
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    let mut inbuf = vec![0u8; STREAM_BUF];
-    let mut outbuf = vec![0u8; STREAM_BUF];
+    let mut buf = vec![0u8; STREAM_BUF];
     loop {
-        let n = read_full(reader, &mut inbuf)?;
+        let n = read_full(reader, &mut buf)?;
         if n == 0 {
             break;
         }
-        translate_range_simd(&inbuf[..n], &mut outbuf[..n], lo, hi, offset);
-        writer.write_all(&outbuf[..n])?;
+        translate_range_simd_inplace(&mut buf[..n], lo, hi, offset);
+        writer.write_all(&buf[..n])?;
     }
     Ok(())
 }

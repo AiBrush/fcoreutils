@@ -88,8 +88,24 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     None
 }
 
+/// Enlarge pipe buffers on Linux for higher throughput.
+/// Default pipe buffer is 64KB; increasing to 4MB reduces syscalls by ~64x
+/// when reading/writing through pipes (e.g., `cat file | ftr`).
+#[cfg(target_os = "linux")]
+fn enlarge_pipe_bufs() {
+    const PIPE_SIZE: i32 = 4 * 1024 * 1024;
+    unsafe {
+        libc::fcntl(0, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdin
+        libc::fcntl(1, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdout
+    }
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
+
+    #[cfg(target_os = "linux")]
+    enlarge_pipe_bufs();
+
     let cli = Cli::parse();
 
     let set1_str = &cli.sets[0];
@@ -168,11 +184,11 @@ fn main() {
 
     // === Streaming paths (stdin pipe): use BufWriter for batching ===
     #[cfg(unix)]
-    let mut writer = BufWriter::with_capacity(1024 * 1024, &mut *raw);
+    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, &mut *raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut writer = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, stdout.lock());
 
     let result = run_streaming_mode(&cli, set1_str, &mut writer);
 

@@ -1,36 +1,48 @@
-use std::io::{self, Write};
+use std::io::{self, IoSlice, Write};
 
-/// Output buffer: 16MB minimizes write() syscall count.
-const OUT_BUF: usize = 16 * 1024 * 1024;
+/// Max IoSlice entries per write_vectored batch.
+/// Linux UIO_MAXIOV is 1024; we use that as our batch limit.
+const MAX_IOV: usize = 1024;
 
-/// Copy a slice into the output buffer, flushing to the writer when full.
+/// Flush a batch of IoSlice entries using write_vectored.
+/// Falls back to individual write_all for each slice if write_vectored
+/// doesn't write everything (handles partial writes).
 #[inline]
-fn emit_slice(out: &mut impl Write, buf: &mut [u8], wp: &mut usize, s: &[u8]) -> io::Result<()> {
-    let cap = buf.len();
-    if *wp + s.len() <= cap {
-        unsafe {
-            std::ptr::copy_nonoverlapping(s.as_ptr(), buf.as_mut_ptr().add(*wp), s.len());
-        }
-        *wp += s.len();
-        Ok(())
-    } else if s.len() > cap {
-        if *wp > 0 {
-            out.write_all(&buf[..*wp])?;
-            *wp = 0;
-        }
-        out.write_all(s)
-    } else {
-        out.write_all(&buf[..*wp])?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(s.as_ptr(), buf.as_mut_ptr(), s.len());
-        }
-        *wp = s.len();
-        Ok(())
+fn flush_iov(out: &mut impl Write, slices: &[IoSlice]) -> io::Result<()> {
+    if slices.is_empty() {
+        return Ok(());
     }
+    // Try write_vectored first for the whole batch
+    let total: usize = slices.iter().map(|s| s.len()).sum();
+
+    // Fast path: single writev call often writes everything
+    let written = match out.write_vectored(slices) {
+        Ok(n) if n >= total => return Ok(()),
+        Ok(n) => n,
+        Err(e) => return Err(e),
+    };
+
+    // Slow path: partial write — fall back to write_all per remaining slice
+    let mut skip = written;
+    for slice in slices {
+        let slen = slice.len();
+        if skip >= slen {
+            skip -= slen;
+            continue;
+        }
+        if skip > 0 {
+            out.write_all(&slice[skip..])?;
+            skip = 0;
+        } else {
+            out.write_all(slice)?;
+        }
+    }
+    Ok(())
 }
 
 /// Reverse records separated by a single byte.
 /// Uses backward SIMD scan (memrchr) — zero Vec allocation, single pass.
+/// Output uses write_vectored (writev) for zero-copy from mmap'd data.
 pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -44,11 +56,9 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
 
 /// After-separator mode: backward scan with memrchr.
 /// Each record includes its trailing separator byte.
-/// Scans from end to start, emitting records directly — no position Vec needed.
+/// Uses IoSlice batching for zero-copy output directly from mmap'd data.
 fn tac_bytes_backward_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let buf_size = data.len().min(OUT_BUF);
-    let mut buf = vec![0u8; buf_size];
-    let mut wp = 0;
+    let mut iov: Vec<IoSlice> = Vec::with_capacity(MAX_IOV);
 
     let mut end = data.len();
 
@@ -58,7 +68,7 @@ fn tac_bytes_backward_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
 
     // Trailing content after last separator
     if pos + 1 < end {
-        emit_slice(out, &mut buf, &mut wp, &data[pos + 1..end])?;
+        iov.push(IoSlice::new(&data[pos + 1..end]));
     }
     end = pos + 1;
 
@@ -66,7 +76,11 @@ fn tac_bytes_backward_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
     while pos > 0 {
         match memchr::memrchr(sep, &data[..pos]) {
             Some(prev) => {
-                emit_slice(out, &mut buf, &mut wp, &data[prev + 1..end])?;
+                iov.push(IoSlice::new(&data[prev + 1..end]));
+                if iov.len() >= MAX_IOV {
+                    flush_iov(out, &iov)?;
+                    iov.clear();
+                }
                 end = prev + 1;
                 pos = prev;
             }
@@ -75,20 +89,17 @@ fn tac_bytes_backward_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
     }
 
     // First record (from start of data)
-    emit_slice(out, &mut buf, &mut wp, &data[0..end])?;
+    iov.push(IoSlice::new(&data[0..end]));
+    flush_iov(out, &iov)?;
 
-    if wp > 0 {
-        out.write_all(&buf[..wp])?;
-    }
     Ok(())
 }
 
 /// Before-separator mode: backward scan with memrchr.
 /// Each record starts with its separator byte.
+/// Uses IoSlice batching for zero-copy output.
 fn tac_bytes_backward_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let buf_size = data.len().min(OUT_BUF);
-    let mut buf = vec![0u8; buf_size];
-    let mut wp = 0;
+    let mut iov: Vec<IoSlice> = Vec::with_capacity(MAX_IOV);
 
     let mut end = data.len();
 
@@ -97,14 +108,18 @@ fn tac_bytes_backward_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::
     };
 
     // Last record: from last separator to end
-    emit_slice(out, &mut buf, &mut wp, &data[pos..end])?;
+    iov.push(IoSlice::new(&data[pos..end]));
     end = pos;
 
     // Scan backward
     while end > 0 {
         match memchr::memrchr(sep, &data[..end]) {
             Some(prev) => {
-                emit_slice(out, &mut buf, &mut wp, &data[prev..end])?;
+                iov.push(IoSlice::new(&data[prev..end]));
+                if iov.len() >= MAX_IOV {
+                    flush_iov(out, &iov)?;
+                    iov.clear();
+                }
                 end = prev;
             }
             None => break,
@@ -113,17 +128,15 @@ fn tac_bytes_backward_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::
 
     // Leading content before first separator
     if end > 0 {
-        emit_slice(out, &mut buf, &mut wp, &data[0..end])?;
+        iov.push(IoSlice::new(&data[0..end]));
     }
 
-    if wp > 0 {
-        out.write_all(&buf[..wp])?;
-    }
+    flush_iov(out, &iov)?;
     Ok(())
 }
 
 /// Reverse records using a multi-byte string separator.
-/// Uses backward SIMD-accelerated memmem (FinderRev) + buffered output.
+/// Uses backward SIMD-accelerated memmem (FinderRev) + IoSlice zero-copy output.
 pub fn tac_string_separator(
     data: &[u8],
     separator: &[u8],
@@ -140,10 +153,7 @@ pub fn tac_string_separator(
 
     let sep_len = separator.len();
     let finder = memchr::memmem::FinderRev::new(separator);
-
-    let buf_size = data.len().min(OUT_BUF);
-    let mut buf = vec![0u8; buf_size];
-    let mut wp = 0;
+    let mut iov: Vec<IoSlice> = Vec::with_capacity(MAX_IOV);
 
     if !before {
         let mut end = data.len();
@@ -154,7 +164,7 @@ pub fn tac_string_separator(
 
         // Trailing content after last separator
         if pos + sep_len < end {
-            emit_slice(out, &mut buf, &mut wp, &data[pos + sep_len..end])?;
+            iov.push(IoSlice::new(&data[pos + sep_len..end]));
         }
         end = pos + sep_len;
 
@@ -162,7 +172,11 @@ pub fn tac_string_separator(
         while pos > 0 {
             match finder.rfind(&data[..pos]) {
                 Some(prev) => {
-                    emit_slice(out, &mut buf, &mut wp, &data[prev + sep_len..end])?;
+                    iov.push(IoSlice::new(&data[prev + sep_len..end]));
+                    if iov.len() >= MAX_IOV {
+                        flush_iov(out, &iov)?;
+                        iov.clear();
+                    }
                     end = prev + sep_len;
                     pos = prev;
                 }
@@ -171,7 +185,7 @@ pub fn tac_string_separator(
         }
 
         // First record
-        emit_slice(out, &mut buf, &mut wp, &data[0..end])?;
+        iov.push(IoSlice::new(&data[0..end]));
     } else {
         let mut end = data.len();
 
@@ -180,14 +194,18 @@ pub fn tac_string_separator(
         };
 
         // Last record: from last separator to end
-        emit_slice(out, &mut buf, &mut wp, &data[pos..end])?;
+        iov.push(IoSlice::new(&data[pos..end]));
         end = pos;
 
         // Scan backward
         while end > 0 {
             match finder.rfind(&data[..end]) {
                 Some(prev) => {
-                    emit_slice(out, &mut buf, &mut wp, &data[prev..end])?;
+                    iov.push(IoSlice::new(&data[prev..end]));
+                    if iov.len() >= MAX_IOV {
+                        flush_iov(out, &iov)?;
+                        iov.clear();
+                    }
                     end = prev;
                 }
                 None => break,
@@ -196,13 +214,11 @@ pub fn tac_string_separator(
 
         // Leading content before first separator
         if end > 0 {
-            emit_slice(out, &mut buf, &mut wp, &data[0..end])?;
+            iov.push(IoSlice::new(&data[0..end]));
         }
     }
 
-    if wp > 0 {
-        out.write_all(&buf[..wp])?;
-    }
+    flush_iov(out, &iov)?;
     Ok(())
 }
 
@@ -265,22 +281,24 @@ pub fn tac_regex_separator(
         return Ok(());
     }
 
-    let buf_size = data.len().min(OUT_BUF);
-    let mut buf = vec![0u8; buf_size];
-    let mut wp = 0;
+    let mut iov: Vec<IoSlice> = Vec::with_capacity(matches.len().min(MAX_IOV) + 2);
 
     if !before {
         let last_end = matches.last().unwrap().1;
 
         if last_end < data.len() {
-            emit_slice(out, &mut buf, &mut wp, &data[last_end..])?;
+            iov.push(IoSlice::new(&data[last_end..]));
         }
 
         let mut i = matches.len();
         while i > 0 {
             i -= 1;
             let rec_start = if i == 0 { 0 } else { matches[i - 1].1 };
-            emit_slice(out, &mut buf, &mut wp, &data[rec_start..matches[i].1])?;
+            iov.push(IoSlice::new(&data[rec_start..matches[i].1]));
+            if iov.len() >= MAX_IOV {
+                flush_iov(out, &iov)?;
+                iov.clear();
+            }
         }
     } else {
         let mut i = matches.len();
@@ -292,16 +310,18 @@ pub fn tac_regex_separator(
             } else {
                 data.len()
             };
-            emit_slice(out, &mut buf, &mut wp, &data[start..end])?;
+            iov.push(IoSlice::new(&data[start..end]));
+            if iov.len() >= MAX_IOV {
+                flush_iov(out, &iov)?;
+                iov.clear();
+            }
         }
 
         if matches[0].0 > 0 {
-            emit_slice(out, &mut buf, &mut wp, &data[..matches[0].0])?;
+            iov.push(IoSlice::new(&data[..matches[0].0]));
         }
     }
 
-    if wp > 0 {
-        out.write_all(&buf[..wp])?;
-    }
+    flush_iov(out, &iov)?;
     Ok(())
 }
