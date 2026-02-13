@@ -97,9 +97,7 @@ fn tac_bytes_backward_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
 
         // Reuse positions buffer: clear and refill without reallocation.
         positions_buf.clear();
-        positions_buf.extend(
-            memchr::memchr_iter(sep, chunk).map(|p| p + chunk_start),
-        );
+        positions_buf.extend(memchr::memchr_iter(sep, chunk).map(|p| p + chunk_start));
 
         // Emit records in reverse (rightmost first).
         for &pos in positions_buf.iter().rev() {
@@ -151,9 +149,7 @@ fn tac_bytes_backward_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::
         let chunk = &data[chunk_start..chunk_end];
 
         positions_buf.clear();
-        positions_buf.extend(
-            memchr::memchr_iter(sep, chunk).map(|p| p + chunk_start),
-        );
+        positions_buf.extend(memchr::memchr_iter(sep, chunk).map(|p| p + chunk_start));
 
         for &pos in positions_buf.iter().rev() {
             iov.push(IoSlice::new(&data[pos..global_end]));

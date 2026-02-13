@@ -1444,8 +1444,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     .par_iter()
                     .enumerate()
                     .map(|(i, &(s, e))| {
-                        try_parse_integer(&data[s..e])
-                            .map(|v| (int_to_sortable_u64(v), i))
+                        try_parse_integer(&data[s..e]).map(|v| (int_to_sortable_u64(v), i))
                     })
                     .collect();
                 // Check if all parses succeeded (no decimal points)
@@ -1580,8 +1579,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             if s == e {
                                 Some((int_to_sortable_u64(0), i))
                             } else {
-                                try_parse_integer(&data[s..e])
-                                    .map(|v| (int_to_sortable_u64(v), i))
+                                try_parse_integer(&data[s..e]).map(|v| (int_to_sortable_u64(v), i))
                             }
                         })
                         .collect();
@@ -1614,13 +1612,25 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 } else {
                     // Fall back to f64
                     let parse_entry = |i: usize, &(s, e): &(usize, usize)| {
-                        let f = if s == e { 0.0 } else { parse_numeric_value(&data[s..e]) };
+                        let f = if s == e {
+                            0.0
+                        } else {
+                            parse_numeric_value(&data[s..e])
+                        };
                         (float_to_sortable_u64(f), i)
                     };
                     if num_lines > 10_000 {
-                        key_offs.par_iter().enumerate().map(|(i, ko)| parse_entry(i, ko)).collect()
+                        key_offs
+                            .par_iter()
+                            .enumerate()
+                            .map(|(i, ko)| parse_entry(i, ko))
+                            .collect()
                     } else {
-                        key_offs.iter().enumerate().map(|(i, ko)| parse_entry(i, ko)).collect()
+                        key_offs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, ko)| parse_entry(i, ko))
+                            .collect()
                     }
                 }
             } else {
@@ -1633,9 +1643,17 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     (float_to_sortable_u64(f), i)
                 };
                 if num_lines > 10_000 {
-                    key_offs.par_iter().enumerate().map(|(i, ko)| parse_entry(i, ko)).collect()
+                    key_offs
+                        .par_iter()
+                        .enumerate()
+                        .map(|(i, ko)| parse_entry(i, ko))
+                        .collect()
                 } else {
-                    key_offs.iter().enumerate().map(|(i, ko)| parse_entry(i, ko)).collect()
+                    key_offs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ko)| parse_entry(i, ko))
+                        .collect()
                 }
             };
 
