@@ -332,19 +332,21 @@ pub fn decode_owned(
     decode_clean_slice(data, out)
 }
 
-/// Strip all whitespace from a Vec in-place using SIMD memchr.
-/// Single-pass compaction: scan for newlines (most common whitespace in base64),
-/// compact non-newline segments, then handle rare other whitespace.
+/// Strip all whitespace from a Vec in-place using SIMD memchr2.
+/// Single-pass compaction: scan for \n and \r (the two most common whitespace
+/// in base64 data) using SIMD, compact segments between them, then handle
+/// rare other whitespace (tab, space).
 fn strip_whitespace_inplace(data: &mut Vec<u8>) {
-    // Quick check: no newlines at all?
-    if memchr::memchr(b'\n', data).is_none() {
+    // Quick check: no CR or LF at all?
+    if memchr::memchr2(b'\n', b'\r', data).is_none() {
         if data.iter().any(|&b| is_whitespace(b)) {
             data.retain(|&b| !is_whitespace(b));
         }
         return;
     }
 
-    // In-place compaction using raw pointers
+    // In-place compaction using raw pointers.
+    // memchr2 finds both \n and \r in a single SIMD pass.
     let ptr = data.as_ptr();
     let mut_ptr = data.as_mut_ptr();
     let len = data.len();
@@ -353,7 +355,7 @@ fn strip_whitespace_inplace(data: &mut Vec<u8>) {
     let mut wp = 0usize;
     let mut rp = 0usize;
 
-    for pos in memchr::memchr_iter(b'\n', slice) {
+    for pos in memchr::memchr2_iter(b'\n', b'\r', slice) {
         if pos > rp {
             let seg = pos - rp;
             unsafe {
@@ -374,8 +376,11 @@ fn strip_whitespace_inplace(data: &mut Vec<u8>) {
 
     data.truncate(wp);
 
-    // Handle rare non-newline whitespace (CR, tab, etc.)
-    if data.iter().any(|&b| is_whitespace(b)) {
+    // Handle rare non-CR/LF whitespace (tab, space, etc.)
+    if data
+        .iter()
+        .any(|&b| b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c)
+    {
         data.retain(|&b| !is_whitespace(b));
     }
 }
@@ -391,12 +396,13 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
         return decode_borrowed_clean(out, data);
     }
 
-    // Fused strip+collect: use SIMD memchr to find newlines,
-    // copy non-newline segments via raw pointers (skip bounds checks).
+    // Fused strip+collect: use SIMD memchr2 to find both \n and \r in one pass.
+    // Standard base64 output uses \n only, but CRLF (\r\n) is common on Windows.
+    // Using memchr2 handles both in a single SIMD scan instead of two passes.
     let mut clean: Vec<u8> = Vec::with_capacity(data.len());
     let mut wp = 0usize;
     let mut last = 0;
-    for pos in memchr::memchr_iter(b'\n', data) {
+    for pos in memchr::memchr2_iter(b'\n', b'\r', data) {
         if pos > last {
             let seg = pos - last;
             unsafe {
@@ -421,8 +427,11 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
         clean.set_len(wp);
     }
 
-    // Handle rare non-newline whitespace (CR, tab, etc.)
-    if clean.iter().any(|&b| is_whitespace(b)) {
+    // Handle rare non-CR/LF whitespace (tab, space, etc.)
+    if clean
+        .iter()
+        .any(|&b| b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c)
+    {
         clean.retain(|&b| !is_whitespace(b));
     }
 
@@ -619,9 +628,9 @@ pub fn decode_stream(
         if ignore_garbage {
             clean.extend(chunk.iter().copied().filter(|&b| is_base64_char(b)));
         } else {
-            // Strip newlines using SIMD memchr — single pass
+            // Strip CR/LF using SIMD memchr2 — single pass for both \n and \r
             let mut last = 0;
-            for pos in memchr::memchr_iter(b'\n', chunk) {
+            for pos in memchr::memchr2_iter(b'\n', b'\r', chunk) {
                 if pos > last {
                     clean.extend_from_slice(&chunk[last..pos]);
                 }
@@ -630,8 +639,11 @@ pub fn decode_stream(
             if last < n {
                 clean.extend_from_slice(&chunk[last..]);
             }
-            // Handle rare non-newline whitespace
-            if clean.iter().any(|&b| is_whitespace(b) && b != b'\n') {
+            // Handle rare non-CR/LF whitespace (tab, space)
+            if clean
+                .iter()
+                .any(|&b| b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c)
+            {
                 clean.retain(|&b| !is_whitespace(b));
             }
         }
