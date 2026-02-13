@@ -64,13 +64,12 @@ impl SortOutput {
         }
         #[cfg(not(unix))]
         {
-            // On non-Unix, use a temporary file approach or just BufWriter<Stdout>
-            // For simplicity, use the stdout lock approach
-            let stdout_handle = io::stdout();
+            // On non-Unix platforms, fall back to opening /dev/stdout or CON.
+            // This is a best-effort stub; Windows support is not a primary target.
+            let path = if cfg!(windows) { "CON" } else { "/dev/stdout" };
             SortOutput::Stdout(BufWriter::with_capacity(
                 OUTPUT_BUF_SIZE,
-                // This is a workaround; on Windows we'd need a different approach
-                File::open("/dev/stdout").unwrap_or_else(|_| panic!("Cannot open stdout")),
+                File::open(path).unwrap_or_else(|_| panic!("Cannot open stdout")),
             ))
         }
     }
