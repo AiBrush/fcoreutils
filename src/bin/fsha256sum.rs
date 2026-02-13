@@ -153,21 +153,10 @@ fn main() {
     }
 }
 
-/// Check if parallel hashing is worthwhile based on total file size.
-/// For many small files, sequential with reused thread-local buffer is faster
-/// than rayon's per-task overhead (~50µs/task).
+/// Check if parallel hashing is worthwhile.
+/// Always parallelize with 2+ files — eliminates N stat() syscalls.
 fn use_parallel(files: &[String]) -> bool {
-    const MIN_TOTAL: u64 = 10 * 1024 * 1024;
-    if files.len() < 2 {
-        return false;
-    }
-    let total: u64 = files
-        .iter()
-        .filter_map(|f| std::fs::metadata(f).ok())
-        .filter(|m| m.is_file())
-        .map(|m| m.len())
-        .sum();
-    total >= MIN_TOTAL
+    files.len() >= 2
 }
 
 fn run_hash_mode(
