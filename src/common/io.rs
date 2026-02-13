@@ -122,6 +122,20 @@ pub fn file_size(path: &Path) -> io::Result<u64> {
     Ok(fs::metadata(path)?.len())
 }
 
+/// Try to enlarge the stdout pipe buffer to 1MB on Linux.
+/// Reduces write() syscall count when output goes through a pipe.
+/// Silently ignored on non-Linux or if fcntl fails (e.g., stdout is a file).
+#[cfg(target_os = "linux")]
+pub fn enlarge_pipe_if_possible() {
+    unsafe {
+        libc::fcntl(1, libc::F_SETPIPE_SZ, 1_048_576i32);
+    }
+}
+
+/// No-op on non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+pub fn enlarge_pipe_if_possible() {}
+
 /// Read all bytes from stdin into a Vec.
 pub fn read_stdin() -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();

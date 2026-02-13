@@ -155,6 +155,7 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
 
 fn main() {
     coreutils_rs::common::reset_sigpipe();
+    coreutils_rs::common::io::enlarge_pipe_if_possible();
     let cli = Cli::parse();
 
     let files: Vec<String> = if cli.files.is_empty() {

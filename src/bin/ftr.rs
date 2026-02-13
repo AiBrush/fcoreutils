@@ -90,6 +90,7 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
 
 fn main() {
     coreutils_rs::common::reset_sigpipe();
+    coreutils_rs::common::io::enlarge_pipe_if_possible();
     let cli = Cli::parse();
 
     let set1_str = &cli.sets[0];

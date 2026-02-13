@@ -42,10 +42,79 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
     }
 }
 
+/// Maximum data size for single-allocation reverse copy (256MB).
+/// Above this, fall back to chunked emit_slice to avoid excessive memory use.
+const SINGLE_ALLOC_LIMIT: usize = 256 * 1024 * 1024;
+
 /// After-separator mode: backward scan with memrchr.
 /// Each record includes its trailing separator byte.
-/// Scans from end to start, emitting records directly — no position Vec needed.
+/// For data ≤ 256MB: single-alloc output buffer + bulk memcpy + one write_all.
+/// For larger data: chunked emit_slice approach.
 fn tac_bytes_backward_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
+    if data.len() <= SINGLE_ALLOC_LIMIT {
+        tac_bytes_backward_after_single_alloc(data, sep, out)
+    } else {
+        tac_bytes_backward_after_chunked(data, sep, out)
+    }
+}
+
+/// Single-allocation fast path: copy all reversed records into one buffer, one write_all.
+fn tac_bytes_backward_after_single_alloc(
+    data: &[u8],
+    sep: u8,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let mut end = data.len();
+
+    let Some(mut pos) = memchr::memrchr(sep, data) else {
+        return out.write_all(data);
+    };
+
+    let mut outbuf = vec![0u8; data.len()];
+    let mut wp = 0;
+
+    // Trailing content after last separator
+    if pos + 1 < end {
+        let slice = &data[pos + 1..end];
+        unsafe {
+            std::ptr::copy_nonoverlapping(slice.as_ptr(), outbuf.as_mut_ptr().add(wp), slice.len());
+        }
+        wp += slice.len();
+    }
+    end = pos + 1;
+
+    // Scan backward for remaining separators
+    while pos > 0 {
+        match memchr::memrchr(sep, &data[..pos]) {
+            Some(prev) => {
+                let slice = &data[prev + 1..end];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        slice.as_ptr(),
+                        outbuf.as_mut_ptr().add(wp),
+                        slice.len(),
+                    );
+                }
+                wp += slice.len();
+                end = prev + 1;
+                pos = prev;
+            }
+            None => break,
+        }
+    }
+
+    // First record (from start of data)
+    let slice = &data[0..end];
+    unsafe {
+        std::ptr::copy_nonoverlapping(slice.as_ptr(), outbuf.as_mut_ptr().add(wp), slice.len());
+    }
+    wp += slice.len();
+
+    out.write_all(&outbuf[..wp])
+}
+
+/// Chunked fallback for very large data (>256MB).
+fn tac_bytes_backward_after_chunked(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let buf_size = data.len().min(OUT_BUF);
     let mut buf = vec![0u8; buf_size];
     let mut wp = 0;
@@ -86,6 +155,69 @@ fn tac_bytes_backward_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
 /// Before-separator mode: backward scan with memrchr.
 /// Each record starts with its separator byte.
 fn tac_bytes_backward_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
+    if data.len() <= SINGLE_ALLOC_LIMIT {
+        tac_bytes_backward_before_single_alloc(data, sep, out)
+    } else {
+        tac_bytes_backward_before_chunked(data, sep, out)
+    }
+}
+
+/// Single-allocation fast path for before-separator mode.
+fn tac_bytes_backward_before_single_alloc(
+    data: &[u8],
+    sep: u8,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let mut end = data.len();
+
+    let Some(pos) = memchr::memrchr(sep, data) else {
+        return out.write_all(data);
+    };
+
+    let mut outbuf = vec![0u8; data.len()];
+    let mut wp = 0;
+
+    // Last record: from last separator to end
+    let slice = &data[pos..end];
+    unsafe {
+        std::ptr::copy_nonoverlapping(slice.as_ptr(), outbuf.as_mut_ptr().add(wp), slice.len());
+    }
+    wp += slice.len();
+    end = pos;
+
+    // Scan backward
+    while end > 0 {
+        match memchr::memrchr(sep, &data[..end]) {
+            Some(prev) => {
+                let slice = &data[prev..end];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        slice.as_ptr(),
+                        outbuf.as_mut_ptr().add(wp),
+                        slice.len(),
+                    );
+                }
+                wp += slice.len();
+                end = prev;
+            }
+            None => break,
+        }
+    }
+
+    // Leading content before first separator
+    if end > 0 {
+        let slice = &data[0..end];
+        unsafe {
+            std::ptr::copy_nonoverlapping(slice.as_ptr(), outbuf.as_mut_ptr().add(wp), slice.len());
+        }
+        wp += slice.len();
+    }
+
+    out.write_all(&outbuf[..wp])
+}
+
+/// Chunked fallback for before-separator mode (>256MB).
+fn tac_bytes_backward_before_chunked(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let buf_size = data.len().min(OUT_BUF);
     let mut buf = vec![0u8; buf_size];
     let mut wp = 0;

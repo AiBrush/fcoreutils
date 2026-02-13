@@ -54,6 +54,7 @@ fn raw_stdout() -> ManuallyDrop<std::fs::File> {
 
 fn main() {
     coreutils_rs::common::reset_sigpipe();
+    coreutils_rs::common::io::enlarge_pipe_if_possible();
     let cli = Cli::parse();
 
     let filename = cli.file.as_deref().unwrap_or("-");

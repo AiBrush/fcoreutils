@@ -785,6 +785,7 @@ fn process_first_field_combined(
 }
 
 /// Process a chunk of data for single-field extraction.
+/// Uses unsafe buf_extend internally — reserves full capacity upfront.
 fn process_single_field_chunk(
     data: &[u8],
     delim: u8,
@@ -793,6 +794,8 @@ fn process_single_field_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
+    // Ensure capacity for worst case (output ≤ input size for single field + line delims)
+    buf.reserve(data.len());
     let mut start = 0;
     for end_pos in memchr_iter(line_delim, data) {
         let line = &data[start..end_pos];
@@ -805,6 +808,7 @@ fn process_single_field_chunk(
 }
 
 /// Extract a single field from one line.
+/// Uses unsafe buf_extend/buf_push for zero-overhead appends (caller pre-reserves capacity).
 #[inline(always)]
 fn extract_single_field_line(
     line: &[u8],
@@ -816,7 +820,7 @@ fn extract_single_field_line(
 ) {
     if line.is_empty() {
         if !suppress {
-            buf.push(line_delim);
+            unsafe { buf_push(buf, line_delim) };
         }
         return;
     }
@@ -824,14 +828,16 @@ fn extract_single_field_line(
     // Ultra-fast path for first field: single memchr
     if target_idx == 0 {
         match memchr::memchr(delim, line) {
-            Some(pos) => {
-                buf.extend_from_slice(&line[..pos]);
-                buf.push(line_delim);
-            }
+            Some(pos) => unsafe {
+                buf_extend(buf, &line[..pos]);
+                buf_push(buf, line_delim);
+            },
             None => {
                 if !suppress {
-                    buf.extend_from_slice(line);
-                    buf.push(line_delim);
+                    unsafe {
+                        buf_extend(buf, line);
+                        buf_push(buf, line_delim);
+                    }
                 }
             }
         }
@@ -845,8 +851,10 @@ fn extract_single_field_line(
     for pos in memchr_iter(delim, line) {
         has_delim = true;
         if field_idx == target_idx {
-            buf.extend_from_slice(&line[field_start..pos]);
-            buf.push(line_delim);
+            unsafe {
+                buf_extend(buf, &line[field_start..pos]);
+                buf_push(buf, line_delim);
+            }
             return;
         }
         field_idx += 1;
@@ -855,17 +863,21 @@ fn extract_single_field_line(
 
     if !has_delim {
         if !suppress {
-            buf.extend_from_slice(line);
-            buf.push(line_delim);
+            unsafe {
+                buf_extend(buf, line);
+                buf_push(buf, line_delim);
+            }
         }
         return;
     }
 
     if field_idx == target_idx {
-        buf.extend_from_slice(&line[field_start..]);
-        buf.push(line_delim);
+        unsafe {
+            buf_extend(buf, &line[field_start..]);
+            buf_push(buf, line_delim);
+        }
     } else {
-        buf.push(line_delim);
+        unsafe { buf_push(buf, line_delim) };
     }
 }
 

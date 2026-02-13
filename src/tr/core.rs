@@ -1,10 +1,10 @@
 use std::io::{self, Read, Write};
 
-/// Main processing buffer: 32MB.
-const BUF_SIZE: usize = 32 * 1024 * 1024;
+/// Main processing buffer: 4MB — fits in L3 cache, avoids TLB thrashing.
+const BUF_SIZE: usize = 4 * 1024 * 1024;
 
-/// Stream buffer: 16MB.
-const STREAM_BUF: usize = 16 * 1024 * 1024;
+/// Stream buffer: 4MB — cache-friendly for streaming translate/delete.
+const STREAM_BUF: usize = 4 * 1024 * 1024;
 
 /// Build a 256-byte lookup table mapping set1[i] -> set2[i].
 #[inline]
@@ -727,9 +727,14 @@ pub fn translate_mmap(
 
     // Try SIMD fast path for single-range constant-offset translations
     if let Some((lo, hi, offset)) = detect_range_offset(&table) {
-        let buf_size = data.len().min(BUF_SIZE);
-        let mut buf = vec![0u8; buf_size];
-        for chunk in data.chunks(buf_size) {
+        // Single-chunk fast path: no intermediate allocation overhead
+        if data.len() <= BUF_SIZE {
+            let mut buf = vec![0u8; data.len()];
+            translate_range_simd(data, &mut buf, lo, hi, offset);
+            return writer.write_all(&buf);
+        }
+        let mut buf = vec![0u8; BUF_SIZE];
+        for chunk in data.chunks(BUF_SIZE) {
             translate_range_simd(chunk, &mut buf[..chunk.len()], lo, hi, offset);
             writer.write_all(&buf[..chunk.len()])?;
         }
@@ -737,9 +742,14 @@ pub fn translate_mmap(
     }
 
     // General case: scalar table lookup in chunks
-    let buf_size = data.len().min(BUF_SIZE);
-    let mut buf = vec![0u8; buf_size];
-    for chunk in data.chunks(buf_size) {
+    // Single-chunk fast path: translate directly, one write
+    if data.len() <= BUF_SIZE {
+        let mut buf = vec![0u8; data.len()];
+        translate_to(data, &mut buf, &table);
+        return writer.write_all(&buf);
+    }
+    let mut buf = vec![0u8; BUF_SIZE];
+    for chunk in data.chunks(BUF_SIZE) {
         translate_to(chunk, &mut buf[..chunk.len()], &table);
         writer.write_all(&buf[..chunk.len()])?;
     }
