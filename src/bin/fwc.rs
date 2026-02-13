@@ -95,8 +95,11 @@ fn count_lines_streaming(path: &Path) -> io::Result<(u64, u64)> {
         return Ok((0, file_bytes));
     }
 
-    // Fast path: mmap with populate (pre-fault pages) + parallel SIMD memchr
-    if let Ok(mmap) = unsafe { MmapOptions::new().populate().map(&file) } {
+    // Fast path: mmap + parallel SIMD memchr.
+    // No populate() — let kernel's readahead handle page faults on demand.
+    // This avoids upfront page table creation overhead (~25K PTEs for 100MB)
+    // and allows counting to start while later pages are still being faulted.
+    if let Ok(mmap) = unsafe { MmapOptions::new().map(&file) } {
         #[cfg(target_os = "linux")]
         {
             unsafe {
@@ -104,6 +107,12 @@ fn count_lines_streaming(path: &Path) -> io::Result<(u64, u64)> {
                     mmap.as_ptr() as *mut libc::c_void,
                     mmap.len(),
                     libc::MADV_SEQUENTIAL,
+                );
+                // WILLNEED triggers aggressive kernel readahead immediately
+                libc::madvise(
+                    mmap.as_ptr() as *mut libc::c_void,
+                    mmap.len(),
+                    libc::MADV_WILLNEED,
                 );
                 // HUGEPAGE reduces TLB misses: 100MB = 50 huge pages vs 25,600 regular pages
                 if mmap.len() >= LINE_PARALLEL_THRESHOLD {
@@ -119,7 +128,9 @@ fn count_lines_streaming(path: &Path) -> io::Result<(u64, u64)> {
         // Parallel counting for large files: split across CPU cores
         let lines = if mmap.len() >= LINE_PARALLEL_THRESHOLD {
             let num_threads = rayon::current_num_threads().max(1);
-            let chunk_size = (mmap.len() / num_threads).max(512 * 1024);
+            // Use 1MB min chunk size — amortizes rayon scheduling overhead
+            // while keeping enough parallelism for multi-core benefit
+            let chunk_size = (mmap.len() / num_threads).max(1024 * 1024);
             mmap.par_chunks(chunk_size)
                 .map(|chunk| memchr_iter(b'\n', chunk).count() as u64)
                 .sum()
@@ -143,7 +154,7 @@ fn count_lines_streaming(path: &Path) -> io::Result<(u64, u64)> {
         }
     }
     let mut lines = 0u64;
-    let mut buf = vec![0u8; 256 * 1024]; // 256KB
+    let mut buf = vec![0u8; 2 * 1024 * 1024]; // 2MB — matches huge page size for aligned I/O
     let mut reader = file;
     loop {
         let n = reader.read(&mut buf)?;

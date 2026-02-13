@@ -593,12 +593,22 @@ fn radix_sort_entries(
         }
         bk_starts[nbk] = s;
     }
-    let mut sorted = vec![(0u64, 0u32, 0u32); entries.len()];
+    // Allocate without zero-init: the scatter writes every position exactly once
+    // (each of the N entries maps to a unique position via the prefix sum).
+    // Avoids ~15ms of page faults for 40MB zero-fill on large inputs.
+    let mut sorted: Vec<(u64, u32, u32)> = Vec::with_capacity(entries.len());
+    // SAFETY: every position [0..entries.len()) is written exactly once by the scatter loop below.
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        sorted.set_len(entries.len());
+    }
     {
         let mut wpos = bk_starts.clone();
         for &ent in &entries {
             let b = (ent.0 >> 48) as usize;
-            sorted[wpos[b]] = ent;
+            unsafe {
+                *sorted.as_mut_ptr().add(wpos[b]) = ent;
+            }
             wpos[b] += 1;
         }
     }
@@ -804,42 +814,59 @@ fn write_sorted_single_buf_idx(
             })
             .collect();
 
-        // Per-thread sub-buffers with pre-computed sizes
-        let buffers: Vec<Vec<u8>> = sorted_indices
+        // Single contiguous buffer with parallel fill — avoids N separate allocations
+        // and N write syscalls. Prefix sum gives each thread its disjoint write region.
+        let mut chunk_offsets: Vec<usize> = Vec::with_capacity(chunk_sizes.len() + 1);
+        chunk_offsets.push(0usize);
+        let mut total_out = 0usize;
+        for &sz in &chunk_sizes {
+            total_out += sz;
+            chunk_offsets.push(total_out);
+        }
+
+        let mut output: Vec<u8> = Vec::with_capacity(total_out);
+        // SAFETY: every byte in [0..total_out) is written by the parallel fill below.
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            output.set_len(total_out);
+        }
+
+        let output_addr = output.as_mut_ptr() as usize;
+        let data_addr = data.as_ptr() as usize;
+        sorted_indices
             .par_chunks(chunk_size)
             .enumerate()
-            .map(|(ci, chunk)| {
-                let sz = chunk_sizes[ci];
-                let mut buf = vec![0u8; sz];
-                let buf_ptr = buf.as_mut_ptr();
-                let data_ptr = data.as_ptr();
-                let mut wp = 0usize;
+            .for_each(|(ci, chunk)| {
+                let op = output_addr as *mut u8;
+                let dp = data_addr as *const u8;
+                let mut wp = chunk_offsets[ci];
                 for &idx in chunk {
                     let (s, e) = offsets[idx];
                     let ll = e - s;
                     unsafe {
-                        std::ptr::copy_nonoverlapping(data_ptr.add(s), buf_ptr.add(wp), ll);
+                        std::ptr::copy_nonoverlapping(dp.add(s), op.add(wp), ll);
                         wp += ll;
-                        std::ptr::copy_nonoverlapping(terminator.as_ptr(), buf_ptr.add(wp), tl);
+                        std::ptr::copy_nonoverlapping(terminator.as_ptr(), op.add(wp), tl);
                         wp += tl;
                     }
                 }
-                buf
-            })
-            .collect();
+            });
 
-        for buf in &buffers {
-            writer.write_all(buf)?;
-        }
+        writer.write_all(&output)?;
         return Ok(());
     }
 
-    // Small output: single sequential buffer
+    // Small output: single sequential buffer (no zero-init)
     let total: usize = sorted_indices
         .iter()
         .map(|&idx| (offsets[idx].1 - offsets[idx].0) + tl)
         .sum();
-    let mut output = vec![0u8; total];
+    let mut output: Vec<u8> = Vec::with_capacity(total);
+    // SAFETY: every byte in [0..total) is written by the sequential fill below.
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        output.set_len(total);
+    }
     let out_ptr = output.as_mut_ptr();
     let data_ptr = data.as_ptr();
     let mut wp = 0usize;
@@ -897,8 +924,8 @@ fn write_sorted_entries(
     Ok(())
 }
 
-/// Build output from sorted (key, index) entries using per-thread parallel copy.
-/// Each thread builds its portion of the output buffer independently.
+/// Build output from sorted (key, index) entries using single contiguous buffer.
+/// One allocation + one write vs N allocations + N writes.
 fn write_sorted_single_buf_entries(
     data: &[u8],
     offsets: &[(usize, usize)],
@@ -913,35 +940,57 @@ fn write_sorted_single_buf_entries(
         let num_threads = rayon::current_num_threads().max(1);
         let chunk_size = (n + num_threads - 1) / num_threads;
 
-        // Per-thread sub-buffers built in parallel
-        let buffers: Vec<Vec<u8>> = entries
+        // Compute per-chunk sizes in parallel
+        let chunk_sizes: Vec<usize> = entries
             .par_chunks(chunk_size)
             .map(|chunk| {
-                // Pre-compute size for this chunk
-                let sz: usize = chunk
+                chunk
                     .iter()
                     .map(|&(_, idx)| (offsets[idx].1 - offsets[idx].0) + tl)
-                    .sum();
-                let mut buf: Vec<u8> = Vec::with_capacity(sz);
-                let data_ptr = data.as_ptr();
+                    .sum()
+            })
+            .collect();
+
+        // Prefix sum for chunk write offsets
+        let mut chunk_offsets: Vec<usize> = Vec::with_capacity(chunk_sizes.len() + 1);
+        chunk_offsets.push(0usize);
+        let mut total_out = 0usize;
+        for &sz in &chunk_sizes {
+            total_out += sz;
+            chunk_offsets.push(total_out);
+        }
+
+        // Single allocation (no zero-init)
+        let mut output: Vec<u8> = Vec::with_capacity(total_out);
+        // SAFETY: every byte in [0..total_out) is written by the parallel fill below.
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            output.set_len(total_out);
+        }
+
+        // Parallel fill — each thread writes to its disjoint region
+        let output_addr = output.as_mut_ptr() as usize;
+        let data_addr = data.as_ptr() as usize;
+        entries
+            .par_chunks(chunk_size)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let op = output_addr as *mut u8;
+                let dp = data_addr as *const u8;
+                let mut wp = chunk_offsets[ci];
                 for &(_, idx) in chunk {
                     let (s, e) = offsets[idx];
                     let ll = e - s;
                     unsafe {
-                        let old_len = buf.len();
-                        buf.set_len(old_len + ll + tl);
-                        let buf_ptr = buf.as_mut_ptr().add(old_len);
-                        std::ptr::copy_nonoverlapping(data_ptr.add(s), buf_ptr, ll);
-                        std::ptr::copy_nonoverlapping(terminator.as_ptr(), buf_ptr.add(ll), tl);
+                        std::ptr::copy_nonoverlapping(dp.add(s), op.add(wp), ll);
+                        wp += ll;
+                        std::ptr::copy_nonoverlapping(terminator.as_ptr(), op.add(wp), tl);
+                        wp += tl;
                     }
                 }
-                buf
-            })
-            .collect();
+            });
 
-        for buf in &buffers {
-            writer.write_all(buf)?;
-        }
+        writer.write_all(&output)?;
         return Ok(());
     }
 
@@ -1211,43 +1260,9 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                     let bkt = &sorted[lo..hi];
                     let sz: usize = bkt.iter().map(|&(_, _, l)| l as usize + tl).sum();
-                    let mut buf = vec![0u8; sz];
-                    let bp = buf.as_mut_ptr();
-                    let dp = data.as_ptr();
-                    let mut wp = 0usize;
-                    for &(_, s, l) in bkt {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                dp.add(s as usize),
-                                bp.add(wp),
-                                l as usize,
-                            );
-                            wp += l as usize;
-                            std::ptr::copy_nonoverlapping(terminator.as_ptr(), bp.add(wp), tl);
-                            wp += tl;
-                        }
-                    }
-                    buf
-                })
-                .collect();
-            for bi in (0..nbk).rev() {
-                if !bucket_bufs[bi].is_empty() {
-                    writer.write_all(&bucket_bufs[bi])?;
-                }
-            }
-        } else {
-            // Forward: parallel chunked output buffer construction
-            let tl = terminator.len();
-            let n = sorted.len();
-            let num_threads = rayon::current_num_threads().max(1);
-            let chunk_size = (n + num_threads - 1) / num_threads;
-            let buffers: Vec<Vec<u8>> = sorted
-                .par_chunks(chunk_size)
-                .map(|chunk| {
-                    let sz: usize = chunk.iter().map(|&(_, _, l)| l as usize + tl).sum();
                     let mut buf: Vec<u8> = Vec::with_capacity(sz);
                     let dp = data.as_ptr();
-                    for &(_, s, l) in chunk {
+                    for &(_, s, l) in bkt {
                         unsafe {
                             let old_len = buf.len();
                             buf.set_len(old_len + l as usize + tl);
@@ -1263,8 +1278,76 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     buf
                 })
                 .collect();
-            for buf in &buffers {
-                writer.write_all(buf)?;
+            for bi in (0..nbk).rev() {
+                if !bucket_bufs[bi].is_empty() {
+                    writer.write_all(&bucket_bufs[bi])?;
+                }
+            }
+        } else {
+            // Forward: single contiguous output buffer with parallel fill.
+            // One allocation + one write syscall vs N allocations + N writes.
+            // Reduces memory allocation overhead and write syscall count.
+            let tl = terminator.len();
+            let n = sorted.len();
+            if n > 50_000 {
+                let num_threads = rayon::current_num_threads().max(1);
+                let chunk_size = (n + num_threads - 1) / num_threads;
+
+                // Phase 1: compute per-chunk output sizes (parallel)
+                let chunk_sizes: Vec<usize> = sorted
+                    .par_chunks(chunk_size)
+                    .map(|chunk| chunk.iter().map(|&(_, _, l)| l as usize + tl).sum())
+                    .collect();
+
+                // Phase 2: prefix sum for chunk write offsets (serial, tiny)
+                let mut chunk_offsets: Vec<usize> = Vec::with_capacity(chunk_sizes.len() + 1);
+                chunk_offsets.push(0usize);
+                let mut total_out = 0usize;
+                for &sz in &chunk_sizes {
+                    total_out += sz;
+                    chunk_offsets.push(total_out);
+                }
+
+                // Phase 3: single allocation (no zero-init)
+                let mut output: Vec<u8> = Vec::with_capacity(total_out);
+                // SAFETY: every byte in [0..total_out) is written by the parallel fill below.
+                #[allow(clippy::uninit_vec)]
+                unsafe {
+                    output.set_len(total_out);
+                }
+
+                // Phase 4: parallel fill — each thread writes to its disjoint region
+                // SAFETY: chunk_offsets guarantees non-overlapping write regions.
+                let output_addr = output.as_mut_ptr() as usize;
+                let data_addr = data.as_ptr() as usize;
+                sorted
+                    .par_chunks(chunk_size)
+                    .enumerate()
+                    .for_each(|(ci, chunk)| {
+                        let op = output_addr as *mut u8;
+                        let dp = data_addr as *const u8;
+                        let mut wp = chunk_offsets[ci];
+                        for &(_, s, l) in chunk {
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    dp.add(s as usize),
+                                    op.add(wp),
+                                    l as usize,
+                                );
+                                wp += l as usize;
+                                std::ptr::copy_nonoverlapping(terminator.as_ptr(), op.add(wp), tl);
+                                wp += tl;
+                            }
+                        }
+                    });
+
+                // Phase 5: single write
+                writer.write_all(&output)?;
+            } else {
+                for &(_, s, l) in &sorted {
+                    writer.write_all(&data[s as usize..(s + l) as usize])?;
+                    writer.write_all(terminator)?;
+                }
             }
         }
     } else if is_fold_case_lex && num_lines > 256 {
