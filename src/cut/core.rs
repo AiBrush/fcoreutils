@@ -2,10 +2,10 @@ use memchr::memchr_iter;
 use rayon::prelude::*;
 use std::io::{self, BufRead, Write};
 
-/// Minimum file size for parallel processing (2MB).
-/// Rayon overhead is ~5-10μs per task; at 2MB per chunk,
-/// each chunk takes ~200μs+ to process, so overhead is < 5%.
-const PARALLEL_THRESHOLD: usize = 2 * 1024 * 1024;
+/// Minimum file size for parallel processing (1MB).
+/// Rayon overhead is ~5-10μs per task; at 1MB per chunk,
+/// each chunk takes ~100μs+ to process, so overhead is < 10%.
+const PARALLEL_THRESHOLD: usize = 1024 * 1024;
 
 /// Configuration for cut operations.
 pub struct CutConfig<'a> {

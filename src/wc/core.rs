@@ -1456,6 +1456,37 @@ fn check_ascii_sample(data: &[u8]) -> bool {
 // Parallel counting for large files
 // ──────────────────────────────────────────────────
 
+/// Split data into chunks at newline boundaries for parallel processing.
+/// Returns slices where each slice (except possibly the last) ends with `\n`.
+/// Splitting at newlines guarantees word boundaries in any locale,
+/// enabling safe parallel word counting without boundary adjustment.
+fn split_at_newlines(data: &[u8], num_chunks: usize) -> Vec<&[u8]> {
+    if data.is_empty() || num_chunks <= 1 {
+        return vec![data];
+    }
+    let chunk_size = data.len() / num_chunks;
+    let mut chunks = Vec::with_capacity(num_chunks);
+    let mut pos = 0;
+
+    for _ in 0..num_chunks - 1 {
+        let target = pos + chunk_size;
+        if target >= data.len() {
+            break;
+        }
+        let boundary = memchr::memchr(b'\n', &data[target..])
+            .map(|p| target + p + 1)
+            .unwrap_or(data.len());
+        if boundary > pos {
+            chunks.push(&data[pos..boundary]);
+        }
+        pos = boundary;
+    }
+    if pos < data.len() {
+        chunks.push(&data[pos..]);
+    }
+    chunks
+}
+
 /// Count newlines in parallel using SIMD memchr + rayon.
 /// Each thread gets at least 1MB (to amortize rayon scheduling overhead).
 pub fn count_lines_parallel(data: &[u8]) -> u64 {
@@ -1474,35 +1505,41 @@ pub fn count_lines_parallel(data: &[u8]) -> u64 {
 
 /// Count words in parallel with boundary adjustment.
 pub fn count_words_parallel(data: &[u8], utf8: bool) -> u64 {
-    if utf8 || data.len() < PARALLEL_THRESHOLD {
-        // UTF-8: state machine can't be trivially parallelized
-        // (multi-byte sequences may span chunk boundaries).
+    if data.len() < PARALLEL_THRESHOLD {
         return count_words_locale(data, utf8);
     }
 
-    // C locale: parallel 3-state word counting with boundary adjustment
     let num_threads = rayon::current_num_threads().max(1);
-    let chunk_size = (data.len() / num_threads).max(1024 * 1024);
 
-    let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
+    if utf8 {
+        // UTF-8: split at newline boundaries for safe parallel word counting.
+        // Newlines are always word boundaries, so no boundary adjustment needed.
+        let chunks = split_at_newlines(data, num_threads);
+        chunks.par_iter().map(|chunk| count_words_utf8(chunk)).sum()
+    } else {
+        // C locale: parallel 3-state word counting with boundary adjustment
+        let chunk_size = (data.len() / num_threads).max(1024 * 1024);
 
-    // Each chunk returns (lines, word_count, first_active_is_printable, ends_in_word)
-    let results: Vec<(u64, u64, bool, bool)> = chunks
-        .par_iter()
-        .map(|chunk| count_lw_c_chunk(chunk))
-        .collect();
+        let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
 
-    let mut total = 0u64;
-    for i in 0..results.len() {
-        total += results[i].1;
-        // Boundary adjustment: if previous chunk ended in_word AND
-        // current chunk's first non-transparent byte is printable,
-        // the word was split across chunks — subtract the overcount.
-        if i > 0 && results[i - 1].3 && results[i].2 {
-            total -= 1;
+        // Each chunk returns (lines, word_count, first_active_is_printable, ends_in_word)
+        let results: Vec<(u64, u64, bool, bool)> = chunks
+            .par_iter()
+            .map(|chunk| count_lw_c_chunk(chunk))
+            .collect();
+
+        let mut total = 0u64;
+        for i in 0..results.len() {
+            total += results[i].1;
+            // Boundary adjustment: if previous chunk ended in_word AND
+            // current chunk's first non-transparent byte is printable,
+            // the word was split across chunks — subtract the overcount.
+            if i > 0 && results[i - 1].3 && results[i].2 {
+                total -= 1;
+            }
         }
+        total
     }
-    total
 }
 
 /// Count UTF-8 characters in parallel.
@@ -1530,34 +1567,18 @@ pub fn count_lwb(data: &[u8], utf8: bool) -> (u64, u64, u64) {
 /// Parallel counting of lines + words + bytes only (no chars).
 /// Optimized for the default `wc` mode: avoids unnecessary char-counting pass.
 /// C locale: single fused pass per chunk counts BOTH lines and words.
-/// UTF-8 with pure ASCII data: falls back to parallel C locale path.
+/// UTF-8: checks ASCII first for C locale fast path, else splits at newlines
+/// for safe parallel UTF-8 word counting.
 pub fn count_lwb_parallel(data: &[u8], utf8: bool) -> (u64, u64, u64) {
     if data.len() < PARALLEL_THRESHOLD {
         // Small file: use fused single-pass
         return count_lwb(data, utf8);
     }
 
-    // For UTF-8 locale: check if data is pure ASCII first.
-    // If so, UTF-8 and C locale produce identical word counts,
-    // and we can use the parallelizable C locale path.
-    let effective_utf8 = if utf8 {
-        // Quick ASCII check: sample first, middle, last 256 bytes
-        let is_ascii = check_ascii_sample(data);
-        if is_ascii {
-            false // Use C locale parallel path
-        } else {
-            true // Need sequential UTF-8 path
-        }
-    } else {
-        false
-    };
+    let num_threads = rayon::current_num_threads().max(1);
 
-    let (lines, words) = if effective_utf8 {
-        // Must be sequential for UTF-8 with non-ASCII data
-        count_lines_words_utf8_fused(data)
-    } else {
+    let (lines, words) = if !utf8 {
         // C locale: FUSED parallel lines+words counting — single pass per chunk
-        let num_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / num_threads).max(1024 * 1024);
 
         let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
@@ -1577,12 +1598,52 @@ pub fn count_lwb_parallel(data: &[u8], utf8: bool) -> (u64, u64, u64) {
         }
 
         (line_total, word_total)
+    } else {
+        // UTF-8 locale: check if ASCII for faster C locale path
+        let is_ascii = check_ascii_sample(data);
+        if is_ascii {
+            // Pure ASCII: use C locale parallel path (arbitrary chunks OK)
+            let chunk_size = (data.len() / num_threads).max(1024 * 1024);
+            let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
+            let results: Vec<(u64, u64, bool, bool)> = chunks
+                .par_iter()
+                .map(|chunk| count_lw_c_chunk_fast(chunk))
+                .collect();
+
+            let mut line_total = 0u64;
+            let mut word_total = 0u64;
+            for i in 0..results.len() {
+                line_total += results[i].0;
+                word_total += results[i].1;
+                if i > 0 && results[i - 1].3 && results[i].2 {
+                    word_total -= 1;
+                }
+            }
+            (line_total, word_total)
+        } else {
+            // Non-ASCII UTF-8: split at newline boundaries for safe parallel
+            // word counting. Newlines always break words, so no adjustment needed.
+            let chunks = split_at_newlines(data, num_threads);
+            let results: Vec<(u64, u64)> = chunks
+                .par_iter()
+                .map(|chunk| count_lines_words_utf8_fused(chunk))
+                .collect();
+            let mut line_total = 0u64;
+            let mut word_total = 0u64;
+            for (l, w) in results {
+                line_total += l;
+                word_total += w;
+            }
+            (line_total, word_total)
+        }
     };
 
     (lines, words, data.len() as u64)
 }
 
 /// Combined parallel counting of lines + words + chars.
+/// UTF-8: splits at newline boundaries for fused lines+words+chars per chunk.
+/// C locale: fused parallel lines+words with boundary adjustment + parallel chars.
 pub fn count_lwc_parallel(data: &[u8], utf8: bool) -> (u64, u64, u64) {
     if data.len() < PARALLEL_THRESHOLD {
         let lines = count_lines(data);
@@ -1591,23 +1652,129 @@ pub fn count_lwc_parallel(data: &[u8], utf8: bool) -> (u64, u64, u64) {
         return (lines, words, chars);
     }
 
-    // Word counting: sequential for UTF-8 (state machine), parallel for C locale
-    let words = count_words_parallel(data, utf8);
-
-    // Lines and chars can always be parallelized safely
     let num_threads = rayon::current_num_threads().max(1);
-    let chunk_size = (data.len() / num_threads).max(1024 * 1024);
 
-    let lines: u64 = data
-        .par_chunks(chunk_size)
-        .map(|chunk| memchr_iter(b'\n', chunk).count() as u64)
-        .sum();
-
-    let chars = if utf8 {
-        data.par_chunks(chunk_size).map(count_chars_utf8).sum()
+    if utf8 {
+        // UTF-8: fused parallel lines+words+chars per chunk (split at newlines)
+        let chunks = split_at_newlines(data, num_threads);
+        let results: Vec<(u64, u64, u64)> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let (lines, words) = count_lines_words_utf8_fused(chunk);
+                let chars = count_chars_utf8(chunk);
+                (lines, words, chars)
+            })
+            .collect();
+        let mut lines = 0u64;
+        let mut words = 0u64;
+        let mut chars = 0u64;
+        for (l, w, c) in results {
+            lines += l;
+            words += w;
+            chars += c;
+        }
+        (lines, words, chars)
     } else {
-        data.len() as u64
-    };
+        // C locale: fused parallel lines+words + parallel chars (= byte count)
+        let chunk_size = (data.len() / num_threads).max(1024 * 1024);
+        let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
+        let results: Vec<(u64, u64, bool, bool)> = chunks
+            .par_iter()
+            .map(|chunk| count_lw_c_chunk_fast(chunk))
+            .collect();
+        let mut lines = 0u64;
+        let mut words = 0u64;
+        for i in 0..results.len() {
+            lines += results[i].0;
+            words += results[i].1;
+            if i > 0 && results[i - 1].3 && results[i].2 {
+                words -= 1;
+            }
+        }
+        (lines, words, data.len() as u64)
+    }
+}
 
-    (lines, words, chars)
+/// Parallel max line length computation.
+/// Splits at newline boundaries so each chunk independently computes correct
+/// max line width (since newlines reset position tracking).
+pub fn max_line_length_parallel(data: &[u8], utf8: bool) -> u64 {
+    if data.len() < PARALLEL_THRESHOLD {
+        return max_line_length(data, utf8);
+    }
+    let num_threads = rayon::current_num_threads().max(1);
+    let chunks = split_at_newlines(data, num_threads);
+    chunks
+        .par_iter()
+        .map(|chunk| {
+            if utf8 {
+                max_line_length_utf8(chunk)
+            } else {
+                max_line_length_c(chunk)
+            }
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Parallel counting of all metrics at once.
+/// Splits at newline boundaries for safe parallel word + max_line_length counting.
+/// Each chunk computes all metrics in a single traversal group, maximizing cache reuse.
+pub fn count_all_parallel(data: &[u8], utf8: bool) -> WcCounts {
+    if data.len() < PARALLEL_THRESHOLD {
+        return count_all(data, utf8);
+    }
+
+    let num_threads = rayon::current_num_threads().max(1);
+    let chunks = split_at_newlines(data, num_threads);
+
+    if utf8 {
+        let results: Vec<(u64, u64, u64, u64)> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let (lines, words) = count_lines_words_utf8_fused(chunk);
+                let chars = count_chars_utf8(chunk);
+                let max_ll = max_line_length_utf8(chunk);
+                (lines, words, chars, max_ll)
+            })
+            .collect();
+
+        let mut counts = WcCounts {
+            bytes: data.len() as u64,
+            ..Default::default()
+        };
+        for (l, w, c, m) in results {
+            counts.lines += l;
+            counts.words += w;
+            counts.chars += c;
+            if m > counts.max_line_length {
+                counts.max_line_length = m;
+            }
+        }
+        counts
+    } else {
+        // C locale: fused lines+words per chunk + max_line_length per chunk
+        let results: Vec<(u64, u64, u64)> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let (lines, words) = count_lines_words(chunk, false);
+                let max_ll = max_line_length_c(chunk);
+                (lines, words, max_ll)
+            })
+            .collect();
+
+        let mut counts = WcCounts {
+            bytes: data.len() as u64,
+            chars: data.len() as u64,
+            ..Default::default()
+        };
+        for (l, w, m) in &results {
+            counts.lines += l;
+            counts.words += w;
+            if *m > counts.max_line_length {
+                counts.max_line_length = *m;
+            }
+        }
+        counts
+    }
 }

@@ -334,7 +334,25 @@ fn main() {
         // cost (~0.5-1ms per process) which dominates for single-file benchmarks.
         let use_parallel = data.len() >= WC_PARALLEL_THRESHOLD;
 
-        let counts = if show.lines && show.words && show.chars && !show.max_line_length {
+        let counts = if show.max_line_length && (show.lines || show.words) {
+            // All metrics including max_line_length: use fused parallel count_all
+            if use_parallel {
+                let mut c = wc::count_all_parallel(&data, utf8_locale);
+                // Zero out unrequested metrics (for correct total accumulation)
+                if !show.lines {
+                    c.lines = 0;
+                }
+                if !show.words {
+                    c.words = 0;
+                }
+                if !show.chars {
+                    c.chars = 0;
+                }
+                c
+            } else {
+                wc::count_all(&data, utf8_locale)
+            }
+        } else if show.lines && show.words && show.chars && !show.max_line_length {
             if use_parallel {
                 let (lines, words, chars) = wc::count_lwc_parallel(&data, utf8_locale);
                 wc::WcCounts {
@@ -405,7 +423,11 @@ fn main() {
                     0
                 },
                 max_line_length: if show.max_line_length {
-                    wc::max_line_length(&data, utf8_locale)
+                    if use_parallel {
+                        wc::max_line_length_parallel(&data, utf8_locale)
+                    } else {
+                        wc::max_line_length(&data, utf8_locale)
+                    }
                 } else {
                     0
                 },
