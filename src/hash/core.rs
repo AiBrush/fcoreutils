@@ -6,8 +6,12 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(target_vendor = "apple")]
+// digest::Digest needed for generic hash on non-Linux (macOS, Windows)
+#[cfg(not(target_os = "linux"))]
 use digest::Digest;
+// md5 crate needed on non-Linux where OpenSSL is not available
+#[cfg(not(target_os = "linux"))]
+use md5::Md5;
 use memmap2::MmapOptions;
 
 /// Supported hash algorithms.
@@ -30,7 +34,8 @@ impl HashAlgorithm {
 
 // ── Generic hash helpers ────────────────────────────────────────────
 
-#[cfg(target_vendor = "apple")]
+/// Single-shot hash using the Digest trait (non-Linux: Apple, Windows).
+#[cfg(not(target_os = "linux"))]
 fn hash_digest<D: Digest>(data: &[u8]) -> String {
     hex_encode(&D::digest(data))
 }
@@ -38,7 +43,8 @@ fn hash_digest<D: Digest>(data: &[u8]) -> String {
 /// Streaming hash using thread-local buffer for optimal cache behavior.
 /// Uses read_full to ensure each update() gets a full buffer, minimizing
 /// per-chunk hasher overhead and maximizing SIMD-friendly aligned updates.
-#[cfg(target_vendor = "apple")]
+/// Used on non-Linux platforms (Apple, Windows) where OpenSSL is not available.
+#[cfg(not(target_os = "linux"))]
 fn hash_reader_impl<D: Digest>(mut reader: impl Read) -> io::Result<String> {
     STREAM_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
@@ -71,21 +77,29 @@ thread_local! {
 // ── SHA-256 ───────────────────────────────────────────────────────────
 
 /// Single-shot SHA-256 using OpenSSL's optimized assembly (SHA-NI on x86).
-#[cfg(not(target_vendor = "apple"))]
+/// Linux only — OpenSSL is not available on Windows/macOS in CI.
+#[cfg(target_os = "linux")]
 fn sha256_bytes(data: &[u8]) -> String {
     let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)
         .expect("SHA256 hash failed");
     hex_encode(&digest)
 }
 
-/// Single-shot SHA-256 using sha2 crate (macOS fallback).
+/// Single-shot SHA-256 using ring's BoringSSL assembly (Windows and other non-Apple).
+#[cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))]
+fn sha256_bytes(data: &[u8]) -> String {
+    hex_encode(ring::digest::digest(&ring::digest::SHA256, data).as_ref())
+}
+
+/// Single-shot SHA-256 using sha2 crate (macOS fallback — ring doesn't compile on Apple Silicon).
 #[cfg(target_vendor = "apple")]
 fn sha256_bytes(data: &[u8]) -> String {
     hash_digest::<sha2::Sha256>(data)
 }
 
 /// Streaming SHA-256 using OpenSSL's optimized assembly.
-#[cfg(not(target_vendor = "apple"))]
+/// Linux only — OpenSSL is not available on Windows/macOS in CI.
+#[cfg(target_os = "linux")]
 fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
     STREAM_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
@@ -103,6 +117,23 @@ fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
     })
 }
 
+/// Streaming SHA-256 using ring's BoringSSL assembly (Windows and other non-Apple).
+#[cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))]
+fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
+    STREAM_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+        loop {
+            let n = read_full(&mut reader, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            ctx.update(&buf[..n]);
+        }
+        Ok(hex_encode(ctx.finish().as_ref()))
+    })
+}
+
 /// Streaming SHA-256 using sha2 crate (macOS fallback).
 #[cfg(target_vendor = "apple")]
 fn sha256_reader(reader: impl Read) -> io::Result<String> {
@@ -113,12 +144,7 @@ fn sha256_reader(reader: impl Read) -> io::Result<String> {
 pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> String {
     match algo {
         HashAlgorithm::Sha256 => sha256_bytes(data),
-        HashAlgorithm::Md5 => {
-            // Use OpenSSL's highly optimized MD5 assembly implementation
-            let digest = openssl::hash::hash(openssl::hash::MessageDigest::md5(), data)
-                .expect("MD5 hash failed");
-            hex_encode(&digest)
-        }
+        HashAlgorithm::Md5 => md5_bytes(data),
         HashAlgorithm::Blake2b => {
             let hash = blake2b_simd::blake2b(data);
             hex_encode(hash.as_bytes())
@@ -126,17 +152,32 @@ pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> String {
     }
 }
 
+/// Single-shot MD5 using OpenSSL's optimized assembly (Linux only).
+#[cfg(target_os = "linux")]
+fn md5_bytes(data: &[u8]) -> String {
+    let digest =
+        openssl::hash::hash(openssl::hash::MessageDigest::md5(), data).expect("MD5 hash failed");
+    hex_encode(&digest)
+}
+
+/// Single-shot MD5 using md-5 crate (macOS, Windows).
+#[cfg(not(target_os = "linux"))]
+fn md5_bytes(data: &[u8]) -> String {
+    hash_digest::<Md5>(data)
+}
+
 /// Compute hash of data from a reader, returning hex string.
 pub fn hash_reader<R: Read>(algo: HashAlgorithm, reader: R) -> io::Result<String> {
     match algo {
         HashAlgorithm::Sha256 => sha256_reader(reader),
-        HashAlgorithm::Md5 => md5_reader_openssl(reader),
+        HashAlgorithm::Md5 => md5_reader(reader),
         HashAlgorithm::Blake2b => blake2b_hash_reader(reader, 64),
     }
 }
 
-/// Streaming MD5 hash using OpenSSL's optimized assembly implementation.
-fn md5_reader_openssl(mut reader: impl Read) -> io::Result<String> {
+/// Streaming MD5 hash using OpenSSL's optimized assembly implementation (Linux only).
+#[cfg(target_os = "linux")]
+fn md5_reader(mut reader: impl Read) -> io::Result<String> {
     STREAM_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::md5())
@@ -151,6 +192,12 @@ fn md5_reader_openssl(mut reader: impl Read) -> io::Result<String> {
         let digest = hasher.finish().map_err(|e| io::Error::other(e))?;
         Ok(hex_encode(&digest))
     })
+}
+
+/// Streaming MD5 hash using md-5 crate (macOS, Windows).
+#[cfg(not(target_os = "linux"))]
+fn md5_reader(reader: impl Read) -> io::Result<String> {
+    hash_reader_impl::<Md5>(reader)
 }
 
 /// Track whether O_NOATIME is supported to avoid repeated failed open() attempts.

@@ -89,9 +89,6 @@ sha2 = "0.10"
 # MD5 hashing (ring doesn't support MD5)
 md-5 = "0.10"
 
-# OpenSSL for optimized MD5 (uses system OpenSSL assembly)
-openssl = "0.10"
-
 # Digest trait (for generic hash interface used by md-5/sha2)
 digest = "0.10"
 
@@ -146,3 +143,8 @@ ring = "0.17"
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 sha2 = { version = "0.10", features = ["asm"] }
 md-5 = { version = "0.10", features = ["asm"] }
+
+# OpenSSL for optimized MD5 and SHA-256 on Linux (uses system OpenSSL assembly)
+# Windows doesn't have OpenSSL by default; falls back to md-5/ring crates
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = "0.10"
