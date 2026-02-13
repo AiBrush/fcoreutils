@@ -1260,20 +1260,19 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                     let bkt = &sorted[lo..hi];
                     let sz: usize = bkt.iter().map(|&(_, _, l)| l as usize + tl).sum();
-                    let mut buf = vec![0u8; sz];
-                    let bp = buf.as_mut_ptr();
+                    let mut buf: Vec<u8> = Vec::with_capacity(sz);
                     let dp = data.as_ptr();
-                    let mut wp = 0usize;
                     for &(_, s, l) in bkt {
                         unsafe {
+                            let old_len = buf.len();
+                            buf.set_len(old_len + l as usize + tl);
+                            let bp = buf.as_mut_ptr().add(old_len);
+                            std::ptr::copy_nonoverlapping(dp.add(s as usize), bp, l as usize);
                             std::ptr::copy_nonoverlapping(
-                                dp.add(s as usize),
-                                bp.add(wp),
-                                l as usize,
+                                terminator.as_ptr(),
+                                bp.add(l as usize),
+                                tl,
                             );
-                            wp += l as usize;
-                            std::ptr::copy_nonoverlapping(terminator.as_ptr(), bp.add(wp), tl);
-                            wp += tl;
                         }
                     }
                     buf
