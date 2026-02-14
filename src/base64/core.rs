@@ -727,10 +727,10 @@ static NOT_WHITESPACE: [bool; 256] = {
 
 /// Decode by stripping whitespace and decoding in a single fused pass.
 /// For data with no whitespace, decodes directly without any copy.
-/// Uses memchr2 SIMD gap-copy for \n/\r (the dominant whitespace in base64),
-/// then a conditional fallback pass for rare whitespace types (tab, space, VT, FF).
-/// Tracks rare whitespace presence during the gap-copy to skip the second scan
-/// entirely in the common case (pure \n/\r whitespace only).
+///
+/// For standard base64 with regular newlines (every 76 chars), uses a fast
+/// fixed-stride copy that skips memchr scanning entirely. Falls back to SIMD
+/// memchr2 gap-copy for irregular newline patterns or mixed whitespace.
 fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<()> {
     // Quick check: skip stripping if no \n or \r in the data.
     // Uses SIMD memchr2 for fast scanning (~10 GB/s) instead of per-byte check.
@@ -752,22 +752,143 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
         return decode_clean_slice(&mut cleaned, out);
     }
 
-    // SIMD gap-copy: use memchr2 to find \n and \r positions, then copy the
-    // gaps between them. For typical base64 (76-char lines), newlines are ~1/77
-    // of the data, so we process ~76 bytes per memchr hit instead of 1 per scalar.
+    // Detect regular line pattern: if the first newline is at a consistent stride,
+    // use fixed-stride copy (no memchr scanning needed). This covers standard base64
+    // output with -w 76 (stride 77) or any other fixed wrap width.
+    if let Some(stride) = detect_regular_newline_stride(data) {
+        return decode_fixed_stride(data, stride, out);
+    }
+
+    // Fallback: SIMD gap-copy for irregular newline patterns.
+    decode_stripping_whitespace_memchr(data, out)
+}
+
+/// Detect if data has newlines at a regular stride (every `stride` bytes).
+/// Returns Some(stride) if the first 3 newlines are evenly spaced and the
+/// stride matches the expected line width (no rare whitespace in between).
+/// Returns None if the pattern is irregular.
+#[inline]
+fn detect_regular_newline_stride(data: &[u8]) -> Option<usize> {
+    // Find first newline
+    let pos1 = memchr::memchr(b'\n', data)?;
+    if pos1 == 0 || pos1 >= data.len() - 1 {
+        return None;
+    }
+    let stride = pos1 + 1; // expected line stride (e.g. 77 for wrap=76)
+
+    // Verify second newline is at the expected position
+    if stride >= data.len() {
+        // Only one line — treat as regular with this stride
+        // Check no rare whitespace in the line
+        if data[..pos1]
+            .iter()
+            .any(|&b| b == b' ' || b == b'\t' || b == b'\r' || b == 0x0b || b == 0x0c)
+        {
+            return None;
+        }
+        return Some(stride);
+    }
+    if data.get(stride - 1).copied() != Some(b'\n') {
+        return None;
+    }
+
+    // Verify third newline if data is large enough
+    if 2 * stride <= data.len() {
+        if data.get(2 * stride - 1).copied() != Some(b'\n') {
+            return None;
+        }
+    }
+
+    // Check for rare whitespace in the first line (representative sample)
+    if data[..pos1]
+        .iter()
+        .any(|&b| b == b' ' || b == b'\t' || b == b'\r' || b == 0x0b || b == 0x0c)
+    {
+        return None;
+    }
+
+    Some(stride)
+}
+
+/// Fast fixed-stride whitespace strip + decode for regular base64 output.
+/// Copies line-length chunks at stride intervals, skipping the \n at the end
+/// of each line. No SIMD scanning needed — just arithmetic + memcpy.
+fn decode_fixed_stride(data: &[u8], stride: usize, out: &mut impl Write) -> io::Result<()> {
+    let line_len = stride - 1; // data bytes per line (e.g. 76 for stride 77)
+    let num_full_lines = data.len() / stride;
+    let remainder = data.len() % stride;
+    let clean_len = num_full_lines * line_len + if remainder > 0 { remainder.min(line_len) } else { 0 };
+
+    let mut clean: Vec<u8> = Vec::with_capacity(clean_len);
+    let dst = clean.as_mut_ptr();
+    let src = data.as_ptr();
+    let mut wp = 0;
+
+    // Copy full lines: skip \n at end of each stride
+    // 4-line unrolled for ILP
+    let mut line = 0;
+    while line + 4 <= num_full_lines {
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(line * stride), dst.add(wp), line_len);
+            std::ptr::copy_nonoverlapping(src.add((line + 1) * stride), dst.add(wp + line_len), line_len);
+            std::ptr::copy_nonoverlapping(src.add((line + 2) * stride), dst.add(wp + 2 * line_len), line_len);
+            std::ptr::copy_nonoverlapping(src.add((line + 3) * stride), dst.add(wp + 3 * line_len), line_len);
+        }
+        wp += 4 * line_len;
+        line += 4;
+    }
+    while line < num_full_lines {
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(line * stride), dst.add(wp), line_len);
+        }
+        wp += line_len;
+        line += 1;
+    }
+
+    // Handle remainder (last partial line, no trailing \n needed)
+    if remainder > 0 {
+        let tail = remainder.min(line_len);
+        // Strip trailing \n from remainder if present
+        let actual_tail = if remainder > 0 && data[data.len() - 1] == b'\n' {
+            remainder - 1
+        } else {
+            tail
+        };
+        if actual_tail > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src.add(num_full_lines * stride),
+                    dst.add(wp),
+                    actual_tail,
+                );
+            }
+            wp += actual_tail;
+        }
+    }
+
+    unsafe {
+        clean.set_len(wp);
+    }
+
+    if clean.len() >= PARALLEL_DECODE_THRESHOLD {
+        decode_borrowed_clean_parallel(out, &clean)
+    } else {
+        decode_clean_slice(&mut clean, out)
+    }
+}
+
+/// SIMD memchr2 gap-copy whitespace strip for irregular newline patterns.
+/// Falls back from the fixed-stride fast path when newlines aren't regular.
+fn decode_stripping_whitespace_memchr(data: &[u8], out: &mut impl Write) -> io::Result<()> {
     let mut clean: Vec<u8> = Vec::with_capacity(data.len());
     let dst = clean.as_mut_ptr();
     let mut wp = 0usize;
     let mut gap_start = 0usize;
-    // Track whether any rare whitespace (tab, space, VT, FF) exists in gap regions.
-    // This avoids the second full-scan pass when only \n/\r are present.
     let mut has_rare_ws = false;
 
     for pos in memchr::memchr2_iter(b'\n', b'\r', data) {
         let gap_len = pos - gap_start;
         if gap_len > 0 {
-            // Check gap region for rare whitespace during copy.
-            // This adds ~1 branch per gap but eliminates the second full scan.
             if !has_rare_ws {
                 has_rare_ws = data[gap_start..pos]
                     .iter()
@@ -780,7 +901,6 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
         }
         gap_start = pos + 1;
     }
-    // Copy the final gap after the last \n/\r
     let tail_len = data.len() - gap_start;
     if tail_len > 0 {
         if !has_rare_ws {
@@ -797,8 +917,6 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
         clean.set_len(wp);
     }
 
-    // Second pass for rare whitespace (tab, space, VT, FF) — only runs when needed.
-    // In typical base64 streams (76-char lines with \n), this is skipped entirely.
     if has_rare_ws {
         let ptr = clean.as_mut_ptr();
         let len = clean.len();
@@ -815,8 +933,6 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
         clean.truncate(cwp);
     }
 
-    // For large data (>= threshold), use parallel decode for multi-core speedup.
-    // For small data, use in-place decode to avoid extra allocation.
     if clean.len() >= PARALLEL_DECODE_THRESHOLD {
         decode_borrowed_clean_parallel(out, &clean)
     } else {
