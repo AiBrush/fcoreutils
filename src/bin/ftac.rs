@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
 #[cfg(unix)]
@@ -66,10 +66,10 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
         unsafe {
             let ptr = m.as_ptr() as *mut libc::c_void;
             let len = m.len();
-            // WILLNEED pre-faults all pages, RANDOM disables readahead since
-            // tac accesses pages in reverse order during output.
+            // WILLNEED pre-faults all pages. SEQUENTIAL enables readahead
+            // for the forward SIMD scan phase. Pages stay cached for output.
             libc::madvise(ptr, len, libc::MADV_WILLNEED);
-            libc::madvise(ptr, len, libc::MADV_RANDOM);
+            libc::madvise(ptr, len, libc::MADV_SEQUENTIAL);
             if len >= 2 * 1024 * 1024 {
                 libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
             }
@@ -117,8 +117,10 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             }
         };
 
-        // madvise is already set in try_mmap_stdin / read_file.
-        // No duplicate madvise calls needed here.
+        // read_file sets MADV_SEQUENTIAL which is correct for the forward
+        // SIMD scan phase. Pages stay cached for the reverse output phase.
+        // MADV_WILLNEED is already set by read_file to pre-fault pages.
+
         let result = if cli.regex {
             let bytes: &[u8] = &data;
             let sep = cli.separator.as_deref().unwrap_or("\n");
@@ -171,20 +173,32 @@ fn main() {
         cli.files.clone()
     };
 
-    // Write directly to raw fd stdout — tac already batches output into either:
-    // - A single write_all (buffered copy path for many records)
-    // - Batched write_vectored calls (writev path for few records)
-    // BufWriter would add an unnecessary memcpy of the entire output buffer.
+    // For byte separator (default): use raw stdout for zero-copy writev.
+    // The core tac functions batch IoSlices and call write_vectored,
+    // which maps to system writev on Unix — zero-copy from mmap pages.
+    // For regex/string separator: use BufWriter since those paths
+    // use many small write_all calls that benefit from buffering.
     #[cfg(unix)]
     let had_error = {
-        let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        run(&cli, &files, &mut *raw)
+        let is_byte_sep = !cli.regex && cli.separator.is_none();
+        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        if is_byte_sep {
+            run(&cli, &files, &mut &*raw)
+        } else {
+            let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, &*raw);
+            let err = run(&cli, &files, &mut writer);
+            let _ = writer.flush();
+            err
+        }
     };
     #[cfg(not(unix))]
     let had_error = {
         let stdout = io::stdout();
-        let mut lock = stdout.lock();
-        run(&cli, &files, &mut lock)
+        let lock = stdout.lock();
+        let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, lock);
+        let err = run(&cli, &files, &mut writer);
+        let _ = writer.flush();
+        err
     };
 
     if had_error {
