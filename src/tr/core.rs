@@ -3791,8 +3791,8 @@ unsafe fn delete_range_zerocopy_neon(
             let pair = vpaddlq_u8(bits); // u8→u16 pairwise add
             let quad = vpaddlq_u16(pair); // u16→u32
             let octet = vpaddlq_u32(quad); // u32→u64
-            let mask_lo = vgetq_lane_u64(vreinterpretq_u64_u8(octet), 0) as u8;
-            let mask_hi = vgetq_lane_u64(vreinterpretq_u64_u8(octet), 1) as u8;
+            let mask_lo = vgetq_lane_u64::<0>(octet) as u8;
+            let mask_hi = vgetq_lane_u64::<1>(octet) as u8;
             let del_mask = (mask_hi as u16) << 8 | mask_lo as u16;
 
             if del_mask == 0 {
