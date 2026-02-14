@@ -2406,6 +2406,18 @@ pub fn translate_mmap_inplace(
         return writer.write_all(data);
     }
 
+    // For data that's being translated in a MAP_PRIVATE mmap, every modified page
+    // triggers a COW fault. For small-to-medium files where most bytes change,
+    // reading from mmap (read-only) + writing to a separate heap buffer is faster
+    // because it avoids COW faults entirely. The output buffer is fresh memory
+    // (no COW), and the input mmap stays read-only (MADV_SEQUENTIAL).
+    // Threshold: 32MB. Above this, in-place is better to avoid doubling memory.
+    const SEPARATE_BUF_THRESHOLD: usize = 32 * 1024 * 1024;
+
+    if data.len() < SEPARATE_BUF_THRESHOLD {
+        return translate_to_separate_buf(data, &table, writer);
+    }
+
     // Try SIMD fast path for single-range constant-offset translations (e.g., a-z -> A-Z)
     if let Some((lo, hi, offset)) = detect_range_offset(&table) {
         if data.len() >= PARALLEL_THRESHOLD {
@@ -2443,6 +2455,65 @@ pub fn translate_mmap_inplace(
         translate_inplace(data, &table);
     }
     writer.write_all(data)
+}
+
+/// Translate from read-only source to a separate output buffer, avoiding COW faults.
+/// Uses the appropriate SIMD path (range offset, range-to-constant, or general nibble).
+/// For data >= PARALLEL_THRESHOLD, uses parallel chunked translation.
+fn translate_to_separate_buf(
+    data: &[u8],
+    table: &[u8; 256],
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let mut out_buf = alloc_uninit_vec(data.len());
+
+    let range_info = detect_range_offset(table);
+    let const_info = if range_info.is_none() {
+        detect_range_to_constant(table)
+    } else {
+        None
+    };
+
+    if data.len() >= PARALLEL_THRESHOLD {
+        let n_threads = rayon::current_num_threads().max(1);
+        let chunk_size = (data.len() / n_threads).max(32 * 1024);
+
+        if let Some((lo, hi, offset)) = range_info {
+            data.par_chunks(chunk_size)
+                .zip(out_buf.par_chunks_mut(chunk_size))
+                .for_each(|(src, dst)| {
+                    translate_range_simd(src, &mut dst[..src.len()], lo, hi, offset);
+                });
+        } else if let Some((lo, hi, replacement)) = const_info {
+            data.par_chunks(chunk_size)
+                .zip(out_buf.par_chunks_mut(chunk_size))
+                .for_each(|(src, dst)| {
+                    // Copy src to dst, then translate in-place
+                    dst[..src.len()].copy_from_slice(src);
+                    translate_range_to_constant_simd_inplace(
+                        &mut dst[..src.len()],
+                        lo,
+                        hi,
+                        replacement,
+                    );
+                });
+        } else {
+            data.par_chunks(chunk_size)
+                .zip(out_buf.par_chunks_mut(chunk_size))
+                .for_each(|(src, dst)| {
+                    translate_to(src, &mut dst[..src.len()], table);
+                });
+        }
+    } else if let Some((lo, hi, offset)) = range_info {
+        translate_range_simd(data, &mut out_buf, lo, hi, offset);
+    } else if let Some((lo, hi, replacement)) = const_info {
+        out_buf.copy_from_slice(data);
+        translate_range_to_constant_simd_inplace(&mut out_buf, lo, hi, replacement);
+    } else {
+        translate_to(data, &mut out_buf, table);
+    }
+
+    writer.write_all(&out_buf)
 }
 
 /// Translate + squeeze from mmap'd byte slice.
@@ -3204,48 +3275,76 @@ fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Resu
         return writer.write_all(data);
     }
 
-    // Zero-copy writev approach: build IoSlice entries pointing directly into
-    // the original mmap'd data, skipping duplicate bytes in runs.
-    // For `tr -s ' '` on 10MB with ~5K squeeze points:
-    //   - Old: 10MB allocation + 10MB copy into output buffer
-    //   - New: ~5K * 16 = 80KB IoSlice entries, zero data copy
+    // Buffered approach: copy non-duplicate regions into a contiguous output buffer.
+    // For `tr -s ' '` on 10MB with ~5K squeeze points, the output is ~10MB minus
+    // duplicates. Copying to a buffer and flushing with large write_all is faster
+    // than managing thousands of writev IoSlice entries.
+    const BUF_CAP: usize = 16 * 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP.min(data.len()));
+    let data_ptr = data.as_ptr();
+    let data_len = data.len();
+
     let finder = memchr::memmem::Finder::new(&pair);
-    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(1024);
     let mut cursor = 0;
 
-    while cursor < data.len() {
+    while cursor < data_len {
         match finder.find(&data[cursor..]) {
             Some(offset) => {
                 let pair_pos = cursor + offset;
                 // Include everything up to and including the first byte of the pair
                 let seg_end = pair_pos + 1;
-                if seg_end > cursor {
-                    iov.push(std::io::IoSlice::new(&data[cursor..seg_end]));
+                let seg_len = seg_end - cursor;
+                if seg_len > 0 {
+                    // Flush if buffer would overflow
+                    if buf.len() + seg_len > buf.capacity() && !buf.is_empty() {
+                        writer.write_all(&buf)?;
+                        buf.clear();
+                    }
+                    if seg_len > BUF_CAP && buf.is_empty() {
+                        writer.write_all(&data[cursor..seg_end])?;
+                    } else {
+                        unsafe {
+                            let dst = buf.as_mut_ptr().add(buf.len());
+                            std::ptr::copy_nonoverlapping(data_ptr.add(cursor), dst, seg_len);
+                            buf.set_len(buf.len() + seg_len);
+                        }
+                    }
                 }
                 // Skip all remaining consecutive ch bytes (the run)
                 let mut skip = seg_end;
-                while skip < data.len() && data[skip] == ch {
+                while skip < data_len {
+                    if unsafe { *data_ptr.add(skip) } != ch {
+                        break;
+                    }
                     skip += 1;
                 }
                 cursor = skip;
-                // Flush when approaching MAX_IOV
-                if iov.len() >= MAX_IOV {
-                    write_ioslices(writer, &iov)?;
-                    iov.clear();
-                }
             }
             None => {
                 // No more pairs — emit remainder
-                if cursor < data.len() {
-                    iov.push(std::io::IoSlice::new(&data[cursor..]));
+                let rem = data_len - cursor;
+                if rem > 0 {
+                    if buf.len() + rem > buf.capacity() && !buf.is_empty() {
+                        writer.write_all(&buf)?;
+                        buf.clear();
+                    }
+                    if rem > BUF_CAP && buf.is_empty() {
+                        writer.write_all(&data[cursor..])?;
+                    } else {
+                        unsafe {
+                            let dst = buf.as_mut_ptr().add(buf.len());
+                            std::ptr::copy_nonoverlapping(data_ptr.add(cursor), dst, rem);
+                            buf.set_len(buf.len() + rem);
+                        }
+                    }
                 }
                 break;
             }
         }
     }
 
-    if !iov.is_empty() {
-        write_ioslices(writer, &iov)?;
+    if !buf.is_empty() {
+        writer.write_all(&buf)?;
     }
     Ok(())
 }

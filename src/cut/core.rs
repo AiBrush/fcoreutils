@@ -2072,7 +2072,16 @@ fn process_bytes_from_start(
         let results: Vec<Vec<u8>> = chunks
             .par_iter()
             .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
+                // Pre-estimate output size: each line contributes max_bytes + 1 (delimiter)
+                // Count newlines to estimate output size (more accurate than chunk.len())
+                let n_lines = memchr_iter(line_delim, chunk).count()
+                    + if chunk.last() != Some(&line_delim) {
+                        1
+                    } else {
+                        0
+                    };
+                let est_out = n_lines * (max_bytes + 1);
+                let mut buf = Vec::with_capacity(est_out.min(chunk.len()));
                 bytes_from_start_chunk(chunk, max_bytes, line_delim, &mut buf);
                 buf
             })
@@ -2085,10 +2094,30 @@ fn process_bytes_from_start(
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        // Zero-copy path: track contiguous output runs and write directly from source.
-        // For lines <= max_bytes, we include them as-is (no copy needed).
-        // For lines > max_bytes, we flush the run, write the truncated line, start new run.
-        bytes_from_start_zerocopy(data, max_bytes, line_delim, out)?;
+        // For small max_bytes, the buffer path is faster than writev zero-copy
+        // because every line gets truncated, creating 3 IoSlice entries per line.
+        // Copying max_bytes+1 bytes into a contiguous buffer is cheaper than
+        // managing millions of IoSlice entries through the kernel.
+        if max_bytes <= 64 {
+            // Estimate output size
+            let n_lines = memchr_iter(line_delim, data).count()
+                + if data.last() != Some(&line_delim) {
+                    1
+                } else {
+                    0
+                };
+            let est_out = n_lines * (max_bytes + 1);
+            let mut buf = Vec::with_capacity(est_out.min(data.len()));
+            bytes_from_start_chunk(data, max_bytes, line_delim, &mut buf);
+            if !buf.is_empty() {
+                out.write_all(&buf)?;
+            }
+        } else {
+            // Zero-copy path: track contiguous output runs and write directly from source.
+            // For lines <= max_bytes, we include them as-is (no copy needed).
+            // For lines > max_bytes, we flush the run, write the truncated line, start new run.
+            bytes_from_start_zerocopy(data, max_bytes, line_delim, out)?;
+        }
     }
     Ok(())
 }
@@ -2157,18 +2186,28 @@ fn bytes_from_start_zerocopy(
 
 /// Process a chunk for from-start byte range extraction (parallel path).
 /// Uses unsafe appends to eliminate bounds checking in the hot loop.
+/// When max_bytes is small, the output per line is tiny so we fuse the
+/// data copy + delimiter into a single tight loop with minimal overhead.
 #[inline]
 fn bytes_from_start_chunk(data: &[u8], max_bytes: usize, line_delim: u8, buf: &mut Vec<u8>) {
-    // Reserve enough capacity: output <= input size
-    buf.reserve(data.len());
-
     let mut start = 0;
+    // Use raw pointer for the inner copy to eliminate slice bounds checks
+    let data_ptr = data.as_ptr();
+
     for pos in memchr_iter(line_delim, data) {
         let line_len = pos - start;
         let take = line_len.min(max_bytes);
+        // Ensure capacity for data + delimiter
+        let needed = take + 1;
+        let remaining = buf.capacity() - buf.len();
+        if remaining < needed {
+            buf.reserve(needed.max(data.len() - pos));
+        }
         unsafe {
-            buf_extend(buf, &data[start..start + take]);
-            buf_push(buf, line_delim);
+            let dst = buf.as_mut_ptr().add(buf.len());
+            std::ptr::copy_nonoverlapping(data_ptr.add(start), dst, take);
+            *dst.add(take) = line_delim;
+            buf.set_len(buf.len() + take + 1);
         }
         start = pos + 1;
     }
@@ -2176,9 +2215,16 @@ fn bytes_from_start_chunk(data: &[u8], max_bytes: usize, line_delim: u8, buf: &m
     if start < data.len() {
         let line_len = data.len() - start;
         let take = line_len.min(max_bytes);
+        let needed = take + 1;
+        let remaining = buf.capacity() - buf.len();
+        if remaining < needed {
+            buf.reserve(needed);
+        }
         unsafe {
-            buf_extend(buf, &data[start..start + take]);
-            buf_push(buf, line_delim);
+            let dst = buf.as_mut_ptr().add(buf.len());
+            std::ptr::copy_nonoverlapping(data_ptr.add(start), dst, take);
+            *dst.add(take) = line_delim;
+            buf.set_len(buf.len() + take + 1);
         }
     }
 }

@@ -189,18 +189,23 @@ fn main() {
         cli.files.clone()
     };
 
-    // Write directly to raw fd stdout — bypass BufWriter because our tac
-    // implementation uses write_vectored (writev syscall) which sends many
-    // record slices in a single syscall. BufWriter would intercept and copy.
+    // Use BufWriter with 16MB capacity on stdout. For files with many small
+    // records, the tac implementation now copies records into a contiguous buffer
+    // and calls write_all with large chunks. BufWriter coalesces these into
+    // fewer syscalls. For files with few records, writev is still used but
+    // BufWriter passes write_vectored through to the underlying fd.
     #[cfg(unix)]
     let had_error = {
         let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        run(&cli, &files, &mut *raw)
+        let mut writer = io::BufWriter::with_capacity(16 * 1024 * 1024, &mut *raw);
+        let err = run(&cli, &files, &mut writer);
+        let _ = writer.flush();
+        err
     };
     #[cfg(not(unix))]
     let had_error = {
         let stdout = io::stdout();
-        let mut writer = io::BufWriter::with_capacity(8 * 1024 * 1024, stdout.lock());
+        let mut writer = io::BufWriter::with_capacity(16 * 1024 * 1024, stdout.lock());
         let err = run(&cli, &files, &mut writer);
         let _ = writer.flush();
         err
