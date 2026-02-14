@@ -139,6 +139,8 @@ fn needs_key_extraction(config: &UniqConfig) -> bool {
 /// Uses pointer+length equality shortcut and multi-word prefix rejection.
 /// For short lines (<= 32 bytes, common in many-dups data), avoids the
 /// full memcmp call overhead by doing direct word comparisons.
+/// For medium lines (33-256 bytes), uses a tight u64 loop covering the
+/// full line without falling through to memcmp.
 #[inline(always)]
 fn lines_equal_fast(a: &[u8], b: &[u8]) -> bool {
     let alen = a.len();
@@ -153,56 +155,72 @@ fn lines_equal_fast(a: &[u8], b: &[u8]) -> bool {
         // For < 8 bytes: byte-by-byte via slice (compiler vectorizes this)
         return a == b;
     }
-    // 8-byte prefix check: reject most non-equal lines without full memcmp
-    let a8 = unsafe { (a.as_ptr() as *const u64).read_unaligned() };
-    let b8 = unsafe { (b.as_ptr() as *const u64).read_unaligned() };
-    if a8 != b8 {
-        return false;
-    }
-    // Check last 8 bytes (overlapping for 9-16 byte lines, eliminating full memcmp)
-    if alen <= 16 {
-        let a_tail = unsafe { (a.as_ptr().add(alen - 8) as *const u64).read_unaligned() };
-        let b_tail = unsafe { (b.as_ptr().add(alen - 8) as *const u64).read_unaligned() };
-        return a_tail == b_tail;
-    }
-    // For 17-32 bytes: check first 16 + last 16 (overlapping) to avoid memcmp
-    if alen <= 32 {
-        let a16 = unsafe { (a.as_ptr().add(8) as *const u64).read_unaligned() };
-        let b16 = unsafe { (b.as_ptr().add(8) as *const u64).read_unaligned() };
-        if a16 != b16 {
+    unsafe {
+        let ap = a.as_ptr();
+        let bp = b.as_ptr();
+        // 8-byte prefix check: reject most non-equal lines without full memcmp
+        let a8 = (ap as *const u64).read_unaligned();
+        let b8 = (bp as *const u64).read_unaligned();
+        if a8 != b8 {
             return false;
         }
-        let a_tail = unsafe { (a.as_ptr().add(alen - 8) as *const u64).read_unaligned() };
-        let b_tail = unsafe { (b.as_ptr().add(alen - 8) as *const u64).read_unaligned() };
-        return a_tail == b_tail;
-    }
-    // For 33-64 bytes: check 4 u64 words + last 8 bytes (overlapping)
-    // Covers common medium-length lines without falling through to full memcmp
-    if alen <= 64 {
-        unsafe {
-            let ap = a.as_ptr();
-            let bp = b.as_ptr();
+        // Check last 8 bytes (overlapping for 9-16 byte lines, eliminating full memcmp)
+        if alen <= 16 {
+            let a_tail = (ap.add(alen - 8) as *const u64).read_unaligned();
+            let b_tail = (bp.add(alen - 8) as *const u64).read_unaligned();
+            return a_tail == b_tail;
+        }
+        // For 17-32 bytes: check first 16 + last 16 (overlapping) to avoid memcmp
+        if alen <= 32 {
             let a16 = (ap.add(8) as *const u64).read_unaligned();
             let b16 = (bp.add(8) as *const u64).read_unaligned();
             if a16 != b16 {
-                return false;
-            }
-            let a24 = (ap.add(16) as *const u64).read_unaligned();
-            let b24 = (bp.add(16) as *const u64).read_unaligned();
-            if a24 != b24 {
-                return false;
-            }
-            let a32 = (ap.add(24) as *const u64).read_unaligned();
-            let b32 = (bp.add(24) as *const u64).read_unaligned();
-            if a32 != b32 {
                 return false;
             }
             let a_tail = (ap.add(alen - 8) as *const u64).read_unaligned();
             let b_tail = (bp.add(alen - 8) as *const u64).read_unaligned();
             return a_tail == b_tail;
         }
+        // For 33-256 bytes: tight u64 loop covering the full line.
+        // Compare 32 bytes per iteration (4 u64 loads), then handle tail.
+        // This avoids the function call overhead of memcmp for medium lines.
+        if alen <= 256 {
+            let mut off = 8usize; // first 8 bytes already compared
+            // Compare 32 bytes at a time
+            while off + 32 <= alen {
+                let a0 = (ap.add(off) as *const u64).read_unaligned();
+                let b0 = (bp.add(off) as *const u64).read_unaligned();
+                let a1 = (ap.add(off + 8) as *const u64).read_unaligned();
+                let b1 = (bp.add(off + 8) as *const u64).read_unaligned();
+                let a2 = (ap.add(off + 16) as *const u64).read_unaligned();
+                let b2 = (bp.add(off + 16) as *const u64).read_unaligned();
+                let a3 = (ap.add(off + 24) as *const u64).read_unaligned();
+                let b3 = (bp.add(off + 24) as *const u64).read_unaligned();
+                // XOR all pairs and OR together: zero if all equal
+                if (a0 ^ b0) | (a1 ^ b1) | (a2 ^ b2) | (a3 ^ b3) != 0 {
+                    return false;
+                }
+                off += 32;
+            }
+            // Compare remaining 8 bytes at a time
+            while off + 8 <= alen {
+                let aw = (ap.add(off) as *const u64).read_unaligned();
+                let bw = (bp.add(off) as *const u64).read_unaligned();
+                if aw != bw {
+                    return false;
+                }
+                off += 8;
+            }
+            // Compare tail (overlapping last 8 bytes)
+            if off < alen {
+                let a_tail = (ap.add(alen - 8) as *const u64).read_unaligned();
+                let b_tail = (bp.add(alen - 8) as *const u64).read_unaligned();
+                return a_tail == b_tail;
+            }
+            return true;
+        }
     }
-    // Longer lines: prefix passed, fall through to full memcmp
+    // Longer lines (>256): prefix passed, fall through to full memcmp
     a == b
 }
 
@@ -664,35 +682,50 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
                         a_tail == b_tail
                     }
                 }
-            } else if cur_len <= 64 {
-                // 33-64 bytes: check 4 u64 words + last 8 bytes
+            } else if cur_len <= 256 {
+                // 33-256 bytes: tight u64 loop with XOR-OR batching.
+                // Compares 32 bytes per iteration (4 u64 loads), reducing
+                // branch mispredictions vs individual comparisons.
                 unsafe {
-                    let a16 = (base.add(prev_start + 8) as *const u64).read_unaligned();
-                    let b16 = (base.add(cur_start + 8) as *const u64).read_unaligned();
-                    if a16 != b16 {
-                        false
-                    } else {
-                        let a24 = (base.add(prev_start + 16) as *const u64).read_unaligned();
-                        let b24 = (base.add(cur_start + 16) as *const u64).read_unaligned();
-                        if a24 != b24 {
-                            false
-                        } else {
-                            let a32 = (base.add(prev_start + 24) as *const u64).read_unaligned();
-                            let b32 = (base.add(cur_start + 24) as *const u64).read_unaligned();
-                            if a32 != b32 {
-                                false
-                            } else {
-                                let a_tail = (base.add(prev_start + prev_len - 8) as *const u64)
-                                    .read_unaligned();
-                                let b_tail = (base.add(cur_start + cur_len - 8) as *const u64)
-                                    .read_unaligned();
-                                a_tail == b_tail
+                    let ap = base.add(prev_start);
+                    let bp = base.add(cur_start);
+                    let mut off = 8usize; // first 8 bytes already compared via prefix
+                    let mut eq = true;
+                    while off + 32 <= cur_len {
+                        let a0 = (ap.add(off) as *const u64).read_unaligned();
+                        let b0 = (bp.add(off) as *const u64).read_unaligned();
+                        let a1 = (ap.add(off + 8) as *const u64).read_unaligned();
+                        let b1 = (bp.add(off + 8) as *const u64).read_unaligned();
+                        let a2 = (ap.add(off + 16) as *const u64).read_unaligned();
+                        let b2 = (bp.add(off + 16) as *const u64).read_unaligned();
+                        let a3 = (ap.add(off + 24) as *const u64).read_unaligned();
+                        let b3 = (bp.add(off + 24) as *const u64).read_unaligned();
+                        if (a0 ^ b0) | (a1 ^ b1) | (a2 ^ b2) | (a3 ^ b3) != 0 {
+                            eq = false;
+                            break;
+                        }
+                        off += 32;
+                    }
+                    if eq {
+                        while off + 8 <= cur_len {
+                            let aw = (ap.add(off) as *const u64).read_unaligned();
+                            let bw = (bp.add(off) as *const u64).read_unaligned();
+                            if aw != bw {
+                                eq = false;
+                                break;
                             }
+                            off += 8;
                         }
                     }
+                    if eq && off < cur_len {
+                        let a_tail = (ap.add(cur_len - 8) as *const u64).read_unaligned();
+                        let b_tail = (bp.add(cur_len - 8) as *const u64).read_unaligned();
+                        eq = a_tail == b_tail;
+                    }
+                    eq
                 }
             } else {
-                // For longer lines, use unsafe slice comparison to skip bounds checks
+                // For longer lines (>256), use unsafe slice comparison
                 unsafe {
                     let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
                     let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
