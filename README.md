@@ -8,20 +8,20 @@
 
 High-performance GNU coreutils replacement in Rust. Faster with SIMD acceleration. Drop-in compatible, cross-platform.
 
-## Performance ([independent benchmarks](https://github.com/AiBrush/coreutils-rs-independent-test) v0.2.0, Linux x86_64, hyperfine)
+## Performance ([independent benchmarks](https://github.com/AiBrush/coreutils-rs-independent-test) v0.2.2, Linux x86_64, hyperfine)
 
 | Tool | Speedup vs GNU | Benchmark |
 |------|---------------:|-----------|
-| wc | **34.7x** | default 100MB text |
+| wc | **34.8x** | default 100MB text |
 | sort | **17.6x** | lexicographic 10MB |
-| uniq | **14.1x** | repetitive 10MB |
+| uniq | **13.2x** | repetitive 10MB |
 | cut | **8.6x** | -b1-100 10MB CSV |
-| tr | **6.8x** | -d lowercase 10MB |
-| tac | **3.9x** | reverse 100MB text |
-| base64 | **3.8x** | decode 10MB |
+| base64 | **6.4x** | decode 10MB |
+| tr | **6.1x** | -d lowercase 10MB |
+| tac | **4.5x** | reverse 100MB text |
 | md5sum | **1.4x** | single 100MB text |
 | b2sum | **1.3x** | single 100MB text |
-| sha256sum | **1.2x** | single 100MB text |
+| sha256sum | **1.0x** | single 100MB text |
 
 ## Tools
 
@@ -29,14 +29,14 @@ High-performance GNU coreutils replacement in Rust. Faster with SIMD acceleratio
 |------|--------|--------|-------------|
 | wc | `fwc` | Optimized | Word, line, char, byte count (SIMD SSE2, single-pass, parallel) |
 | cut | `fcut` | Optimized | Field/byte/char extraction (mmap, SIMD) |
-| sha256sum | `fsha256sum` | Optimized | SHA-256 checksums (mmap, madvise, readahead, parallel) |
+| sha256sum | `fsha256sum` | Optimized | SHA-256 checksums (streaming I/O-compute overlap, readahead, parallel) |
 | md5sum | `fmd5sum` | Optimized | MD5 checksums (mmap, madvise, readahead, parallel) |
 | b2sum | `fb2sum` | Optimized | BLAKE2b checksums (mmap, madvise, readahead) |
 | base64 | `fbase64` | Optimized | Base64 encode/decode (SIMD, 4MB chunks, raw fd stdout) |
 | sort | `fsort` | Optimized | Line sorting (parallel merge sort) |
 | tr | `ftr` | Optimized | Character translation (SIMD range translate/delete, AVX2/SSE2, parallel) |
 | uniq | `funiq` | Optimized | Filter duplicate lines (mmap, zero-copy, single-pass) |
-| tac | `ftac` | Optimized | Reverse file lines (parallel SIMD scan, contiguous output buffer) |
+| tac | `ftac` | Optimized | Reverse file lines (parallel SIMD scan, zero-copy writev) |
 
 ## Installation
 
@@ -104,7 +104,7 @@ ftac file.txt             # Print lines in reverse order
 - **SIMD base64**: Vectorized encode/decode with 4MB chunked streaming
 - **Parallel processing**: Multi-file hashing and wc use thread pools
 - **SIMD range translate/delete**: `tr` detects contiguous byte ranges and uses AVX2/SSE2 SIMD
-- **Chunk-based reverse scan**: `tac` processes backward in 512KB chunks with forward SIMD within each chunk
+- **Zero-copy reverse output**: `tac` uses writev with IoSlice entries pointing directly into mmap'd data, eliminating output buffer allocation
 - **Optimized release profile**: Fat LTO, single codegen unit, abort on panic, stripped binaries
 
 ## GNU Compatibility

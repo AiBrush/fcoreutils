@@ -318,36 +318,31 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         if file_size < TINY_FILE_LIMIT {
             return hash_file_tiny(algo, file, file_size as usize);
         }
-        // mmap for large files — zero-copy, eliminates multiple read() syscalls
-        if file_size >= SMALL_FILE_LIMIT {
-            #[cfg(target_os = "linux")]
-            if file_size >= FADVISE_MIN_SIZE {
-                use std::os::unix::io::AsRawFd;
-                unsafe {
-                    libc::posix_fadvise(
-                        file.as_raw_fd(),
-                        0,
-                        file_size as i64,
-                        libc::POSIX_FADV_SEQUENTIAL,
-                    );
-                }
-            }
-            if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().populate().map(&file) } {
-                #[cfg(target_os = "linux")]
-                {
-                    let _ = mmap.advise(memmap2::Advice::Sequential);
-                    if file_size >= 2 * 1024 * 1024 {
-                        let _ = mmap.advise(memmap2::Advice::HugePage);
-                    }
-                }
-                return Ok(hash_bytes(algo, &mmap));
-            }
-        }
         // Small files (8KB..1MB): single read into thread-local buffer, then single-shot hash.
         // This avoids Hasher context allocation + streaming overhead for each file.
         if file_size < SMALL_FILE_LIMIT {
             return hash_file_small(algo, file, file_size as usize);
         }
+        // Large files (>= 1MB): streaming hash with fadvise(SEQUENTIAL).
+        // Streaming overlaps I/O and compute: the kernel reads ahead while we
+        // hash the current buffer. This is faster than mmap+MAP_POPULATE which
+        // serializes all I/O before any hashing begins.
+        // For SHA-256 at ~2.5 GB/s with 100MB file:
+        //   mmap+populate: ~33ms (I/O) + ~40ms (hash) = ~73ms
+        //   streaming:     ~45ms (overlapped)
+        #[cfg(target_os = "linux")]
+        if file_size >= FADVISE_MIN_SIZE {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::posix_fadvise(
+                    file.as_raw_fd(),
+                    0,
+                    file_size as i64,
+                    libc::POSIX_FADV_SEQUENTIAL,
+                );
+            }
+        }
+        return hash_reader(algo, file);
     }
 
     // Non-regular files or fallback: stream

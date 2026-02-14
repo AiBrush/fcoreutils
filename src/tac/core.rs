@@ -1,15 +1,16 @@
 use std::io::{self, IoSlice, Write};
 
-use rayon::prelude::*;
-
-/// Threshold for parallel processing (512KB).
-/// Lower threshold allows parallelism for smaller files in benchmarks.
-const PARALLEL_THRESHOLD: usize = 512 * 1024;
+/// Threshold for parallel position finding (4MB).
+/// Thread spawn overhead (~50μs) and position Vec allocation hurt for small files.
+/// For 1MB with ~25K lines, sequential memrchr_iter takes ~0.1ms; parallel
+/// overhead adds ~100μs for no benefit. Parallel pays off at 4MB+.
+const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Reverse records separated by a single byte.
-/// Scans for separators with SIMD memchr, then outputs records in reverse
-/// order directly from the input buffer. Expects the caller to provide
-/// a buffered writer (e.g., BufWriter) for efficient syscall batching.
+/// Uses zero-copy writev output: IoSlice entries point directly into
+/// the input buffer, eliminating output buffer allocation and memcpy.
+/// For large data (>= 512KB), uses parallel memchr via std::thread::scope
+/// (avoids rayon's ~300µs thread pool init overhead per process).
 pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -37,20 +38,6 @@ pub fn tac_bytes_owned(
     tac_bytes(data, separator, before, out)
 }
 
-/// Collect separator positions with pre-allocated Vec.
-/// memchr_iter's size_hint returns (0, Some(len)), so collect() starts at
-/// capacity 0 and doubles ~20 times for 1M+ separators. Pre-allocating
-/// with an estimated line length avoids all reallocations.
-#[inline]
-fn collect_positions_byte(data: &[u8], sep: u8) -> Vec<usize> {
-    let estimated = data.len() / 40 + 64; // ~40 bytes per line, conservative
-    let mut positions = Vec::with_capacity(estimated);
-    for pos in memchr::memchr_iter(sep, data) {
-        positions.push(pos);
-    }
-    positions
-}
-
 /// Collect multi-byte separator positions with pre-allocated Vec.
 #[inline]
 fn collect_positions_str(data: &[u8], separator: &[u8]) -> Vec<usize> {
@@ -62,203 +49,65 @@ fn collect_positions_str(data: &[u8], separator: &[u8]) -> Vec<usize> {
     positions
 }
 
-/// Split data into chunks at separator boundaries for parallel processing.
-/// Returns chunk boundary positions (indices into data).
-fn split_into_chunks(data: &[u8], sep: u8) -> Vec<usize> {
-    let num_threads = rayon::current_num_threads().max(1);
-    let chunk_target = data.len() / num_threads;
-    let mut boundaries = vec![0usize];
-    for i in 1..num_threads {
-        let target = i * chunk_target;
-        if target >= data.len() {
-            break;
-        }
-        if let Some(p) = memchr::memchr(sep, &data[target..]) {
-            let b = target + p + 1;
-            if b > *boundaries.last().unwrap() && b <= data.len() {
-                boundaries.push(b);
-            }
-        }
-    }
-    boundaries.push(data.len());
-    boundaries
-}
+/// Find separator positions in parallel using std::thread::scope.
+/// Returns per-chunk position arrays in forward order (chunk 0, 1, ..., N-1).
+/// Each chunk's positions are globally indexed (not chunk-relative).
+/// Uses lightweight OS threads instead of rayon to avoid ~300µs thread pool init.
+/// Parallel position finding using memrchr_iter (reverse scan).
+/// Positions within each chunk are stored in reverse order (end-of-chunk first).
+/// This way the output phase can iterate forward (cache-friendly sequential access)
+/// instead of backward through the position Vecs.
+/// For 100MB with ~2.5M positions (~20MB of position data), forward iteration
+/// enables L2 hardware prefetching, reducing access latency from ~35ns to ~5ns.
+fn parallel_find_positions(data: &[u8], sep: u8) -> Vec<Vec<usize>> {
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(data.len() / (256 * 1024)) // At least 256KB per thread
+        .max(2); // Always at least 2 for parallel benefit
 
-/// Parallel after-separator mode: split file into chunks, find separator
-/// positions in parallel, build contiguous output buffer in parallel,
-/// single write_all. The contiguous buffer approach is faster than writev
-/// for files with many short lines because it avoids per-record syscall
-/// overhead (writev with 250K IoSlice entries requires 244+ syscalls).
-fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let boundaries = split_into_chunks(data, sep);
-    let n_chunks = boundaries.len() - 1;
-    if n_chunks == 0 {
-        return out.write_all(data);
-    }
+    let chunk_size = data.len() / num_threads;
 
-    // Calculate output offsets: reversed chunk order.
-    // Output: chunk N-1 first, then N-2, ..., chunk 0.
-    let mut chunk_out_off = vec![0usize; n_chunks];
-    {
-        let mut off = 0;
-        for i in (0..n_chunks).rev() {
-            chunk_out_off[i] = off;
-            off += boundaries[i + 1] - boundaries[i];
-        }
-    }
-
-    // Allocate output buffer (same size as input: all bytes are output).
-    let mut output = Vec::with_capacity(data.len());
-    #[allow(clippy::uninit_vec)]
-    unsafe {
-        output.set_len(data.len());
-    }
-    let optr_addr = output.as_mut_ptr() as usize;
-    let iptr_addr = data.as_ptr() as usize;
-
-    // Parallel: find positions within each chunk and fill output buffer.
-    let chunk_ranges: Vec<(usize, usize, usize)> = (0..n_chunks)
-        .map(|i| (i, boundaries[i], boundaries[i + 1]))
-        .collect();
-
-    chunk_ranges
-        .par_iter()
-        .for_each(|&(chunk_idx, chunk_start, chunk_end)| {
-            let chunk = unsafe {
-                std::slice::from_raw_parts(
-                    (iptr_addr as *const u8).add(chunk_start),
-                    chunk_end - chunk_start,
-                )
-            };
-
-            // Find all separator positions within this chunk.
-            let estimated = chunk.len() / 40 + 64;
-            let mut positions = Vec::with_capacity(estimated);
-            for p in memchr::memchr_iter(sep, chunk) {
-                positions.push(chunk_start + p);
-            }
-
-            // Fill output at the correct offset.
-            let out_base = unsafe { (optr_addr as *mut u8).add(chunk_out_off[chunk_idx]) };
-            let src = iptr_addr as *const u8;
-            let mut wpos = 0usize;
-            let mut end = chunk_end;
-
-            for &pos in positions.iter().rev() {
-                let rec_start = pos + 1;
-                let len = end - rec_start;
-                if len > 0 {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(src.add(rec_start), out_base.add(wpos), len);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..num_threads)
+            .map(|i| {
+                let start = i * chunk_size;
+                let end = if i + 1 == num_threads {
+                    data.len()
+                } else {
+                    (i + 1) * chunk_size
+                };
+                s.spawn(move || {
+                    let chunk = &data[start..end];
+                    let estimated = chunk.len() / 40 + 64;
+                    let mut positions = Vec::with_capacity(estimated);
+                    // memrchr_iter scans backward, so positions are stored in
+                    // reverse order (last separator in chunk first). This matches
+                    // the output order (end of file first) for forward iteration.
+                    for p in memchr::memrchr_iter(sep, chunk) {
+                        positions.push(start + p);
                     }
-                    wpos += len;
-                }
-                end = rec_start;
-            }
+                    positions
+                })
+            })
+            .collect();
 
-            // Remaining prefix within chunk (before first separator).
-            if end > chunk_start {
-                let len = end - chunk_start;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(chunk_start), out_base.add(wpos), len);
-                }
-            }
-        });
-
-    out.write_all(&output)
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
 }
 
-/// Parallel before-separator mode: same parallel contiguous buffer approach.
-fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let boundaries = split_into_chunks(data, sep);
-    let n_chunks = boundaries.len() - 1;
-    if n_chunks == 0 {
-        return out.write_all(data);
-    }
-
-    let mut chunk_out_off = vec![0usize; n_chunks];
-    {
-        let mut off = 0;
-        for i in (0..n_chunks).rev() {
-            chunk_out_off[i] = off;
-            off += boundaries[i + 1] - boundaries[i];
-        }
-    }
-
-    let mut output = Vec::with_capacity(data.len());
-    #[allow(clippy::uninit_vec)]
-    unsafe {
-        output.set_len(data.len());
-    }
-    let optr_addr = output.as_mut_ptr() as usize;
-    let iptr_addr = data.as_ptr() as usize;
-
-    let chunk_ranges: Vec<(usize, usize, usize)> = (0..n_chunks)
-        .map(|i| (i, boundaries[i], boundaries[i + 1]))
-        .collect();
-
-    chunk_ranges
-        .par_iter()
-        .for_each(|&(chunk_idx, chunk_start, chunk_end)| {
-            let chunk = unsafe {
-                std::slice::from_raw_parts(
-                    (iptr_addr as *const u8).add(chunk_start),
-                    chunk_end - chunk_start,
-                )
-            };
-
-            let estimated = chunk.len() / 40 + 64;
-            let mut positions = Vec::with_capacity(estimated);
-            for p in memchr::memchr_iter(sep, chunk) {
-                positions.push(chunk_start + p);
-            }
-
-            // Before mode: separator attached to the start of each record.
-            let out_base = unsafe { (optr_addr as *mut u8).add(chunk_out_off[chunk_idx]) };
-            let src = iptr_addr as *const u8;
-            let mut wpos = 0usize;
-            let mut end = chunk_end;
-
-            for &pos in positions.iter().rev() {
-                let len = end - pos;
-                if len > 0 {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(src.add(pos), out_base.add(wpos), len);
-                    }
-                    wpos += len;
-                }
-                end = pos;
-            }
-
-            // Remaining prefix within chunk (before first separator).
-            if end > chunk_start {
-                let len = end - chunk_start;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(chunk_start), out_base.add(wpos), len);
-                }
-            }
-        });
-
-    out.write_all(&output)
-}
-
-/// After-separator mode: zero-copy writev from source data.
-/// Records are output in reverse order using IoSlice entries pointing
-/// directly into the input buffer. No output buffer allocation or copy needed.
-/// For files <512KB, this avoids ~100-500KB of allocation + memcpy overhead,
-/// trading it for batched writev syscalls (~3-13 calls for typical data).
+/// After-separator mode for small data: backward memrchr scan + writev.
+/// Uses memrchr_iter to scan positions right-to-left, building IoSlice
+/// entries on-the-fly without an intermediate position Vec.
+/// Zero-copy: all output points directly into the input buffer.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let positions = collect_positions_byte(data, sep);
-
-    if positions.is_empty() {
-        return out.write_all(data);
-    }
-
     const BATCH: usize = 1024;
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
+    let mut found_any = false;
 
-    for &pos in positions.iter().rev() {
+    for pos in memchr::memrchr_iter(sep, data) {
+        found_any = true;
         let rec_start = pos + 1;
         if rec_start < end {
             slices.push(IoSlice::new(&data[rec_start..end]));
@@ -268,6 +117,10 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
             }
         }
         end = rec_start;
+    }
+
+    if !found_any {
+        return out.write_all(data);
     }
 
     // Remaining prefix before the first separator
@@ -281,20 +134,15 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
     Ok(())
 }
 
-/// Before-separator mode: zero-copy writev from source data.
-/// Same approach as after mode: IoSlice entries pointing into source data.
+/// Before-separator mode for small data: backward memrchr scan + writev.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let positions = collect_positions_byte(data, sep);
-
-    if positions.is_empty() {
-        return out.write_all(data);
-    }
-
     const BATCH: usize = 1024;
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
+    let mut found_any = false;
 
-    for &pos in positions.iter().rev() {
+    for pos in memchr::memrchr_iter(sep, data) {
+        found_any = true;
         if pos < end {
             slices.push(IoSlice::new(&data[pos..end]));
             if slices.len() >= BATCH {
@@ -303,6 +151,93 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
             }
         }
         end = pos;
+    }
+
+    if !found_any {
+        return out.write_all(data);
+    }
+
+    if end > 0 {
+        slices.push(IoSlice::new(&data[..end]));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
+    }
+
+    Ok(())
+}
+
+/// Parallel after-separator mode: parallel forward memchr + zero-copy writev.
+/// Phase 1: Find separator positions in parallel via thread::scope.
+/// Phase 2: Iterate positions from last chunk to first, building IoSlice
+/// entries pointing directly into the input buffer. No output buffer needed.
+///
+/// vs previous contiguous buffer approach:
+/// - Eliminates N-byte output buffer allocation (10MB → 0 for 10MB file)
+/// - Eliminates N-byte memcpy for reverse-copy (saves ~1ms per 10MB)
+/// - Uses std::thread::scope instead of rayon (saves ~300µs thread pool init)
+fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
+    let chunk_positions = parallel_find_positions(data, sep);
+
+    // Check if no separators found in any chunk
+    if chunk_positions.iter().all(|v| v.is_empty()) {
+        return out.write_all(data);
+    }
+
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut end = data.len();
+
+    // Process chunks from last to first. Within each chunk, positions are already
+    // in reverse order (from memrchr_iter), so iterate forward for cache-friendly access.
+    for positions in chunk_positions.iter().rev() {
+        for &pos in positions.iter() {
+            let rec_start = pos + 1;
+            if rec_start < end {
+                slices.push(IoSlice::new(&data[rec_start..end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
+                }
+            }
+            end = rec_start;
+        }
+    }
+
+    // Remaining prefix before the first separator
+    if end > 0 {
+        slices.push(IoSlice::new(&data[..end]));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
+    }
+
+    Ok(())
+}
+
+/// Parallel before-separator mode: parallel forward memchr + zero-copy writev.
+fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
+    let chunk_positions = parallel_find_positions(data, sep);
+
+    if chunk_positions.iter().all(|v| v.is_empty()) {
+        return out.write_all(data);
+    }
+
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut end = data.len();
+
+    for positions in chunk_positions.iter().rev() {
+        for &pos in positions.iter() {
+            if pos < end {
+                slices.push(IoSlice::new(&data[pos..end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
+                }
+            }
+            end = pos;
+        }
     }
 
     if end > 0 {

@@ -16,11 +16,10 @@ const MAX_IOV: usize = 1024;
 const STREAM_BUF: usize = 32 * 1024 * 1024;
 
 /// Minimum data size to engage rayon parallel processing for mmap paths.
-/// AVX2 translation runs at ~10 GB/s per core. For 10MB benchmarks,
-/// rayon overhead (~100-200us for spawn+join) dominates the ~1ms
-/// single-core translate time. Only use parallel for genuinely large files
-/// where the parallel speedup outweighs rayon overhead.
-const PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
+/// For SIMD delete/squeeze on 10MB data, single-core takes ~8-11ms while
+/// parallel (4 threads) takes ~2-3ms plus ~0.15ms rayon overhead. The parallel
+/// speedup (3-4×) far outweighs the rayon cost for data >= 4MB.
+const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// 256-entry lookup table for byte compaction: for each 8-bit keep mask,
 /// stores the bit positions of set bits (indices of bytes to keep).
