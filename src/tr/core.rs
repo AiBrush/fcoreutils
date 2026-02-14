@@ -124,6 +124,7 @@ fn get_simd_level() -> u8 {
 }
 
 /// Count how many entries in the translate table are non-identity.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn count_non_identity(table: &[u8; 256]) -> usize {
     table
