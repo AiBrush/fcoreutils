@@ -2413,49 +2413,52 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                 }
 
-                // Radix + prefix sort for single-key lexicographic path.
-                // Uses radix distribution on (key_prefix, line_index) pairs.
-                // Resolves most ordering via the 8-byte prefix radix buckets.
-                let pfx = |i: usize, &(s, e): &(usize, usize)| -> (u64, usize) {
-                    (if s < e { line_prefix(data, s, e) } else { 0u64 }, i)
+                // Packed-entry radix sort for single-key lexicographic path.
+                // Stores key boundaries directly in each entry, eliminating
+                // random accesses to key_offs[] during comparison.
+                // Entry: (key_prefix, key_start, key_end, line_idx) = 24 bytes.
+                // This reduces total memory from 12MB (entries+key_offs+offsets)
+                // to 6MB (packed entries) for 250K lines.
+                type PackedEntry = (u64, u32, u32, u32);
+                let build_packed = |i: usize, &(ks, ke): &(usize, usize)| -> PackedEntry {
+                    let pfx = if ks < ke {
+                        line_prefix(data, ks, ke)
+                    } else {
+                        0u64
+                    };
+                    (pfx, ks as u32, ke as u32, i as u32)
                 };
-                let mut entries: Vec<(u64, usize)> = if num_lines > 10_000 {
+                let mut entries: Vec<PackedEntry> = if num_lines > 10_000 {
                     key_offs
                         .par_iter()
                         .enumerate()
-                        .map(|(i, ko)| pfx(i, ko))
+                        .map(|(i, ko)| build_packed(i, ko))
                         .collect()
                 } else {
                     key_offs
                         .iter()
                         .enumerate()
-                        .map(|(i, ko)| pfx(i, ko))
+                        .map(|(i, ko)| build_packed(i, ko))
                         .collect()
                 };
 
-                // Pdqsort with 8-byte prefix comparison.
-                // The u64 prefix resolves most comparisons in a single instruction.
-                // For equal prefixes, compare remaining key bytes with u64-wide loads.
-                // This is faster than radix sort for keyed sorts (-t,-k) because:
-                // - No 256KB+ bucket allocation overhead
-                // - No multi-level scatter passes with random writes
-                // - Cache-friendly in-place sort (entries fit in L2 for <500K lines)
-                // - Parallel pdqsort scales well via rayon
+                // Comparison using packed entries: key data is in the entry,
+                // no key_offs[] lookup needed. Only offsets[] is accessed for
+                // last-resort full-line comparison (rare).
                 let data_addr = data.as_ptr() as usize;
-                let prefix_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                let offsets_ptr = offsets.as_ptr() as usize;
+                let packed_cmp = |a: &PackedEntry, b: &PackedEntry| -> Ordering {
                     let ord = match a.0.cmp(&b.0) {
                         Ordering::Equal => {
-                            let (sa, ea) = key_offs[a.1];
-                            let (sb, eb) = key_offs[b.1];
-                            let la = ea - sa;
-                            let lb = eb - sb;
+                            let la = (a.2 - a.1) as usize;
+                            let lb = (b.2 - b.1) as usize;
                             let skip = 8.min(la).min(lb);
-                            let rem_a = la - skip;
-                            let rem_b = lb - skip;
                             unsafe {
                                 let dp = data_addr as *const u8;
-                                let pa = dp.add(sa + skip);
-                                let pb = dp.add(sb + skip);
+                                let pa = dp.add(a.1 as usize + skip);
+                                let pb = dp.add(b.1 as usize + skip);
+                                let rem_a = la - skip;
+                                let rem_b = lb - skip;
                                 let min_rem = rem_a.min(rem_b);
                                 let mut i = 0usize;
                                 while i + 8 <= min_rem {
@@ -2476,8 +2479,9 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         return if reverse { ord.reverse() } else { ord };
                     }
                     if !stable {
-                        let (la, ra) = offsets[a.1];
-                        let (lb, rb) = offsets[b.1];
+                        let off = offsets_ptr as *const (usize, usize);
+                        let (la, ra) = unsafe { *off.add(a.3 as usize) };
+                        let (lb, rb) = unsafe { *off.add(b.3 as usize) };
                         unsafe {
                             let dp = data_addr as *const u8;
                             std::slice::from_raw_parts(dp.add(la), ra - la)
@@ -2489,17 +2493,16 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 };
                 if num_lines > 4096 && !reverse && !stable {
                     // Hybrid MSD radix + parallel bucket pdqsort for single-key lex.
-                    // Same approach as lex FAST PATH 1: distribute by top byte of key
-                    // prefix, then pdqsort each bucket independently.
+                    // Distribute by top byte of key prefix, then pdqsort each bucket.
                     let n = entries.len();
-                    let mut temp: Vec<(u64, usize)> = Vec::with_capacity(n);
+                    let mut temp: Vec<PackedEntry> = Vec::with_capacity(n);
                     #[allow(clippy::uninit_vec)]
                     unsafe {
                         temp.set_len(n);
                     }
                     let mut cnts = [0u32; 256];
-                    for &(pfx, _) in entries.iter() {
-                        cnts[(pfx >> 56) as usize] += 1;
+                    for ent in entries.iter() {
+                        cnts[(ent.0 >> 56) as usize] += 1;
                     }
                     let mut bk_starts = [0usize; 257];
                     {
@@ -2525,27 +2528,23 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                     entries = temp;
 
-                    // Parallel bucket sort
+                    // Parallel bucket sort with packed comparison (no key_offs lookup)
                     let entries_ptr = entries.as_mut_ptr() as usize;
-                    let key_offs_ptr = key_offs.as_ptr() as usize;
-                    let offsets_ptr = offsets.as_ptr() as usize;
                     let buckets: Vec<(usize, usize)> = (0..256)
                         .filter(|&i| bk_starts[i + 1] - bk_starts[i] > 1)
                         .map(|i| (bk_starts[i], bk_starts[i + 1]))
                         .collect();
-                    let sk_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                    // Packed comparison for parallel buckets: all data in entry
+                    let pk_cmp = |a: &PackedEntry, b: &PackedEntry| -> Ordering {
                         let ord = match a.0.cmp(&b.0) {
                             Ordering::Equal => {
-                                let ko = key_offs_ptr as *const (usize, usize);
-                                let (sa, ea) = unsafe { *ko.add(a.1) };
-                                let (sb, eb) = unsafe { *ko.add(b.1) };
-                                let la = ea - sa;
-                                let lb = eb - sb;
+                                let la = (a.2 - a.1) as usize;
+                                let lb = (b.2 - b.1) as usize;
                                 let skip = 8.min(la).min(lb);
                                 unsafe {
                                     let dp = data_addr as *const u8;
-                                    let pa = dp.add(sa + skip);
-                                    let pb = dp.add(sb + skip);
+                                    let pa = dp.add(a.1 as usize + skip);
+                                    let pb = dp.add(b.1 as usize + skip);
                                     let rem_a = la - skip;
                                     let rem_b = lb - skip;
                                     let min_rem = rem_a.min(rem_b);
@@ -2569,8 +2568,8 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         }
                         // Last-resort: full line comparison
                         let off = offsets_ptr as *const (usize, usize);
-                        let (la, ra) = unsafe { *off.add(a.1) };
-                        let (lb, rb) = unsafe { *off.add(b.1) };
+                        let (la, ra) = unsafe { *off.add(a.3 as usize) };
+                        let (lb, rb) = unsafe { *off.add(b.3 as usize) };
                         unsafe {
                             let dp = data_addr as *const u8;
                             std::slice::from_raw_parts(dp.add(la), ra - la)
@@ -2581,12 +2580,12 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         let bsize = hi - lo;
                         let group = unsafe {
                             std::slice::from_raw_parts_mut(
-                                (entries_ptr as *mut (u64, usize)).add(lo),
+                                (entries_ptr as *mut PackedEntry).add(lo),
                                 bsize,
                             )
                         };
                         if bsize <= 64 {
-                            group.sort_unstable_by(sk_cmp);
+                            group.sort_unstable_by(pk_cmp);
                             return;
                         }
                         // Level-2 radix by second byte of key prefix
@@ -2603,7 +2602,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             }
                             starts2[256] = s2;
                         }
-                        let mut temp2: Vec<(u64, usize)> = Vec::with_capacity(bsize);
+                        let mut temp2: Vec<PackedEntry> = Vec::with_capacity(bsize);
                         #[allow(clippy::uninit_vec)]
                         unsafe {
                             temp2.set_len(bsize);
@@ -2621,18 +2620,93 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         for i in 0..256 {
                             let sub_sz = starts2[i + 1] - starts2[i];
                             if sub_sz > 1 {
-                                group[starts2[i]..starts2[i + 1]].sort_unstable_by(sk_cmp);
+                                group[starts2[i]..starts2[i + 1]].sort_unstable_by(pk_cmp);
                             }
                         }
                     });
                 } else if num_lines > 10_000 {
-                    entries.par_sort_unstable_by(prefix_cmp);
+                    entries.par_sort_unstable_by(packed_cmp);
                 } else if stable {
-                    entries.sort_by(prefix_cmp);
+                    entries.sort_by(packed_cmp);
                 } else {
-                    entries.sort_unstable_by(prefix_cmp);
+                    entries.sort_unstable_by(packed_cmp);
                 }
-                write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
+                // Output sorted packed entries
+                {
+                    let dp = data.as_ptr();
+                    const BATCH: usize = 512;
+                    let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+                    if config.unique {
+                        let mut prev: Option<u32> = None;
+                        let n = entries.len();
+                        for j in 0..n {
+                            let idx = if reverse { n - 1 - j } else { j };
+                            let ent = &entries[idx];
+                            let li = ent.3 as usize;
+                            let (s, e) = offsets[li];
+                            let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
+                            let should_output = match prev {
+                                Some(p) => {
+                                    let pi = p as usize;
+                                    let (ps, pe) = offsets[pi];
+                                    let prev_line =
+                                        unsafe { std::slice::from_raw_parts(dp.add(ps), pe - ps) };
+                                    compare_lines_for_dedup(prev_line, line, config)
+                                        != Ordering::Equal
+                                }
+                                None => true,
+                            };
+                            if should_output {
+                                slices.push(io::IoSlice::new(line));
+                                slices.push(io::IoSlice::new(terminator));
+                                if slices.len() >= BATCH * 2 {
+                                    write_all_vectored(&mut writer, &slices)?;
+                                    slices.clear();
+                                }
+                                prev = Some(ent.3);
+                            }
+                        }
+                    } else if reverse {
+                        let n = entries.len();
+                        for j in 0..n {
+                            if j + 8 < n {
+                                let ahead = entries[n - 1 - (j + 8)].3 as usize;
+                                let (ps, _) = offsets[ahead];
+                                prefetch_read(unsafe { dp.add(ps) });
+                            }
+                            let ent = &entries[n - 1 - j];
+                            let (s, e) = offsets[ent.3 as usize];
+                            let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
+                            slices.push(io::IoSlice::new(line));
+                            slices.push(io::IoSlice::new(terminator));
+                            if slices.len() >= BATCH * 2 {
+                                write_all_vectored(&mut writer, &slices)?;
+                                slices.clear();
+                            }
+                        }
+                    } else {
+                        let n = entries.len();
+                        for j in 0..n {
+                            if j + 8 < n {
+                                let ahead = entries[j + 8].3 as usize;
+                                let (ps, _) = offsets[ahead];
+                                prefetch_read(unsafe { dp.add(ps) });
+                            }
+                            let ent = &entries[j];
+                            let (s, e) = offsets[ent.3 as usize];
+                            let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
+                            slices.push(io::IoSlice::new(line));
+                            slices.push(io::IoSlice::new(terminator));
+                            if slices.len() >= BATCH * 2 {
+                                write_all_vectored(&mut writer, &slices)?;
+                                slices.clear();
+                            }
+                        }
+                    }
+                    if !slices.is_empty() {
+                        write_all_vectored(&mut writer, &slices)?;
+                    }
+                }
             } else {
                 // Pre-select comparator: eliminates per-comparison option branching
                 let mut indices: Vec<usize> = (0..num_lines).collect();
