@@ -858,9 +858,19 @@ fn encode_stream_nowrap(reader: &mut impl Read, writer: &mut impl Write) -> io::
     // For 10MB input: 1 read (10MB) instead of 2 reads.
     const NOWRAP_READ: usize = 12 * 1024 * 1024; // exactly divisible by 3
 
-    let mut buf = vec![0u8; NOWRAP_READ];
+    // SAFETY: buf bytes are written by read_full before being processed.
+    // encode_buf bytes are written by encode before being read.
+    let mut buf: Vec<u8> = Vec::with_capacity(NOWRAP_READ);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(NOWRAP_READ);
+    }
     let encode_buf_size = BASE64_ENGINE.encoded_length(NOWRAP_READ);
-    let mut encode_buf = vec![0u8; encode_buf_size];
+    let mut encode_buf: Vec<u8> = Vec::with_capacity(encode_buf_size);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        encode_buf.set_len(encode_buf_size);
+    }
 
     loop {
         let n = read_full(reader, &mut buf)?;
@@ -896,9 +906,17 @@ fn encode_stream_wrapped(
 
     // Fallback: non-aligned wrap columns use IoSlice/writev with column tracking
     const STREAM_READ: usize = 12 * 1024 * 1024;
-    let mut buf = vec![0u8; STREAM_READ];
+    let mut buf: Vec<u8> = Vec::with_capacity(STREAM_READ);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(STREAM_READ);
+    }
     let encode_buf_size = BASE64_ENGINE.encoded_length(STREAM_READ);
-    let mut encode_buf = vec![0u8; encode_buf_size];
+    let mut encode_buf: Vec<u8> = Vec::with_capacity(encode_buf_size);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        encode_buf.set_len(encode_buf_size);
+    }
 
     let mut col = 0usize;
 
@@ -935,12 +953,22 @@ fn encode_stream_wrapped_fused(
     let lines_per_chunk = (12 * 1024 * 1024) / bytes_per_line;
     let read_size = lines_per_chunk * bytes_per_line;
 
-    let mut buf = vec![0u8; read_size];
+    // SAFETY: buf bytes are written by read_full before being processed.
+    // work_buf bytes are written by encode/fuse_wrap before being read.
+    let mut buf: Vec<u8> = Vec::with_capacity(read_size);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(read_size);
+    }
     let enc_max = BASE64_ENGINE.encoded_length(read_size);
     let fused_max = enc_max + (enc_max / wrap_col + 2); // encoded + newlines
     let total_buf_size = fused_max + enc_max;
     // Single buffer: [0..fused_max) = fuse_wrap output, [fused_max..total_buf_size) = encode region
-    let mut work_buf: Vec<u8> = vec![0u8; total_buf_size];
+    let mut work_buf: Vec<u8> = Vec::with_capacity(total_buf_size);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        work_buf.set_len(total_buf_size);
+    }
 
     let mut trailing_partial = false;
 
@@ -987,7 +1015,12 @@ pub fn decode_stream(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     const READ_CHUNK: usize = 16 * 1024 * 1024;
-    let mut buf = vec![0u8; READ_CHUNK];
+    // SAFETY: buf bytes are written by read_full before being processed.
+    let mut buf: Vec<u8> = Vec::with_capacity(READ_CHUNK);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(READ_CHUNK);
+    }
     // Pre-allocate clean buffer once and reuse across iterations.
     // Use Vec with set_len for zero-overhead reset instead of clear() + extend().
     let mut clean: Vec<u8> = Vec::with_capacity(READ_CHUNK + 4);
