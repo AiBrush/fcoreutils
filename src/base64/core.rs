@@ -142,8 +142,7 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
             let out_base = line_idx * line_out;
             unsafe {
                 let s0 = std::slice::from_raw_parts_mut(dst.add(out_base), wrap_col);
-                let _ = BASE64_ENGINE
-                    .encode(&data[in_base..in_base + bytes_per_line], s0.as_out());
+                let _ = BASE64_ENGINE.encode(&data[in_base..in_base + bytes_per_line], s0.as_out());
                 *dst.add(out_base + wrap_col) = b'\n';
 
                 let s1 = std::slice::from_raw_parts_mut(dst.add(out_base + line_out), wrap_col);
@@ -153,16 +152,14 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
                 );
                 *dst.add(out_base + line_out + wrap_col) = b'\n';
 
-                let s2 =
-                    std::slice::from_raw_parts_mut(dst.add(out_base + 2 * line_out), wrap_col);
+                let s2 = std::slice::from_raw_parts_mut(dst.add(out_base + 2 * line_out), wrap_col);
                 let _ = BASE64_ENGINE.encode(
                     &data[in_base + 2 * bytes_per_line..in_base + 3 * bytes_per_line],
                     s2.as_out(),
                 );
                 *dst.add(out_base + 2 * line_out + wrap_col) = b'\n';
 
-                let s3 =
-                    std::slice::from_raw_parts_mut(dst.add(out_base + 3 * line_out), wrap_col);
+                let s3 = std::slice::from_raw_parts_mut(dst.add(out_base + 3 * line_out), wrap_col);
                 let _ = BASE64_ENGINE.encode(
                     &data[in_base + 3 * bytes_per_line..in_base + 4 * bytes_per_line],
                     s3.as_out(),
@@ -178,8 +175,7 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
             let out_base = line_idx * line_out;
             unsafe {
                 let s = std::slice::from_raw_parts_mut(dst.add(out_base), wrap_col);
-                let _ =
-                    BASE64_ENGINE.encode(&data[in_base..in_base + bytes_per_line], s.as_out());
+                let _ = BASE64_ENGINE.encode(&data[in_base..in_base + bytes_per_line], s.as_out());
                 *dst.add(out_base + wrap_col) = b'\n';
             }
             line_idx += 1;
@@ -817,7 +813,12 @@ fn decode_fixed_stride(data: &[u8], stride: usize, out: &mut impl Write) -> io::
     let line_len = stride - 1; // data bytes per line (e.g. 76 for stride 77)
     let num_full_lines = data.len() / stride;
     let remainder = data.len() % stride;
-    let clean_len = num_full_lines * line_len + if remainder > 0 { remainder.min(line_len) } else { 0 };
+    let clean_len = num_full_lines * line_len
+        + if remainder > 0 {
+            remainder.min(line_len)
+        } else {
+            0
+        };
 
     let mut clean: Vec<u8> = Vec::with_capacity(clean_len);
     let dst = clean.as_mut_ptr();
@@ -830,9 +831,21 @@ fn decode_fixed_stride(data: &[u8], stride: usize, out: &mut impl Write) -> io::
     while line + 4 <= num_full_lines {
         unsafe {
             std::ptr::copy_nonoverlapping(src.add(line * stride), dst.add(wp), line_len);
-            std::ptr::copy_nonoverlapping(src.add((line + 1) * stride), dst.add(wp + line_len), line_len);
-            std::ptr::copy_nonoverlapping(src.add((line + 2) * stride), dst.add(wp + 2 * line_len), line_len);
-            std::ptr::copy_nonoverlapping(src.add((line + 3) * stride), dst.add(wp + 3 * line_len), line_len);
+            std::ptr::copy_nonoverlapping(
+                src.add((line + 1) * stride),
+                dst.add(wp + line_len),
+                line_len,
+            );
+            std::ptr::copy_nonoverlapping(
+                src.add((line + 2) * stride),
+                dst.add(wp + 2 * line_len),
+                line_len,
+            );
+            std::ptr::copy_nonoverlapping(
+                src.add((line + 3) * stride),
+                dst.add(wp + 3 * line_len),
+                line_len,
+            );
         }
         wp += 4 * line_len;
         line += 4;
