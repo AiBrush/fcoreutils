@@ -166,10 +166,10 @@ fn enlarge_pipes() {
         .ok()
         .and_then(|s| s.trim().parse::<i32>().ok());
     for &fd in &[0i32, 1] {
-        if let Some(max) = max_size {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, max) } > 0 {
-                continue;
-            }
+        if let Some(max) = max_size
+            && unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, max) } > 0
+        {
+            continue;
         }
         for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
             if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
