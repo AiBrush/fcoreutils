@@ -2297,11 +2297,12 @@ fn process_bytes_from_start(
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        // For small max_bytes, the buffer path is faster than writev zero-copy
+        // For moderate max_bytes, the buffer path is faster than writev zero-copy
         // because every line gets truncated, creating 3 IoSlice entries per line.
         // Copying max_bytes+1 bytes into a contiguous buffer is cheaper than
         // managing millions of IoSlice entries through the kernel.
-        if max_bytes <= 64 {
+        // Threshold at 512 covers common byte-range benchmarks like -b1-100.
+        if max_bytes <= 512 {
             // Estimate output size without scanning: output <= data.len(),
             // typically ~data.len()/4 for short max_bytes on longer lines.
             let est_out = (data.len() / 4).max(max_bytes + 2);

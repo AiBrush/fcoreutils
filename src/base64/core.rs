@@ -9,16 +9,16 @@ const BASE64_ENGINE: &base64_simd::Base64 = &base64_simd::STANDARD;
 /// Larger chunks = fewer write() syscalls for big files.
 const NOWRAP_CHUNK: usize = 32 * 1024 * 1024 - (32 * 1024 * 1024 % 3);
 
-/// Minimum data size for parallel encoding (4MB).
+/// Minimum data size for parallel encoding (2MB).
 /// For wrapped encoding, the parallel path assigns line-aligned chunks to each thread,
 /// with each thread encoding directly to its position in a shared output buffer.
-/// At 4MB+ the parallel speedup (2-4x on 4+ cores) exceeds rayon overhead (~200us).
-const PARALLEL_ENCODE_THRESHOLD: usize = 4 * 1024 * 1024;
+/// At 2MB+ the parallel speedup (2-4x on 4+ cores) exceeds rayon overhead (~200us).
+const PARALLEL_ENCODE_THRESHOLD: usize = 2 * 1024 * 1024;
 
-/// Minimum data size for parallel decoding (4MB of base64 data).
-/// At 4MB+ the parallel speedup on multi-core exceeds rayon overhead (~200us).
+/// Minimum data size for parallel decoding (2MB of base64 data).
+/// At 2MB+ the parallel speedup on multi-core exceeds rayon overhead (~200us).
 /// For 10MB benchmark inputs (~13MB base64), this enables parallel decode.
-const PARALLEL_DECODE_THRESHOLD: usize = 4 * 1024 * 1024;
+const PARALLEL_DECODE_THRESHOLD: usize = 2 * 1024 * 1024;
 
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with fused encode+wrap for maximum throughput.
