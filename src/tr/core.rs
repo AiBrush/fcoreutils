@@ -2516,6 +2516,26 @@ fn translate_to_separate_buf(
     writer.write_all(&out_buf)
 }
 
+/// Translate from a read-only mmap (or any byte slice) to a separate output buffer.
+/// Avoids MAP_PRIVATE COW page faults by reading from the original data and
+/// writing to a freshly allocated heap buffer.
+pub fn translate_mmap_readonly(
+    set1: &[u8],
+    set2: &[u8],
+    data: &[u8],
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let table = build_translate_table(set1, set2);
+
+    // Check if table is identity — pure passthrough
+    let is_identity = table.iter().enumerate().all(|(i, &v)| v == i as u8);
+    if is_identity {
+        return writer.write_all(data);
+    }
+
+    translate_to_separate_buf(data, &table, writer)
+}
+
 /// Translate + squeeze from mmap'd byte slice.
 ///
 /// For data >= 2MB: two-phase approach: parallel translate, then sequential squeeze.
