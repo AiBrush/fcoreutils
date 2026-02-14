@@ -314,6 +314,56 @@ fn write_count_line(out: &mut impl Write, count: u64, line: &[u8], term: u8) -> 
     }
 }
 
+/// Write a count-prefixed line into a Vec<u8> buffer (avoids Writer overhead).
+/// Same format as write_count_line but appends to buf instead of calling write_all.
+#[inline(always)]
+fn write_count_line_buf(buf: &mut Vec<u8>, count: u64, line: &[u8], term: u8) {
+    // Ultra-fast path for common small counts: pre-built prefix strings
+    if count <= 9 {
+        let prefix: &[u8] = match count {
+            1 => b"      1 ",
+            2 => b"      2 ",
+            3 => b"      3 ",
+            4 => b"      4 ",
+            5 => b"      5 ",
+            6 => b"      6 ",
+            7 => b"      7 ",
+            8 => b"      8 ",
+            9 => b"      9 ",
+            _ => unreachable!(),
+        };
+        let total = 8 + line.len() + 1;
+        buf.reserve(total);
+        let old_len = buf.len();
+        unsafe {
+            let dst = buf.as_mut_ptr().add(old_len);
+            std::ptr::copy_nonoverlapping(prefix.as_ptr(), dst, 8);
+            std::ptr::copy_nonoverlapping(line.as_ptr(), dst.add(8), line.len());
+            *dst.add(8 + line.len()) = term;
+            buf.set_len(old_len + total);
+        }
+        return;
+    }
+
+    // Build prefix "     N " in a stack buffer
+    let mut prefix = [b' '; 28];
+    let digits = itoa_right_aligned_into(&mut prefix, count);
+    let width = digits.max(7);
+    let prefix_len = width + 1;
+    prefix[width] = b' ';
+
+    let total = prefix_len + line.len() + 1;
+    buf.reserve(total);
+    let old_len = buf.len();
+    unsafe {
+        let dst = buf.as_mut_ptr().add(old_len);
+        std::ptr::copy_nonoverlapping(prefix.as_ptr(), dst, prefix_len);
+        std::ptr::copy_nonoverlapping(line.as_ptr(), dst.add(prefix_len), line.len());
+        *dst.add(prefix_len + line.len()) = term;
+        buf.set_len(old_len + total);
+    }
+}
+
 /// Write u64 decimal right-aligned into prefix buffer.
 /// Buffer is pre-filled with spaces. Returns number of digits written.
 #[inline(always)]
@@ -1079,6 +1129,12 @@ fn process_filter_fast_singlepass(
     let mut count: u64 = 1;
     let mut cur_start = first_term + 1;
 
+    // Batch output using IoSlice write_vectored to reduce syscall overhead.
+    // Each output line needs 2 slices: content + terminator.
+    const BATCH: usize = 512;
+    let term_slice: [u8; 1] = [term];
+    let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+
     while cur_start < data_len {
         // Speculative line-end detection
         let cur_end = {
@@ -1128,8 +1184,12 @@ fn process_filter_fast_singlepass(
         } else {
             let should_print = if repeated { count > 1 } else { count == 1 };
             if should_print {
-                writer.write_all(&data[prev_start..prev_end])?;
-                writer.write_all(&[term])?;
+                slices.push(io::IoSlice::new(&data[prev_start..prev_end]));
+                slices.push(io::IoSlice::new(&term_slice));
+                if slices.len() >= BATCH * 2 {
+                    write_all_vectored(writer, &slices)?;
+                    slices.clear();
+                }
             }
             prev_start = cur_start;
             prev_end = cur_end;
@@ -1152,8 +1212,11 @@ fn process_filter_fast_singlepass(
     // Output last group
     let should_print = if repeated { count > 1 } else { count == 1 };
     if should_print {
-        writer.write_all(&data[prev_start..prev_end])?;
-        writer.write_all(&[term])?;
+        slices.push(io::IoSlice::new(&data[prev_start..prev_end]));
+        slices.push(io::IoSlice::new(&term_slice));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(writer, &slices)?;
     }
 
     Ok(())
@@ -1208,6 +1271,11 @@ fn process_count_fast_singlepass(
     };
     let mut count: u64 = 1;
     let mut cur_start = first_term + 1;
+
+    // Batch output into a local buffer to reduce write_all calls.
+    // 64KB buffer amortizes BufWriter overhead (~50ns per write_all) across many lines.
+    const BATCH_BUF_SIZE: usize = 64 * 1024;
+    let mut batch_buf: Vec<u8> = Vec::with_capacity(BATCH_BUF_SIZE);
 
     while cur_start < data_len {
         // Speculative line-end detection: if previous line had length L,
@@ -1269,7 +1337,11 @@ fn process_count_fast_singlepass(
                 }
             };
             if should_print {
-                write_count_line(writer, count, &data[prev_start..prev_end], term)?;
+                write_count_line_buf(&mut batch_buf, count, &data[prev_start..prev_end], term);
+                if batch_buf.len() >= BATCH_BUF_SIZE {
+                    writer.write_all(&batch_buf)?;
+                    batch_buf.clear();
+                }
             }
             prev_start = cur_start;
             prev_end = cur_end;
@@ -1300,7 +1372,10 @@ fn process_count_fast_singlepass(
         }
     };
     if should_print {
-        write_count_line(writer, count, &data[prev_start..prev_end], term)?;
+        write_count_line_buf(&mut batch_buf, count, &data[prev_start..prev_end], term);
+    }
+    if !batch_buf.is_empty() {
+        writer.write_all(&batch_buf)?;
     }
 
     Ok(())
@@ -1388,6 +1463,11 @@ fn process_filter_ci_singlepass(
     let mut count: u64 = 1;
     let mut cur_start = first_term + 1;
 
+    // Batch output using IoSlice write_vectored
+    const BATCH: usize = 512;
+    let term_slice: [u8; 1] = [term];
+    let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+
     while cur_start < data_len {
         // Speculative line-end detection
         let cur_end = {
@@ -1414,8 +1494,12 @@ fn process_filter_ci_singlepass(
         } else {
             let should_print = if repeated { count > 1 } else { count == 1 };
             if should_print {
-                writer.write_all(&data[prev_start..prev_end])?;
-                writer.write_all(&[term])?;
+                slices.push(io::IoSlice::new(&data[prev_start..prev_end]));
+                slices.push(io::IoSlice::new(&term_slice));
+                if slices.len() >= BATCH * 2 {
+                    write_all_vectored(writer, &slices)?;
+                    slices.clear();
+                }
             }
             prev_start = cur_start;
             prev_end = cur_end;
@@ -1432,8 +1516,11 @@ fn process_filter_ci_singlepass(
 
     let should_print = if repeated { count > 1 } else { count == 1 };
     if should_print {
-        writer.write_all(&data[prev_start..prev_end])?;
-        writer.write_all(&[term])?;
+        slices.push(io::IoSlice::new(&data[prev_start..prev_end]));
+        slices.push(io::IoSlice::new(&term_slice));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(writer, &slices)?;
     }
 
     Ok(())
@@ -1470,6 +1557,10 @@ fn process_count_ci_singlepass(
     let mut count: u64 = 1;
     let mut cur_start = first_term + 1;
 
+    // Batch output into a local buffer to reduce write_all calls.
+    const BATCH_BUF_SIZE: usize = 64 * 1024;
+    let mut batch_buf: Vec<u8> = Vec::with_capacity(BATCH_BUF_SIZE);
+
     while cur_start < data.len() {
         let cur_end = match memchr::memchr(term, &data[cur_start..]) {
             Some(offset) => cur_start + offset,
@@ -1489,7 +1580,11 @@ fn process_count_ci_singlepass(
                 }
             };
             if should_print {
-                write_count_line(writer, count, &data[prev_start..prev_end], term)?;
+                write_count_line_buf(&mut batch_buf, count, &data[prev_start..prev_end], term);
+                if batch_buf.len() >= BATCH_BUF_SIZE {
+                    writer.write_all(&batch_buf)?;
+                    batch_buf.clear();
+                }
             }
             prev_start = cur_start;
             prev_end = cur_end;
@@ -1513,7 +1608,10 @@ fn process_count_ci_singlepass(
         }
     };
     if should_print {
-        write_count_line(writer, count, &data[prev_start..prev_end], term)?;
+        write_count_line_buf(&mut batch_buf, count, &data[prev_start..prev_end], term);
+    }
+    if !batch_buf.is_empty() {
+        writer.write_all(&batch_buf)?;
     }
 
     Ok(())
