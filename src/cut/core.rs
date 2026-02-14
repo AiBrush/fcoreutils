@@ -1298,7 +1298,7 @@ fn fields_mid_range_chunk(
 }
 
 /// Extract fields start_field..=end_field from one line.
-/// Uses memchr_iter to skip to start_field, then counts delimiters to end_field.
+/// Uses scalar byte scanning for short lines, memchr_iter for longer.
 /// Raw pointer arithmetic to eliminate bounds checking.
 #[inline(always)]
 fn fields_mid_range_line(
@@ -1324,29 +1324,57 @@ fn fields_mid_range_line(
     // Count delimiters to find start_field and end_field boundaries
     let skip_before = start_field - 1; // delimiters to skip before start_field
     let field_span = end_field - start_field; // additional delimiters within the range
+    let target_end_delim = skip_before + field_span + 1;
     let mut delim_count = 0;
     let mut range_start = 0;
     let mut has_delim = false;
 
-    for pos in memchr_iter(delim, line) {
-        has_delim = true;
-        delim_count += 1;
-        if delim_count == skip_before {
-            range_start = pos + 1;
+    if len <= 256 {
+        // Scalar path for short lines
+        let mut i = 0usize;
+        unsafe {
+            while i < len {
+                if *base.add(i) == delim {
+                    has_delim = true;
+                    delim_count += 1;
+                    if delim_count == skip_before {
+                        range_start = i + 1;
+                    }
+                    if delim_count == target_end_delim {
+                        if skip_before == 0 {
+                            range_start = 0;
+                        }
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(range_start), i - range_start),
+                        );
+                        buf_push(buf, line_delim);
+                        return;
+                    }
+                }
+                i += 1;
+            }
         }
-        if delim_count == skip_before + field_span + 1 {
-            // Found the delimiter after end_field — output the range
-            if skip_before == 0 {
-                range_start = 0;
+    } else {
+        for pos in memchr_iter(delim, line) {
+            has_delim = true;
+            delim_count += 1;
+            if delim_count == skip_before {
+                range_start = pos + 1;
             }
-            unsafe {
-                buf_extend(
-                    buf,
-                    std::slice::from_raw_parts(base.add(range_start), pos - range_start),
-                );
-                buf_push(buf, line_delim);
+            if delim_count == target_end_delim {
+                if skip_before == 0 {
+                    range_start = 0;
+                }
+                unsafe {
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(range_start), pos - range_start),
+                    );
+                    buf_push(buf, line_delim);
+                }
+                return;
             }
-            return;
         }
     }
 
