@@ -8,19 +8,19 @@
 
 High-performance GNU coreutils replacement in Rust. Faster with SIMD acceleration. Drop-in compatible, cross-platform.
 
-## Performance ([independent benchmarks](https://github.com/AiBrush/coreutils-rs-independent-test) v0.2.0, Linux x86_64, hyperfine)
+## Performance ([independent benchmarks](https://github.com/AiBrush/coreutils-rs-independent-test) v0.2.3, Linux x86_64, hyperfine)
 
 | Tool | Speedup vs GNU | Benchmark |
 |------|---------------:|-----------|
-| wc | **34.7x** | default 100MB text |
-| sort | **17.6x** | lexicographic 10MB |
-| uniq | **14.1x** | repetitive 10MB |
-| cut | **8.6x** | -b1-100 10MB CSV |
-| tr | **6.8x** | -d lowercase 10MB |
-| tac | **3.9x** | reverse 100MB text |
-| base64 | **3.8x** | decode 10MB |
+| wc | **33.4x** | default 100MB text |
+| sort | **18.2x** | lexicographic 10MB |
+| uniq | **13.1x** | repetitive 10MB |
+| cut | **7.7x** | -b1-100 10MB CSV |
+| base64 | **5.6x** | decode 10MB |
+| tr | **4.6x** | -d lowercase 10MB |
+| tac | **4.3x** | reverse 100MB text |
 | md5sum | **1.4x** | single 100MB text |
-| b2sum | **1.3x** | single 100MB text |
+| b2sum | **1.4x** | single 100MB text |
 | sha256sum | **1.2x** | single 100MB text |
 
 ## Tools
@@ -36,7 +36,7 @@ High-performance GNU coreutils replacement in Rust. Faster with SIMD acceleratio
 | sort | `fsort` | Optimized | Line sorting (parallel merge sort) |
 | tr | `ftr` | Optimized | Character translation (SIMD range translate/delete, AVX2/SSE2, parallel) |
 | uniq | `funiq` | Optimized | Filter duplicate lines (mmap, zero-copy, single-pass) |
-| tac | `ftac` | Optimized | Reverse file lines (parallel SIMD scan, contiguous output buffer) |
+| tac | `ftac` | Optimized | Reverse file lines (parallel SIMD scan, zero-copy writev, vmsplice) |
 
 ## Installation
 

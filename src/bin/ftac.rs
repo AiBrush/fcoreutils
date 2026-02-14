@@ -116,11 +116,11 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             }
         };
 
-        // Override MADV_SEQUENTIAL from read_file: the contiguous buffer
-        // parallel approach scans forward in chunks (memchr) then copies records
-        // to the output buffer. WILLNEED pre-faults all pages so the parallel
-        // threads don't stall on page faults. Don't use SEQUENTIAL since
-        // multiple threads access different regions concurrently.
+        // Override MADV_SEQUENTIAL from read_file: the writev approach scans
+        // forward in chunks (memchr) then writes records in reverse via IoSlice.
+        // WILLNEED pre-faults all pages so the parallel threads don't stall on
+        // page faults. Don't use SEQUENTIAL since multiple threads access
+        // different regions concurrently.
         #[cfg(target_os = "linux")]
         {
             let ptr = data.as_ptr() as *mut libc::c_void;
@@ -159,6 +159,109 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
     had_error
 }
 
+/// VmspliceWriter: zero-copy pipe output using Linux vmsplice(2).
+///
+/// For pipe output, vmsplice references mmap pages directly in the kernel
+/// pipe buffer — no memcpy from userspace to kernel. This is safe for tac
+/// because mmap'd file pages are valid for the program's lifetime and are
+/// never modified. For non-pipe output (files, terminal), falls back to
+/// regular write(2).
+#[cfg(target_os = "linux")]
+struct VmspliceWriter {
+    raw: ManuallyDrop<std::fs::File>,
+    is_pipe: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl VmspliceWriter {
+    fn new() -> Self {
+        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        let is_pipe = unsafe {
+            let mut stat: libc::stat = std::mem::zeroed();
+            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
+        };
+        Self { raw, is_pipe }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Write for VmspliceWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write(buf);
+        }
+        let iov = libc::iovec {
+            iov_base: buf.as_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
+        };
+        let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+        if n >= 0 {
+            Ok(n as usize)
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                return Ok(0);
+            }
+            self.is_pipe = false;
+            (&*self.raw).write(buf)
+        }
+    }
+
+    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write_all(buf);
+        }
+        while !buf.is_empty() {
+            let iov = libc::iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            };
+            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+            if n > 0 {
+                buf = &buf[n as usize..];
+            } else if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "vmsplice wrote 0"));
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                self.is_pipe = false;
+                return (&*self.raw).write_all(buf);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        if !self.is_pipe || bufs.is_empty() {
+            return (&*self.raw).write_vectored(bufs);
+        }
+        let iovs: Vec<libc::iovec> = bufs
+            .iter()
+            .map(|b| libc::iovec {
+                iov_base: b.as_ptr() as *mut libc::c_void,
+                iov_len: b.len(),
+            })
+            .collect();
+        let n = unsafe { libc::vmsplice(1, iovs.as_ptr(), iovs.len(), 0) };
+        if n >= 0 {
+            Ok(n as usize)
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                return Ok(0);
+            }
+            self.is_pipe = false;
+            (&*self.raw).write_vectored(bufs)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Enlarge pipe buffers on Linux for higher throughput.
 /// Reads system max from /proc, falls back through decreasing sizes.
 #[cfg(target_os = "linux")]
@@ -194,18 +297,29 @@ fn main() {
         cli.files.clone()
     };
 
-    // For byte separator (default): use raw stdout for zero-copy writev.
-    // The core tac functions batch IoSlices and call write_vectored,
-    // which maps to system writev on Unix — zero-copy from mmap pages.
+    // For byte separator (default): use VmspliceWriter on Linux for
+    // zero-copy pipe output. The core tac functions build IoSlice entries
+    // pointing directly into mmap'd data and call write_vectored.
+    // VmspliceWriter.write_vectored uses vmsplice(2) to reference these
+    // pages in the kernel pipe buffer — no memcpy at any level.
     // For regex/string separator: use BufWriter since those paths
     // use many small write_all calls that benefit from buffering.
     #[cfg(unix)]
     let had_error = {
         let is_byte_sep = !cli.regex && cli.separator.is_none();
-        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
         if is_byte_sep {
-            run(&cli, &files, &mut &*raw)
+            #[cfg(target_os = "linux")]
+            {
+                let mut vwriter = VmspliceWriter::new();
+                run(&cli, &files, &mut vwriter)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                run(&cli, &files, &mut &*raw)
+            }
         } else {
+            let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
             let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, &*raw);
             let err = run(&cli, &files, &mut writer);
             let _ = writer.flush();

@@ -85,10 +85,11 @@ fn split_into_chunks(data: &[u8], sep: u8) -> Vec<usize> {
 }
 
 /// Parallel after-separator mode: split file into chunks, find separator
-/// positions in parallel, build contiguous output buffer in parallel,
-/// single write_all. The contiguous buffer approach is faster than writev
-/// for files with many short lines because it avoids per-record syscall
-/// overhead (writev with 250K IoSlice entries requires 244+ syscalls).
+/// positions in parallel with SIMD memchr, then build IoSlice entries
+/// pointing directly into the input buffer (zero-copy from mmap pages).
+/// Writes in batched write_vectored calls — no output buffer allocation
+/// or memcpy needed. With VmspliceWriter on Linux, vmsplice references
+/// the mmap pages directly in the pipe buffer.
 fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let boundaries = split_into_chunks(data, sep);
     let n_chunks = boundaries.len() - 1;
@@ -96,79 +97,66 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
         return out.write_all(data);
     }
 
-    // Calculate output offsets: reversed chunk order.
-    // Output: chunk N-1 first, then N-2, ..., chunk 0.
-    let mut chunk_out_off = vec![0usize; n_chunks];
-    {
-        let mut off = 0;
-        for i in (0..n_chunks).rev() {
-            chunk_out_off[i] = off;
-            off += boundaries[i + 1] - boundaries[i];
-        }
-    }
-
-    // Allocate output buffer (same size as input: all bytes are output).
-    let mut output = Vec::with_capacity(data.len());
-    #[allow(clippy::uninit_vec)]
-    unsafe {
-        output.set_len(data.len());
-    }
-    let optr_addr = output.as_mut_ptr() as usize;
-    let iptr_addr = data.as_ptr() as usize;
-
-    // Parallel: find positions within each chunk and fill output buffer.
-    let chunk_ranges: Vec<(usize, usize, usize)> = (0..n_chunks)
-        .map(|i| (i, boundaries[i], boundaries[i + 1]))
+    // Phase 1: Parallel memchr to find separator positions in each chunk.
+    let chunk_ranges: Vec<(usize, usize)> = (0..n_chunks)
+        .map(|i| (boundaries[i], boundaries[i + 1]))
         .collect();
 
-    chunk_ranges
+    let all_positions: Vec<Vec<usize>> = chunk_ranges
         .par_iter()
-        .for_each(|&(chunk_idx, chunk_start, chunk_end)| {
-            let chunk = unsafe {
-                std::slice::from_raw_parts(
-                    (iptr_addr as *const u8).add(chunk_start),
-                    chunk_end - chunk_start,
-                )
-            };
-
-            // Find all separator positions within this chunk.
+        .map(|&(chunk_start, chunk_end)| {
+            let chunk = &data[chunk_start..chunk_end];
             let estimated = chunk.len() / 40 + 64;
             let mut positions = Vec::with_capacity(estimated);
             for p in memchr::memchr_iter(sep, chunk) {
                 positions.push(chunk_start + p);
             }
+            positions
+        })
+        .collect();
 
-            // Fill output at the correct offset.
-            let out_base = unsafe { (optr_addr as *mut u8).add(chunk_out_off[chunk_idx]) };
-            let src = iptr_addr as *const u8;
-            let mut wpos = 0usize;
-            let mut end = chunk_end;
+    // Phase 2: Build IoSlice entries in reverse order and write in batches.
+    // Process chunks in reverse order; within each chunk, process positions
+    // in reverse. This produces the correct global reverse record order.
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
 
-            for &pos in positions.iter().rev() {
-                let rec_start = pos + 1;
-                let len = end - rec_start;
-                if len > 0 {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(src.add(rec_start), out_base.add(wpos), len);
-                    }
-                    wpos += len;
+    for chunk_idx in (0..n_chunks).rev() {
+        let chunk_end = boundaries[chunk_idx + 1];
+        let chunk_start = boundaries[chunk_idx];
+        let positions = &all_positions[chunk_idx];
+
+        let mut end = chunk_end;
+        for &pos in positions.iter().rev() {
+            let rec_start = pos + 1;
+            if rec_start < end {
+                slices.push(IoSlice::new(&data[rec_start..end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
                 }
-                end = rec_start;
             }
+            end = rec_start;
+        }
 
-            // Remaining prefix within chunk (before first separator).
-            if end > chunk_start {
-                let len = end - chunk_start;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(chunk_start), out_base.add(wpos), len);
-                }
+        // Remaining prefix within chunk (before first separator).
+        if end > chunk_start {
+            slices.push(IoSlice::new(&data[chunk_start..end]));
+            if slices.len() >= BATCH {
+                write_all_vectored(out, &slices)?;
+                slices.clear();
             }
-        });
+        }
+    }
 
-    out.write_all(&output)
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
+    }
+
+    Ok(())
 }
 
-/// Parallel before-separator mode: same parallel contiguous buffer approach.
+/// Parallel before-separator mode: same zero-copy writev approach.
 fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let boundaries = split_into_chunks(data, sep);
     let n_chunks = boundaries.len() - 1;
@@ -176,70 +164,60 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
         return out.write_all(data);
     }
 
-    let mut chunk_out_off = vec![0usize; n_chunks];
-    {
-        let mut off = 0;
-        for i in (0..n_chunks).rev() {
-            chunk_out_off[i] = off;
-            off += boundaries[i + 1] - boundaries[i];
-        }
-    }
-
-    let mut output = Vec::with_capacity(data.len());
-    #[allow(clippy::uninit_vec)]
-    unsafe {
-        output.set_len(data.len());
-    }
-    let optr_addr = output.as_mut_ptr() as usize;
-    let iptr_addr = data.as_ptr() as usize;
-
-    let chunk_ranges: Vec<(usize, usize, usize)> = (0..n_chunks)
-        .map(|i| (i, boundaries[i], boundaries[i + 1]))
+    let chunk_ranges: Vec<(usize, usize)> = (0..n_chunks)
+        .map(|i| (boundaries[i], boundaries[i + 1]))
         .collect();
 
-    chunk_ranges
+    let all_positions: Vec<Vec<usize>> = chunk_ranges
         .par_iter()
-        .for_each(|&(chunk_idx, chunk_start, chunk_end)| {
-            let chunk = unsafe {
-                std::slice::from_raw_parts(
-                    (iptr_addr as *const u8).add(chunk_start),
-                    chunk_end - chunk_start,
-                )
-            };
-
+        .map(|&(chunk_start, chunk_end)| {
+            let chunk = &data[chunk_start..chunk_end];
             let estimated = chunk.len() / 40 + 64;
             let mut positions = Vec::with_capacity(estimated);
             for p in memchr::memchr_iter(sep, chunk) {
                 positions.push(chunk_start + p);
             }
+            positions
+        })
+        .collect();
 
-            // Before mode: separator attached to the start of each record.
-            let out_base = unsafe { (optr_addr as *mut u8).add(chunk_out_off[chunk_idx]) };
-            let src = iptr_addr as *const u8;
-            let mut wpos = 0usize;
-            let mut end = chunk_end;
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
 
-            for &pos in positions.iter().rev() {
-                let len = end - pos;
-                if len > 0 {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(src.add(pos), out_base.add(wpos), len);
-                    }
-                    wpos += len;
-                }
-                end = pos;
-            }
+    for chunk_idx in (0..n_chunks).rev() {
+        let chunk_end = boundaries[chunk_idx + 1];
+        let chunk_start = boundaries[chunk_idx];
+        let positions = &all_positions[chunk_idx];
 
-            // Remaining prefix within chunk (before first separator).
-            if end > chunk_start {
-                let len = end - chunk_start;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(chunk_start), out_base.add(wpos), len);
+        let mut end = chunk_end;
+
+        // Before mode: separator attached to the start of each record.
+        for &pos in positions.iter().rev() {
+            if pos < end {
+                slices.push(IoSlice::new(&data[pos..end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
                 }
             }
-        });
+            end = pos;
+        }
 
-    out.write_all(&output)
+        // Remaining prefix within chunk (before first separator).
+        if end > chunk_start {
+            slices.push(IoSlice::new(&data[chunk_start..end]));
+            if slices.len() >= BATCH {
+                write_all_vectored(out, &slices)?;
+                slices.clear();
+            }
+        }
+    }
+
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
+    }
+
+    Ok(())
 }
 
 /// After-separator mode: zero-copy writev from source data.
