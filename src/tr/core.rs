@@ -1402,11 +1402,16 @@ pub fn translate_squeeze(
     let table = build_translate_table(set1, set2);
     let squeeze_set = build_member_set(set2);
 
+    // For single-char squeeze set with range-to-constant translation, use
+    // fused approach: translate via SIMD, then use memmem to find squeeze points.
+    if set2.len() == 1 || (set2.len() > 1 && set2.iter().all(|&b| b == set2[0])) {
+        let squeeze_ch = set2.last().copied().unwrap_or(0);
+        return translate_squeeze_single_ch(&table, squeeze_ch, &squeeze_set, reader, writer);
+    }
+
     // Two-pass optimization for range translations:
     // Pass 1: SIMD range translate in-place (10x faster than scalar table lookup)
     // Pass 2: scalar squeeze (inherently sequential due to state dependency)
-    // Even though it's two passes, the translate pass is so much faster with SIMD
-    // that the total is still a net win.
     let range_info = detect_range_offset(&table);
     let range_const_info = if range_info.is_none() {
         detect_range_to_constant(&table)
@@ -1430,14 +1435,43 @@ pub fn translate_squeeze(
         } else {
             translate_inplace(&mut buf[..n], &table);
         }
-        // Pass 2: squeeze in-place
+        // Pass 2: squeeze in-place using 8x-unrolled loop
         let mut wp = 0;
         unsafe {
             let ptr = buf.as_mut_ptr();
-            for i in 0..n {
+            let mut i = 0;
+            while i + 8 <= n {
+                macro_rules! squeeze_byte {
+                    ($off:expr) => {
+                        let b = *ptr.add(i + $off);
+                        if is_member(&squeeze_set, b) {
+                            if last_squeezed != b as u16 {
+                                last_squeezed = b as u16;
+                                *ptr.add(wp) = b;
+                                wp += 1;
+                            }
+                        } else {
+                            last_squeezed = 256;
+                            *ptr.add(wp) = b;
+                            wp += 1;
+                        }
+                    };
+                }
+                squeeze_byte!(0);
+                squeeze_byte!(1);
+                squeeze_byte!(2);
+                squeeze_byte!(3);
+                squeeze_byte!(4);
+                squeeze_byte!(5);
+                squeeze_byte!(6);
+                squeeze_byte!(7);
+                i += 8;
+            }
+            while i < n {
                 let b = *ptr.add(i);
                 if is_member(&squeeze_set, b) {
                     if last_squeezed == b as u16 {
+                        i += 1;
                         continue;
                     }
                     last_squeezed = b as u16;
@@ -1446,9 +1480,98 @@ pub fn translate_squeeze(
                 }
                 *ptr.add(wp) = b;
                 wp += 1;
+                i += 1;
             }
         }
         writer.write_all(&buf[..wp])?;
+    }
+    Ok(())
+}
+
+/// Optimized translate+squeeze for single squeeze character.
+/// After SIMD translation, uses memmem to find consecutive pairs
+/// of the squeeze char and does zero-copy writev from the buffer.
+fn translate_squeeze_single_ch(
+    table: &[u8; 256],
+    squeeze_ch: u8,
+    _squeeze_set: &[u8; 32],
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let range_info = detect_range_offset(table);
+    let range_const_info = if range_info.is_none() {
+        detect_range_to_constant(table)
+    } else {
+        None
+    };
+
+    let pair = [squeeze_ch, squeeze_ch];
+    let finder = memchr::memmem::Finder::new(&pair);
+    let mut buf = alloc_uninit_vec(STREAM_BUF);
+    let mut was_squeeze_char = false;
+
+    loop {
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        // Pass 1: SIMD translate in-place
+        if let Some((lo, hi, offset)) = range_info {
+            translate_range_simd_inplace(&mut buf[..n], lo, hi, offset);
+        } else if let Some((lo, hi, replacement)) = range_const_info {
+            translate_range_to_constant_simd_inplace(&mut buf[..n], lo, hi, replacement);
+        } else {
+            translate_inplace(&mut buf[..n], table);
+        }
+
+        // Pass 2: squeeze using memmem pair-finding + writev (zero-copy)
+        let mut i = 0;
+
+        // Handle carry-over from previous chunk
+        if was_squeeze_char {
+            while i < n && unsafe { *buf.as_ptr().add(i) } == squeeze_ch {
+                i += 1;
+            }
+            if i >= n {
+                continue;
+            }
+        }
+
+        let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(64);
+
+        loop {
+            match finder.find(&buf[i..n]) {
+                Some(offset) => {
+                    let seg_end = i + offset + 1;
+                    if seg_end > i {
+                        iov.push(std::io::IoSlice::new(&buf[i..seg_end]));
+                    }
+                    i = seg_end;
+                    while i < n && unsafe { *buf.as_ptr().add(i) } == squeeze_ch {
+                        i += 1;
+                    }
+                    if i >= n {
+                        was_squeeze_char = true;
+                        break;
+                    }
+                    if iov.len() >= MAX_IOV {
+                        write_ioslices(writer, &iov)?;
+                        iov.clear();
+                    }
+                }
+                None => {
+                    if i < n {
+                        iov.push(std::io::IoSlice::new(&buf[i..n]));
+                    }
+                    was_squeeze_char = n > 0 && unsafe { *buf.as_ptr().add(n - 1) } == squeeze_ch;
+                    break;
+                }
+            }
+        }
+
+        if !iov.is_empty() {
+            write_ioslices(writer, &iov)?;
+        }
     }
     Ok(())
 }
@@ -1661,24 +1784,58 @@ pub fn delete_squeeze(
         if n == 0 {
             break;
         }
+        // Fused delete+squeeze: 8x-unrolled inner loop for better ILP.
+        // Each byte is checked against delete set first (skip if member),
+        // then squeeze set (deduplicate consecutive members).
         let mut wp = 0;
         unsafe {
             let ptr = buf.as_mut_ptr();
-            for i in 0..n {
+            let mut i = 0;
+            while i + 8 <= n {
+                macro_rules! process_byte {
+                    ($off:expr) => {
+                        let b = *ptr.add(i + $off);
+                        if !is_member(&delete_set, b) {
+                            if is_member(&squeeze_set, b) {
+                                if last_squeezed != b as u16 {
+                                    last_squeezed = b as u16;
+                                    *ptr.add(wp) = b;
+                                    wp += 1;
+                                }
+                            } else {
+                                last_squeezed = 256;
+                                *ptr.add(wp) = b;
+                                wp += 1;
+                            }
+                        }
+                    };
+                }
+                process_byte!(0);
+                process_byte!(1);
+                process_byte!(2);
+                process_byte!(3);
+                process_byte!(4);
+                process_byte!(5);
+                process_byte!(6);
+                process_byte!(7);
+                i += 8;
+            }
+            while i < n {
                 let b = *ptr.add(i);
-                if is_member(&delete_set, b) {
-                    continue;
-                }
-                if is_member(&squeeze_set, b) {
-                    if last_squeezed == b as u16 {
-                        continue;
+                if !is_member(&delete_set, b) {
+                    if is_member(&squeeze_set, b) {
+                        if last_squeezed != b as u16 {
+                            last_squeezed = b as u16;
+                            *ptr.add(wp) = b;
+                            wp += 1;
+                        }
+                    } else {
+                        last_squeezed = 256;
+                        *ptr.add(wp) = b;
+                        wp += 1;
                     }
-                    last_squeezed = b as u16;
-                } else {
-                    last_squeezed = 256;
                 }
-                *ptr.add(wp) = b;
-                wp += 1;
+                i += 1;
             }
         }
         writer.write_all(&buf[..wp])?;
@@ -1693,6 +1850,12 @@ pub fn squeeze(
 ) -> io::Result<()> {
     if squeeze_chars.len() == 1 {
         return squeeze_single_stream(squeeze_chars[0], reader, writer);
+    }
+
+    // For 2-3 squeeze chars, use memchr2/memchr3-based gap-copy
+    // which gives SIMD-accelerated scanning instead of byte-at-a-time.
+    if squeeze_chars.len() <= 3 {
+        return squeeze_multi_stream(squeeze_chars, reader, writer);
     }
 
     let member = build_member_set(squeeze_chars);
@@ -1726,6 +1889,103 @@ pub fn squeeze(
     Ok(())
 }
 
+/// Streaming squeeze for 2-3 chars using memchr2/memchr3 SIMD scanning.
+/// Builds writev IoSlice entries pointing into the read buffer, skipping
+/// duplicate runs of squeezable characters. Zero-copy between squeeze points.
+fn squeeze_multi_stream(
+    chars: &[u8],
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let c0 = chars[0];
+    let c1 = chars[1];
+    let c2 = if chars.len() >= 3 {
+        Some(chars[2])
+    } else {
+        None
+    };
+    let single_byte = [0u8; 1]; // used for the kept single byte
+    let _ = single_byte;
+
+    let mut buf = alloc_uninit_vec(STREAM_BUF);
+    let mut last_squeezed: u16 = 256;
+
+    loop {
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+
+        // In-place compaction using memchr2/memchr3 gap-copy.
+        // For each squeezable char found, copy the gap before it,
+        // then emit one byte (if not a squeeze duplicate) and skip the run.
+        let ptr = buf.as_mut_ptr();
+        let mut wp = 0usize;
+        let mut cursor = 0usize;
+
+        macro_rules! find_next {
+            ($start:expr) => {
+                if let Some(c) = c2 {
+                    memchr::memchr3(c0, c1, c, &buf[$start..n])
+                } else {
+                    memchr::memchr2(c0, c1, &buf[$start..n])
+                }
+            };
+        }
+
+        while cursor < n {
+            match find_next!(cursor) {
+                Some(offset) => {
+                    let pos = cursor + offset;
+                    let b = unsafe { *ptr.add(pos) };
+
+                    // Copy gap before squeeze point
+                    let gap = pos - cursor;
+                    if gap > 0 {
+                        if wp != cursor {
+                            unsafe {
+                                std::ptr::copy(ptr.add(cursor), ptr.add(wp), gap);
+                            }
+                        }
+                        wp += gap;
+                        last_squeezed = 256;
+                    }
+
+                    // Emit single byte if not duplicate
+                    if last_squeezed != b as u16 {
+                        unsafe { *ptr.add(wp) = b };
+                        wp += 1;
+                        last_squeezed = b as u16;
+                    }
+
+                    // Skip the run of same byte
+                    cursor = pos + 1;
+                    while cursor < n && unsafe { *ptr.add(cursor) } == b {
+                        cursor += 1;
+                    }
+                }
+                None => {
+                    // No more squeeze chars — copy remainder
+                    let rem = n - cursor;
+                    if rem > 0 {
+                        if wp != cursor {
+                            unsafe {
+                                std::ptr::copy(ptr.add(cursor), ptr.add(wp), rem);
+                            }
+                        }
+                        wp += rem;
+                        last_squeezed = 256;
+                    }
+                    break;
+                }
+            }
+        }
+
+        writer.write_all(&buf[..wp])?;
+    }
+    Ok(())
+}
+
 fn squeeze_single_stream(
     ch: u8,
     reader: &mut impl Read,
@@ -1735,6 +1995,8 @@ fn squeeze_single_stream(
     // For squeeze-spaces: most of the data has no consecutive spaces, so memmem
     // skips over huge regions at SIMD speed. When a pair is found, we scan the
     // run length and collapse it to one occurrence.
+    // Zero-copy writev: build IoSlice entries pointing into the read buffer,
+    // skipping duplicate bytes. Avoids memmove entirely.
     let pair = [ch, ch];
     let finder = memchr::memmem::Finder::new(&pair);
     let mut buf = alloc_uninit_vec(STREAM_BUF);
@@ -1746,14 +2008,12 @@ fn squeeze_single_stream(
             break;
         }
 
-        let ptr = buf.as_mut_ptr();
-        let mut wp = 0;
         let mut i = 0;
 
         // Handle carry-over: if previous chunk ended with squeeze char,
         // skip leading occurrences of that char in this chunk.
         if was_squeeze_char {
-            while i < n && unsafe { *ptr.add(i) } == ch {
+            while i < n && unsafe { *buf.as_ptr().add(i) } == ch {
                 i += 1;
             }
             if i >= n {
@@ -1763,46 +2023,48 @@ fn squeeze_single_stream(
             }
         }
 
-        // Use memmem to find consecutive pairs (ch, ch) — SIMD-accelerated.
-        // Between pairs, the data passes through unchanged.
+        // Zero-copy writev: scan for consecutive pairs and build IoSlice entries
+        // pointing directly into the read buffer, skipping duplicate bytes.
+        let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(64);
+
         loop {
             match finder.find(&buf[i..n]) {
                 Some(offset) => {
-                    // Copy everything up to and including the first char of the pair
-                    let copy_len = offset + 1; // include first ch
-                    if copy_len > 0 && wp != i {
-                        unsafe {
-                            std::ptr::copy(ptr.add(i), ptr.add(wp), copy_len);
-                        }
+                    // Include everything up to and including the first char of the pair
+                    let seg_end = i + offset + 1;
+                    if seg_end > i {
+                        iov.push(std::io::IoSlice::new(&buf[i..seg_end]));
                     }
-                    wp += copy_len;
-                    i += offset + 1; // position after first ch of pair
+                    i = seg_end;
                     // Skip all remaining consecutive ch bytes (the run)
-                    while i < n && unsafe { *ptr.add(i) } == ch {
+                    while i < n && unsafe { *buf.as_ptr().add(i) } == ch {
                         i += 1;
                     }
                     if i >= n {
                         was_squeeze_char = true;
                         break;
                     }
+                    // Flush when approaching MAX_IOV
+                    if iov.len() >= MAX_IOV {
+                        write_ioslices(writer, &iov)?;
+                        iov.clear();
+                    }
                 }
                 None => {
-                    // No more consecutive pairs — copy remainder
-                    let run_len = n - i;
-                    if run_len > 0 && wp != i {
-                        unsafe {
-                            std::ptr::copy(ptr.add(i), ptr.add(wp), run_len);
-                        }
+                    // No more consecutive pairs — emit remainder
+                    if i < n {
+                        iov.push(std::io::IoSlice::new(&buf[i..n]));
                     }
-                    wp += run_len;
                     // Check if chunk ends with the squeeze char
-                    was_squeeze_char = n > 0 && unsafe { *ptr.add(n - 1) } == ch;
+                    was_squeeze_char = n > 0 && unsafe { *buf.as_ptr().add(n - 1) } == ch;
                     break;
                 }
             }
         }
 
-        writer.write_all(&buf[..wp])?;
+        if !iov.is_empty() {
+            write_ioslices(writer, &iov)?;
+        }
     }
     Ok(())
 }
@@ -2664,11 +2926,15 @@ fn squeeze_multi_mmap<const N: usize>(
         return write_ioslices(writer, &slices);
     }
 
-    let buf_size = data.len().min(BUF_SIZE);
-    let mut outbuf = vec![0u8; buf_size];
-    let mut wp = 0;
-    let mut last_squeezed: u16 = 256;
+    // Zero-copy writev: build IoSlice entries pointing directly into
+    // the original mmap'd data, keeping one byte per run of squeezable chars.
+    // Each IoSlice points at the gap between squeeze points (inclusive of
+    // the first byte of a run) — no data is copied.
+    let single = [chars[0]; 1]; // scratch for emitting single squeeze byte
+    let _ = single;
+    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(1024);
     let mut cursor = 0;
+    let mut last_squeezed: u16 = 256;
 
     macro_rules! find_next {
         ($data:expr) => {
@@ -2680,55 +2946,44 @@ fn squeeze_multi_mmap<const N: usize>(
         };
     }
 
-    macro_rules! flush_and_copy {
-        ($src:expr, $len:expr) => {
-            if wp + $len > buf_size {
-                writer.write_all(&outbuf[..wp])?;
-                wp = 0;
-            }
-            if $len > buf_size {
-                writer.write_all($src)?;
-            } else {
-                outbuf[wp..wp + $len].copy_from_slice($src);
-                wp += $len;
-            }
-        };
-    }
-
     while cursor < data.len() {
         match find_next!(&data[cursor..]) {
             Some(offset) => {
                 let pos = cursor + offset;
                 let b = data[pos];
+                // Emit gap before squeeze point
                 if pos > cursor {
-                    let span = pos - cursor;
-                    flush_and_copy!(&data[cursor..pos], span);
+                    iov.push(std::io::IoSlice::new(&data[cursor..pos]));
                     last_squeezed = 256;
                 }
+                // Emit single byte if not duplicate
                 if last_squeezed != b as u16 {
-                    if wp >= buf_size {
-                        writer.write_all(&outbuf[..wp])?;
-                        wp = 0;
-                    }
-                    outbuf[wp] = b;
-                    wp += 1;
+                    // Point at the byte in the original data (zero-copy)
+                    iov.push(std::io::IoSlice::new(&data[pos..pos + 1]));
                     last_squeezed = b as u16;
                 }
+                // Skip the run of same byte
                 let mut skip = pos + 1;
                 while skip < data.len() && data[skip] == b {
                     skip += 1;
                 }
                 cursor = skip;
+                // Flush when approaching MAX_IOV
+                if iov.len() >= MAX_IOV {
+                    write_ioslices(writer, &iov)?;
+                    iov.clear();
+                }
             }
             None => {
-                let remaining = data.len() - cursor;
-                flush_and_copy!(&data[cursor..], remaining);
+                if cursor < data.len() {
+                    iov.push(std::io::IoSlice::new(&data[cursor..]));
+                }
                 break;
             }
         }
     }
-    if wp > 0 {
-        writer.write_all(&outbuf[..wp])?;
+    if !iov.is_empty() {
+        write_ioslices(writer, &iov)?;
     }
     Ok(())
 }
@@ -2738,122 +2993,54 @@ fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Resu
         return Ok(());
     }
 
-    if memchr::memmem::find(data, &[ch, ch]).is_none() {
+    // Quick check: no consecutive pairs means no squeezing needed
+    let pair = [ch, ch];
+    if memchr::memmem::find(data, &pair).is_none() {
         return writer.write_all(data);
     }
 
-    // Parallel path: squeeze each chunk, fix boundaries
-    if data.len() >= PARALLEL_THRESHOLD {
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        let results: Vec<Vec<u8>> = data
-            .par_chunks(chunk_size)
-            .map(|chunk| {
-                let mut out = Vec::with_capacity(chunk.len());
-                let mut cursor = 0;
-                while cursor < chunk.len() {
-                    match memchr::memchr(ch, &chunk[cursor..]) {
-                        Some(offset) => {
-                            let pos = cursor + offset;
-                            if pos > cursor {
-                                out.extend_from_slice(&chunk[cursor..pos]);
-                            }
-                            out.push(ch);
-                            cursor = pos + 1;
-                            while cursor < chunk.len() && chunk[cursor] == ch {
-                                cursor += 1;
-                            }
-                        }
-                        None => {
-                            out.extend_from_slice(&chunk[cursor..]);
-                            break;
-                        }
-                    }
-                }
-                out
-            })
-            .collect();
-
-        // Build IoSlice list, fixing boundary squeezability.
-        // Use writev to minimize syscalls.
-        let mut slices: Vec<std::io::IoSlice> = Vec::with_capacity(results.len());
-        for (idx, result) in results.iter().enumerate() {
-            if result.is_empty() {
-                continue;
-            }
-            if idx > 0 {
-                if let Some(&prev_last) = results[..idx].iter().rev().find_map(|r| r.last()) {
-                    if prev_last == ch {
-                        // Skip leading ch bytes in this chunk result
-                        let skip = result.iter().take_while(|&&b| b == ch).count();
-                        if skip < result.len() {
-                            slices.push(std::io::IoSlice::new(&result[skip..]));
-                        }
-                        continue;
-                    }
-                }
-            }
-            slices.push(std::io::IoSlice::new(result));
-        }
-        return write_ioslices(writer, &slices);
-    }
-
-    let buf_size = data.len().min(BUF_SIZE);
-    let mut outbuf = vec![0u8; buf_size];
-    let len = data.len();
-    let mut wp = 0;
+    // Zero-copy writev approach: build IoSlice entries pointing directly into
+    // the original mmap'd data, skipping duplicate bytes in runs.
+    // For `tr -s ' '` on 10MB with ~5K squeeze points:
+    //   - Old: 10MB allocation + 10MB copy into output buffer
+    //   - New: ~5K * 16 = 80KB IoSlice entries, zero data copy
+    let finder = memchr::memmem::Finder::new(&pair);
+    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(1024);
     let mut cursor = 0;
 
-    while cursor < len {
-        match memchr::memchr(ch, &data[cursor..]) {
+    while cursor < data.len() {
+        match finder.find(&data[cursor..]) {
             Some(offset) => {
-                let pos = cursor + offset;
-                let gap = pos - cursor;
-                if gap > 0 {
-                    if wp + gap > buf_size {
-                        writer.write_all(&outbuf[..wp])?;
-                        wp = 0;
-                    }
-                    if gap > buf_size {
-                        writer.write_all(&data[cursor..pos])?;
-                    } else {
-                        outbuf[wp..wp + gap].copy_from_slice(&data[cursor..pos]);
-                        wp += gap;
-                    }
+                let pair_pos = cursor + offset;
+                // Include everything up to and including the first byte of the pair
+                let seg_end = pair_pos + 1;
+                if seg_end > cursor {
+                    iov.push(std::io::IoSlice::new(&data[cursor..seg_end]));
                 }
-                if wp >= buf_size {
-                    writer.write_all(&outbuf[..wp])?;
-                    wp = 0;
+                // Skip all remaining consecutive ch bytes (the run)
+                let mut skip = seg_end;
+                while skip < data.len() && data[skip] == ch {
+                    skip += 1;
                 }
-                outbuf[wp] = ch;
-                wp += 1;
-                cursor = pos + 1;
-                while cursor < len && data[cursor] == ch {
-                    cursor += 1;
+                cursor = skip;
+                // Flush when approaching MAX_IOV
+                if iov.len() >= MAX_IOV {
+                    write_ioslices(writer, &iov)?;
+                    iov.clear();
                 }
             }
             None => {
-                let remaining = len - cursor;
-                if remaining > 0 {
-                    if wp + remaining > buf_size {
-                        writer.write_all(&outbuf[..wp])?;
-                        wp = 0;
-                    }
-                    if remaining > buf_size {
-                        writer.write_all(&data[cursor..])?;
-                    } else {
-                        outbuf[wp..wp + remaining].copy_from_slice(&data[cursor..]);
-                        wp += remaining;
-                    }
+                // No more pairs — emit remainder
+                if cursor < data.len() {
+                    iov.push(std::io::IoSlice::new(&data[cursor..]));
                 }
                 break;
             }
         }
     }
 
-    if wp > 0 {
-        writer.write_all(&outbuf[..wp])?;
+    if !iov.is_empty() {
+        write_ioslices(writer, &iov)?;
     }
     Ok(())
 }
