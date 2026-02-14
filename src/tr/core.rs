@@ -2610,14 +2610,15 @@ pub fn translate_mmap_inplace(
 
 /// Translate from read-only source to a separate output buffer, avoiding COW faults.
 /// Uses the appropriate SIMD path (range offset, range-to-constant, or general nibble).
-/// For data >= PARALLEL_THRESHOLD, uses parallel chunked translation.
+///
+/// For data >= PARALLEL_THRESHOLD: parallel chunked translate into full-size buffer.
+/// For smaller data: chunked translate+write with a reusable 4MB buffer to keep
+/// output data in L3 cache during write_all (avoids main memory round-trip).
 fn translate_to_separate_buf(
     data: &[u8],
     table: &[u8; 256],
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    let mut out_buf = alloc_uninit_vec(data.len());
-
     let range_info = detect_range_offset(table);
     let const_info = if range_info.is_none() {
         detect_range_to_constant(table)
@@ -2626,6 +2627,8 @@ fn translate_to_separate_buf(
     };
 
     if data.len() >= PARALLEL_THRESHOLD {
+        // Parallel path: full-size output buffer, parallel translate, single write.
+        let mut out_buf = alloc_uninit_vec(data.len());
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
 
@@ -2639,7 +2642,6 @@ fn translate_to_separate_buf(
             data.par_chunks(chunk_size)
                 .zip(out_buf.par_chunks_mut(chunk_size))
                 .for_each(|(src, dst)| {
-                    // Copy src to dst, then translate in-place
                     dst[..src.len()].copy_from_slice(src);
                     translate_range_to_constant_simd_inplace(
                         &mut dst[..src.len()],
@@ -2655,16 +2657,30 @@ fn translate_to_separate_buf(
                     translate_to(src, &mut dst[..src.len()], table);
                 });
         }
-    } else if let Some((lo, hi, offset)) = range_info {
-        translate_range_simd(data, &mut out_buf, lo, hi, offset);
-    } else if let Some((lo, hi, replacement)) = const_info {
-        out_buf.copy_from_slice(data);
-        translate_range_to_constant_simd_inplace(&mut out_buf, lo, hi, replacement);
-    } else {
-        translate_to(data, &mut out_buf, table);
+        return writer.write_all(&out_buf);
     }
 
-    writer.write_all(&out_buf)
+    // Sequential path: translate in L3-cache-sized chunks (4MB).
+    // This keeps the output buffer hot in L3 cache during write_all,
+    // avoiding a main memory round-trip that happens with a full-size buffer.
+    const CHUNK: usize = 4 * 1024 * 1024;
+    let buf_size = data.len().min(CHUNK);
+    let mut out_buf = alloc_uninit_vec(buf_size);
+
+    for src_chunk in data.chunks(CHUNK) {
+        let dst = &mut out_buf[..src_chunk.len()];
+        if let Some((lo, hi, offset)) = range_info {
+            translate_range_simd(src_chunk, dst, lo, hi, offset);
+        } else if let Some((lo, hi, replacement)) = const_info {
+            dst.copy_from_slice(src_chunk);
+            translate_range_to_constant_simd_inplace(dst, lo, hi, replacement);
+        } else {
+            translate_to(src_chunk, dst, table);
+        }
+        writer.write_all(dst)?;
+    }
+
+    Ok(())
 }
 
 /// Translate from a read-only mmap (or any byte slice) to a separate output buffer.
