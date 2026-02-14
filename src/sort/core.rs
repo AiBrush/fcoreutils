@@ -2627,20 +2627,25 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             };
                             let blen = bucket.len();
 
-                            // Second-level radix for large buckets
+                            // Second-level radix for large buckets.
+                            // Uses 16-bit radix (65536 buckets) for very large buckets (>512),
+                            // 8-bit radix (256 buckets) for medium buckets (65-512).
                             if blen > 64 {
-                                let shift = 32u32;
-                                let mask: u64 = 0xFFFF;
-                                let first_bits = (bucket[0].0 >> shift) & mask;
+                                let use_wide = blen > 512;
+                                let check_shift = if use_wide { 32u32 } else { 40u32 };
+                                let check_mask: u64 = if use_wide { 0xFFFF } else { 0xFF };
+                                let first_bits = (bucket[0].0 >> check_shift) & check_mask;
                                 let mut has_variation = false;
                                 for e in &bucket[1..] {
-                                    if ((e.0 >> shift) & mask) != first_bits {
+                                    if ((e.0 >> check_shift) & check_mask) != first_bits {
                                         has_variation = true;
                                         break;
                                     }
                                 }
                                 if has_variation {
-                                    let sub_nbk: usize = 65536;
+                                    let sub_nbk: usize = if use_wide { 65536 } else { 256 };
+                                    let shift = check_shift;
+                                    let mask = check_mask;
                                     let mut sub_cnts = vec![0u32; sub_nbk];
                                     for &(pfx, _) in bucket.iter() {
                                         sub_cnts[((pfx >> shift) & mask) as usize] += 1;
