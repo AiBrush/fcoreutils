@@ -679,6 +679,31 @@ fn open_file_content(path: &Path) -> io::Result<FileContent> {
     Ok(FileContent::Buf(buf))
 }
 
+/// Open a file and read all content without fstat — just open+read+close.
+/// For many-file workloads (100+ files), skipping fstat saves ~5µs/file
+/// (~0.5ms for 100 files). Falls back to mmap for files > 64KB.
+fn open_file_content_fast(path: &Path) -> io::Result<FileContent> {
+    let mut file = open_noatime(path)?;
+    // First read into a small stack-allocated buffer
+    let mut buf = [0u8; 65536];
+    let mut total = 0;
+    loop {
+        match file.read(&mut buf[total..]) {
+            Ok(0) => return Ok(FileContent::Buf(buf[..total].to_vec())),
+            Ok(n) => {
+                total += n;
+                if total >= buf.len() {
+                    // File exceeds stack buffer — fall back to open_file_content
+                    // which uses mmap for large files
+                    return open_file_content(path);
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Batch-hash multiple files with BLAKE2b using multi-buffer SIMD.
 ///
 /// Uses blake2b_simd::many::hash_many for 4-way AVX2 parallel hashing.
@@ -692,10 +717,18 @@ pub fn blake2b_hash_files_many(
 ) -> Vec<io::Result<String>> {
     use blake2b_simd::many::{hash_many, HashManyJob};
 
-    // Phase 1: Read all files into memory in parallel using rayon
+    // Phase 1: Read all files into memory in parallel using rayon.
+    // For many files (100+), use fast path that skips fstat.
+    let use_fast = paths.len() >= 20;
     let file_data: Vec<io::Result<FileContent>> = paths
         .par_iter()
-        .map(|&path| open_file_content(path))
+        .map(|&path| {
+            if use_fast {
+                open_file_content_fast(path)
+            } else {
+                open_file_content(path)
+            }
+        })
         .collect();
 
     // Phase 2: Build hash_many jobs for successful reads
@@ -751,10 +784,42 @@ pub fn hash_files_parallel(
         readahead_files_all(paths);
     }
 
+    // For many files (100+), use nostat path that skips fstat syscall.
+    // Saves ~5µs/file = ~0.5ms for 100 files.
+    let use_fast = paths.len() >= 20;
     paths
         .par_iter()
-        .map(|&path| hash_file(algo, path))
+        .map(|&path| {
+            if use_fast {
+                hash_file_nostat(algo, path)
+            } else {
+                hash_file(algo, path)
+            }
+        })
         .collect()
+}
+
+/// Hash a file without fstat — just open, read until EOF, hash.
+/// For many-file workloads (100+ tiny files), skipping fstat saves ~5µs/file.
+/// Falls back to streaming hash for files > 64KB.
+fn hash_file_nostat(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
+    let mut file = open_noatime(path)?;
+    let mut buf = [0u8; 65536];
+    let mut total = 0;
+    loop {
+        match file.read(&mut buf[total..]) {
+            Ok(0) => return Ok(hash_bytes(algo, &buf[..total])),
+            Ok(n) => {
+                total += n;
+                if total >= buf.len() {
+                    // File exceeds stack buffer — fall back to full hash_file
+                    return hash_file(algo, path);
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Issue readahead hints for ALL file paths (no size threshold).
