@@ -250,20 +250,24 @@ fn main() {
                 }
             }
         } else {
-            // Piped stdin: use streaming path (16MB buffer, read+translate+write
-            // in chunks). This avoids the 64MB read_stdin pre-allocation and
-            // overlaps pipe reads with processing.
-            let stdin = io::stdin();
-            let mut reader = stdin.lock();
-            #[cfg(unix)]
-            {
-                tr::translate(&set1, &set2, &mut reader, &mut *raw)
-            }
-            #[cfg(not(unix))]
-            {
-                let stdout = io::stdout();
-                let mut lock = stdout.lock();
-                tr::translate(&set1, &set2, &mut reader, &mut lock)
+            // Piped stdin: read all data, then use batch translate with
+            // optimized code paths (in-place SIMD, parallel for large inputs).
+            // Avoids per-chunk streaming overhead (N read+process+write cycles).
+            match coreutils_rs::common::io::read_stdin() {
+                Ok(mut data) => {
+                    #[cfg(unix)]
+                    {
+                        tr::translate_owned(&set1, &set2, &mut data, &mut *raw)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let stdout = io::stdout();
+                        let mut lock = stdout.lock();
+                        tr::translate_owned(&set1, &set2, &mut data, &mut lock)
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                Err(e) => Err(e),
             }
         };
         if let Err(e) = result
@@ -296,92 +300,34 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: use streaming path to avoid 64MB read_stdin pre-allocation
-        // and overlap pipe reads with processing.
-        let stdin = io::stdin();
-        let mut reader = stdin.lock();
-        #[cfg(unix)]
-        let result = run_streaming_mode(&cli, set1_str, &mut reader, &mut *raw);
-        #[cfg(not(unix))]
-        let result = {
-            let stdout = io::stdout();
-            let mut lock = stdout.lock();
-            run_streaming_mode(&cli, set1_str, &mut reader, &mut lock)
-        };
-        if let Err(e) = result
-            && e.kind() != io::ErrorKind::BrokenPipe
-        {
-            eprintln!("tr: {}", io_error_msg(&e));
-            process::exit(1);
+        // Piped stdin: read all data first, then use batch processing.
+        // This allows optimized mmap-like code paths (parallel processing,
+        // zero-copy output) instead of per-chunk streaming. The 16MB
+        // pre-allocation is amortized over the batch processing savings.
+        match coreutils_rs::common::io::read_stdin() {
+            Ok(data) => {
+                #[cfg(unix)]
+                let result = run_mmap_mode(&cli, set1_str, &data, &mut *raw);
+                #[cfg(not(unix))]
+                let result = {
+                    let stdout = io::stdout();
+                    let mut lock = stdout.lock();
+                    run_mmap_mode(&cli, set1_str, &data, &mut lock)
+                };
+                if let Err(e) = result
+                    && e.kind() != io::ErrorKind::BrokenPipe
+                {
+                    eprintln!("tr: {}", io_error_msg(&e));
+                    process::exit(1);
+                }
+            }
+            Err(e) => {
+                if e.kind() != io::ErrorKind::BrokenPipe {
+                    eprintln!("tr: {}", io_error_msg(&e));
+                    process::exit(1);
+                }
+            }
         }
-    }
-}
-
-/// Dispatch streaming modes for piped stdin — uses 16MB buffer with
-/// read+process+write in chunks, avoiding the 64MB read_stdin pre-allocation.
-fn run_streaming_mode(
-    cli: &Cli,
-    set1_str: &str,
-    reader: &mut impl io::Read,
-    writer: &mut impl Write,
-) -> io::Result<()> {
-    if cli.delete && cli.squeeze {
-        if cli.sets.len() < 2 {
-            eprintln!("tr: missing operand after '{}'", set1_str);
-            eprintln!("Two strings must be given when both deleting and squeezing repeats.");
-            eprintln!("Try 'tr --help' for more information.");
-            process::exit(1);
-        }
-        let set2_str = &cli.sets[1];
-        let set1 = tr::parse_set(set1_str);
-        let set2 = tr::parse_set(set2_str);
-        let delete_set = if cli.complement {
-            tr::complement(&set1)
-        } else {
-            set1
-        };
-        tr::delete_squeeze(&delete_set, &set2, reader, writer)
-    } else if cli.delete {
-        if cli.sets.len() > 1 {
-            eprintln!("tr: extra operand '{}'", cli.sets[1]);
-            eprintln!("Only one string may be given when deleting without squeezing.");
-            eprintln!("Try 'tr --help' for more information.");
-            process::exit(1);
-        }
-        let set1 = tr::parse_set(set1_str);
-        let delete_set = if cli.complement {
-            tr::complement(&set1)
-        } else {
-            set1
-        };
-        tr::delete(&delete_set, reader, writer)
-    } else if cli.squeeze && cli.sets.len() < 2 {
-        let set1 = tr::parse_set(set1_str);
-        let squeeze_set = if cli.complement {
-            tr::complement(&set1)
-        } else {
-            set1
-        };
-        tr::squeeze(&squeeze_set, reader, writer)
-    } else if cli.squeeze {
-        let set2_str = &cli.sets[1];
-        let mut set1 = tr::parse_set(set1_str);
-        if cli.complement {
-            set1 = tr::complement(&set1);
-        }
-        let set2 = if cli.truncate {
-            let raw_set = tr::parse_set(set2_str);
-            set1.truncate(raw_set.len());
-            raw_set
-        } else {
-            tr::expand_set2(set2_str, set1.len())
-        };
-        tr::translate_squeeze(&set1, &set2, reader, writer)
-    } else {
-        eprintln!("tr: missing operand after '{}'", set1_str);
-        eprintln!("Two strings must be given when translating.");
-        eprintln!("Try 'tr --help' for more information.");
-        process::exit(1);
     }
 }
 
