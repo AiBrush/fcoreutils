@@ -610,8 +610,7 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
             true
         } else if cur_len >= 8 {
             // Compare cached 8-byte prefix first
-            let cur_prefix =
-                unsafe { (base.add(cur_start) as *const u64).read_unaligned() };
+            let cur_prefix = unsafe { (base.add(cur_start) as *const u64).read_unaligned() };
             if cur_prefix != prev_prefix {
                 false
             } else if cur_len <= 8 {
@@ -619,7 +618,8 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
             } else if cur_len <= 16 {
                 // Check last 8 bytes (overlapping)
                 unsafe {
-                    let a_tail = (base.add(prev_start + prev_len - 8) as *const u64).read_unaligned();
+                    let a_tail =
+                        (base.add(prev_start + prev_len - 8) as *const u64).read_unaligned();
                     let b_tail = (base.add(cur_start + cur_len - 8) as *const u64).read_unaligned();
                     a_tail == b_tail
                 }
@@ -631,8 +631,10 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
                     if a16 != b16 {
                         false
                     } else {
-                        let a_tail = (base.add(prev_start + prev_len - 8) as *const u64).read_unaligned();
-                        let b_tail = (base.add(cur_start + cur_len - 8) as *const u64).read_unaligned();
+                        let a_tail =
+                            (base.add(prev_start + prev_len - 8) as *const u64).read_unaligned();
+                        let b_tail =
+                            (base.add(cur_start + cur_len - 8) as *const u64).read_unaligned();
                         a_tail == b_tail
                     }
                 }
@@ -659,7 +661,11 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
                 writer.write_all(&data[run_start..cur_start])?;
             }
             // Start new run after this duplicate
-            run_start = if cur_end < data_len { cur_end + 1 } else { cur_end };
+            run_start = if cur_end < data_len {
+                cur_end + 1
+            } else {
+                cur_end
+            };
         } else {
             // Different line — update cached comparison state
             prev_start = cur_start;
@@ -669,7 +675,11 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
             } else {
                 0
             };
-            last_output_end = if cur_end < data_len { cur_end + 1 } else { cur_end };
+            last_output_end = if cur_end < data_len {
+                cur_end + 1
+            } else {
+                cur_end
+            };
         }
 
         if cur_end < data_len {
@@ -891,11 +901,12 @@ fn process_filter_fast_singlepass(
         };
 
         let cur_len = cur_end - cur_start;
-        let is_dup = cur_len == prev_len && unsafe {
-            let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
-            let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
-            lines_equal_fast(a, b)
-        };
+        let is_dup = cur_len == prev_len
+            && unsafe {
+                let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
+                let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
+                lines_equal_fast(a, b)
+            };
 
         if is_dup {
             count += 1;
@@ -983,11 +994,12 @@ fn process_count_fast_singlepass(
         };
 
         let cur_len = cur_end - cur_start;
-        let is_dup = cur_len == prev_len && unsafe {
-            let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
-            let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
-            lines_equal_fast(a, b)
-        };
+        let is_dup = cur_len == prev_len
+            && unsafe {
+                let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
+                let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
+                lines_equal_fast(a, b)
+            };
 
         if is_dup {
             count += 1;

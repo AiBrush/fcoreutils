@@ -452,7 +452,12 @@ fn process_fields_chunk(
                     if !first_output {
                         unsafe { buf_extend(buf, output_delim) };
                     }
-                    unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), pos - field_start)) };
+                    unsafe {
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(field_start), pos - field_start),
+                        )
+                    };
                     first_output = false;
                 }
 
@@ -461,7 +466,10 @@ fn process_fields_chunk(
                 } else if !has_delim {
                     if !suppress {
                         unsafe {
-                            buf_extend(buf, std::slice::from_raw_parts(base.add(line_start), pos - line_start));
+                            buf_extend(
+                                buf,
+                                std::slice::from_raw_parts(base.add(line_start), pos - line_start),
+                            );
                             buf_push(buf, line_delim);
                         }
                     }
@@ -483,7 +491,12 @@ fn process_fields_chunk(
                     if !first_output {
                         unsafe { buf_extend(buf, output_delim) };
                     }
-                    unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), pos - field_start)) };
+                    unsafe {
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(field_start), pos - field_start),
+                        )
+                    };
                     first_output = false;
                 }
 
@@ -502,7 +515,15 @@ fn process_fields_chunk(
                     if !first_output {
                         unsafe { buf_extend(buf, output_delim) };
                     }
-                    unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), data_len - field_start)) };
+                    unsafe {
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(
+                                base.add(field_start),
+                                data_len - field_start,
+                            ),
+                        )
+                    };
                     first_output = false;
                 }
 
@@ -511,7 +532,13 @@ fn process_fields_chunk(
                 } else if !has_delim {
                     if !suppress {
                         unsafe {
-                            buf_extend(buf, std::slice::from_raw_parts(base.add(line_start), data_len - line_start));
+                            buf_extend(
+                                buf,
+                                std::slice::from_raw_parts(
+                                    base.add(line_start),
+                                    data_len - line_start,
+                                ),
+                            );
                             buf_push(buf, line_delim);
                         }
                     }
@@ -747,7 +774,12 @@ fn complement_single_field_line(
             if !first_output {
                 unsafe { buf_push(buf, delim) };
             }
-            unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), pos - field_start)) };
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(field_start), pos - field_start),
+                )
+            };
             first_output = false;
         }
         field_idx += 1;
@@ -769,7 +801,12 @@ fn complement_single_field_line(
         if !first_output {
             unsafe { buf_push(buf, delim) };
         }
-        unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), len - field_start)) };
+        unsafe {
+            buf_extend(
+                buf,
+                std::slice::from_raw_parts(base.add(field_start), len - field_start),
+            )
+        };
     }
 
     unsafe { buf_push(buf, line_delim) };
@@ -1056,7 +1093,10 @@ fn fields_suffix_line(
         delim_count += 1;
         if delim_count >= skip_delims {
             unsafe {
-                buf_extend(buf, std::slice::from_raw_parts(base.add(pos + 1), len - pos - 1));
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(pos + 1), len - pos - 1),
+                );
                 buf_push(buf, line_delim);
             }
             return;
@@ -1210,7 +1250,10 @@ fn fields_mid_range_line(
                 range_start = 0;
             }
             unsafe {
-                buf_extend(buf, std::slice::from_raw_parts(base.add(range_start), pos - range_start));
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(range_start), pos - range_start),
+                );
                 buf_push(buf, line_delim);
             }
             return;
@@ -1234,7 +1277,10 @@ fn fields_mid_range_line(
             range_start = 0;
         }
         unsafe {
-            buf_extend(buf, std::slice::from_raw_parts(base.add(range_start), len - range_start));
+            buf_extend(
+                buf,
+                std::slice::from_raw_parts(base.add(range_start), len - range_start),
+            );
             buf_push(buf, line_delim);
         }
     } else {
@@ -1277,7 +1323,10 @@ fn process_nth_field_combined(
                 if has_delim && field_idx == target_idx {
                     // Last field matches target
                     unsafe {
-                        buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), pos - field_start));
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(field_start), pos - field_start),
+                        );
                         buf_push(buf, line_delim);
                     }
                 } else if has_delim {
@@ -1288,7 +1337,10 @@ fn process_nth_field_combined(
                 } else if !suppress {
                     // No delimiter in line — output unchanged
                     unsafe {
-                        buf_extend(buf, std::slice::from_raw_parts(base.add(line_start), pos - line_start));
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(line_start), pos - line_start),
+                        );
                         buf_push(buf, line_delim);
                     }
                 }
@@ -1304,7 +1356,10 @@ fn process_nth_field_combined(
             has_delim = true;
             if field_idx == target_idx {
                 unsafe {
-                    buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), pos - field_start));
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(field_start), pos - field_start),
+                    );
                     buf_push(buf, line_delim);
                 }
                 emitted = true;
@@ -1318,7 +1373,10 @@ fn process_nth_field_combined(
     if line_start < data_len && !emitted {
         if has_delim && field_idx == target_idx {
             unsafe {
-                buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), data_len - field_start));
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(field_start), data_len - field_start),
+                );
                 buf_push(buf, line_delim);
             }
         } else if has_delim {
@@ -1327,7 +1385,10 @@ fn process_nth_field_combined(
             }
         } else if !suppress {
             unsafe {
-                buf_extend(buf, std::slice::from_raw_parts(base.add(line_start), data_len - line_start));
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(line_start), data_len - line_start),
+                );
                 buf_push(buf, line_delim);
             }
         }
@@ -1449,11 +1510,20 @@ fn process_small_field_combined(
                 std::slice::from_raw_parts(line_base.add(field_start), line_len - field_start)
             }) {
                 Some(pos) => unsafe {
-                    buf_extend(buf, std::slice::from_raw_parts(line_base.add(field_start), pos));
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(line_base.add(field_start), pos),
+                    );
                     buf_push(buf, line_delim);
                 },
                 None => unsafe {
-                    buf_extend(buf, std::slice::from_raw_parts(line_base.add(field_start), line_len - field_start));
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(
+                            line_base.add(field_start),
+                            line_len - field_start,
+                        ),
+                    );
                     buf_push(buf, line_delim);
                 },
             }
@@ -1494,11 +1564,20 @@ fn process_small_field_combined(
                 std::slice::from_raw_parts(line_base.add(field_start), line_len - field_start)
             }) {
                 Some(pos) => unsafe {
-                    buf_extend(buf, std::slice::from_raw_parts(line_base.add(field_start), pos));
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(line_base.add(field_start), pos),
+                    );
                     buf_push(buf, line_delim);
                 },
                 None => unsafe {
-                    buf_extend(buf, std::slice::from_raw_parts(line_base.add(field_start), line_len - field_start));
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(
+                            line_base.add(field_start),
+                            line_len - field_start,
+                        ),
+                    );
                     buf_push(buf, line_delim);
                 },
             }
@@ -1578,7 +1657,10 @@ fn extract_single_field_line(
         has_delim = true;
         if field_idx == target_idx {
             unsafe {
-                buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), pos - field_start));
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(field_start), pos - field_start),
+                );
                 buf_push(buf, line_delim);
             }
             return;
@@ -1599,7 +1681,10 @@ fn extract_single_field_line(
 
     if field_idx == target_idx {
         unsafe {
-            buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), len - field_start));
+            buf_extend(
+                buf,
+                std::slice::from_raw_parts(base.add(field_start), len - field_start),
+            );
             buf_push(buf, line_delim);
         }
     } else {
@@ -1652,7 +1737,12 @@ fn extract_fields_to_buf(
             if !first_output {
                 unsafe { buf_extend(buf, output_delim) };
             }
-            unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), delim_pos - field_start)) };
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(field_start), delim_pos - field_start),
+                )
+            };
             first_output = false;
         }
 
@@ -1672,7 +1762,12 @@ fn extract_fields_to_buf(
         if !first_output {
             unsafe { buf_extend(buf, output_delim) };
         }
-        unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), len - field_start)) };
+        unsafe {
+            buf_extend(
+                buf,
+                std::slice::from_raw_parts(base.add(field_start), len - field_start),
+            )
+        };
         first_output = false;
     }
 
@@ -2033,14 +2128,24 @@ fn cut_bytes_to_buf(
             if !first_range && !output_delim.is_empty() {
                 unsafe { buf_extend(buf, output_delim) };
             }
-            unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(pos - 1), len - pos + 1)) };
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(pos - 1), len - pos + 1),
+                )
+            };
         }
     } else if output_delim.is_empty() && ranges.len() == 1 {
         // Ultra-fast path: single range, no output delimiter
         let start = ranges[0].start.saturating_sub(1);
         let end = ranges[0].end.min(len);
         if start < len {
-            unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(start), end - start)) };
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(start), end - start),
+                )
+            };
         }
     } else {
         for r in ranges {
@@ -2052,7 +2157,12 @@ fn cut_bytes_to_buf(
             if !first_range && !output_delim.is_empty() {
                 unsafe { buf_extend(buf, output_delim) };
             }
-            unsafe { buf_extend(buf, std::slice::from_raw_parts(base.add(start), end - start)) };
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(start), end - start),
+                )
+            };
             first_range = false;
         }
     }

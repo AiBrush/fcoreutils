@@ -258,14 +258,16 @@ fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
             let chunk_start = w[0];
             let chunk_end = w[1];
             let dp = data_addr as *const u8;
-            let chunk = unsafe { std::slice::from_raw_parts(dp.add(chunk_start), chunk_end - chunk_start) };
+            let chunk =
+                unsafe { std::slice::from_raw_parts(dp.add(chunk_start), chunk_end - chunk_start) };
             let mut offsets = Vec::with_capacity(chunk.len() / 40 + 1);
             let mut line_start = chunk_start;
 
             for pos in memchr::memchr_iter(delimiter, chunk) {
                 let abs_pos = chunk_start + pos;
                 let mut line_end = abs_pos;
-                if is_newline && line_end > line_start && unsafe { *dp.add(line_end - 1) } == b'\r' {
+                if is_newline && line_end > line_start && unsafe { *dp.add(line_end - 1) } == b'\r'
+                {
                     line_end -= 1;
                 }
                 offsets.push((line_start, line_end));
@@ -275,7 +277,8 @@ fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
             // Handle last line in chunk (only if this is the final chunk)
             if line_start < chunk_end && chunk_end == data_len {
                 let mut line_end = chunk_end;
-                if is_newline && line_end > line_start && unsafe { *dp.add(line_end - 1) } == b'\r' {
+                if is_newline && line_end > line_start && unsafe { *dp.add(line_end - 1) } == b'\r'
+                {
                     line_end -= 1;
                 }
                 offsets.push((line_start, line_end));
@@ -1441,9 +1444,9 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     let emit = match prev {
                         Some(p) => {
                             let (ps, pe) = offsets[p];
-                            let prev_line = unsafe { std::slice::from_raw_parts(dp.add(ps), pe - ps) };
-                            compare_lines_for_dedup(prev_line, line, config)
-                                != Ordering::Equal
+                            let prev_line =
+                                unsafe { std::slice::from_raw_parts(dp.add(ps), pe - ps) };
+                            compare_lines_for_dedup(prev_line, line, config) != Ordering::Equal
                         }
                         None => true,
                     };
@@ -1557,8 +1560,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             let ps = prev_start as usize;
                             let pl = prev_len as usize;
                             let prev_line = unsafe { std::slice::from_raw_parts(dp.add(ps), pl) };
-                            compare_lines_for_dedup(prev_line, line, config)
-                                != Ordering::Equal
+                            compare_lines_for_dedup(prev_line, line, config) != Ordering::Equal
                         };
                         if emit {
                             writer.write_all(line)?;
@@ -1577,8 +1579,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         let ps = prev_start as usize;
                         let pl = prev_len as usize;
                         let prev_line = unsafe { std::slice::from_raw_parts(dp.add(ps), pl) };
-                        compare_lines_for_dedup(prev_line, line, config)
-                            != Ordering::Equal
+                        compare_lines_for_dedup(prev_line, line, config) != Ordering::Equal
                     };
                     if emit {
                         writer.write_all(line)?;
@@ -1690,7 +1691,8 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 const BATCH: usize = 512;
                 let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
                 for &(_, s, l) in &sorted {
-                    let line = unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
+                    let line =
+                        unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
                     slices.push(io::IoSlice::new(line));
                     slices.push(io::IoSlice::new(terminator));
                     if slices.len() >= BATCH * 2 {
