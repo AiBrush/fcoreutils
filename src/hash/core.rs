@@ -3,8 +3,6 @@ use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 
-use rayon::prelude::*;
-
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -86,6 +84,14 @@ fn ensure_stream_buf(buf: &mut Vec<u8>) {
 /// Linux only — OpenSSL is not available on Windows/macOS in CI.
 #[cfg(target_os = "linux")]
 fn sha256_bytes(data: &[u8]) -> String {
+    // For tiny data (<8KB): use sha2 crate directly, avoiding OpenSSL's
+    // EVP_MD_CTX_new/free overhead (~700ns per call). sha2 with asm feature
+    // uses SHA-NI instructions and has no heap allocation, just stack state.
+    // For 100 × 55-byte files: saves ~70µs total.
+    if data.len() < TINY_FILE_LIMIT as usize {
+        use digest::Digest;
+        return hex_encode(&sha2::Sha256::digest(data));
+    }
     let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)
         .expect("SHA256 hash failed");
     hex_encode(&digest)
@@ -165,6 +171,13 @@ pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> String {
 /// Single-shot MD5 using OpenSSL's optimized assembly (Linux).
 #[cfg(target_os = "linux")]
 fn md5_bytes(data: &[u8]) -> String {
+    // For tiny data (<8KB): use md5 crate directly, avoiding OpenSSL's
+    // EVP_MD_CTX_new/free overhead (~700ns per call). md5 with asm feature
+    // uses optimized assembly and has no heap allocation.
+    if data.len() < TINY_FILE_LIMIT as usize {
+        use digest::Digest;
+        return hex_encode(&md5::Md5::digest(data));
+    }
     let digest =
         openssl::hash::hash(openssl::hash::MessageDigest::md5(), data).expect("MD5 hash failed");
     hex_encode(&digest)
@@ -681,26 +694,56 @@ fn open_file_content(path: &Path) -> io::Result<FileContent> {
 
 /// Open a file and read all content without fstat — just open+read+close.
 /// For many-file workloads (100+ files), skipping fstat saves ~5µs/file
-/// (~0.5ms for 100 files). Falls back to mmap for files > 64KB.
+/// (~0.5ms for 100 files). Uses a small initial buffer for tiny files (< 4KB),
+/// then falls back to larger buffer or mmap for bigger files.
 fn open_file_content_fast(path: &Path) -> io::Result<FileContent> {
     let mut file = open_noatime(path)?;
-    // First read into a small stack-allocated buffer
-    let mut buf = [0u8; 65536];
-    let mut total = 0;
-    loop {
-        match file.read(&mut buf[total..]) {
-            Ok(0) => return Ok(FileContent::Buf(buf[..total].to_vec())),
-            Ok(n) => {
-                total += n;
-                if total >= buf.len() {
-                    // File exceeds stack buffer — fall back to open_file_content
-                    // which uses mmap for large files
-                    return open_file_content(path);
+    // Try small buffer first — optimal for benchmark's ~55 byte files.
+    // Single read() + to_vec() with exact size for minimal allocation.
+    let mut small_buf = [0u8; 4096];
+    match file.read(&mut small_buf) {
+        Ok(0) => return Ok(FileContent::Buf(Vec::new())),
+        Ok(n) if n < small_buf.len() => {
+            // File fits in small buffer — done (common case for tiny files)
+            return Ok(FileContent::Buf(small_buf[..n].to_vec()));
+        }
+        Ok(n) => {
+            // Might be more data — fall back to larger buffer
+            let mut buf = [0u8; 65536];
+            buf[..n].copy_from_slice(&small_buf[..n]);
+            let mut total = n;
+            loop {
+                match file.read(&mut buf[total..]) {
+                    Ok(0) => return Ok(FileContent::Buf(buf[..total].to_vec())),
+                    Ok(n) => {
+                        total += n;
+                        if total >= buf.len() {
+                            return open_file_content(path);
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
                 }
             }
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
         }
+        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+            let mut buf = [0u8; 65536];
+            let mut total = 0;
+            loop {
+                match file.read(&mut buf[total..]) {
+                    Ok(0) => return Ok(FileContent::Buf(buf[..total].to_vec())),
+                    Ok(n) => {
+                        total += n;
+                        if total >= buf.len() {
+                            return open_file_content(path);
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Err(e) => return Err(e),
     }
 }
 
@@ -714,22 +757,40 @@ fn open_file_content_fast(path: &Path) -> io::Result<FileContent> {
 pub fn blake2b_hash_files_many(paths: &[&Path], output_bytes: usize) -> Vec<io::Result<String>> {
     use blake2b_simd::many::{HashManyJob, hash_many};
 
-    // Phase 1: Read all files into memory in parallel using rayon.
+    // Phase 1: Read all files into memory in parallel using std::thread::scope.
+    // Avoids rayon thread pool init (~300µs) — lightweight OS threads instead.
     // For many files (100+), use fast path that skips fstat.
-    // Batch into chunks of N/4 to reduce rayon work-stealing overhead.
     let use_fast = paths.len() >= 20;
-    let min_chunk = (paths.len() / 4).max(1);
-    let file_data: Vec<io::Result<FileContent>> = paths
-        .par_iter()
-        .with_min_len(min_chunk)
-        .map(|&path| {
-            if use_fast {
-                open_file_content_fast(path)
-            } else {
-                open_file_content(path)
-            }
-        })
-        .collect();
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(paths.len());
+    let chunk_size = (paths.len() + num_threads - 1) / num_threads;
+
+    let file_data: Vec<io::Result<FileContent>> = std::thread::scope(|s| {
+        let handles: Vec<_> = paths
+            .chunks(chunk_size)
+            .map(|chunk| {
+                s.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|&path| {
+                            if use_fast {
+                                open_file_content_fast(path)
+                            } else {
+                                open_file_content(path)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
 
     // Phase 2: Build hash_many jobs for successful reads
     let hash_results = {
@@ -769,8 +830,10 @@ pub fn blake2b_hash_files_many(paths: &[&Path], output_bytes: usize) -> Vec<io::
         .collect()
 }
 
-/// Batch-hash multiple files with SHA-256/MD5 using rayon parallel processing.
-/// Pre-loads all files in parallel, then hashes them in parallel.
+/// Batch-hash multiple files with SHA-256/MD5 using std::thread::scope.
+/// Uses lightweight OS threads instead of rayon's work-stealing pool.
+/// For single-invocation tools, this saves ~300µs of rayon thread pool
+/// initialization (spawning N-1 threads + setting up work-stealing deques).
 /// Returns results in input order.
 pub fn hash_files_parallel(paths: &[&Path], algo: HashAlgorithm) -> Vec<io::Result<String>> {
     // Only issue readahead for modest file counts (likely larger files).
@@ -782,46 +845,98 @@ pub fn hash_files_parallel(paths: &[&Path], algo: HashAlgorithm) -> Vec<io::Resu
     }
 
     // For many files (100+), use nostat path that skips fstat syscall.
-    // Saves ~5µs/file = ~0.5ms for 100 files.
     let use_fast = paths.len() >= 20;
 
-    // Batch files into chunks of at least N/4 to reduce rayon work-stealing
-    // overhead. For 100 tiny files, this means ~4 chunks of 25 instead of
-    // 100 individual tasks — saves ~100µs of scheduling overhead.
-    let min_chunk = (paths.len() / 4).max(1);
-    paths
-        .par_iter()
-        .with_min_len(min_chunk)
-        .map(|&path| {
-            if use_fast {
-                hash_file_nostat(algo, path)
-            } else {
-                hash_file(algo, path)
-            }
-        })
-        .collect()
+    // Use std::thread::scope for lighter-weight parallelism than rayon.
+    // Thread spawn (~30µs × 3 = ~90µs) vs rayon init (~300µs).
+    // For 100 tiny files, the ~200µs savings is significant (total time ~3ms).
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(paths.len());
+    let chunk_size = (paths.len() + num_threads - 1) / num_threads;
+
+    std::thread::scope(|s| {
+        let handles: Vec<_> = paths
+            .chunks(chunk_size)
+            .map(|chunk| {
+                s.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|&path| {
+                            if use_fast {
+                                hash_file_nostat(algo, path)
+                            } else {
+                                hash_file(algo, path)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    })
 }
 
 /// Hash a file without fstat — just open, read until EOF, hash.
 /// For many-file workloads (100+ tiny files), skipping fstat saves ~5µs/file.
-/// Falls back to streaming hash for files > 64KB.
+/// Uses a two-tier buffer strategy: small stack buffer (4KB) for the initial read,
+/// then falls back to a larger stack buffer (64KB) or streaming hash for bigger files.
+/// For benchmark's 55-byte files: one read() fills the 4KB buffer, hash immediately.
 fn hash_file_nostat(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     let mut file = open_noatime(path)?;
-    let mut buf = [0u8; 65536];
-    let mut total = 0;
-    loop {
-        match file.read(&mut buf[total..]) {
-            Ok(0) => return Ok(hash_bytes(algo, &buf[..total])),
-            Ok(n) => {
-                total += n;
-                if total >= buf.len() {
-                    // File exceeds stack buffer — fall back to full hash_file
-                    return hash_file(algo, path);
+    // First try a small stack buffer — optimal for tiny files (< 4KB).
+    // Most "many_files" benchmark files are ~55 bytes, so this completes
+    // with a single read() syscall and no fallback.
+    let mut small_buf = [0u8; 4096];
+    match file.read(&mut small_buf) {
+        Ok(0) => return Ok(hash_bytes(algo, &[])),
+        Ok(n) if n < small_buf.len() => {
+            // File fits in small buffer — hash directly (common case)
+            return Ok(hash_bytes(algo, &small_buf[..n]));
+        }
+        Ok(n) => {
+            // Might be more data — fall back to larger buffer
+            let mut buf = [0u8; 65536];
+            buf[..n].copy_from_slice(&small_buf[..n]);
+            let mut total = n;
+            loop {
+                match file.read(&mut buf[total..]) {
+                    Ok(0) => return Ok(hash_bytes(algo, &buf[..total])),
+                    Ok(n) => {
+                        total += n;
+                        if total >= buf.len() {
+                            return hash_file(algo, path);
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
                 }
             }
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
         }
+        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+            // Retry with full buffer on interrupt
+            let mut buf = [0u8; 65536];
+            let mut total = 0;
+            loop {
+                match file.read(&mut buf[total..]) {
+                    Ok(0) => return Ok(hash_bytes(algo, &buf[..total])),
+                    Ok(n) => {
+                        total += n;
+                        if total >= buf.len() {
+                            return hash_file(algo, path);
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Err(e) => return Err(e),
     }
 }
 
