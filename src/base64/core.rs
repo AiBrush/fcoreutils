@@ -612,7 +612,11 @@ pub fn decode_to_writer(data: &[u8], ignore_garbage: bool, out: &mut impl Write)
 /// containing whitespace (newlines) get physically copied (~1.3% for
 /// 76-char line base64). The decode writes to the same buffer, but decoded
 /// data is always shorter than encoded (3/4 ratio), so it fits in-place.
-pub fn decode_mmap_inplace(data: &mut [u8], ignore_garbage: bool, out: &mut impl Write) -> io::Result<()> {
+pub fn decode_mmap_inplace(
+    data: &mut [u8],
+    ignore_garbage: bool,
+    out: &mut impl Write,
+) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
@@ -641,7 +645,10 @@ pub fn decode_mmap_inplace(data: &mut [u8], ignore_garbage: bool, out: &mut impl
     // Quick check: no newlines at all — maybe already clean
     if memchr::memchr2(b'\n', b'\r', data).is_none() {
         // Check for rare whitespace
-        if !data.iter().any(|&b| b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c) {
+        if !data
+            .iter()
+            .any(|&b| b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c)
+        {
             // Perfectly clean — decode in-place directly
             match BASE64_ENGINE.decode_inplace(data) {
                 Ok(decoded) => return out.write_all(decoded),

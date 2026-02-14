@@ -2329,8 +2329,9 @@ pub fn translate_mmap_inplace(
         if data.len() >= PARALLEL_THRESHOLD {
             let n_threads = rayon::current_num_threads().max(1);
             let chunk_size = (data.len() / n_threads).max(32 * 1024);
-            data.par_chunks_mut(chunk_size)
-                .for_each(|chunk| translate_range_to_constant_simd_inplace(chunk, lo, hi, replacement));
+            data.par_chunks_mut(chunk_size).for_each(|chunk| {
+                translate_range_to_constant_simd_inplace(chunk, lo, hi, replacement)
+            });
         } else {
             translate_range_to_constant_simd_inplace(data, lo, hi, replacement);
         }
