@@ -43,9 +43,9 @@ fn parse_args() -> Cli {
         files: Vec::new(),
     };
 
-    let mut args = std::env::args_os().skip(1);
+    let args = std::env::args_os().skip(1);
     let mut saw_dashdash = false;
-    while let Some(arg) = args.next() {
+    for arg in args {
         let bytes = arg.as_encoded_bytes();
         if saw_dashdash {
             cli.files.push(arg.to_string_lossy().into_owned());
