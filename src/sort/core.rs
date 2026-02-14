@@ -246,7 +246,10 @@ fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
     let is_newline = delimiter == b'\n';
     let data_len = data.len();
 
-    // Scan each chunk in parallel
+    // Scan each chunk in parallel.
+    // Uses raw pointer arithmetic (via data_addr usize) to eliminate bounds checking
+    // in the \r\n detection hot path.
+    let data_addr = data.as_ptr() as usize;
     let chunk_offsets: Vec<Vec<(usize, usize)>> = boundaries
         .windows(2)
         .collect::<Vec<_>>()
@@ -254,14 +257,15 @@ fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
         .map(|w| {
             let chunk_start = w[0];
             let chunk_end = w[1];
-            let chunk = &data[chunk_start..chunk_end];
+            let dp = data_addr as *const u8;
+            let chunk = unsafe { std::slice::from_raw_parts(dp.add(chunk_start), chunk_end - chunk_start) };
             let mut offsets = Vec::with_capacity(chunk.len() / 40 + 1);
             let mut line_start = chunk_start;
 
             for pos in memchr::memchr_iter(delimiter, chunk) {
                 let abs_pos = chunk_start + pos;
                 let mut line_end = abs_pos;
-                if is_newline && line_end > line_start && data[line_end - 1] == b'\r' {
+                if is_newline && line_end > line_start && unsafe { *dp.add(line_end - 1) } == b'\r' {
                     line_end -= 1;
                 }
                 offsets.push((line_start, line_end));
@@ -271,7 +275,7 @@ fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
             // Handle last line in chunk (only if this is the final chunk)
             if line_start < chunk_end && chunk_end == data_len {
                 let mut line_end = chunk_end;
-                if is_newline && line_end > line_start && data[line_end - 1] == b'\r' {
+                if is_newline && line_end > line_start && unsafe { *dp.add(line_end - 1) } == b'\r' {
                     line_end -= 1;
                 }
                 offsets.push((line_start, line_end));
@@ -356,13 +360,14 @@ fn read_all_input(
     let offsets = if data.len() > 2 * 1024 * 1024 {
         find_lines_parallel(data, delimiter)
     } else {
+        let dp = data.as_ptr();
         let mut offsets = Vec::with_capacity(data.len() / 40 + 1);
         let mut start = 0usize;
 
         for pos in memchr::memchr_iter(delimiter, data) {
             let mut end = pos;
-            // Strip trailing CR before LF
-            if delimiter == b'\n' && end > start && data[end - 1] == b'\r' {
+            // Strip trailing CR before LF (raw pointer to avoid bounds check)
+            if delimiter == b'\n' && end > start && unsafe { *dp.add(end - 1) } == b'\r' {
                 end -= 1;
             }
             offsets.push((start, end));
@@ -372,7 +377,7 @@ fn read_all_input(
         // Handle last line without trailing delimiter
         if start < data.len() {
             let mut end = data.len();
-            if delimiter == b'\n' && end > start && data[end - 1] == b'\r' {
+            if delimiter == b'\n' && end > start && unsafe { *dp.add(end - 1) } == b'\r' {
                 end -= 1;
             }
             offsets.push((start, end));
