@@ -123,15 +123,36 @@ fn get_simd_level() -> u8 {
     detected
 }
 
+/// Count how many entries in the translate table are non-identity.
+#[inline]
+fn count_non_identity(table: &[u8; 256]) -> usize {
+    table
+        .iter()
+        .enumerate()
+        .filter(|&(i, &v)| v != i as u8)
+        .count()
+}
+
 /// Translate bytes in-place using a 256-byte lookup table.
-/// On x86_64 with SSSE3+, uses SIMD pshufb-based nibble decomposition for
-/// ~32 bytes per iteration. Falls back to 8x-unrolled scalar on other platforms.
+/// For sparse translations (few bytes change), uses SIMD skip-ahead:
+/// compare 32 bytes at a time against identity, skip unchanged chunks.
+/// For dense translations, uses full SIMD nibble decomposition.
+/// Falls back to 8x-unrolled scalar on non-x86_64 platforms.
 #[inline(always)]
 fn translate_inplace(data: &mut [u8], table: &[u8; 256]) {
     #[cfg(target_arch = "x86_64")]
     {
         let level = get_simd_level();
         if level >= 3 {
+            // For sparse translations (<=16 non-identity entries), the skip-ahead
+            // approach is faster: load 32 bytes, do a full nibble lookup, compare
+            // against input, skip store if identical. This avoids writing to pages
+            // that don't change (important for MAP_PRIVATE COW mmap).
+            let non_id = count_non_identity(table);
+            if non_id > 0 && non_id <= 16 {
+                unsafe { translate_inplace_avx2_sparse(data, table) };
+                return;
+            }
             unsafe { translate_inplace_avx2_table(data, table) };
             return;
         }
@@ -141,6 +162,79 @@ fn translate_inplace(data: &mut [u8], table: &[u8; 256]) {
         }
     }
     translate_inplace_scalar(data, table);
+}
+
+/// Sparse AVX2 translate: skip unchanged 32-byte chunks.
+/// For each chunk: perform full nibble lookup, compare result vs input.
+/// If identical (no bytes changed), skip the store entirely.
+/// This reduces memory bandwidth and avoids COW page faults for
+/// MAP_PRIVATE mmaps when most bytes are unchanged.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn translate_inplace_avx2_sparse(data: &mut [u8], table: &[u8; 256]) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let len = data.len();
+        let ptr = data.as_mut_ptr();
+
+        // Pre-build 16 lookup vectors (same as full nibble decomposition)
+        let mut lut = [_mm256_setzero_si256(); 16];
+        for h in 0u8..16 {
+            let base = (h as usize) * 16;
+            let row: [u8; 16] = std::array::from_fn(|i| *table.get_unchecked(base + i));
+            let row128 = _mm_loadu_si128(row.as_ptr() as *const _);
+            lut[h as usize] = _mm256_broadcastsi128_si256(row128);
+        }
+
+        let lo_mask = _mm256_set1_epi8(0x0F);
+
+        let mut i = 0;
+        while i + 32 <= len {
+            let input = _mm256_loadu_si256(ptr.add(i) as *const _);
+            let lo_nibble = _mm256_and_si256(input, lo_mask);
+            let hi_nibble = _mm256_and_si256(_mm256_srli_epi16(input, 4), lo_mask);
+
+            let mut result = _mm256_setzero_si256();
+            macro_rules! do_nibble {
+                ($h:expr) => {
+                    let h_val = _mm256_set1_epi8($h as i8);
+                    let mask = _mm256_cmpeq_epi8(hi_nibble, h_val);
+                    let looked_up = _mm256_shuffle_epi8(lut[$h], lo_nibble);
+                    result = _mm256_or_si256(result, _mm256_and_si256(mask, looked_up));
+                };
+            }
+            do_nibble!(0);
+            do_nibble!(1);
+            do_nibble!(2);
+            do_nibble!(3);
+            do_nibble!(4);
+            do_nibble!(5);
+            do_nibble!(6);
+            do_nibble!(7);
+            do_nibble!(8);
+            do_nibble!(9);
+            do_nibble!(10);
+            do_nibble!(11);
+            do_nibble!(12);
+            do_nibble!(13);
+            do_nibble!(14);
+            do_nibble!(15);
+
+            // Only store if result differs from input (skip unchanged chunks)
+            let diff = _mm256_xor_si256(input, result);
+            if _mm256_testz_si256(diff, diff) == 0 {
+                _mm256_storeu_si256(ptr.add(i) as *mut _, result);
+            }
+            i += 32;
+        }
+
+        // Scalar tail
+        while i < len {
+            *ptr.add(i) = *table.get_unchecked(*ptr.add(i) as usize);
+            i += 1;
+        }
+    }
 }
 
 /// Scalar fallback: 8x-unrolled table lookup.
