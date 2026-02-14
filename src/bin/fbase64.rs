@@ -68,8 +68,7 @@ impl VmspliceWriter {
         // Check if stdout is a pipe (vmsplice only works on pipes)
         let is_pipe = unsafe {
             let mut stat: libc::stat = std::mem::zeroed();
-            libc::fstat(1, &mut stat) == 0
-                && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
+            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
         };
         Self { raw, is_pipe }
     }
@@ -245,7 +244,6 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     }
     mmap
 }
-
 
 fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
     if cli.decode {
