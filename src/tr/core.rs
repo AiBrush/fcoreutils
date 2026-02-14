@@ -3012,24 +3012,28 @@ fn delete_bitset_zerocopy(
 }
 
 fn delete_single_char_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Result<()> {
-    // Zero-copy delete using writev: build IoSlice entries pointing to the
-    // gaps between deleted characters in the ORIGINAL data buffer.
-    // For `tr -d '\n'` on 10MB with ~200K newlines:
-    //   - Old: 10MB allocation + 10MB copy into output buffer
-    //   - New: ~200K * 16 = 3.2MB IoSlice entries, zero data copy
-    // Uses SIMD memchr_iter to find all positions, then builds IoSlice spans.
-    let mut iov: Vec<std::io::IoSlice> = Vec::new();
+    // Streaming zero-copy delete using writev: build IoSlice batches of MAX_IOV
+    // pointing to gaps between deleted characters, write each batch immediately.
+    // Avoids allocating the full Vec<IoSlice> for all positions.
+    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(MAX_IOV);
     let mut last = 0;
     for pos in memchr::memchr_iter(ch, data) {
         if pos > last {
             iov.push(std::io::IoSlice::new(&data[last..pos]));
+            if iov.len() >= MAX_IOV {
+                write_ioslices(writer, &iov)?;
+                iov.clear();
+            }
         }
         last = pos + 1;
     }
     if last < data.len() {
         iov.push(std::io::IoSlice::new(&data[last..]));
     }
-    write_ioslices(writer, &iov)
+    if !iov.is_empty() {
+        write_ioslices(writer, &iov)?;
+    }
+    Ok(())
 }
 
 fn delete_multi_memchr_mmap(chars: &[u8], data: &[u8], writer: &mut impl Write) -> io::Result<()> {
@@ -3038,29 +3042,39 @@ fn delete_multi_memchr_mmap(chars: &[u8], data: &[u8], writer: &mut impl Write) 
     let c2 = if chars.len() >= 3 { chars[2] } else { 0 };
     let is_three = chars.len() >= 3;
 
-    // Zero-copy delete using writev: build IoSlice entries pointing to the
-    // gaps between deleted characters in the original data buffer.
-    let mut iov: Vec<std::io::IoSlice> = Vec::new();
+    // Streaming zero-copy delete: batch IoSlice entries and write in groups of MAX_IOV.
+    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(MAX_IOV);
     let mut last = 0;
+
+    macro_rules! process_pos {
+        ($pos:expr) => {
+            if $pos > last {
+                iov.push(std::io::IoSlice::new(&data[last..$pos]));
+                if iov.len() >= MAX_IOV {
+                    write_ioslices(writer, &iov)?;
+                    iov.clear();
+                }
+            }
+            last = $pos + 1;
+        };
+    }
+
     if is_three {
         for pos in memchr::memchr3_iter(c0, c1, c2, data) {
-            if pos > last {
-                iov.push(std::io::IoSlice::new(&data[last..pos]));
-            }
-            last = pos + 1;
+            process_pos!(pos);
         }
     } else {
         for pos in memchr::memchr2_iter(c0, c1, data) {
-            if pos > last {
-                iov.push(std::io::IoSlice::new(&data[last..pos]));
-            }
-            last = pos + 1;
+            process_pos!(pos);
         }
     }
     if last < data.len() {
         iov.push(std::io::IoSlice::new(&data[last..]));
     }
-    write_ioslices(writer, &iov)
+    if !iov.is_empty() {
+        write_ioslices(writer, &iov)?;
+    }
+    Ok(())
 }
 
 /// Delete + squeeze from mmap'd byte slice.

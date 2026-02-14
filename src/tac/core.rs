@@ -18,66 +18,17 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
     }
 }
 
-/// Reverse records of an owned Vec in-place, then write.
-/// Avoids allocating a second output buffer by using a two-pass approach:
-/// 1. Reverse all bytes in the Vec
-/// 2. Reverse each individual record (between separators)
-/// This produces the same output as copying records in reverse order.
-///
-/// Only works for after-separator mode with single-byte separator.
+/// Reverse records of an owned Vec using the same streaming writev approach
+/// as tac_bytes. The owned data stays alive for the duration, so IoSlice
+/// entries can point directly into it. This is simpler and uses fewer passes
+/// than the in-place reversal approach (1 memchr scan + writev vs 3 passes).
 pub fn tac_bytes_owned(
     data: &mut [u8],
     separator: u8,
     before: bool,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    if data.is_empty() {
-        return Ok(());
-    }
-    // For before-separator mode, fall back to the zero-copy approach
-    if before {
-        return tac_bytes(data, separator, before, out);
-    }
-
-    // In-place reversal only works correctly when data ends with separator.
-    // When it doesn't, separators get misplaced (e.g., "A\nB" -> "B\nA" instead of "BA\n").
-    // Fall back to the zero-copy approach for that case.
-    let len = data.len();
-    if data[len - 1] != separator {
-        return tac_bytes(data, separator, false, out);
-    }
-
-    // Step 1: Reverse the entire buffer.
-    // The trailing separator moves to position 0.
-    data.reverse();
-
-    // Step 2: Instead of rotate_left(1) (expensive full memmove), we write
-    // data[1..] then data[0..1] separately. This avoids O(n) memmove.
-    // "A\nB\n" -> reverse -> "\nB\nA" -> write [1..] then [0..1] -> "B\nA\n"
-    let saved_byte = data[0];
-
-    // Step 3: Reverse each record within the buffer (excluding the leading byte).
-    // After step 1, records are in the right order but each record's bytes are reversed.
-    let sub = &mut data[1..];
-    let sub_len = sub.len();
-    let est_capacity = (sub_len / 50).max(64);
-    let mut positions: Vec<usize> = Vec::with_capacity(est_capacity);
-    positions.extend(memchr::memchr_iter(separator, sub));
-    let mut start = 0;
-    for &pos in &positions {
-        if pos > start {
-            sub[start..pos].reverse();
-        }
-        start = pos + 1;
-    }
-    // Reverse the last segment (after the last separator, if any)
-    if start < sub_len {
-        sub[start..sub_len].reverse();
-    }
-
-    // Write data[1..] then the saved leading byte (the separator)
-    out.write_all(&data[1..])?;
-    out.write_all(&[saved_byte])
+    tac_bytes(data, separator, before, out)
 }
 
 /// After-separator mode: zero-copy write from mmap in reverse record order.
