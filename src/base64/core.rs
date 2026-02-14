@@ -15,11 +15,12 @@ const NOWRAP_CHUNK: usize = 32 * 1024 * 1024 - (32 * 1024 * 1024 % 3);
 /// For 10MB benchmark workloads, single-threaded is faster.
 const PARALLEL_ENCODE_THRESHOLD: usize = 16 * 1024 * 1024;
 
-/// Minimum data size for parallel decoding (4MB of base64 data).
-/// With 2+ cores, parallel decode at 4MB provides ~1.5x speedup:
-/// single-core decode at 8GB/s takes ~0.5ms for 4MB, while dual-core
-/// takes ~0.25ms + ~0.1ms rayon overhead = ~0.35ms.
-const PARALLEL_DECODE_THRESHOLD: usize = 4 * 1024 * 1024;
+/// Minimum data size for parallel decoding (32MB of base64 data).
+/// base64_simd decode runs at ~4-8 GB/s per core. For 13.5MB (the typical
+/// decode benchmark), single-threaded decode takes ~2-3ms while parallel
+/// decode adds ~1ms for allocation + rayon overhead, making it slower on
+/// 2-core CI runners. Use single-threaded in-place decode for data under 32MB.
+const PARALLEL_DECODE_THRESHOLD: usize = 32 * 1024 * 1024;
 
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with fused encode+wrap for maximum throughput.
