@@ -1515,8 +1515,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             const BATCH: usize = 512;
             let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
             for &(_, s, l) in &sorted {
-                let line =
-                    unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
+                let line = unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
                 slices.push(io::IoSlice::new(line));
                 slices.push(io::IoSlice::new(terminator));
                 if slices.len() >= BATCH * 2 {
