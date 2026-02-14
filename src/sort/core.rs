@@ -552,6 +552,9 @@ pub fn merge_sorted(
     }
 
     let mut prev_line: Option<Vec<u8>> = None;
+    // Batch merge output to reduce write_all call overhead
+    const MERGE_BATCH: usize = 256 * 1024;
+    let mut batch_buf: Vec<u8> = Vec::with_capacity(MERGE_BATCH);
 
     while let Some(std::cmp::Reverse(min)) = heap.pop() {
         let should_output = if config.unique {
@@ -566,8 +569,12 @@ pub fn merge_sorted(
         };
 
         if should_output {
-            writer.write_all(&min.entry.line)?;
-            writer.write_all(terminator)?;
+            batch_buf.extend_from_slice(&min.entry.line);
+            batch_buf.extend_from_slice(terminator);
+            if batch_buf.len() >= MERGE_BATCH {
+                writer.write_all(&batch_buf)?;
+                batch_buf.clear();
+            }
             if config.unique {
                 prev_line = Some(min.entry.line.clone());
             }
@@ -586,6 +593,10 @@ pub fn merge_sorted(
             }));
             seq += 1;
         }
+    }
+
+    if !batch_buf.is_empty() {
+        writer.write_all(&batch_buf)?;
     }
 
     Ok(())
