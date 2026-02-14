@@ -2086,7 +2086,8 @@ fn detect_delete_range(chars: &[u8]) -> Option<(u8, u8)> {
         }
     }
     // Check that the range size matches the number of chars (no gaps)
-    if (hi - lo + 1) as usize == chars.len() {
+    // Cast to usize before +1 to avoid u8 overflow when hi=255, lo=0 (range=256)
+    if (hi as usize - lo as usize + 1) == chars.len() {
         Some((lo, hi))
     } else {
         None
@@ -2149,28 +2150,28 @@ unsafe fn delete_range_avx2(src: &[u8], dst: &mut [u8], lo: u8, hi: u8) -> usize
                 if m0 == 0xFF {
                     std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 8);
                 } else if m0 != 0 {
-                    compact_8bytes(sp.add(ri), dp.add(wp), m0);
+                    compact_8bytes_simd(sp.add(ri), dp.add(wp), m0);
                 }
                 let c0 = m0.count_ones() as usize;
 
                 if m1 == 0xFF {
                     std::ptr::copy_nonoverlapping(sp.add(ri + 8), dp.add(wp + c0), 8);
                 } else if m1 != 0 {
-                    compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), m1);
+                    compact_8bytes_simd(sp.add(ri + 8), dp.add(wp + c0), m1);
                 }
                 let c1 = m1.count_ones() as usize;
 
                 if m2 == 0xFF {
                     std::ptr::copy_nonoverlapping(sp.add(ri + 16), dp.add(wp + c0 + c1), 8);
                 } else if m2 != 0 {
-                    compact_8bytes(sp.add(ri + 16), dp.add(wp + c0 + c1), m2);
+                    compact_8bytes_simd(sp.add(ri + 16), dp.add(wp + c0 + c1), m2);
                 }
                 let c2 = m2.count_ones() as usize;
 
                 if m3 == 0xFF {
                     std::ptr::copy_nonoverlapping(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), 8);
                 } else if m3 != 0 {
-                    compact_8bytes(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), m3);
+                    compact_8bytes_simd(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), m3);
                 }
                 let c3 = m3.count_ones() as usize;
                 wp += c0 + c1 + c2 + c3;
@@ -2200,13 +2201,13 @@ unsafe fn delete_range_avx2(src: &[u8], dst: &mut [u8], lo: u8, hi: u8) -> usize
                 if m0 == 0xFF {
                     std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 8);
                 } else if m0 != 0 {
-                    compact_8bytes(sp.add(ri), dp.add(wp), m0);
+                    compact_8bytes_simd(sp.add(ri), dp.add(wp), m0);
                 }
                 let c0 = m0.count_ones() as usize;
                 if m1 == 0xFF {
                     std::ptr::copy_nonoverlapping(sp.add(ri + 8), dp.add(wp + c0), 8);
                 } else if m1 != 0 {
-                    compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), m1);
+                    compact_8bytes_simd(sp.add(ri + 8), dp.add(wp + c0), m1);
                 }
                 wp += c0 + m1.count_ones() as usize;
             }
@@ -2245,6 +2246,23 @@ unsafe fn compact_8bytes(src: *const u8, dst: *mut u8, mask: u8) {
         *dst.add(5) = *src.add(*idx.get_unchecked(5) as usize);
         *dst.add(6) = *src.add(*idx.get_unchecked(6) as usize);
         *dst.add(7) = *src.add(*idx.get_unchecked(7) as usize);
+    }
+}
+
+/// SSSE3 pshufb-based byte compaction. Loads 8 source bytes into an XMM register,
+/// shuffles kept bytes to the front using COMPACT_LUT + _mm_shuffle_epi8, stores 8 bytes.
+/// ~4x faster than scalar compact_8bytes: 1 pshufb vs 8 individual indexed byte copies.
+/// Requires SSSE3; safe to call from AVX2 functions (which imply SSSE3).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+#[inline]
+unsafe fn compact_8bytes_simd(src: *const u8, dst: *mut u8, mask: u8) {
+    use std::arch::x86_64::*;
+    unsafe {
+        let src_v = _mm_loadl_epi64(src as *const _);
+        let shuf = _mm_loadl_epi64(COMPACT_LUT.get_unchecked(mask as usize).as_ptr() as *const _);
+        let out_v = _mm_shuffle_epi8(src_v, shuf);
+        _mm_storel_epi64(dst as *mut _, out_v);
     }
 }
 
@@ -3991,7 +4009,7 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
                     if m0 == 0xFF {
                         unsafe { std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 8) };
                     } else if m0 != 0 {
-                        unsafe { compact_8bytes(sp.add(ri), dp.add(wp), m0) };
+                        unsafe { compact_8bytes_simd(sp.add(ri), dp.add(wp), m0) };
                     }
                     let c0 = m0.count_ones() as usize;
 
@@ -4000,7 +4018,7 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
                             std::ptr::copy_nonoverlapping(sp.add(ri + 8), dp.add(wp + c0), 8)
                         };
                     } else if m1 != 0 {
-                        unsafe { compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), m1) };
+                        unsafe { compact_8bytes_simd(sp.add(ri + 8), dp.add(wp + c0), m1) };
                     }
                     let c1 = m1.count_ones() as usize;
 
@@ -4009,7 +4027,7 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
                             std::ptr::copy_nonoverlapping(sp.add(ri + 16), dp.add(wp + c0 + c1), 8)
                         };
                     } else if m2 != 0 {
-                        unsafe { compact_8bytes(sp.add(ri + 16), dp.add(wp + c0 + c1), m2) };
+                        unsafe { compact_8bytes_simd(sp.add(ri + 16), dp.add(wp + c0 + c1), m2) };
                     }
                     let c2 = m2.count_ones() as usize;
 
@@ -4022,7 +4040,9 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
                             )
                         };
                     } else if m3 != 0 {
-                        unsafe { compact_8bytes(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), m3) };
+                        unsafe {
+                            compact_8bytes_simd(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), m3)
+                        };
                     }
                     let c3 = m3.count_ones() as usize;
                     wp += c0 + c1 + c2 + c3;
