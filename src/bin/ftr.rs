@@ -146,19 +146,27 @@ fn try_mmap_stdin_mut() -> Option<memmap2::MmapMut> {
 }
 
 /// Enlarge pipe buffers on Linux to the maximum allowed size.
-/// Reads /proc/sys/fs/pipe-max-size for the system limit (typically 1MB for
-/// unprivileged users), falls back to requesting 16MB (kernel caps silently).
-/// Larger pipe buffers reduce the number of read/write syscalls for piped input.
+/// Reads /proc/sys/fs/pipe-max-size for the system limit, then falls back
+/// through decreasing sizes. Larger pipe buffers dramatically reduce
+/// read/write syscall count for piped input (64KB default → 10x more syscalls).
 #[cfg(target_os = "linux")]
 fn enlarge_pipe_bufs() {
     // Try to read the system max pipe size
     let max_size = std::fs::read_to_string("/proc/sys/fs/pipe-max-size")
         .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok())
-        .unwrap_or(16 * 1024 * 1024);
-    unsafe {
-        libc::fcntl(0, libc::F_SETPIPE_SZ, max_size); // stdin
-        libc::fcntl(1, libc::F_SETPIPE_SZ, max_size); // stdout
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    for &fd in &[0i32, 1] {
+        if let Some(max) = max_size {
+            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, max) } > 0 {
+                continue;
+            }
+        }
+        // Fallback: try decreasing sizes when /proc read fails or max is denied
+        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
+            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
+                break;
+            }
+        }
     }
 }
 
