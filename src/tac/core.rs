@@ -279,7 +279,7 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
     unsafe {
         output.set_len(data.len());
     }
-    let op = output.as_mut_ptr();
+    let op: *mut u8 = output.as_mut_ptr();
     let sp = data.as_ptr();
     let mut wp = 0;
     let mut end = data.len();
@@ -320,7 +320,7 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
     unsafe {
         output.set_len(data.len());
     }
-    let op = output.as_mut_ptr();
+    let op: *mut u8 = output.as_mut_ptr();
     let sp = data.as_ptr();
     let mut wp = 0;
     let mut end = data.len();

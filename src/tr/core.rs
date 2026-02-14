@@ -79,6 +79,7 @@ fn write_ioslices(writer: &mut impl Write, slices: &[std::io::IoSlice]) -> io::R
 }
 
 /// Allocate a Vec<u8> of given length without zero-initialization.
+/// Uses MADV_HUGEPAGE on Linux for buffers >= 2MB to reduce TLB misses.
 /// SAFETY: Caller must write all bytes before reading them.
 #[inline]
 #[allow(clippy::uninit_vec)]
@@ -87,6 +88,16 @@ fn alloc_uninit_vec(len: usize) -> Vec<u8> {
     // SAFETY: u8 has no drop, no invalid bit patterns; caller will overwrite before reading
     unsafe {
         v.set_len(len);
+    }
+    #[cfg(target_os = "linux")]
+    if len >= 2 * 1024 * 1024 {
+        unsafe {
+            libc::madvise(
+                v.as_mut_ptr() as *mut libc::c_void,
+                len,
+                libc::MADV_HUGEPAGE,
+            );
+        }
     }
     v
 }
