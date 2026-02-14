@@ -2913,11 +2913,9 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
     Ok(())
 }
 
-/// SIMD range delete for mmap data. Uses zero-copy writev for sparse deletes
-/// (pointing directly into the mmap'd data), avoiding buffer allocation and copy.
-/// Falls back to buffered copy for dense deletes or very large data.
+/// SIMD range delete for mmap data, with rayon parallel processing.
 fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io::Result<()> {
-    // Parallel path for genuinely large data
+    // Parallel path: each thread deletes from its chunk into a local Vec
     if data.len() >= PARALLEL_THRESHOLD {
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
@@ -2940,158 +2938,10 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
         return write_ioslices(writer, &slices);
     }
 
-    // Zero-copy writev path for mmap data: build IoSlice entries pointing at
-    // gaps between deleted bytes in the original mmap data. No buffer allocation.
-    // Uses SIMD range check to scan 32 bytes at a time, finding delete positions
-    // and emitting kept ranges as IoSlice entries.
-    delete_range_zerocopy(data, writer, lo, hi)
-}
-
-/// Zero-copy range delete using writev: SIMD range check to find bytes in
-/// [lo..=hi], builds IoSlice entries pointing directly into the source data.
-/// No output buffer allocation, no memcpy.
-///
-/// Processes 32 bytes at a time (AVX2) or 16 (SSE2). For chunks with no
-/// bytes in the delete range, simply extends the current kept run. For chunks
-/// with deletions, scans individual bytes to build precise IoSlice boundaries.
-/// For sparse deletes (e.g., 4% for digits), ~72% of chunks need no scanning.
-#[cfg(target_arch = "x86_64")]
-fn delete_range_zerocopy(
-    data: &[u8],
-    writer: &mut impl Write,
-    lo: u8,
-    hi: u8,
-) -> io::Result<()> {
-    if get_simd_level() >= 3 {
-        unsafe { delete_range_zerocopy_avx2(data, writer, lo, hi) }
-    } else {
-        delete_range_zerocopy_scalar(data, writer, lo, hi)
-    }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn delete_range_zerocopy(
-    data: &[u8],
-    writer: &mut impl Write,
-    lo: u8,
-    hi: u8,
-) -> io::Result<()> {
-    delete_range_zerocopy_scalar(data, writer, lo, hi)
-}
-
-/// Scalar fallback for zero-copy range delete.
-fn delete_range_zerocopy_scalar(
-    data: &[u8],
-    writer: &mut impl Write,
-    lo: u8,
-    hi: u8,
-) -> io::Result<()> {
-    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(1024);
-    let mut run_start: usize = 0;
-    let len = data.len();
-
-    for i in 0..len {
-        let b = unsafe { *data.get_unchecked(i) };
-        if b >= lo && b <= hi {
-            if i > run_start {
-                iov.push(std::io::IoSlice::new(&data[run_start..i]));
-                if iov.len() >= MAX_IOV {
-                    write_ioslices(writer, &iov)?;
-                    iov.clear();
-                }
-            }
-            run_start = i + 1;
-        }
-    }
-    if run_start < len {
-        iov.push(std::io::IoSlice::new(&data[run_start..]));
-    }
-    if !iov.is_empty() {
-        write_ioslices(writer, &iov)?;
-    }
-    Ok(())
-}
-
-/// AVX2 zero-copy range delete: process 32 bytes at a time with SIMD range check.
-/// For chunks with no deletions (all-kept), skip scanning entirely.
-/// For chunks with deletions, scan individual bytes for IoSlice boundaries.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn delete_range_zerocopy_avx2(
-    data: &[u8],
-    writer: &mut impl Write,
-    lo: u8,
-    hi: u8,
-) -> io::Result<()> {
-    use std::arch::x86_64::*;
-
-    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(1024);
-    let mut run_start: usize = 0;
-    let len = data.len();
-    let ptr = data.as_ptr();
-
-    unsafe {
-        let range = hi - lo;
-        let bias_v = _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
-        let threshold_v = _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8);
-        let zero = _mm256_setzero_si256();
-
-        let mut i = 0;
-        while i + 32 <= len {
-            let input = _mm256_loadu_si256(ptr.add(i) as *const _);
-            let biased = _mm256_add_epi8(input, bias_v);
-            let gt = _mm256_cmpgt_epi8(biased, threshold_v);
-            let in_range = _mm256_cmpeq_epi8(gt, zero);
-            let delete_mask = _mm256_movemask_epi8(in_range) as u32;
-
-            if delete_mask == 0 {
-                // No bytes to delete in this chunk — extend the run
-                i += 32;
-                continue;
-            }
-
-            // Some bytes to delete — scan individual bytes
-            let mut m = delete_mask;
-            while m != 0 {
-                let bit = m.trailing_zeros() as usize;
-                let pos = i + bit;
-                if pos > run_start {
-                    iov.push(std::io::IoSlice::new(&data[run_start..pos]));
-                    if iov.len() >= MAX_IOV {
-                        write_ioslices(writer, &iov)?;
-                        iov.clear();
-                    }
-                }
-                run_start = pos + 1;
-                m &= m - 1; // clear lowest set bit
-            }
-            i += 32;
-        }
-
-        // Scalar tail
-        while i < len {
-            let b = *ptr.add(i);
-            if b >= lo && b <= hi {
-                if i > run_start {
-                    iov.push(std::io::IoSlice::new(&data[run_start..i]));
-                    if iov.len() >= MAX_IOV {
-                        write_ioslices(writer, &iov)?;
-                        iov.clear();
-                    }
-                }
-                run_start = i + 1;
-            }
-            i += 1;
-        }
-    }
-
-    if run_start < len {
-        iov.push(std::io::IoSlice::new(&data[run_start..]));
-    }
-    if !iov.is_empty() {
-        write_ioslices(writer, &iov)?;
-    }
-    Ok(())
+    // Single-write fast path: SIMD range delete into single buffer, one write_all
+    let mut outbuf = alloc_uninit_vec(data.len());
+    let wp = delete_range_chunk(data, &mut outbuf, lo, hi);
+    writer.write_all(&outbuf[..wp])
 }
 
 /// Delete bytes from chunk using bitset, writing into pre-allocated buffer.

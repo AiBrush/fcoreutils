@@ -601,6 +601,15 @@ pub fn decode_to_writer(data: &[u8], ignore_garbage: bool, out: &mut impl Write)
         return decode_clean_slice(&mut cleaned, out);
     }
 
+    // Try line-by-line decode: if data has uniform 76+1 byte lines (76 base64
+    // chars + newline), decode each line directly into the output buffer.
+    // This avoids the whitespace stripping copy entirely.
+    if data.len() >= 77 {
+        if let Some(result) = try_line_decode(data, out) {
+            return result;
+        }
+    }
+
     // Fast path: single-pass strip + decode
     decode_stripping_whitespace(data, out)
 }
@@ -620,6 +629,14 @@ pub fn decode_mmap_inplace(
 ) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
+    }
+
+    // Try line-by-line decode first: avoids the in-place whitespace strip
+    // and COW page faults entirely. Each line is decoded independently.
+    if !ignore_garbage && data.len() >= 77 {
+        if let Some(result) = try_line_decode(data, out) {
+            return result;
+        }
     }
 
     if ignore_garbage {
@@ -954,6 +971,117 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
     } else {
         decode_clean_slice(&mut clean, out)
     }
+}
+
+/// Try to decode base64 data line-by-line, avoiding whitespace stripping.
+/// Returns Some(result) if the data has uniform line lengths suitable for
+/// per-line decode, or None if the data doesn't fit this pattern.
+///
+/// For standard 76-char-line base64 (wrap=76): each line is 76 encoded chars
+/// + newline = 77 bytes. 76 chars = 19 groups of 4 = 57 decoded bytes per line.
+/// We decode each line directly into its position in the output buffer.
+fn try_line_decode(data: &[u8], out: &mut impl Write) -> Option<io::Result<()>> {
+    // Find the first newline to determine line length
+    let first_nl = memchr::memchr(b'\n', data)?;
+    let line_len = first_nl; // encoded chars per line (without newline)
+
+    // Line length must be a multiple of 4 (complete base64 groups, no padding mid-stream)
+    if line_len == 0 || line_len % 4 != 0 {
+        return None;
+    }
+
+    let line_stride = line_len + 1; // line_len chars + 1 newline byte
+    let decoded_per_line = line_len * 3 / 4;
+
+    // Verify the data has a consistent line structure by checking the next few lines
+    let check_lines = 4.min(data.len() / line_stride);
+    for i in 1..check_lines {
+        let expected_nl = i * line_stride - 1;
+        if expected_nl >= data.len() {
+            break;
+        }
+        if data[expected_nl] != b'\n' {
+            return None; // Inconsistent line length
+        }
+    }
+
+    // Calculate full lines and remainder
+    let full_lines = if data.len() >= line_stride {
+        // Check how many complete lines fit
+        let candidate = data.len() / line_stride;
+        // Verify the last full line's newline
+        if candidate > 0 && data[candidate * line_stride - 1] != b'\n' {
+            return None; // Not a clean line-structured file
+        }
+        candidate
+    } else {
+        0
+    };
+
+    let remainder_start = full_lines * line_stride;
+    let remainder = &data[remainder_start..];
+
+    // Calculate exact output size
+    let remainder_clean_len = if remainder.is_empty() {
+        0
+    } else {
+        // Remainder might end with newline, strip it
+        let rem = if remainder.last() == Some(&b'\n') {
+            &remainder[..remainder.len() - 1]
+        } else {
+            remainder
+        };
+        if rem.is_empty() {
+            0
+        } else {
+            // Check for padding
+            let pad = rem.iter().rev().take(2).filter(|&&b| b == b'=').count();
+            if rem.len() % 4 != 0 {
+                return None; // Invalid remainder
+            }
+            rem.len() * 3 / 4 - pad
+        }
+    };
+
+    let total_decoded = full_lines * decoded_per_line + remainder_clean_len;
+
+    // Pre-allocate output buffer
+    let mut out_buf: Vec<u8> = Vec::with_capacity(total_decoded);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        out_buf.set_len(total_decoded);
+    }
+
+    // Decode each full line directly into its output position
+    let dst = out_buf.as_mut_ptr();
+    for i in 0..full_lines {
+        let in_start = i * line_stride;
+        let in_end = in_start + line_len;
+        let out_off = i * decoded_per_line;
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(dst.add(out_off), decoded_per_line) };
+        match BASE64_ENGINE.decode(&data[in_start..in_end], out_slice.as_out()) {
+            Ok(_) => {}
+            Err(_) => return Some(decode_error()),
+        }
+    }
+
+    // Decode remainder
+    if remainder_clean_len > 0 {
+        let rem = if remainder.last() == Some(&b'\n') {
+            &remainder[..remainder.len() - 1]
+        } else {
+            remainder
+        };
+        let out_off = full_lines * decoded_per_line;
+        let out_slice =
+            unsafe { std::slice::from_raw_parts_mut(dst.add(out_off), remainder_clean_len) };
+        match BASE64_ENGINE.decode(rem, out_slice.as_out()) {
+            Ok(_) => {}
+            Err(_) => return Some(decode_error()),
+        }
+    }
+
+    Some(out.write_all(&out_buf[..total_decoded]))
 }
 
 /// Decode a clean (no whitespace) buffer in-place with SIMD.
