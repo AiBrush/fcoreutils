@@ -23,7 +23,7 @@ jobs:
         run: |
           # Find the latest version directory in the independent test repo
           LATEST=$(gh api repos/AiBrush/coreutils-rs-independent-test/contents/results/benchmarks \
-            --jq '[.[] | select(.type == "dir")] | sort_by(.name) | last | .name' 2>/dev/null || echo "")
+            --jq '[.[] | select(.type == "dir") | .name] | .[]' 2>/dev/null | sort -V | tail -1 || echo "")
 
           if [ -z "$LATEST" ]; then
             echo "No benchmark results found"
@@ -127,5 +127,5 @@ jobs:
 
           VERSION=$(cat /tmp/bench_version.txt)
           git add README.md
-          git commit -m "docs: update performance benchmarks to ${VERSION}"
+          git commit -m "docs: update performance benchmarks to ${VERSION} [skip ci]"
           git push
