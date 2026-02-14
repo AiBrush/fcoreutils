@@ -3295,76 +3295,49 @@ fn squeeze_single_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Resu
         return writer.write_all(data);
     }
 
-    // Buffered approach: copy non-duplicate regions into a contiguous output buffer.
-    // For `tr -s ' '` on 10MB with ~5K squeeze points, the output is ~10MB minus
-    // duplicates. Copying to a buffer and flushing with large write_all is faster
-    // than managing thousands of writev IoSlice entries.
-    const BUF_CAP: usize = 16 * 1024 * 1024;
-    let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP.min(data.len()));
-    let data_ptr = data.as_ptr();
-    let data_len = data.len();
-
+    // Zero-copy writev approach: build IoSlice entries pointing directly into
+    // the original mmap'd data, skipping duplicate bytes in runs.
+    // For `tr -s ' '` on 10MB with ~5K squeeze points:
+    //   - ~10K IoSlice entries (one per gap + one per squeeze point)
+    //   - ~10 writev syscalls (at 1024 entries per batch)
+    //   - Zero data copy — kernel reads directly from mmap pages
     let finder = memchr::memmem::Finder::new(&pair);
+    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(2048);
     let mut cursor = 0;
 
-    while cursor < data_len {
+    while cursor < data.len() {
         match finder.find(&data[cursor..]) {
             Some(offset) => {
                 let pair_pos = cursor + offset;
                 // Include everything up to and including the first byte of the pair
                 let seg_end = pair_pos + 1;
-                let seg_len = seg_end - cursor;
-                if seg_len > 0 {
-                    // Flush if buffer would overflow
-                    if buf.len() + seg_len > buf.capacity() && !buf.is_empty() {
-                        writer.write_all(&buf)?;
-                        buf.clear();
-                    }
-                    if seg_len > BUF_CAP && buf.is_empty() {
-                        writer.write_all(&data[cursor..seg_end])?;
-                    } else {
-                        unsafe {
-                            let dst = buf.as_mut_ptr().add(buf.len());
-                            std::ptr::copy_nonoverlapping(data_ptr.add(cursor), dst, seg_len);
-                            buf.set_len(buf.len() + seg_len);
-                        }
-                    }
+                if seg_end > cursor {
+                    iov.push(std::io::IoSlice::new(&data[cursor..seg_end]));
                 }
                 // Skip all remaining consecutive ch bytes (the run)
                 let mut skip = seg_end;
-                while skip < data_len {
-                    if unsafe { *data_ptr.add(skip) } != ch {
-                        break;
-                    }
+                while skip < data.len() && data[skip] == ch {
                     skip += 1;
                 }
                 cursor = skip;
+                // Flush when approaching MAX_IOV
+                if iov.len() >= MAX_IOV {
+                    write_ioslices(writer, &iov)?;
+                    iov.clear();
+                }
             }
             None => {
                 // No more pairs — emit remainder
-                let rem = data_len - cursor;
-                if rem > 0 {
-                    if buf.len() + rem > buf.capacity() && !buf.is_empty() {
-                        writer.write_all(&buf)?;
-                        buf.clear();
-                    }
-                    if rem > BUF_CAP && buf.is_empty() {
-                        writer.write_all(&data[cursor..])?;
-                    } else {
-                        unsafe {
-                            let dst = buf.as_mut_ptr().add(buf.len());
-                            std::ptr::copy_nonoverlapping(data_ptr.add(cursor), dst, rem);
-                            buf.set_len(buf.len() + rem);
-                        }
-                    }
+                if cursor < data.len() {
+                    iov.push(std::io::IoSlice::new(&data[cursor..]));
                 }
                 break;
             }
         }
     }
 
-    if !buf.is_empty() {
-        writer.write_all(&buf)?;
+    if !iov.is_empty() {
+        write_ioslices(writer, &iov)?;
     }
     Ok(())
 }
