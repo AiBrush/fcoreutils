@@ -140,8 +140,7 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
             let out_base = line_idx * line_out;
             unsafe {
                 let s0 = std::slice::from_raw_parts_mut(dst.add(out_base), wrap_col);
-                let _ = BASE64_ENGINE
-                    .encode(&data[in_base..in_base + bytes_per_line], s0.as_out());
+                let _ = BASE64_ENGINE.encode(&data[in_base..in_base + bytes_per_line], s0.as_out());
                 *dst.add(out_base + wrap_col) = b'\n';
 
                 let s1 = std::slice::from_raw_parts_mut(dst.add(out_base + line_out), wrap_col);
@@ -151,16 +150,14 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
                 );
                 *dst.add(out_base + line_out + wrap_col) = b'\n';
 
-                let s2 =
-                    std::slice::from_raw_parts_mut(dst.add(out_base + 2 * line_out), wrap_col);
+                let s2 = std::slice::from_raw_parts_mut(dst.add(out_base + 2 * line_out), wrap_col);
                 let _ = BASE64_ENGINE.encode(
                     &data[in_base + 2 * bytes_per_line..in_base + 3 * bytes_per_line],
                     s2.as_out(),
                 );
                 *dst.add(out_base + 2 * line_out + wrap_col) = b'\n';
 
-                let s3 =
-                    std::slice::from_raw_parts_mut(dst.add(out_base + 3 * line_out), wrap_col);
+                let s3 = std::slice::from_raw_parts_mut(dst.add(out_base + 3 * line_out), wrap_col);
                 let _ = BASE64_ENGINE.encode(
                     &data[in_base + 3 * bytes_per_line..in_base + 4 * bytes_per_line],
                     s3.as_out(),
@@ -176,8 +173,7 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
             let out_base = line_idx * line_out;
             unsafe {
                 let s = std::slice::from_raw_parts_mut(dst.add(out_base), wrap_col);
-                let _ = BASE64_ENGINE
-                    .encode(&data[in_base..in_base + bytes_per_line], s.as_out());
+                let _ = BASE64_ENGINE.encode(&data[in_base..in_base + bytes_per_line], s.as_out());
                 *dst.add(out_base + wrap_col) = b'\n';
             }
             line_idx += 1;
@@ -189,8 +185,8 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
             let woff = total_full_lines * line_out;
             unsafe {
                 let s = std::slice::from_raw_parts_mut(dst.add(woff), enc_len);
-                let _ = BASE64_ENGINE
-                    .encode(&data[total_full_lines * bytes_per_line..], s.as_out());
+                let _ =
+                    BASE64_ENGINE.encode(&data[total_full_lines * bytes_per_line..], s.as_out());
                 *dst.add(woff + enc_len) = b'\n';
             }
         }

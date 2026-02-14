@@ -1406,13 +1406,7 @@ pub fn translate_squeeze(
     // fused approach: translate via SIMD, then use memmem to find squeeze points.
     if set2.len() == 1 || (set2.len() > 1 && set2.iter().all(|&b| b == set2[0])) {
         let squeeze_ch = set2.last().copied().unwrap_or(0);
-        return translate_squeeze_single_ch(
-            &table,
-            squeeze_ch,
-            &squeeze_set,
-            reader,
-            writer,
-        );
+        return translate_squeeze_single_ch(&table, squeeze_ch, &squeeze_set, reader, writer);
     }
 
     // Two-pass optimization for range translations:
@@ -1905,7 +1899,11 @@ fn squeeze_multi_stream(
 ) -> io::Result<()> {
     let c0 = chars[0];
     let c1 = chars[1];
-    let c2 = if chars.len() >= 3 { Some(chars[2]) } else { None };
+    let c2 = if chars.len() >= 3 {
+        Some(chars[2])
+    } else {
+        None
+    };
     let single_byte = [0u8; 1]; // used for the kept single byte
     let _ = single_byte;
 

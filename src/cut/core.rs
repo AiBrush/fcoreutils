@@ -1728,10 +1728,7 @@ fn extract_small_field_to_buf(
             std::slice::from_raw_parts(base.add(field_start), len - field_start)
         }) {
             Some(pos) => unsafe {
-                buf_extend(
-                    buf,
-                    std::slice::from_raw_parts(base.add(field_start), pos),
-                );
+                buf_extend(buf, std::slice::from_raw_parts(base.add(field_start), pos));
                 buf_push(buf, line_delim);
             },
             None => unsafe {
