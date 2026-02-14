@@ -153,13 +153,33 @@ fn main() {
         } else {
             tr::expand_set2(set2_str, set1.len())
         };
-        #[cfg(unix)]
-        let result = tr::translate_mmap(&set1, &set2, &data, &mut *raw);
-        #[cfg(not(unix))]
-        let result = {
-            let stdout = io::stdout();
-            let mut lock = stdout.lock();
-            tr::translate_mmap(&set1, &set2, &data, &mut lock)
+        // Use in-place translate for owned data (piped stdin) to avoid output buffer.
+        // For mmap'd data (file redirect), use the mmap path that allocates an output buffer.
+        let result = match data {
+            FileData::Owned(mut vec) => {
+                #[cfg(unix)]
+                {
+                    tr::translate_owned(&set1, &set2, &mut vec, &mut *raw)
+                }
+                #[cfg(not(unix))]
+                {
+                    let stdout = io::stdout();
+                    let mut lock = stdout.lock();
+                    tr::translate_owned(&set1, &set2, &mut vec, &mut lock)
+                }
+            }
+            _ => {
+                #[cfg(unix)]
+                {
+                    tr::translate_mmap(&set1, &set2, &data, &mut *raw)
+                }
+                #[cfg(not(unix))]
+                {
+                    let stdout = io::stdout();
+                    let mut lock = stdout.lock();
+                    tr::translate_mmap(&set1, &set2, &data, &mut lock)
+                }
+            }
         };
         if let Err(e) = result
             && e.kind() != io::ErrorKind::BrokenPipe

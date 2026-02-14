@@ -1592,6 +1592,54 @@ fn squeeze_single_stream(
 }
 
 // ============================================================================
+// Batch in-place functions (owned data from piped stdin)
+// ============================================================================
+
+/// Translate bytes in-place on an owned buffer, then write.
+/// For piped stdin where we own the data, this avoids the separate output buffer
+/// allocation needed by translate_mmap. Uses parallel in-place SIMD for large data.
+pub fn translate_owned(
+    set1: &[u8],
+    set2: &[u8],
+    data: &mut [u8],
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let table = build_translate_table(set1, set2);
+
+    // Identity table — pure passthrough
+    let is_identity = table.iter().enumerate().all(|(i, &v)| v == i as u8);
+    if is_identity {
+        return writer.write_all(data);
+    }
+
+    // SIMD range fast path (in-place)
+    if let Some((lo, hi, offset)) = detect_range_offset(&table) {
+        if data.len() >= PARALLEL_THRESHOLD {
+            let n_threads = rayon::current_num_threads().max(1);
+            let chunk_size = (data.len() / n_threads).max(32 * 1024);
+            data.par_chunks_mut(chunk_size).for_each(|chunk| {
+                translate_range_simd_inplace(chunk, lo, hi, offset);
+            });
+        } else {
+            translate_range_simd_inplace(data, lo, hi, offset);
+        }
+        return writer.write_all(data);
+    }
+
+    // General table lookup (in-place)
+    if data.len() >= PARALLEL_THRESHOLD {
+        let n_threads = rayon::current_num_threads().max(1);
+        let chunk_size = (data.len() / n_threads).max(32 * 1024);
+        data.par_chunks_mut(chunk_size).for_each(|chunk| {
+            translate_inplace(chunk, &table);
+        });
+    } else {
+        translate_inplace(data, &table);
+    }
+    writer.write_all(data)
+}
+
+// ============================================================================
 // Mmap-based functions (zero-copy input from byte slice)
 // ============================================================================
 
