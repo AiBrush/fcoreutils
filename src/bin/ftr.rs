@@ -11,105 +11,6 @@ use coreutils_rs::common::io::FileData;
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::tr;
 
-/// Writer that uses vmsplice(2) for zero-copy pipe output on Linux.
-/// vmsplice references user/mmap pages directly in the pipe buffer,
-/// eliminating one full memcpy per write (user to kernel pipe buffer).
-#[cfg(target_os = "linux")]
-struct VmspliceWriter {
-    raw: ManuallyDrop<std::fs::File>,
-    is_pipe: bool,
-}
-
-#[cfg(target_os = "linux")]
-impl VmspliceWriter {
-    fn new() -> Self {
-        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        let is_pipe = unsafe {
-            let mut stat: libc::stat = std::mem::zeroed();
-            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
-        };
-        Self { raw, is_pipe }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Write for VmspliceWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if !self.is_pipe || buf.is_empty() {
-            return (&*self.raw).write(buf);
-        }
-        let iov = libc::iovec {
-            iov_base: buf.as_ptr() as *mut libc::c_void,
-            iov_len: buf.len(),
-        };
-        let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-        if n >= 0 {
-            Ok(n as usize)
-        } else {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                return Ok(0);
-            }
-            self.is_pipe = false;
-            (&*self.raw).write(buf)
-        }
-    }
-
-    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
-        if !self.is_pipe || buf.is_empty() {
-            return (&*self.raw).write_all(buf);
-        }
-        while !buf.is_empty() {
-            let iov = libc::iovec {
-                iov_base: buf.as_ptr() as *mut libc::c_void,
-                iov_len: buf.len(),
-            };
-            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-            if n > 0 {
-                buf = &buf[n as usize..];
-            } else if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "vmsplice wrote 0"));
-            } else {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                self.is_pipe = false;
-                return (&*self.raw).write_all(buf);
-            }
-        }
-        Ok(())
-    }
-
-    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
-        if !self.is_pipe || bufs.is_empty() {
-            return (&*self.raw).write_vectored(bufs);
-        }
-        let iovs: Vec<libc::iovec> = bufs
-            .iter()
-            .map(|b| libc::iovec {
-                iov_base: b.as_ptr() as *mut libc::c_void,
-                iov_len: b.len(),
-            })
-            .collect();
-        let n = unsafe { libc::vmsplice(1, iovs.as_ptr(), iovs.len(), 0) };
-        if n >= 0 {
-            Ok(n as usize)
-        } else {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                return Ok(0);
-            }
-            self.is_pipe = false;
-            (&*self.raw).write_vectored(bufs)
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 #[derive(Parser)]
 #[command(
     name = "tr",
@@ -139,8 +40,8 @@ struct Cli {
     sets: Vec<String>,
 }
 
-/// Raw fd stdout for zero-overhead writes on non-Linux Unix.
-#[cfg(all(unix, not(target_os = "linux")))]
+/// Raw fd stdout for zero-overhead writes on Unix.
+#[cfg(unix)]
 #[inline]
 fn raw_stdout() -> ManuallyDrop<std::fs::File> {
     unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) }
@@ -279,9 +180,7 @@ fn main() {
 
     let set1_str = &cli.sets[0];
 
-    #[cfg(target_os = "linux")]
-    let mut raw = ManuallyDrop::new(VmspliceWriter::new());
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(unix)]
     let mut raw = raw_stdout();
 
     // Pure translate mode: bypass BufWriter entirely.
