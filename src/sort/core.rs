@@ -1694,23 +1694,18 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             std::mem::swap(&mut sorted, &mut temp);
             drop(temp);
 
-            // Parallel pdqsort within each non-trivial bucket.
-            // Buckets are independent and non-overlapping, so parallel mutation is safe.
+            // 2-level radix: within each level-1 bucket, do a second radix
+            // scatter by the second byte of the prefix (bits [48:56)).
+            // This reduces sub-bucket sizes from ~n/256 to ~n/65536, making
+            // most sub-buckets contain 0-2 entries (no comparison sort needed).
+            // For small buckets (<= 64), just pdqsort directly.
             let sorted_ptr = sorted.as_mut_ptr() as usize;
             let buckets: Vec<(usize, usize)> = (0..256)
                 .filter(|&i| bk_starts[i + 1] - bk_starts[i] > 1)
                 .map(|i| (bk_starts[i], bk_starts[i + 1]))
                 .collect();
-            buckets.into_par_iter().for_each(|(_lo, _hi)| {
-                let lo = _lo;
-                let hi = _hi;
-                let group = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        (sorted_ptr as *mut (u64, u32, u32)).add(lo),
-                        hi - lo,
-                    )
-                };
-                group.sort_unstable_by(|a, b| match a.0.cmp(&b.0) {
+            let pfx_cmp_inner = |a: &(u64, u32, u32), b: &(u64, u32, u32)| -> Ordering {
+                match a.0.cmp(&b.0) {
                     Ordering::Equal => {
                         let la = a.2 as usize;
                         let lb = b.2 as usize;
@@ -1737,7 +1732,56 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         }
                     }
                     ord => ord,
-                });
+                }
+            };
+            buckets.into_par_iter().for_each(|(lo, hi)| {
+                let bsize = hi - lo;
+                let group = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        (sorted_ptr as *mut (u64, u32, u32)).add(lo),
+                        bsize,
+                    )
+                };
+                if bsize <= 64 {
+                    group.sort_unstable_by(pfx_cmp_inner);
+                    return;
+                }
+                // Level-2 radix by second byte of prefix
+                let mut cnts2 = [0u32; 256];
+                for e in group.iter() {
+                    cnts2[((e.0 >> 48) & 0xFF) as usize] += 1;
+                }
+                let mut starts2 = [0usize; 257];
+                {
+                    let mut s2 = 0;
+                    for i in 0..256 {
+                        starts2[i] = s2;
+                        s2 += cnts2[i] as usize;
+                    }
+                    starts2[256] = s2;
+                }
+                let mut temp2: Vec<(u64, u32, u32)> = Vec::with_capacity(bsize);
+                #[allow(clippy::uninit_vec)]
+                unsafe {
+                    temp2.set_len(bsize);
+                }
+                {
+                    let mut wpos2 = starts2;
+                    for &ent in group.iter() {
+                        let b = ((ent.0 >> 48) & 0xFF) as usize;
+                        temp2[wpos2[b]] = ent;
+                        wpos2[b] += 1;
+                    }
+                }
+                group.copy_from_slice(&temp2);
+                drop(temp2);
+                // Sort each sub-bucket
+                for i in 0..256 {
+                    let sub_sz = starts2[i + 1] - starts2[i];
+                    if sub_sz > 1 {
+                        group[starts2[i]..starts2[i + 1]].sort_unstable_by(pfx_cmp_inner);
+                    }
+                }
             });
         } else if num_lines > 10_000 {
             if config.stable {
@@ -2486,59 +2530,97 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         .filter(|&i| bk_starts[i + 1] - bk_starts[i] > 1)
                         .map(|i| (bk_starts[i], bk_starts[i + 1]))
                         .collect();
+                    let sk_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                        let ord = match a.0.cmp(&b.0) {
+                            Ordering::Equal => {
+                                let ko = key_offs_ptr as *const (usize, usize);
+                                let (sa, ea) = unsafe { *ko.add(a.1) };
+                                let (sb, eb) = unsafe { *ko.add(b.1) };
+                                let la = ea - sa;
+                                let lb = eb - sb;
+                                let skip = 8.min(la).min(lb);
+                                unsafe {
+                                    let dp = data_addr as *const u8;
+                                    let pa = dp.add(sa + skip);
+                                    let pb = dp.add(sb + skip);
+                                    let rem_a = la - skip;
+                                    let rem_b = lb - skip;
+                                    let min_rem = rem_a.min(rem_b);
+                                    let mut i = 0usize;
+                                    while i + 8 <= min_rem {
+                                        let wa = u64::from_be_bytes(*(pa.add(i) as *const [u8; 8]));
+                                        let wb = u64::from_be_bytes(*(pb.add(i) as *const [u8; 8]));
+                                        if wa != wb {
+                                            return wa.cmp(&wb);
+                                        }
+                                        i += 8;
+                                    }
+                                    std::slice::from_raw_parts(pa.add(i), rem_a - i)
+                                        .cmp(std::slice::from_raw_parts(pb.add(i), rem_b - i))
+                                }
+                            }
+                            ord => ord,
+                        };
+                        if ord != Ordering::Equal {
+                            return ord;
+                        }
+                        // Last-resort: full line comparison
+                        let off = offsets_ptr as *const (usize, usize);
+                        let (la, ra) = unsafe { *off.add(a.1) };
+                        let (lb, rb) = unsafe { *off.add(b.1) };
+                        unsafe {
+                            let dp = data_addr as *const u8;
+                            std::slice::from_raw_parts(dp.add(la), ra - la)
+                                .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
+                        }
+                    };
                     buckets.into_par_iter().for_each(|(lo, hi)| {
+                        let bsize = hi - lo;
                         let group = unsafe {
                             std::slice::from_raw_parts_mut(
                                 (entries_ptr as *mut (u64, usize)).add(lo),
-                                hi - lo,
+                                bsize,
                             )
                         };
-                        group.sort_unstable_by(|a, b| {
-                            let ord = match a.0.cmp(&b.0) {
-                                Ordering::Equal => {
-                                    let ko = key_offs_ptr as *const (usize, usize);
-                                    let (sa, ea) = unsafe { *ko.add(a.1) };
-                                    let (sb, eb) = unsafe { *ko.add(b.1) };
-                                    let la = ea - sa;
-                                    let lb = eb - sb;
-                                    let skip = 8.min(la).min(lb);
-                                    unsafe {
-                                        let dp = data_addr as *const u8;
-                                        let pa = dp.add(sa + skip);
-                                        let pb = dp.add(sb + skip);
-                                        let rem_a = la - skip;
-                                        let rem_b = lb - skip;
-                                        let min_rem = rem_a.min(rem_b);
-                                        let mut i = 0usize;
-                                        while i + 8 <= min_rem {
-                                            let wa =
-                                                u64::from_be_bytes(*(pa.add(i) as *const [u8; 8]));
-                                            let wb =
-                                                u64::from_be_bytes(*(pb.add(i) as *const [u8; 8]));
-                                            if wa != wb {
-                                                return wa.cmp(&wb);
-                                            }
-                                            i += 8;
-                                        }
-                                        std::slice::from_raw_parts(pa.add(i), rem_a - i)
-                                            .cmp(std::slice::from_raw_parts(pb.add(i), rem_b - i))
-                                    }
-                                }
-                                ord => ord,
-                            };
-                            if ord != Ordering::Equal {
-                                return ord;
+                        if bsize <= 64 {
+                            group.sort_unstable_by(sk_cmp);
+                            return;
+                        }
+                        // Level-2 radix by second byte of key prefix
+                        let mut cnts2 = [0u32; 256];
+                        for e in group.iter() {
+                            cnts2[((e.0 >> 48) & 0xFF) as usize] += 1;
+                        }
+                        let mut starts2 = [0usize; 257];
+                        {
+                            let mut s2 = 0;
+                            for i in 0..256 {
+                                starts2[i] = s2;
+                                s2 += cnts2[i] as usize;
                             }
-                            // Last-resort: full line comparison
-                            let off = offsets_ptr as *const (usize, usize);
-                            let (la, ra) = unsafe { *off.add(a.1) };
-                            let (lb, rb) = unsafe { *off.add(b.1) };
-                            unsafe {
-                                let dp = data_addr as *const u8;
-                                std::slice::from_raw_parts(dp.add(la), ra - la)
-                                    .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
+                            starts2[256] = s2;
+                        }
+                        let mut temp2: Vec<(u64, usize)> = Vec::with_capacity(bsize);
+                        #[allow(clippy::uninit_vec)]
+                        unsafe {
+                            temp2.set_len(bsize);
+                        }
+                        {
+                            let mut wpos2 = starts2;
+                            for &ent in group.iter() {
+                                let b = ((ent.0 >> 48) & 0xFF) as usize;
+                                temp2[wpos2[b]] = ent;
+                                wpos2[b] += 1;
                             }
-                        });
+                        }
+                        group.copy_from_slice(&temp2);
+                        drop(temp2);
+                        for i in 0..256 {
+                            let sub_sz = starts2[i + 1] - starts2[i];
+                            if sub_sz > 1 {
+                                group[starts2[i]..starts2[i + 1]].sort_unstable_by(sk_cmp);
+                            }
+                        }
                     });
                 } else if num_lines > 10_000 {
                     entries.par_sort_unstable_by(prefix_cmp);
