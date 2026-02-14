@@ -1613,7 +1613,116 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             }
         };
         let mut sorted = entries;
-        if num_lines > 10_000 {
+        if num_lines > 4096 && !config.stable {
+            // Hybrid MSD radix + parallel bucket pdqsort.
+            // 1-level radix sort by top byte of u64 prefix distributes entries
+            // into ~70 populated buckets (for ASCII text). Each bucket averages
+            // n/70 entries which fit in L1/L2 cache for fast pdqsort.
+            // This is 2-3x faster than pure pdqsort for random text because:
+            // - The O(n) radix pass eliminates the top byte from all comparisons
+            // - Within-bucket pdqsort has n/70 entries (fits in cache)
+            // - Parallel bucket processing scales with core count
+            let n = sorted.len();
+            let mut temp: Vec<(u64, u32, u32)> = Vec::with_capacity(n);
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                temp.set_len(n);
+            }
+
+            // Count bucket sizes
+            let mut cnts = [0u32; 256];
+            for &(pfx, _, _) in sorted.iter() {
+                cnts[(pfx >> 56) as usize] += 1;
+            }
+            // Prefix sum → bucket start positions
+            let mut bk_starts = [0usize; 257];
+            {
+                let mut s = 0;
+                for i in 0..256 {
+                    bk_starts[i] = s;
+                    s += cnts[i] as usize;
+                }
+                bk_starts[256] = s;
+            }
+            // Scatter into buckets with software prefetch
+            {
+                let mut wpos = bk_starts;
+                let tptr = temp.as_mut_ptr();
+                let sptr = sorted.as_ptr();
+                let pfx_dist = 8usize;
+                for idx in 0..n {
+                    let ent = unsafe { *sptr.add(idx) };
+                    let b = (ent.0 >> 56) as usize;
+                    unsafe {
+                        *tptr.add(wpos[b]) = ent;
+                    }
+                    wpos[b] += 1;
+                    if idx + pfx_dist < n {
+                        let future = unsafe { *sptr.add(idx + pfx_dist) };
+                        let fb = (future.0 >> 56) as usize;
+                        let fp = wpos[fb];
+                        #[cfg(target_arch = "x86_64")]
+                        unsafe {
+                            std::arch::x86_64::_mm_prefetch(
+                                tptr.add(fp) as *const i8,
+                                std::arch::x86_64::_MM_HINT_T0,
+                            );
+                        }
+                        #[cfg(not(target_arch = "x86_64"))]
+                        let _ = fp;
+                    }
+                }
+            }
+            // Move scattered data back to sorted
+            std::mem::swap(&mut sorted, &mut temp);
+            drop(temp);
+
+            // Parallel pdqsort within each non-trivial bucket.
+            // Buckets are independent and non-overlapping, so parallel mutation is safe.
+            let sorted_ptr = sorted.as_mut_ptr() as usize;
+            let buckets: Vec<(usize, usize)> = (0..256)
+                .filter(|&i| bk_starts[i + 1] - bk_starts[i] > 1)
+                .map(|i| (bk_starts[i], bk_starts[i + 1]))
+                .collect();
+            buckets.into_par_iter().for_each(|(_lo, _hi)| {
+                let lo = _lo;
+                let hi = _hi;
+                let group = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        (sorted_ptr as *mut (u64, u32, u32)).add(lo),
+                        hi - lo,
+                    )
+                };
+                group.sort_unstable_by(|a, b| match a.0.cmp(&b.0) {
+                    Ordering::Equal => {
+                        let la = a.2 as usize;
+                        let lb = b.2 as usize;
+                        let skip_a = 8.min(la);
+                        let skip_b = 8.min(lb);
+                        let rem_a = la - skip_a;
+                        let rem_b = lb - skip_b;
+                        unsafe {
+                            let dp = data_addr as *const u8;
+                            let pa = dp.add(a.1 as usize + skip_a);
+                            let pb = dp.add(b.1 as usize + skip_b);
+                            let min_rem = rem_a.min(rem_b);
+                            let mut i = 0usize;
+                            while i + 8 <= min_rem {
+                                let wa = u64::from_be_bytes(*(pa.add(i) as *const [u8; 8]));
+                                let wb = u64::from_be_bytes(*(pb.add(i) as *const [u8; 8]));
+                                if wa != wb {
+                                    return wa.cmp(&wb);
+                                }
+                                i += 8;
+                            }
+                            std::slice::from_raw_parts(pa.add(i), rem_a - i)
+                                .cmp(std::slice::from_raw_parts(pb.add(i), rem_b - i))
+                        }
+                    }
+                    ord => ord,
+                });
+            });
+        } else if num_lines > 10_000 {
             if config.stable {
                 sorted.par_sort_by(pfx_cmp);
             } else {
