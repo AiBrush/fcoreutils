@@ -715,7 +715,7 @@ unsafe fn translate_range_to_constant_avx2_inplace(data: &mut [u8], lo: u8, hi: 
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
+#[target_feature(enable = "sse2")]
 unsafe fn translate_range_to_constant_sse2_inplace(data: &mut [u8], lo: u8, hi: u8, replacement: u8) {
     use std::arch::x86_64::*;
 
@@ -734,8 +734,13 @@ unsafe fn translate_range_to_constant_sse2_inplace(data: &mut [u8], lo: u8, hi: 
             let input = _mm_loadu_si128(ptr.add(i) as *const _);
             let biased = _mm_add_epi8(input, bias_v);
             let gt = _mm_cmpgt_epi8(biased, threshold_v);
+            // in_range mask: 0xFF where in range, 0x00 where not
             let in_range = _mm_cmpeq_epi8(gt, zero);
-            let result = _mm_blendv_epi8(input, repl_v, in_range);
+            // SSE2 blendv: (repl & mask) | (input & ~mask)
+            let result = _mm_or_si128(
+                _mm_and_si128(in_range, repl_v),
+                _mm_andnot_si128(in_range, input),
+            );
             _mm_storeu_si128(ptr.add(i) as *mut _, result);
             i += 16;
         }

@@ -91,23 +91,21 @@ pub fn tac_bytes_owned(
 }
 
 /// Reverse records separated by a single byte.
-/// Uses single forward SIMD pass to find separators, then builds reversed output.
+/// Uses single forward SIMD pass to find separators, then builds zero-copy
+/// reversed output via IoSlice entries pointing directly at the source data.
 ///
-/// For data up to CONTIG_LIMIT, builds a contiguous reversed output buffer
-/// and writes it in a single write_all(). This is much faster for pipe output
-/// than writev with many small slices (a 10MB file with 50-byte lines would
-/// need ~200 writev calls of 1024 entries each; a single 10MB write is faster).
-///
-/// For larger data, uses batched writev to avoid doubling memory usage.
+/// For data up to ZEROCOPY_LIMIT (256MB), builds IoSlice entries for all
+/// records and writes via batched write_vectored. For larger data, falls
+/// back to chunked backward scan to limit memory overhead.
 pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
-    if data.len() <= CONTIG_LIMIT {
+    if data.len() <= ZEROCOPY_LIMIT {
         if !before {
-            tac_bytes_contig_after(data, separator, out)
+            tac_bytes_zerocopy_after(data, separator, out)
         } else {
-            tac_bytes_contig_before(data, separator, out)
+            tac_bytes_zerocopy_before(data, separator, out)
         }
     } else if !before {
         tac_bytes_backward_after(data, separator, out)
@@ -116,145 +114,66 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
     }
 }
 
-/// Threshold for contiguous-buffer strategy.
-/// Up to 128MB, build a single reversed output buffer and write_all in one call.
-/// For data > 128MB, falls back to chunked backward scan with batched writev.
-const CONTIG_LIMIT: usize = 128 * 1024 * 1024;
+/// Threshold for zero-copy IoSlice strategy.
+/// Up to 256MB, the positions Vec (~50MB for 50-byte lines) + IoSlice Vec
+/// (~100MB) is acceptable. For larger data, use chunked backward scan.
+const ZEROCOPY_LIMIT: usize = 256 * 1024 * 1024;
 
-/// Contiguous-buffer after-separator mode for data <= CONTIG_LIMIT.
-/// Uses forward SIMD memchr pass to collect separator positions, then
-/// copies records in reverse order into a pre-allocated output buffer
-/// using ptr::copy_nonoverlapping for maximum throughput.
-/// One write_all() of the full buffer eliminates per-syscall overhead.
+/// Zero-copy after-separator mode: builds IoSlice entries pointing directly
+/// at the source data in reverse record order. Uses forward SIMD memchr_iter
+/// to find all separator positions, then constructs IoSlice entries in reverse
+/// order and writes them via batched write_vectored.
 ///
-/// For small data (<= 64KB), uses memrchr backward scan to avoid
-/// the positions Vec allocation entirely.
-fn tac_bytes_contig_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    // Pre-allocate exact-size output buffer without zero-init
-    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
-    #[allow(clippy::uninit_vec)]
-    unsafe {
-        buf.set_len(data.len());
+/// Eliminates the 10MB output buffer allocation and data copy that the previous
+/// contiguous-buffer approach required. For /dev/null or pipe output, this is
+/// significantly faster since we avoid touching 10MB of output memory entirely.
+fn tac_bytes_zerocopy_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
+    // Collect separator positions with forward SIMD memchr (single fast pass).
+    // For 10MB with 50-byte lines, this produces ~200K positions.
+    let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
+
+    // Build IoSlice entries in reverse order, pointing directly at source data.
+    // Each record is the slice between separators (after the separator byte).
+    let num_records = positions.len() + 1; // +1 for potential leading record
+    let mut iov: Vec<IoSlice> = Vec::with_capacity(num_records);
+
+    let mut end = data.len();
+    for &pos in positions.iter().rev() {
+        let rec_start = pos + 1;
+        if rec_start < end {
+            iov.push(IoSlice::new(&data[rec_start..end]));
+        }
+        end = rec_start;
+    }
+    // First record (before the first separator)
+    if end > 0 {
+        iov.push(IoSlice::new(&data[..end]));
     }
 
-    let src = data.as_ptr();
-    let dst = buf.as_mut_ptr();
-    let mut wp = 0usize;
-
-    if data.len() <= 64 * 1024 {
-        // Small data: use memrchr backward scan — no positions Vec needed
-        let mut end = data.len();
-        while end > 0 {
-            match memchr::memrchr(sep, &data[..end]) {
-                Some(pos) => {
-                    let rec_start = pos + 1;
-                    let rec_len = end - rec_start;
-                    if rec_len > 0 {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(src.add(rec_start), dst.add(wp), rec_len);
-                        }
-                        wp += rec_len;
-                    }
-                    end = rec_start;
-                }
-                None => break,
-            }
-        }
-        if end > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(src, dst.add(wp), end);
-            }
-            wp += end;
-        }
-    } else {
-        // Large data: collect positions with forward SIMD memchr (better throughput
-        // than many memrchr calls), then iterate in reverse.
-        let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
-
-        let mut end = data.len();
-        for &pos in positions.iter().rev() {
-            let rec_start = pos + 1;
-            let rec_len = end - rec_start;
-            if rec_len > 0 {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(rec_start), dst.add(wp), rec_len);
-                }
-                wp += rec_len;
-            }
-            end = rec_start;
-        }
-        if end > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(src, dst.add(wp), end);
-            }
-            wp += end;
-        }
-    }
-
-    out.write_all(&buf[..wp])
+    flush_iov(out, &iov)
 }
 
-/// Contiguous-buffer before-separator mode for data <= CONTIG_LIMIT.
-fn tac_bytes_contig_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    // Pre-allocate exact-size output buffer without zero-init
-    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
-    #[allow(clippy::uninit_vec)]
-    unsafe {
-        buf.set_len(data.len());
+/// Zero-copy before-separator mode: builds IoSlice entries pointing directly
+/// at the source data in reverse record order.
+fn tac_bytes_zerocopy_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
+    let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
+
+    let num_records = positions.len() + 1;
+    let mut iov: Vec<IoSlice> = Vec::with_capacity(num_records);
+
+    let mut end = data.len();
+    for &pos in positions.iter().rev() {
+        if pos < end {
+            iov.push(IoSlice::new(&data[pos..end]));
+        }
+        end = pos;
+    }
+    // First record (before the first separator)
+    if end > 0 {
+        iov.push(IoSlice::new(&data[..end]));
     }
 
-    let src = data.as_ptr();
-    let dst = buf.as_mut_ptr();
-    let mut wp = 0usize;
-
-    if data.len() <= 64 * 1024 {
-        // Small data: use memrchr backward scan — no positions Vec needed
-        let mut end = data.len();
-        while end > 0 {
-            match memchr::memrchr(sep, &data[..end]) {
-                Some(pos) => {
-                    let rec_len = end - pos;
-                    if rec_len > 0 {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(src.add(pos), dst.add(wp), rec_len);
-                        }
-                        wp += rec_len;
-                    }
-                    end = pos;
-                }
-                None => break,
-            }
-        }
-        if end > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(src, dst.add(wp), end);
-            }
-            wp += end;
-        }
-    } else {
-        // Large data: collect positions with forward SIMD memchr
-        let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
-
-        let mut end = data.len();
-        for &pos in positions.iter().rev() {
-            let rec_len = end - pos;
-            if rec_len > 0 {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(pos), dst.add(wp), rec_len);
-                }
-                wp += rec_len;
-            }
-            end = pos;
-        }
-        if end > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(src, dst.add(wp), end);
-            }
-            wp += end;
-        }
-    }
-
-    out.write_all(&buf[..wp])
+    flush_iov(out, &iov)
 }
 
 /// After-separator mode: chunk-based forward SIMD scan, emitted in reverse.
