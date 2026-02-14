@@ -5,8 +5,6 @@ use std::mem::ManuallyDrop;
 use std::os::unix::io::FromRawFd;
 use std::process;
 
-use clap::Parser;
-
 use coreutils_rs::common::io::FileData;
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::tr;
@@ -35,33 +33,94 @@ impl io::Read for RawStdin {
     }
 }
 
-#[derive(Parser)]
-#[command(
-    name = "tr",
-    about = "Translate, squeeze, and/or delete characters",
-    override_usage = "tr [OPTION]... SET1 [SET2]"
-)]
 struct Cli {
-    /// Use the complement of SET1
-    #[arg(short = 'c', short_alias = 'C', long = "complement")]
     complement: bool,
-
-    /// Delete characters in SET1, do not translate
-    #[arg(short = 'd', long = "delete")]
     delete: bool,
-
-    /// Replace each sequence of a repeated character that is listed
-    /// in the last specified SET, with a single occurrence of that character
-    #[arg(short = 's', long = "squeeze-repeats")]
     squeeze: bool,
-
-    /// First truncate SET1 to length of SET2
-    #[arg(short = 't', long = "truncate-set1")]
     truncate: bool,
-
-    /// Character sets
-    #[arg(required = true)]
     sets: Vec<String>,
+}
+
+/// Hand-rolled argument parser — eliminates clap's ~100-200µs initialization.
+/// tr's args are simple: -c/-C, -d, -s, -t flags + 1-2 positional SET args.
+fn parse_args() -> Cli {
+    let mut cli = Cli {
+        complement: false,
+        delete: false,
+        squeeze: false,
+        truncate: false,
+        sets: Vec::with_capacity(2),
+    };
+
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        let bytes = arg.as_encoded_bytes();
+        if bytes == b"--" {
+            // Everything after -- is positional
+            for a in args {
+                cli.sets.push(a.to_string_lossy().into_owned());
+            }
+            break;
+        }
+        if bytes.starts_with(b"--") {
+            match bytes {
+                b"--complement" => cli.complement = true,
+                b"--delete" => cli.delete = true,
+                b"--squeeze-repeats" => cli.squeeze = true,
+                b"--truncate-set1" => cli.truncate = true,
+                b"--help" => {
+                    print!(
+                        "Usage: tr [OPTION]... SET1 [SET2]\n\
+                        Translate, squeeze, and/or delete characters from standard input,\n\
+                        writing to standard output.\n\n\
+                        \x20 -c, -C, --complement    use the complement of SET1\n\
+                        \x20 -d, --delete            delete characters in SET1, do not translate\n\
+                        \x20 -s, --squeeze-repeats   replace each sequence of a repeated character\n\
+                        \x20                         that is listed in the last specified SET,\n\
+                        \x20                         with a single occurrence of that character\n\
+                        \x20 -t, --truncate-set1     first truncate SET1 to length of SET2\n\
+                        \x20     --help              display this help and exit\n\
+                        \x20     --version           output version information and exit\n"
+                    );
+                    process::exit(0);
+                }
+                b"--version" => {
+                    println!("tr (fcoreutils) {}", env!("CARGO_PKG_VERSION"));
+                    process::exit(0);
+                }
+                _ => {
+                    eprintln!("tr: unrecognized option '{}'", arg.to_string_lossy());
+                    eprintln!("Try 'tr --help' for more information.");
+                    process::exit(1);
+                }
+            }
+        } else if bytes.len() > 1 && bytes[0] == b'-' {
+            // Short options: -c, -d, -s, -t (can be combined: -ds, -cd, etc.)
+            for &b in &bytes[1..] {
+                match b {
+                    b'c' | b'C' => cli.complement = true,
+                    b'd' => cli.delete = true,
+                    b's' => cli.squeeze = true,
+                    b't' => cli.truncate = true,
+                    _ => {
+                        eprintln!("tr: invalid option -- '{}'", b as char);
+                        eprintln!("Try 'tr --help' for more information.");
+                        process::exit(1);
+                    }
+                }
+            }
+        } else {
+            cli.sets.push(arg.to_string_lossy().into_owned());
+        }
+    }
+
+    if cli.sets.is_empty() {
+        eprintln!("tr: missing operand");
+        eprintln!("Try 'tr --help' for more information.");
+        process::exit(1);
+    }
+
+    cli
 }
 
 /// Raw fd stdout for zero-overhead writes on Unix.
@@ -200,7 +259,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     enlarge_pipe_bufs();
 
-    let cli = Cli::parse();
+    let cli = parse_args();
 
     let set1_str = &cli.sets[0];
 
