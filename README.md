@@ -8,20 +8,20 @@
 
 High-performance GNU coreutils replacement in Rust. Faster with SIMD acceleration. Drop-in compatible, cross-platform.
 
-## Performance ([independent benchmarks](https://github.com/AiBrush/coreutils-rs-independent-test) v0.2.0, Linux x86_64, hyperfine)
+## Performance ([independent benchmarks](https://github.com/AiBrush/coreutils-rs-independent-test) v0.2.3, Linux x86_64, hyperfine)
 
-| Tool | Speedup vs GNU | Benchmark |
-|------|---------------:|-----------|
-| wc | **34.7x** | default 100MB text |
-| sort | **17.6x** | lexicographic 10MB |
-| uniq | **14.1x** | repetitive 10MB |
-| cut | **8.6x** | -b1-100 10MB CSV |
-| tr | **6.8x** | -d lowercase 10MB |
-| tac | **3.9x** | reverse 100MB text |
-| base64 | **3.8x** | decode 10MB |
-| md5sum | **1.4x** | single 100MB text |
-| b2sum | **1.3x** | single 100MB text |
-| sha256sum | **1.2x** | single 100MB text |
+| Tool | Speedup vs GNU | Speedup vs uutils |
+|------|---------------:|-------------------:|
+| wc | **33.4x** | 25.7x |
+| sort | **18.2x** | 15.9x |
+| uniq | **13.1x** | 3.8x |
+| cut | **7.7x** | 4.7x |
+| base64 | **5.6x** | 4.9x |
+| tr | **4.6x** | 5.5x |
+| tac | **4.3x** | 2.2x |
+| md5sum | **1.4x** | 1.4x |
+| b2sum | **1.4x** | 1.1x |
+| sha256sum | **1.2x** | 4.7x |
 
 ## Tools
 
@@ -32,11 +32,11 @@ High-performance GNU coreutils replacement in Rust. Faster with SIMD acceleratio
 | sha256sum | `fsha256sum` | Optimized | SHA-256 checksums (mmap, madvise, readahead, parallel) |
 | md5sum | `fmd5sum` | Optimized | MD5 checksums (mmap, madvise, readahead, parallel) |
 | b2sum | `fb2sum` | Optimized | BLAKE2b checksums (mmap, madvise, readahead) |
-| base64 | `fbase64` | Optimized | Base64 encode/decode (SIMD, 4MB chunks, raw fd stdout) |
+| base64 | `fbase64` | Optimized | Base64 encode/decode (SIMD, parallel, fused strip+decode) |
 | sort | `fsort` | Optimized | Line sorting (parallel merge sort) |
-| tr | `ftr` | Optimized | Character translation (SIMD range translate/delete, AVX2/SSE2, parallel) |
+| tr | `ftr` | Optimized | Character translation (SIMD pshufb compact, AVX2/SSE2, parallel) |
 | uniq | `funiq` | Optimized | Filter duplicate lines (mmap, zero-copy, single-pass) |
-| tac | `ftac` | Optimized | Reverse file lines (parallel SIMD scan, contiguous output buffer) |
+| tac | `ftac` | Optimized | Reverse file lines (parallel memchr, zero-copy writev, vmsplice) |
 
 ## Installation
 
