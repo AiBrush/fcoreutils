@@ -44,14 +44,24 @@ pub fn tac_bytes_owned(
         return tac_bytes(data, separator, before, out);
     }
 
+    // In-place reversal only works correctly when data ends with separator.
+    // When it doesn't, separators get misplaced (e.g., "A\nB" -> "B\nA" instead of "BA\n").
+    // Fall back to the contiguous buffer approach for that case.
     let len = data.len();
+    if data[len - 1] != separator {
+        return tac_bytes(data, separator, false, out);
+    }
 
-    // Step 1: Reverse the entire buffer
+    // Step 1: Reverse the entire buffer.
+    // The trailing separator moves to position 0.
     data.reverse();
 
-    // Step 2: Reverse each record within the reversed buffer.
-    // After step 1, records are in the right order but each record's bytes are reversed.
-    // Collect separator positions first (memchr SIMD pass), then reverse each segment.
+    // Step 2: Rotate the leading separator to the end to restore correct positioning.
+    // "A\nB\n" -> reverse -> "\nB\nA" -> rotate_left(1) -> "B\nA\n"
+    data.rotate_left(1);
+
+    // Step 3: Reverse each record within the buffer.
+    // After steps 1+2, records are in the right order but each record's bytes are reversed.
     let positions: Vec<usize> = memchr::memchr_iter(separator, data).collect();
     let mut start = 0;
     for &pos in &positions {
@@ -60,7 +70,7 @@ pub fn tac_bytes_owned(
         }
         start = pos + 1;
     }
-    // Reverse the last segment (no trailing separator)
+    // Reverse the last segment (after the last separator, if any)
     if start < len {
         data[start..len].reverse();
     }
