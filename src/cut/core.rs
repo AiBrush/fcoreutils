@@ -2608,6 +2608,96 @@ fn bytes_mid_range_chunk(data: &[u8], skip: usize, end_byte: usize, line_delim: 
     unsafe { buf.set_len(wp) };
 }
 
+/// Fast path for `--complement -bN-M`: output bytes 1..N-1 and M+1..end per line.
+fn process_bytes_complement_mid(
+    data: &[u8],
+    skip_start: usize,
+    skip_end: usize,
+    line_delim: u8,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let prefix_bytes = skip_start - 1; // bytes before the skip region
+    if data.len() >= PARALLEL_THRESHOLD {
+        let chunks = split_into_chunks(data, line_delim);
+        let results: Vec<Vec<u8>> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut buf = Vec::with_capacity(chunk.len());
+                bytes_complement_mid_chunk(chunk, prefix_bytes, skip_end, line_delim, &mut buf);
+                buf
+            })
+            .collect();
+        let slices: Vec<IoSlice> = results
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| IoSlice::new(r))
+            .collect();
+        write_ioslices(out, &slices)?;
+    } else {
+        let mut buf = Vec::with_capacity(data.len());
+        bytes_complement_mid_chunk(data, prefix_bytes, skip_end, line_delim, &mut buf);
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for complement mid-range byte extraction.
+/// For each line: output bytes 0..prefix_bytes, then bytes skip_end..line_len.
+#[inline]
+fn bytes_complement_mid_chunk(data: &[u8], prefix_bytes: usize, skip_end: usize, line_delim: u8, buf: &mut Vec<u8>) {
+    buf.reserve(data.len());
+
+    let src = data.as_ptr();
+    let dst_base = buf.as_mut_ptr();
+    let mut wp = buf.len();
+    let mut start = 0;
+
+    for pos in memchr_iter(line_delim, data) {
+        let line_len = pos - start;
+        // Copy prefix (bytes before skip region)
+        let take_prefix = prefix_bytes.min(line_len);
+        if take_prefix > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(start), dst_base.add(wp), take_prefix);
+            }
+            wp += take_prefix;
+        }
+        // Copy suffix (bytes after skip region)
+        if line_len > skip_end {
+            let suffix_len = line_len - skip_end;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(start + skip_end), dst_base.add(wp), suffix_len);
+            }
+            wp += suffix_len;
+        }
+        unsafe { *dst_base.add(wp) = line_delim; }
+        wp += 1;
+        start = pos + 1;
+    }
+    if start < data.len() {
+        let line_len = data.len() - start;
+        let take_prefix = prefix_bytes.min(line_len);
+        if take_prefix > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(start), dst_base.add(wp), take_prefix);
+            }
+            wp += take_prefix;
+        }
+        if line_len > skip_end {
+            let suffix_len = line_len - skip_end;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(start + skip_end), dst_base.add(wp), suffix_len);
+            }
+            wp += suffix_len;
+        }
+        unsafe { *dst_base.add(wp) = line_delim; }
+        wp += 1;
+    }
+    unsafe { buf.set_len(wp) };
+}
+
 /// Optimized byte/char extraction with batched output and parallel processing.
 fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io::Result<()> {
     let line_delim = cfg.line_delim;
@@ -2645,6 +2735,11 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
     if complement && ranges.len() == 1 && ranges[0].end == usize::MAX && ranges[0].start > 1 && output_delim.is_empty() {
         let max_bytes = ranges[0].start - 1;
         return process_bytes_from_start(data, max_bytes, line_delim, out);
+    }
+
+    // Fast path: complement of single mid-range (e.g., --complement -b5-100 = bytes 1-4,101+)
+    if complement && ranges.len() == 1 && ranges[0].start > 1 && ranges[0].end < usize::MAX && output_delim.is_empty() {
+        return process_bytes_complement_mid(data, ranges[0].start, ranges[0].end, line_delim, out);
     }
 
     if data.len() >= PARALLEL_THRESHOLD {
