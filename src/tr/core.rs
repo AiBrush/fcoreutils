@@ -21,6 +21,30 @@ const STREAM_BUF: usize = 16 * 1024 * 1024;
 /// where the parallel speedup outweighs rayon overhead.
 const PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
 
+/// 256-entry lookup table for byte compaction: for each 8-bit keep mask,
+/// stores the bit positions of set bits (indices of bytes to keep).
+/// Used by compact_8bytes to replace the serial trailing_zeros loop with
+/// unconditional indexed stores, eliminating the tzcnt→blsr dependency chain.
+/// Total size: 256 * 8 = 2KB — fits entirely in L1 cache.
+#[cfg(target_arch = "x86_64")]
+static COMPACT_LUT: [[u8; 8]; 256] = {
+    let mut lut = [[0u8; 8]; 256];
+    let mut mask: u16 = 0;
+    while mask < 256 {
+        let mut idx: usize = 0;
+        let mut bit: u8 = 0;
+        while bit < 8 {
+            if (mask >> bit) & 1 != 0 {
+                lut[mask as usize][idx] = bit;
+                idx += 1;
+            }
+            bit += 1;
+        }
+        mask += 1;
+    }
+    lut
+};
+
 /// Write multiple IoSlice buffers using write_vectored, batching into MAX_IOV-sized groups.
 /// Falls back to write_all per slice for partial writes.
 #[inline]
@@ -584,7 +608,12 @@ fn translate_to(src: &[u8], dst: &mut [u8], table: &[u8; 256]) {
     {
         let level = get_simd_level();
         if level >= 3 {
-            unsafe { translate_to_avx2_table(src, dst, table) };
+            // Use nontemporal stores when dst is 32-byte aligned (large Vec allocations)
+            if dst.as_ptr() as usize & 31 == 0 {
+                unsafe { translate_to_avx2_table_nt(src, dst, table) };
+            } else {
+                unsafe { translate_to_avx2_table(src, dst, table) };
+            }
             return;
         }
         if level >= 2 {
@@ -842,6 +871,165 @@ unsafe fn translate_to_avx2_table(src: &[u8], dst: &mut [u8], table: &[u8; 256])
             *dp.add(i) = *table.get_unchecked(*sp.add(i) as usize);
             i += 1;
         }
+    }
+}
+
+/// Nontemporal variant of translate_to_avx2_table: uses _mm256_stream_si256 for stores.
+/// Avoids RFO cache traffic for the destination buffer in streaming translate operations.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn translate_to_avx2_table_nt(src: &[u8], dst: &mut [u8], table: &[u8; 256]) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let len = src.len();
+        let sp = src.as_ptr();
+        let dp = dst.as_mut_ptr();
+
+        // Pre-build 16 lookup vectors
+        let mut lut = [_mm256_setzero_si256(); 16];
+        for h in 0u8..16 {
+            let base = (h as usize) * 16;
+            let row: [u8; 16] = std::array::from_fn(|i| *table.get_unchecked(base + i));
+            let row128 = _mm_loadu_si128(row.as_ptr() as *const _);
+            lut[h as usize] = _mm256_broadcastsi128_si256(row128);
+        }
+
+        let lo_mask = _mm256_set1_epi8(0x0F);
+        let mut i = 0;
+
+        // 2x unrolled with nontemporal stores
+        while i + 64 <= len {
+            let input0 = _mm256_loadu_si256(sp.add(i) as *const _);
+            let input1 = _mm256_loadu_si256(sp.add(i + 32) as *const _);
+
+            let lo0 = _mm256_and_si256(input0, lo_mask);
+            let hi0 = _mm256_and_si256(_mm256_srli_epi16(input0, 4), lo_mask);
+            let lo1 = _mm256_and_si256(input1, lo_mask);
+            let hi1 = _mm256_and_si256(_mm256_srli_epi16(input1, 4), lo_mask);
+
+            let mut r0 = _mm256_setzero_si256();
+            let mut r1 = _mm256_setzero_si256();
+
+            macro_rules! do_nibble2 {
+                ($h:expr) => {
+                    let h_val = _mm256_set1_epi8($h as i8);
+                    let m0 = _mm256_cmpeq_epi8(hi0, h_val);
+                    let l0 = _mm256_shuffle_epi8(lut[$h], lo0);
+                    r0 = _mm256_or_si256(r0, _mm256_and_si256(m0, l0));
+                    let m1 = _mm256_cmpeq_epi8(hi1, h_val);
+                    let l1 = _mm256_shuffle_epi8(lut[$h], lo1);
+                    r1 = _mm256_or_si256(r1, _mm256_and_si256(m1, l1));
+                };
+            }
+            do_nibble2!(0);
+            do_nibble2!(1);
+            do_nibble2!(2);
+            do_nibble2!(3);
+            do_nibble2!(4);
+            do_nibble2!(5);
+            do_nibble2!(6);
+            do_nibble2!(7);
+            do_nibble2!(8);
+            do_nibble2!(9);
+            do_nibble2!(10);
+            do_nibble2!(11);
+            do_nibble2!(12);
+            do_nibble2!(13);
+            do_nibble2!(14);
+            do_nibble2!(15);
+
+            _mm256_stream_si256(dp.add(i) as *mut _, r0);
+            _mm256_stream_si256(dp.add(i + 32) as *mut _, r1);
+            i += 64;
+        }
+
+        // Remaining 32-byte chunk
+        if i + 32 <= len {
+            let input = _mm256_loadu_si256(sp.add(i) as *const _);
+            let lo_nibble = _mm256_and_si256(input, lo_mask);
+            let hi_nibble = _mm256_and_si256(_mm256_srli_epi16(input, 4), lo_mask);
+
+            let mut result = _mm256_setzero_si256();
+            macro_rules! do_nibble {
+                ($h:expr) => {
+                    let h_val = _mm256_set1_epi8($h as i8);
+                    let mask = _mm256_cmpeq_epi8(hi_nibble, h_val);
+                    let looked_up = _mm256_shuffle_epi8(lut[$h], lo_nibble);
+                    result = _mm256_or_si256(result, _mm256_and_si256(mask, looked_up));
+                };
+            }
+            do_nibble!(0);
+            do_nibble!(1);
+            do_nibble!(2);
+            do_nibble!(3);
+            do_nibble!(4);
+            do_nibble!(5);
+            do_nibble!(6);
+            do_nibble!(7);
+            do_nibble!(8);
+            do_nibble!(9);
+            do_nibble!(10);
+            do_nibble!(11);
+            do_nibble!(12);
+            do_nibble!(13);
+            do_nibble!(14);
+            do_nibble!(15);
+
+            _mm256_stream_si256(dp.add(i) as *mut _, result);
+            i += 32;
+        }
+
+        // SSSE3 tail for remaining 16-byte chunk (regular store)
+        if i + 16 <= len {
+            let lo_mask128 = _mm_set1_epi8(0x0F);
+            let mut lut128 = [_mm_setzero_si128(); 16];
+            for h in 0u8..16 {
+                lut128[h as usize] = _mm256_castsi256_si128(lut[h as usize]);
+            }
+
+            let input = _mm_loadu_si128(sp.add(i) as *const _);
+            let lo_nib = _mm_and_si128(input, lo_mask128);
+            let hi_nib = _mm_and_si128(_mm_srli_epi16(input, 4), lo_mask128);
+
+            let mut res = _mm_setzero_si128();
+            macro_rules! do_nibble128 {
+                ($h:expr) => {
+                    let h_val = _mm_set1_epi8($h as i8);
+                    let mask = _mm_cmpeq_epi8(hi_nib, h_val);
+                    let looked_up = _mm_shuffle_epi8(lut128[$h], lo_nib);
+                    res = _mm_or_si128(res, _mm_and_si128(mask, looked_up));
+                };
+            }
+            do_nibble128!(0);
+            do_nibble128!(1);
+            do_nibble128!(2);
+            do_nibble128!(3);
+            do_nibble128!(4);
+            do_nibble128!(5);
+            do_nibble128!(6);
+            do_nibble128!(7);
+            do_nibble128!(8);
+            do_nibble128!(9);
+            do_nibble128!(10);
+            do_nibble128!(11);
+            do_nibble128!(12);
+            do_nibble128!(13);
+            do_nibble128!(14);
+            do_nibble128!(15);
+
+            _mm_storeu_si128(dp.add(i) as *mut _, res);
+            i += 16;
+        }
+
+        // Scalar tail
+        while i < len {
+            *dp.add(i) = *table.get_unchecked(*sp.add(i) as usize);
+            i += 1;
+        }
+
+        // Fence: ensure nontemporal stores are visible before write() syscall
+        _mm_sfence();
     }
 }
 
@@ -1333,10 +1521,18 @@ unsafe fn translate_range_to_constant_sse2(
 /// SIMD-accelerated range translation for mmap'd data.
 /// For tables where only a contiguous range [lo..=hi] is translated by a constant offset,
 /// uses AVX2 (32 bytes/iter) or SSE2 (16 bytes/iter) vectorized arithmetic.
+/// When dst is 32-byte aligned (true for large Vec allocations from mmap), uses
+/// nontemporal stores to bypass cache, avoiding read-for-ownership overhead and
+/// reducing memory traffic by ~33% for streaming writes.
 #[cfg(target_arch = "x86_64")]
 fn translate_range_simd(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, offset: i8) {
     if get_simd_level() >= 3 {
-        unsafe { translate_range_avx2(src, dst, lo, hi, offset) };
+        // Use nontemporal stores when dst is 32-byte aligned (typical for large allocs)
+        if dst.as_ptr() as usize & 31 == 0 {
+            unsafe { translate_range_avx2_nt(src, dst, lo, hi, offset) };
+        } else {
+            unsafe { translate_range_avx2(src, dst, lo, hi, offset) };
+        }
     } else {
         unsafe { translate_range_sse2(src, dst, lo, hi, offset) };
     }
@@ -1422,6 +1618,92 @@ unsafe fn translate_range_avx2(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, offse
             };
             i += 1;
         }
+    }
+}
+
+/// Nontemporal variant of translate_range_avx2: uses _mm256_stream_si256 for stores.
+/// This bypasses the cache for writes, avoiding read-for-ownership (RFO) traffic on
+/// the destination buffer. For streaming translate (src → dst, dst not read again),
+/// this reduces memory traffic by ~33% (10MB input: 20MB vs 30MB total traffic).
+/// Requires dst to be 32-byte aligned (guaranteed for large Vec/mmap allocations).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn translate_range_avx2_nt(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, offset: i8) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let range = hi - lo;
+        let bias_v = _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let offset_v = _mm256_set1_epi8(offset);
+        let zero = _mm256_setzero_si256();
+
+        let len = src.len();
+        let sp = src.as_ptr();
+        let dp = dst.as_mut_ptr();
+        let mut i = 0;
+
+        // 2x unrolled with nontemporal stores
+        while i + 64 <= len {
+            let in0 = _mm256_loadu_si256(sp.add(i) as *const _);
+            let in1 = _mm256_loadu_si256(sp.add(i + 32) as *const _);
+            let bi0 = _mm256_add_epi8(in0, bias_v);
+            let bi1 = _mm256_add_epi8(in1, bias_v);
+            let gt0 = _mm256_cmpgt_epi8(bi0, threshold_v);
+            let gt1 = _mm256_cmpgt_epi8(bi1, threshold_v);
+            let m0 = _mm256_cmpeq_epi8(gt0, zero);
+            let m1 = _mm256_cmpeq_epi8(gt1, zero);
+            let om0 = _mm256_and_si256(m0, offset_v);
+            let om1 = _mm256_and_si256(m1, offset_v);
+            let r0 = _mm256_add_epi8(in0, om0);
+            let r1 = _mm256_add_epi8(in1, om1);
+            _mm256_stream_si256(dp.add(i) as *mut _, r0);
+            _mm256_stream_si256(dp.add(i + 32) as *mut _, r1);
+            i += 64;
+        }
+
+        // Remaining 32-byte chunk (still nontemporal if aligned)
+        if i + 32 <= len {
+            let input = _mm256_loadu_si256(sp.add(i) as *const _);
+            let biased = _mm256_add_epi8(input, bias_v);
+            let gt = _mm256_cmpgt_epi8(biased, threshold_v);
+            let mask = _mm256_cmpeq_epi8(gt, zero);
+            let offset_masked = _mm256_and_si256(mask, offset_v);
+            let result = _mm256_add_epi8(input, offset_masked);
+            _mm256_stream_si256(dp.add(i) as *mut _, result);
+            i += 32;
+        }
+
+        // SSE2 tail for 16-byte remainder (regular store — only 16 bytes)
+        if i + 16 <= len {
+            let bias_v128 = _mm_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+            let threshold_v128 = _mm_set1_epi8(0x80u8.wrapping_add(range) as i8);
+            let offset_v128 = _mm_set1_epi8(offset);
+            let zero128 = _mm_setzero_si128();
+
+            let input = _mm_loadu_si128(sp.add(i) as *const _);
+            let biased = _mm_add_epi8(input, bias_v128);
+            let gt = _mm_cmpgt_epi8(biased, threshold_v128);
+            let mask = _mm_cmpeq_epi8(gt, zero128);
+            let offset_masked = _mm_and_si128(mask, offset_v128);
+            let result = _mm_add_epi8(input, offset_masked);
+            _mm_storeu_si128(dp.add(i) as *mut _, result);
+            i += 16;
+        }
+
+        // Scalar tail
+        while i < len {
+            let b = *sp.add(i);
+            *dp.add(i) = if b >= lo && b <= hi {
+                b.wrapping_add(offset as u8)
+            } else {
+                b
+            };
+            i += 1;
+        }
+
+        // Fence: ensure nontemporal stores are visible before write() syscall
+        _mm_sfence();
     }
 }
 
@@ -1843,23 +2125,42 @@ unsafe fn delete_range_avx2(src: &[u8], dst: &mut [u8], lo: u8, hi: u8) -> usize
                 std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 32);
                 wp += 32;
             } else if keep_mask != 0 {
-                // Partial keep — process each 8-byte lane with popcnt
-                compact_8bytes(sp.add(ri), dp.add(wp), keep_mask as u8);
-                let c0 = (keep_mask as u8).count_ones() as usize;
-                compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), (keep_mask >> 8) as u8);
-                let c1 = ((keep_mask >> 8) as u8).count_ones() as usize;
-                compact_8bytes(
-                    sp.add(ri + 16),
-                    dp.add(wp + c0 + c1),
-                    (keep_mask >> 16) as u8,
-                );
-                let c2 = ((keep_mask >> 16) as u8).count_ones() as usize;
-                compact_8bytes(
-                    sp.add(ri + 24),
-                    dp.add(wp + c0 + c1 + c2),
-                    (keep_mask >> 24) as u8,
-                );
-                let c3 = ((keep_mask >> 24) as u8).count_ones() as usize;
+                // Partial keep — per-lane processing with all-keep fast paths.
+                // For 4% delete rate, ~72% of 8-byte lanes are all-keep even
+                // within partial 32-byte blocks. The per-lane check avoids
+                // the LUT compact overhead for these clean lanes.
+                let m0 = keep_mask as u8;
+                let m1 = (keep_mask >> 8) as u8;
+                let m2 = (keep_mask >> 16) as u8;
+                let m3 = (keep_mask >> 24) as u8;
+
+                if m0 == 0xFF {
+                    std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 8);
+                } else if m0 != 0 {
+                    compact_8bytes(sp.add(ri), dp.add(wp), m0);
+                }
+                let c0 = m0.count_ones() as usize;
+
+                if m1 == 0xFF {
+                    std::ptr::copy_nonoverlapping(sp.add(ri + 8), dp.add(wp + c0), 8);
+                } else if m1 != 0 {
+                    compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), m1);
+                }
+                let c1 = m1.count_ones() as usize;
+
+                if m2 == 0xFF {
+                    std::ptr::copy_nonoverlapping(sp.add(ri + 16), dp.add(wp + c0 + c1), 8);
+                } else if m2 != 0 {
+                    compact_8bytes(sp.add(ri + 16), dp.add(wp + c0 + c1), m2);
+                }
+                let c2 = m2.count_ones() as usize;
+
+                if m3 == 0xFF {
+                    std::ptr::copy_nonoverlapping(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), 8);
+                } else if m3 != 0 {
+                    compact_8bytes(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), m3);
+                }
+                let c3 = m3.count_ones() as usize;
                 wp += c0 + c1 + c2 + c3;
             }
             // else: keep_mask == 0 means all bytes deleted, skip entirely
@@ -1882,21 +2183,29 @@ unsafe fn delete_range_avx2(src: &[u8], dst: &mut [u8], lo: u8, hi: u8) -> usize
                 std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 16);
                 wp += 16;
             } else if keep_mask != 0 {
-                compact_8bytes(sp.add(ri), dp.add(wp), keep_mask as u8);
-                let c0 = (keep_mask as u8).count_ones() as usize;
-                compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), (keep_mask >> 8) as u8);
-                wp += c0 + ((keep_mask >> 8) as u8).count_ones() as usize;
+                let m0 = keep_mask as u8;
+                let m1 = (keep_mask >> 8) as u8;
+                if m0 == 0xFF {
+                    std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 8);
+                } else if m0 != 0 {
+                    compact_8bytes(sp.add(ri), dp.add(wp), m0);
+                }
+                let c0 = m0.count_ones() as usize;
+                if m1 == 0xFF {
+                    std::ptr::copy_nonoverlapping(sp.add(ri + 8), dp.add(wp + c0), 8);
+                } else if m1 != 0 {
+                    compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), m1);
+                }
+                wp += c0 + m1.count_ones() as usize;
             }
             ri += 16;
         }
 
-        // Scalar tail
+        // Scalar tail — branchless: always store, advance wp only for kept bytes
         while ri < len {
             let b = *sp.add(ri);
-            if b < lo || b > hi {
-                *dp.add(wp) = b;
-                wp += 1;
-            }
+            *dp.add(wp) = b;
+            wp += (b < lo || b > hi) as usize;
             ri += 1;
         }
 
@@ -1906,20 +2215,24 @@ unsafe fn delete_range_avx2(src: &[u8], dst: &mut [u8], lo: u8, hi: u8) -> usize
 
 /// Compact 8 source bytes into contiguous output bytes using a keep mask.
 /// Each bit in `mask` indicates whether the corresponding byte should be kept.
-/// Uses a tight trailing_zeros loop: tzcnt extracts the next kept byte position,
-/// blsr clears the lowest set bit. This runs at ~3 ops per kept byte.
+/// Uses a precomputed LUT: for each 8-bit mask, the LUT stores indices of set bits.
+/// Always performs 8 unconditional stores (extra stores past popcount are harmless
+/// since the write pointer only advances by popcount, and subsequent lanes overwrite).
+/// This eliminates the serial tzcnt→blsr dependency chain (~28 cycles) in favor of
+/// independent indexed loads and stores (~15 cycles).
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn compact_8bytes(src: *const u8, dst: *mut u8, mask: u8) {
     unsafe {
-        let mut m = mask;
-        let mut w = 0;
-        while m != 0 {
-            let bit = m.trailing_zeros() as usize;
-            *dst.add(w) = *src.add(bit);
-            w += 1;
-            m &= m - 1;
-        }
+        let idx = COMPACT_LUT.get_unchecked(mask as usize);
+        *dst = *src.add(*idx.get_unchecked(0) as usize);
+        *dst.add(1) = *src.add(*idx.get_unchecked(1) as usize);
+        *dst.add(2) = *src.add(*idx.get_unchecked(2) as usize);
+        *dst.add(3) = *src.add(*idx.get_unchecked(3) as usize);
+        *dst.add(4) = *src.add(*idx.get_unchecked(4) as usize);
+        *dst.add(5) = *src.add(*idx.get_unchecked(5) as usize);
+        *dst.add(6) = *src.add(*idx.get_unchecked(6) as usize);
+        *dst.add(7) = *src.add(*idx.get_unchecked(7) as usize);
     }
 }
 
@@ -1952,20 +2265,29 @@ unsafe fn delete_range_sse2(src: &[u8], dst: &mut [u8], lo: u8, hi: u8) -> usize
                 std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 16);
                 wp += 16;
             } else if keep_mask != 0 {
-                compact_8bytes(sp.add(ri), dp.add(wp), keep_mask as u8);
-                let c0 = (keep_mask as u8).count_ones() as usize;
-                compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), (keep_mask >> 8) as u8);
-                wp += c0 + ((keep_mask >> 8) as u8).count_ones() as usize;
+                let m0 = keep_mask as u8;
+                let m1 = (keep_mask >> 8) as u8;
+                if m0 == 0xFF {
+                    std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 8);
+                } else if m0 != 0 {
+                    compact_8bytes(sp.add(ri), dp.add(wp), m0);
+                }
+                let c0 = m0.count_ones() as usize;
+                if m1 == 0xFF {
+                    std::ptr::copy_nonoverlapping(sp.add(ri + 8), dp.add(wp + c0), 8);
+                } else if m1 != 0 {
+                    compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), m1);
+                }
+                wp += c0 + m1.count_ones() as usize;
             }
             ri += 16;
         }
 
+        // Scalar tail — branchless
         while ri < len {
             let b = *sp.add(ri);
-            if b < lo || b > hi {
-                *dp.add(wp) = b;
-                wp += 1;
-            }
+            *dp.add(wp) = b;
+            wp += (b < lo || b > hi) as usize;
             ri += 1;
         }
 
@@ -1973,16 +2295,58 @@ unsafe fn delete_range_sse2(src: &[u8], dst: &mut [u8], lo: u8, hi: u8) -> usize
     }
 }
 
-/// Scalar range delete fallback for non-x86_64.
+/// Branchless range delete fallback for non-x86_64 (ARM64, etc.).
+/// Unconditional store + conditional pointer advance eliminates branch
+/// mispredictions. Unrolled 8x for better ILP on out-of-order cores.
 #[cfg(not(target_arch = "x86_64"))]
 fn delete_range_chunk(src: &[u8], dst: &mut [u8], lo: u8, hi: u8) -> usize {
-    let mut wp = 0;
-    for &b in src {
-        if b < lo || b > hi {
-            dst[wp] = b;
-            wp += 1;
+    let len = src.len();
+    let sp = src.as_ptr();
+    let dp = dst.as_mut_ptr();
+    let mut wp: usize = 0;
+    let mut i: usize = 0;
+
+    // Unrolled branchless loop — 8 bytes per iteration
+    while i + 8 <= len {
+        unsafe {
+            let b0 = *sp.add(i);
+            *dp.add(wp) = b0;
+            wp += (b0 < lo || b0 > hi) as usize;
+            let b1 = *sp.add(i + 1);
+            *dp.add(wp) = b1;
+            wp += (b1 < lo || b1 > hi) as usize;
+            let b2 = *sp.add(i + 2);
+            *dp.add(wp) = b2;
+            wp += (b2 < lo || b2 > hi) as usize;
+            let b3 = *sp.add(i + 3);
+            *dp.add(wp) = b3;
+            wp += (b3 < lo || b3 > hi) as usize;
+            let b4 = *sp.add(i + 4);
+            *dp.add(wp) = b4;
+            wp += (b4 < lo || b4 > hi) as usize;
+            let b5 = *sp.add(i + 5);
+            *dp.add(wp) = b5;
+            wp += (b5 < lo || b5 > hi) as usize;
+            let b6 = *sp.add(i + 6);
+            *dp.add(wp) = b6;
+            wp += (b6 < lo || b6 > hi) as usize;
+            let b7 = *sp.add(i + 7);
+            *dp.add(wp) = b7;
+            wp += (b7 < lo || b7 > hi) as usize;
         }
+        i += 8;
     }
+
+    // Scalar tail
+    while i < len {
+        unsafe {
+            let b = *sp.add(i);
+            *dp.add(wp) = b;
+            wp += (b < lo || b > hi) as usize;
+        }
+        i += 1;
+    }
+
     wp
 }
 
@@ -3150,26 +3514,20 @@ fn translate_to_separate_buf(
         return writer.write_all(&out_buf);
     }
 
-    // Chunked translate: 256KB buffer fits in L2 cache on both x86 and ARM.
-    // For 10MB data, this does 40 chunks. Each chunk's source + dest (512KB total)
-    // stays in L2, eliminating cache misses that hurt ARM64 scalar performance.
-    // The extra syscalls (~40 write() calls) add only ~40us overhead total.
-    const CHUNK: usize = 256 * 1024;
-    let buf_size = data.len().min(CHUNK);
-    let mut out_buf = alloc_uninit_vec(buf_size);
-
-    for chunk in data.chunks(CHUNK) {
-        let clen = chunk.len();
-        if let Some((lo, hi, offset)) = range_info {
-            translate_range_simd(chunk, &mut out_buf[..clen], lo, hi, offset);
-        } else if let Some((lo, hi, replacement)) = const_info {
-            translate_range_to_constant_simd(chunk, &mut out_buf[..clen], lo, hi, replacement);
-        } else {
-            translate_to(chunk, &mut out_buf[..clen], table);
-        }
-        writer.write_all(&out_buf[..clen])?;
+    // Single-allocation translate: full-size output buffer, single translate, single write.
+    // For 10MB data, this does 1 write() instead of 40 chunked writes, eliminating
+    // 39 write() syscalls. SIMD translate streams through src and dst sequentially,
+    // so the L2 cache argument for 256KB chunks doesn't apply (src data doesn't fit
+    // in L2 anyway). The reduced syscall overhead more than compensates.
+    let mut out_buf = alloc_uninit_vec(data.len());
+    if let Some((lo, hi, offset)) = range_info {
+        translate_range_simd(data, &mut out_buf, lo, hi, offset);
+    } else if let Some((lo, hi, replacement)) = const_info {
+        translate_range_to_constant_simd(data, &mut out_buf, lo, hi, replacement);
+    } else {
+        translate_to(data, &mut out_buf, table);
     }
-    Ok(())
+    writer.write_all(&out_buf)
 }
 
 /// Translate from a read-only mmap (or any byte slice) to a separate output buffer.
@@ -3310,23 +3668,26 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
 
     let member = build_member_set(delete_chars);
 
-    // Heuristic: sample first 1024 bytes to estimate delete frequency.
-    // If < 10% of bytes are deleted, zero-copy writev is efficient
-    // (long runs between deletes = few IoSlice entries).
-    // For dense deletes (>= 10%), copy-based approach with parallel processing
-    // produces fewer, larger writes.
+    // Heuristic: estimate total delete positions. Zero-copy writev is only efficient
+    // when all gaps fit in a single writev call (< MAX_IOV/2 entries). With uniform
+    // distribution, each delete creates an IoSlice entry. For many deletes (> 512),
+    // multiple writev calls are needed, and the compact approach is faster.
     let sample_size = data.len().min(1024);
     let sample_deletes = data[..sample_size]
         .iter()
         .filter(|&&b| is_member(&member, b))
         .count();
-    let delete_pct = sample_deletes * 100 / sample_size.max(1);
+    let estimated_deletes = if sample_size > 0 {
+        data.len() * sample_deletes / sample_size
+    } else {
+        data.len()
+    };
 
-    if delete_pct < 10 {
+    if estimated_deletes < MAX_IOV / 2 {
         return delete_bitset_zerocopy(data, &member, writer);
     }
 
-    // Dense delete: copy-based approach with parallel processing
+    // Dense delete: parallel compact with writev (avoids scatter-gather copy)
     if data.len() >= PARALLEL_THRESHOLD {
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
@@ -3338,67 +3699,516 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
             .map(|(src_chunk, dst_chunk)| delete_chunk_bitset_into(src_chunk, &member, dst_chunk))
             .collect();
 
-        let mut write_pos = 0;
-        let mut src_offset = 0;
-        for &clen in &chunk_lens {
-            if clen > 0 && src_offset != write_pos {
-                unsafe {
-                    std::ptr::copy(
-                        outbuf.as_ptr().add(src_offset),
-                        outbuf.as_mut_ptr().add(write_pos),
-                        clen,
-                    );
-                }
-            }
-            write_pos += clen;
-            src_offset += chunk_size;
-        }
-
-        return writer.write_all(&outbuf[..write_pos]);
-    }
-
-    // Single-allocation delete: full-size buffer, single write_all.
-    // For 10MB data, this does 1 write() instead of ~40 chunked writes.
-    let mut outbuf = alloc_uninit_vec(data.len());
-    let out_pos = delete_chunk_bitset_into(data, &member, &mut outbuf);
-    if out_pos > 0 {
-        writer.write_all(&outbuf[..out_pos])?;
-    }
-    Ok(())
-}
-
-/// SIMD range delete for mmap data, with rayon parallel processing.
-fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io::Result<()> {
-    // Parallel path: each thread deletes from its chunk into a local Vec
-    if data.len() >= PARALLEL_THRESHOLD {
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        let results: Vec<Vec<u8>> = data
-            .par_chunks(chunk_size)
-            .map(|chunk| {
-                let mut out = alloc_uninit_vec(chunk.len());
-                let wp = delete_range_chunk(chunk, &mut out, lo, hi);
-                unsafe { out.set_len(wp) };
-                out
-            })
-            .collect();
-
-        let slices: Vec<std::io::IoSlice> = results
+        // Use writev to write each chunk at its original position, avoiding
+        // the O(N) scatter-gather memmove. With ~4 threads, that's 4 IoSlice
+        // entries — far below MAX_IOV.
+        let slices: Vec<std::io::IoSlice> = chunk_lens
             .iter()
-            .filter(|r| !r.is_empty())
-            .map(|r| std::io::IoSlice::new(r))
+            .enumerate()
+            .filter(|&(_, &len)| len > 0)
+            .map(|(i, &len)| std::io::IoSlice::new(&outbuf[i * chunk_size..i * chunk_size + len]))
             .collect();
         return write_ioslices(writer, &slices);
     }
 
-    // Single-allocation delete: full-size buffer, single write_all.
-    let mut outbuf = alloc_uninit_vec(data.len());
-    let wp = delete_range_chunk(data, &mut outbuf, lo, hi);
-    if wp > 0 {
-        writer.write_all(&outbuf[..wp])?;
+    // Streaming compact: 256KB output buffer reduces page fault overhead.
+    // For 10MB data: ~64 page faults instead of ~2500, with ~40 write_all calls.
+    const COMPACT_BUF: usize = 256 * 1024;
+    let mut outbuf = alloc_uninit_vec(COMPACT_BUF);
+
+    for chunk in data.chunks(COMPACT_BUF) {
+        let out_pos = delete_chunk_bitset_into(chunk, &member, &mut outbuf);
+        if out_pos > 0 {
+            writer.write_all(&outbuf[..out_pos])?;
+        }
     }
     Ok(())
+}
+
+/// SIMD range delete for mmap data.
+/// Uses a density heuristic: for sparse deletes (< 15%), uses zero-copy writev
+/// directly from mmap data (no output buffer allocation). For dense deletes,
+/// uses SIMD compact into a pre-allocated buffer.
+fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io::Result<()> {
+    // Sample first 1024 bytes to estimate delete density
+    let sample_size = data.len().min(1024);
+    let sample_deletes = data[..sample_size]
+        .iter()
+        .filter(|&&b| b >= lo && b <= hi)
+        .count();
+    // Estimate expected number of delete positions (IoSlice entries for zero-copy).
+    // Each delete creates an IoSlice entry. With MAX_IOV=1024 per writev,
+    // if estimated_deletes > MAX_IOV/2, the writev overhead from multiple syscalls
+    // exceeds the compact approach cost. Only use zero-copy when all gaps fit in
+    // a single writev call.
+    let estimated_deletes = if sample_size > 0 {
+        data.len() * sample_deletes / sample_size
+    } else {
+        data.len()
+    };
+    if estimated_deletes < MAX_IOV / 2 {
+        return delete_range_mmap_zerocopy(data, writer, lo, hi);
+    }
+
+    // Dense deletes: parallel compact with writev (avoids scatter-gather copy)
+    if data.len() >= PARALLEL_THRESHOLD {
+        let n_threads = rayon::current_num_threads().max(1);
+        let chunk_size = (data.len() / n_threads).max(32 * 1024);
+
+        let mut outbuf = alloc_uninit_vec(data.len());
+        let chunk_lens: Vec<usize> = data
+            .par_chunks(chunk_size)
+            .zip(outbuf.par_chunks_mut(chunk_size))
+            .map(|(src_chunk, dst_chunk)| delete_range_chunk(src_chunk, dst_chunk, lo, hi))
+            .collect();
+
+        // Use writev to write each chunk at its original position, avoiding
+        // the O(N) scatter-gather memmove.
+        let slices: Vec<std::io::IoSlice> = chunk_lens
+            .iter()
+            .enumerate()
+            .filter(|&(_, &len)| len > 0)
+            .map(|(i, &len)| std::io::IoSlice::new(&outbuf[i * chunk_size..i * chunk_size + len]))
+            .collect();
+        return write_ioslices(writer, &slices);
+    }
+
+    // Streaming compact: use 256KB output buffer instead of full data.len() buffer.
+    // This reduces page fault overhead from ~2500 faults (10MB) to ~64 faults (256KB).
+    // The extra write_all calls (~40 for 10MB) are negligible cost.
+    const COMPACT_BUF: usize = 256 * 1024;
+    let mut outbuf = alloc_uninit_vec(COMPACT_BUF);
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut wp = 0;
+        let level = get_simd_level();
+        let len = data.len();
+        let sp = data.as_ptr();
+        let dp = outbuf.as_mut_ptr();
+        let mut ri = 0;
+
+        if level >= 3 {
+            use std::arch::x86_64::*;
+            let range = hi - lo;
+            let bias_v = unsafe { _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8) };
+            let threshold_v = unsafe { _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8) };
+            let zero = unsafe { _mm256_setzero_si256() };
+
+            while ri + 32 <= len {
+                // Flush when output buffer is nearly full
+                if wp + 32 > COMPACT_BUF {
+                    writer.write_all(&outbuf[..wp])?;
+                    wp = 0;
+                }
+
+                let input = unsafe { _mm256_loadu_si256(sp.add(ri) as *const _) };
+                let biased = unsafe { _mm256_add_epi8(input, bias_v) };
+                let gt = unsafe { _mm256_cmpgt_epi8(biased, threshold_v) };
+                let in_range = unsafe { _mm256_cmpeq_epi8(gt, zero) };
+                let keep_mask = !(unsafe { _mm256_movemask_epi8(in_range) } as u32);
+
+                if keep_mask == 0xFFFFFFFF {
+                    unsafe { std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 32) };
+                    wp += 32;
+                } else if keep_mask != 0 {
+                    let m0 = keep_mask as u8;
+                    let m1 = (keep_mask >> 8) as u8;
+                    let m2 = (keep_mask >> 16) as u8;
+                    let m3 = (keep_mask >> 24) as u8;
+
+                    if m0 == 0xFF {
+                        unsafe { std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 8) };
+                    } else if m0 != 0 {
+                        unsafe { compact_8bytes(sp.add(ri), dp.add(wp), m0) };
+                    }
+                    let c0 = m0.count_ones() as usize;
+
+                    if m1 == 0xFF {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(sp.add(ri + 8), dp.add(wp + c0), 8)
+                        };
+                    } else if m1 != 0 {
+                        unsafe { compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), m1) };
+                    }
+                    let c1 = m1.count_ones() as usize;
+
+                    if m2 == 0xFF {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(sp.add(ri + 16), dp.add(wp + c0 + c1), 8)
+                        };
+                    } else if m2 != 0 {
+                        unsafe { compact_8bytes(sp.add(ri + 16), dp.add(wp + c0 + c1), m2) };
+                    }
+                    let c2 = m2.count_ones() as usize;
+
+                    if m3 == 0xFF {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                sp.add(ri + 24),
+                                dp.add(wp + c0 + c1 + c2),
+                                8,
+                            )
+                        };
+                    } else if m3 != 0 {
+                        unsafe { compact_8bytes(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), m3) };
+                    }
+                    let c3 = m3.count_ones() as usize;
+                    wp += c0 + c1 + c2 + c3;
+                }
+                ri += 32;
+            }
+        }
+
+        // Scalar tail
+        while ri < len {
+            if wp + 1 > COMPACT_BUF {
+                writer.write_all(&outbuf[..wp])?;
+                wp = 0;
+            }
+            let b = unsafe { *sp.add(ri) };
+            unsafe { *dp.add(wp) = b };
+            wp += (b < lo || b > hi) as usize;
+            ri += 1;
+        }
+
+        if wp > 0 {
+            writer.write_all(&outbuf[..wp])?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Non-x86 fallback: chunk the source and process with delete_range_chunk
+        for chunk in data.chunks(COMPACT_BUF) {
+            let clen = delete_range_chunk(chunk, &mut outbuf, lo, hi);
+            if clen > 0 {
+                writer.write_all(&outbuf[..clen])?;
+            }
+        }
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
+/// Zero-copy range delete for mmap data: SIMD-scans for bytes in [lo..=hi],
+/// builds IoSlice entries pointing to the gaps between deleted ranges in the
+/// original mmap data, and writes using writev. No output buffer allocation.
+/// For 10MB text with 4% digits: ~1.5ms vs ~4ms for the compact approach.
+fn delete_range_mmap_zerocopy(
+    data: &[u8],
+    writer: &mut impl Write,
+    lo: u8,
+    hi: u8,
+) -> io::Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if get_simd_level() >= 3 {
+            return unsafe { delete_range_zerocopy_avx2(data, writer, lo, hi) };
+        }
+        if get_simd_level() >= 2 {
+            return unsafe { delete_range_zerocopy_sse2(data, writer, lo, hi) };
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        return unsafe { delete_range_zerocopy_neon(data, writer, lo, hi) };
+    }
+
+    // Scalar fallback: byte-by-byte scan with IoSlice batching
+    #[allow(unreachable_code)]
+    delete_range_zerocopy_scalar(data, writer, lo, hi)
+}
+
+/// Scalar zero-copy range delete: byte-by-byte scan with IoSlice batching.
+/// Used as fallback when SIMD is unavailable.
+fn delete_range_zerocopy_scalar(
+    data: &[u8],
+    writer: &mut impl Write,
+    lo: u8,
+    hi: u8,
+) -> io::Result<()> {
+    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(MAX_IOV);
+    let len = data.len();
+    let mut run_start: usize = 0;
+    let mut i: usize = 0;
+
+    while i < len {
+        let b = unsafe { *data.get_unchecked(i) };
+        if b >= lo && b <= hi {
+            if i > run_start {
+                iov.push(std::io::IoSlice::new(&data[run_start..i]));
+                if iov.len() >= MAX_IOV {
+                    write_ioslices(writer, &iov)?;
+                    iov.clear();
+                }
+            }
+            run_start = i + 1;
+        }
+        i += 1;
+    }
+    if run_start < len {
+        iov.push(std::io::IoSlice::new(&data[run_start..]));
+    }
+    if !iov.is_empty() {
+        write_ioslices(writer, &iov)?;
+    }
+    Ok(())
+}
+
+/// AVX2 zero-copy range delete: scans 32 bytes at a time using SIMD range
+/// comparison, then iterates only the delete positions from the bitmask.
+/// Blocks with no deletes (common for sparse data) skip with zero per-byte work.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn delete_range_zerocopy_avx2(
+    data: &[u8],
+    writer: &mut impl Write,
+    lo: u8,
+    hi: u8,
+) -> io::Result<()> {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(MAX_IOV);
+        let len = data.len();
+        let mut run_start: usize = 0;
+        let mut ri: usize = 0;
+
+        let range = hi - lo;
+        let bias_v = _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let zero = _mm256_setzero_si256();
+
+        while ri + 32 <= len {
+            let input = _mm256_loadu_si256(data.as_ptr().add(ri) as *const _);
+            let biased = _mm256_add_epi8(input, bias_v);
+            let gt = _mm256_cmpgt_epi8(biased, threshold_v);
+            let in_range = _mm256_cmpeq_epi8(gt, zero);
+            let del_mask = _mm256_movemask_epi8(in_range) as u32;
+
+            if del_mask == 0 {
+                // No bytes to delete — run continues
+                ri += 32;
+                continue;
+            }
+
+            // Process each deleted byte position from the bitmask
+            let mut m = del_mask;
+            while m != 0 {
+                let bit = m.trailing_zeros() as usize;
+                let abs_pos = ri + bit;
+                if abs_pos > run_start {
+                    iov.push(std::io::IoSlice::new(&data[run_start..abs_pos]));
+                    if iov.len() >= MAX_IOV {
+                        write_ioslices(writer, &iov)?;
+                        iov.clear();
+                    }
+                }
+                run_start = abs_pos + 1;
+                m &= m - 1; // clear lowest set bit (blsr)
+            }
+
+            ri += 32;
+        }
+
+        // Scalar tail
+        while ri < len {
+            let b = *data.get_unchecked(ri);
+            if b >= lo && b <= hi {
+                if ri > run_start {
+                    iov.push(std::io::IoSlice::new(&data[run_start..ri]));
+                    if iov.len() >= MAX_IOV {
+                        write_ioslices(writer, &iov)?;
+                        iov.clear();
+                    }
+                }
+                run_start = ri + 1;
+            }
+            ri += 1;
+        }
+
+        if run_start < len {
+            iov.push(std::io::IoSlice::new(&data[run_start..]));
+        }
+        if !iov.is_empty() {
+            write_ioslices(writer, &iov)?;
+        }
+        Ok(())
+    }
+}
+
+/// SSE2 zero-copy range delete: same approach as AVX2 but with 16-byte blocks.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn delete_range_zerocopy_sse2(
+    data: &[u8],
+    writer: &mut impl Write,
+    lo: u8,
+    hi: u8,
+) -> io::Result<()> {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(MAX_IOV);
+        let len = data.len();
+        let mut run_start: usize = 0;
+        let mut ri: usize = 0;
+
+        let range = hi - lo;
+        let bias_v = _mm_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let zero = _mm_setzero_si128();
+
+        while ri + 16 <= len {
+            let input = _mm_loadu_si128(data.as_ptr().add(ri) as *const _);
+            let biased = _mm_add_epi8(input, bias_v);
+            let gt = _mm_cmpgt_epi8(biased, threshold_v);
+            let in_range = _mm_cmpeq_epi8(gt, zero);
+            let del_mask = _mm_movemask_epi8(in_range) as u32 & 0xFFFF;
+
+            if del_mask == 0 {
+                ri += 16;
+                continue;
+            }
+
+            let mut m = del_mask;
+            while m != 0 {
+                let bit = m.trailing_zeros() as usize;
+                let abs_pos = ri + bit;
+                if abs_pos > run_start {
+                    iov.push(std::io::IoSlice::new(&data[run_start..abs_pos]));
+                    if iov.len() >= MAX_IOV {
+                        write_ioslices(writer, &iov)?;
+                        iov.clear();
+                    }
+                }
+                run_start = abs_pos + 1;
+                m &= m - 1;
+            }
+
+            ri += 16;
+        }
+
+        while ri < len {
+            let b = *data.get_unchecked(ri);
+            if b >= lo && b <= hi {
+                if ri > run_start {
+                    iov.push(std::io::IoSlice::new(&data[run_start..ri]));
+                    if iov.len() >= MAX_IOV {
+                        write_ioslices(writer, &iov)?;
+                        iov.clear();
+                    }
+                }
+                run_start = ri + 1;
+            }
+            ri += 1;
+        }
+
+        if run_start < len {
+            iov.push(std::io::IoSlice::new(&data[run_start..]));
+        }
+        if !iov.is_empty() {
+            write_ioslices(writer, &iov)?;
+        }
+        Ok(())
+    }
+}
+
+/// NEON zero-copy range delete for aarch64: scans 16 bytes at a time using
+/// NEON unsigned comparison, creates bitmask via pairwise narrowing, then
+/// iterates delete positions from the bitmask.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn delete_range_zerocopy_neon(
+    data: &[u8],
+    writer: &mut impl Write,
+    lo: u8,
+    hi: u8,
+) -> io::Result<()> {
+    use std::arch::aarch64::*;
+
+    unsafe {
+        let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(MAX_IOV);
+        let len = data.len();
+        let mut run_start: usize = 0;
+        let mut ri: usize = 0;
+
+        let lo_v = vdupq_n_u8(lo);
+        let hi_v = vdupq_n_u8(hi);
+        // Bit position mask for extracting bitmask from comparison results
+        let bit_mask: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        let bit_mask_v = vld1q_u8(bit_mask.as_ptr());
+
+        while ri + 16 <= len {
+            let input = vld1q_u8(data.as_ptr().add(ri));
+            // in_range = 0xFF where lo <= byte <= hi
+            let ge_lo = vcgeq_u8(input, lo_v);
+            let le_hi = vcleq_u8(input, hi_v);
+            let in_range = vandq_u8(ge_lo, le_hi);
+
+            // Create 16-bit bitmask: reduce 16 bytes to 2 bytes
+            let bits = vandq_u8(in_range, bit_mask_v);
+            let pair = vpaddlq_u8(bits); // u8→u16 pairwise add
+            let quad = vpaddlq_u16(pair); // u16→u32
+            let octet = vpaddlq_u32(quad); // u32→u64
+            let mask_lo = vgetq_lane_u64::<0>(octet) as u8;
+            let mask_hi = vgetq_lane_u64::<1>(octet) as u8;
+            let del_mask = (mask_hi as u16) << 8 | mask_lo as u16;
+
+            if del_mask == 0 {
+                // No bytes to delete — run continues
+                ri += 16;
+                continue;
+            }
+
+            // Process each deleted byte position
+            let mut m = del_mask;
+            while m != 0 {
+                let bit = m.trailing_zeros() as usize;
+                let abs_pos = ri + bit;
+                if abs_pos > run_start {
+                    iov.push(std::io::IoSlice::new(&data[run_start..abs_pos]));
+                    if iov.len() >= MAX_IOV {
+                        write_ioslices(writer, &iov)?;
+                        iov.clear();
+                    }
+                }
+                run_start = abs_pos + 1;
+                m &= m - 1;
+            }
+
+            ri += 16;
+        }
+
+        // Scalar tail
+        while ri < len {
+            let b = *data.get_unchecked(ri);
+            if b >= lo && b <= hi {
+                if ri > run_start {
+                    iov.push(std::io::IoSlice::new(&data[run_start..ri]));
+                    if iov.len() >= MAX_IOV {
+                        write_ioslices(writer, &iov)?;
+                        iov.clear();
+                    }
+                }
+                run_start = ri + 1;
+            }
+            ri += 1;
+        }
+
+        if run_start < len {
+            iov.push(std::io::IoSlice::new(&data[run_start..]));
+        }
+        if !iov.is_empty() {
+            write_ioslices(writer, &iov)?;
+        }
+        Ok(())
+    }
 }
 
 /// Delete bytes from chunk using bitset, writing into pre-allocated buffer.
