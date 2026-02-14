@@ -1053,6 +1053,12 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
             let mut prev_len = first_term;
             let chunk_base = chunk.as_ptr();
             let chunk_len = chunk.len();
+            // Cache previous line's prefix for fast rejection
+            let mut prev_prefix: u64 = if prev_len >= 8 {
+                unsafe { (chunk_base as *const u64).read_unaligned() }
+            } else {
+                0
+            };
             let mut cur_start = first_term + 1;
             while cur_start < chunk_len {
                 // Speculative line-end: check if next line has same length
@@ -1061,14 +1067,47 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
                     if spec < chunk_len && unsafe { *chunk_base.add(spec) } == term {
                         spec
                     } else {
-                        match memchr::memchr(term, &chunk[cur_start..]) {
+                        match memchr::memchr(term, unsafe {
+                            std::slice::from_raw_parts(
+                                chunk_base.add(cur_start),
+                                chunk_len - cur_start,
+                            )
+                        }) {
                             Some(offset) => cur_start + offset,
                             None => chunk_len,
                         }
                     }
                 };
 
-                if lines_equal_fast(&chunk[prev_start..prev_end], &chunk[cur_start..cur_end]) {
+                let cur_len = cur_end - cur_start;
+                // Fast reject: length + prefix + full comparison
+                let is_dup = if cur_len != prev_len {
+                    false
+                } else if cur_len == 0 {
+                    true
+                } else if cur_len >= 8 {
+                    let cur_prefix =
+                        unsafe { (chunk_base.add(cur_start) as *const u64).read_unaligned() };
+                    if cur_prefix != prev_prefix {
+                        false
+                    } else if cur_len <= 8 {
+                        true
+                    } else {
+                        unsafe {
+                            let a = std::slice::from_raw_parts(chunk_base.add(prev_start), prev_len);
+                            let b = std::slice::from_raw_parts(chunk_base.add(cur_start), cur_len);
+                            lines_equal_after_prefix(a, b)
+                        }
+                    }
+                } else {
+                    unsafe {
+                        let a = std::slice::from_raw_parts(chunk_base.add(prev_start), prev_len);
+                        let b = std::slice::from_raw_parts(chunk_base.add(cur_start), cur_len);
+                        a == b
+                    }
+                };
+
+                if is_dup {
                     // Duplicate — flush current run up to this line
                     let abs_cur = chunk_start + cur_start;
                     if run_start < abs_cur {
@@ -1084,7 +1123,12 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
                 } else {
                     last_out_start = chunk_start + cur_start;
                     last_out_end = chunk_start + cur_end;
-                    prev_len = cur_end - cur_start;
+                    prev_len = cur_len;
+                    prev_prefix = if cur_len >= 8 {
+                        unsafe { (chunk_base.add(cur_start) as *const u64).read_unaligned() }
+                    } else {
+                        0
+                    };
                 }
                 prev_start = cur_start;
                 prev_end = cur_end;

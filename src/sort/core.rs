@@ -1408,6 +1408,7 @@ fn radix_sort_numeric_entries(
         let mut sorted = entries;
         // Still need last-resort comparison for non-stable sort
         if !stable {
+            let dp = data.as_ptr();
             let mut i = 0;
             while i < n {
                 let key = sorted[i].0;
@@ -1416,9 +1417,11 @@ fn radix_sort_numeric_entries(
                     j += 1;
                 }
                 if j - i > 1 {
-                    sorted[i..j].sort_unstable_by(|a, b| {
-                        data[offsets[a.1].0..offsets[a.1].1]
-                            .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                    sorted[i..j].sort_unstable_by(|a, b| unsafe {
+                        let (sa, ea) = offsets[a.1];
+                        let (sb, eb) = offsets[b.1];
+                        std::slice::from_raw_parts(dp.add(sa), ea - sa)
+                            .cmp(std::slice::from_raw_parts(dp.add(sb), eb - sb))
                     });
                 }
                 i = j;
@@ -1474,6 +1477,7 @@ fn radix_sort_numeric_entries(
     // For non-stable sort: sort entries with equal u64 keys by raw line content
     // (last-resort comparison for deterministic output).
     if !stable {
+        let dp = data.as_ptr();
         // Only sort runs of equal keys — most runs will be length 1.
         let mut i = 0;
         while i < n {
@@ -1484,8 +1488,11 @@ fn radix_sort_numeric_entries(
             }
             if j - i > 1 {
                 // Sort this run by raw line content
-                sorted[i..j].sort_unstable_by(|a, b| {
-                    data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                sorted[i..j].sort_unstable_by(|a, b| unsafe {
+                    let (sa, ea) = offsets[a.1];
+                    let (sb, eb) = offsets[b.1];
+                    std::slice::from_raw_parts(dp.add(sa), ea - sa)
+                        .cmp(std::slice::from_raw_parts(dp.add(sb), eb - sb))
                 });
             }
             i = j;
@@ -2140,11 +2147,14 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
 
         let n = entries.len();
         let stable = config.stable;
+        let dp_fold = data.as_ptr();
         // Case-insensitive comparison: u64 prefix resolves most comparisons,
         // falls back to full case-insensitive compare, then raw line compare.
         let fold_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
-            let la = &data[offsets[a.1].0..offsets[a.1].1];
-            let lb = &data[offsets[b.1].0..offsets[b.1].1];
+            let (sa, ea) = offsets[a.1];
+            let (sb, eb) = offsets[b.1];
+            let la = unsafe { std::slice::from_raw_parts(dp_fold.add(sa), ea - sa) };
+            let lb = unsafe { std::slice::from_raw_parts(dp_fold.add(sb), eb - sb) };
             let la = if needs_blank {
                 super::compare::skip_leading_blanks(la)
             } else {
@@ -2160,7 +2170,10 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 ord => ord,
             };
             if ord == Ordering::Equal && !stable {
-                data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                unsafe {
+                    std::slice::from_raw_parts(dp_fold.add(sa), ea - sa)
+                        .cmp(std::slice::from_raw_parts(dp_fold.add(sb), eb - sb))
+                }
             } else {
                 ord
             }
@@ -2307,13 +2320,19 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             }
             write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
         } else {
+            let dp_ns = data.as_ptr();
             let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
                 let ord = a.0.cmp(&b.0);
                 if ord != Ordering::Equal {
                     return if reverse { ord.reverse() } else { ord };
                 }
                 if !stable {
-                    data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                    let (sa, ea) = offsets[a.1];
+                    let (sb, eb) = offsets[b.1];
+                    unsafe {
+                        std::slice::from_raw_parts(dp_ns.add(sa), ea - sa)
+                            .cmp(std::slice::from_raw_parts(dp_ns.add(sb), eb - sb))
+                    }
                 } else {
                     Ordering::Equal
                 }
@@ -2410,14 +2429,19 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 }
                 write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
             } else {
+                let dp_skn = data.as_ptr();
                 let cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
                     let ord = a.0.cmp(&b.0);
                     if ord != Ordering::Equal {
                         return if reverse { ord.reverse() } else { ord };
                     }
                     if !stable {
-                        data[offsets[a.1].0..offsets[a.1].1]
-                            .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                        let (sa, ea) = offsets[a.1];
+                        let (sb, eb) = offsets[b.1];
+                        unsafe {
+                            std::slice::from_raw_parts(dp_skn.add(sa), ea - sa)
+                                .cmp(std::slice::from_raw_parts(dp_skn.add(sb), eb - sb))
+                        }
                     } else {
                         Ordering::Equal
                     }
@@ -2659,8 +2683,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                                 return ord;
                             }
                             if !stable {
-                                data[offsets[a.1].0..offsets[a.1].1]
-                                    .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                                let (la, ra) = offsets[a.1];
+                                let (lb, rb) = offsets[b.1];
+                                unsafe {
+                                    let dp = data_addr as *const u8;
+                                    std::slice::from_raw_parts(dp.add(la), ra - la)
+                                        .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
+                                }
                             } else {
                                 Ordering::Equal
                             }
@@ -2839,13 +2868,17 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     write_sorted_entries(data, &offsets, &sorted, config, &mut writer, terminator)?;
                 } else {
                     // Small input: comparison-based sort
+                    let dp_small = data.as_ptr();
                     let prefix_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
                         let ord = match a.0.cmp(&b.0) {
                             Ordering::Equal => {
                                 let (sa, ea) = key_offs[a.1];
                                 let (sb, eb) = key_offs[b.1];
                                 let skip = 8.min(ea - sa).min(eb - sb);
-                                data[sa + skip..ea].cmp(&data[sb + skip..eb])
+                                unsafe {
+                                    std::slice::from_raw_parts(dp_small.add(sa + skip), ea - sa - skip)
+                                        .cmp(std::slice::from_raw_parts(dp_small.add(sb + skip), eb - sb - skip))
+                                }
                             }
                             ord => ord,
                         };
@@ -2853,8 +2886,12 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             return if reverse { ord.reverse() } else { ord };
                         }
                         if !stable {
-                            data[offsets[a.1].0..offsets[a.1].1]
-                                .cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                            let (la, ra) = offsets[a.1];
+                            let (lb, rb) = offsets[b.1];
+                            unsafe {
+                                std::slice::from_raw_parts(dp_small.add(la), ra - la)
+                                    .cmp(std::slice::from_raw_parts(dp_small.add(lb), rb - lb))
+                            }
                         } else {
                             Ordering::Equal
                         }
@@ -3029,9 +3066,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             })
             .collect();
 
+        let dp_gen_key = data.as_ptr() as usize;
         do_sort(&mut indices, stable, |&a, &b| {
-            let la = &data[offsets[a].0..offsets[a].1];
-            let lb = &data[offsets[b].0..offsets[b].1];
+            let dp = dp_gen_key as *const u8;
+            let (sa, ea) = offsets[a];
+            let (sb, eb) = offsets[b];
+            let la = unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) };
+            let lb = unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) };
 
             for (ki, &(cmp_fn, needs_blank, needs_reverse)) in comparators.iter().enumerate() {
                 let ka = extract_key(la, &keys[ki], config.separator);
