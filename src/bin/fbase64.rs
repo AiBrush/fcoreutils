@@ -238,18 +238,19 @@ fn process_file(filename: &str, cli: &Cli, out: &mut impl Write) -> io::Result<(
         {
             let file = std::fs::File::open(Path::new(filename))?;
             let metadata = file.metadata()?;
-            if metadata.len() > 0 && metadata.file_type().is_file() {
-                if let Ok(mut mmap) = unsafe { MmapOptions::new().populate().map_copy(&file) } {
-                    #[cfg(target_os = "linux")]
-                    unsafe {
-                        libc::madvise(
-                            mmap.as_ptr() as *mut libc::c_void,
-                            mmap.len(),
-                            libc::MADV_SEQUENTIAL,
-                        );
-                    }
-                    return b64::decode_mmap_inplace(&mut mmap, cli.ignore_garbage, out);
+            if metadata.len() > 0
+                && metadata.file_type().is_file()
+                && let Ok(mut mmap) = unsafe { MmapOptions::new().populate().map_copy(&file) }
+            {
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    libc::madvise(
+                        mmap.as_ptr() as *mut libc::c_void,
+                        mmap.len(),
+                        libc::MADV_SEQUENTIAL,
+                    );
                 }
+                return b64::decode_mmap_inplace(&mut mmap, cli.ignore_garbage, out);
             }
         }
         let data = read_file(Path::new(filename))?;

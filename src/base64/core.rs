@@ -9,17 +9,19 @@ const BASE64_ENGINE: &base64_simd::Base64 = &base64_simd::STANDARD;
 /// Larger chunks = fewer write() syscalls for big files.
 const NOWRAP_CHUNK: usize = 32 * 1024 * 1024 - (32 * 1024 * 1024 % 3);
 
-/// Minimum data size for parallel encoding (8MB).
+/// Minimum data size for parallel encoding (4MB).
 /// base64_simd SIMD encoding runs at ~8 GB/s per core. With 2+ cores
-/// at 8MB, parallel encode provides ~1.5x speedup (4MB per core in ~0.5ms
-/// vs full 8MB in ~1ms + ~0.1ms rayon overhead).
-const PARALLEL_ENCODE_THRESHOLD: usize = 8 * 1024 * 1024;
+/// at 4MB, parallel encode provides ~1.4x speedup (2MB per core in ~0.25ms
+/// vs full 4MB in ~0.5ms + ~0.1ms rayon overhead). Lowered from 8MB to
+/// benefit the common 10MB benchmark input.
+const PARALLEL_ENCODE_THRESHOLD: usize = 4 * 1024 * 1024;
 
-/// Minimum data size for parallel decoding (4MB of base64 data).
-/// With 2+ cores, parallel decode at 4MB provides ~1.5x speedup:
-/// single-core decode at 8GB/s takes ~0.5ms for 4MB, while dual-core
-/// takes ~0.25ms + ~0.1ms rayon overhead = ~0.35ms.
-const PARALLEL_DECODE_THRESHOLD: usize = 4 * 1024 * 1024;
+/// Minimum data size for parallel decoding (2MB of base64 data).
+/// With 2+ cores, parallel decode at 2MB provides ~1.3x speedup:
+/// single-core decode at 8GB/s takes ~0.25ms for 2MB, while dual-core
+/// takes ~0.125ms + ~0.1ms rayon overhead = ~0.225ms. Lowered from
+/// 4MB to benefit the common 10MB benchmark input after whitespace strip.
+const PARALLEL_DECODE_THRESHOLD: usize = 2 * 1024 * 1024;
 
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with fused encode+wrap for maximum throughput.
