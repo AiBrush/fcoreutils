@@ -1,12 +1,9 @@
-use std::io::{self, IoSlice, Write};
-
-/// Maximum number of IoSlice entries per write_vectored call.
-/// Linux IOV_MAX is 1024, so we batch at this limit.
-const IOV_BATCH: usize = 1024;
+use std::io::{self, Write};
 
 /// Reverse records separated by a single byte.
-/// Zero-copy: uses write_vectored (writev) to output slices from the original
-/// mmap data in reverse record order. No output buffer allocation, no memcpy.
+/// Reverse-copy approach: collects separator positions with SIMD memchr,
+/// then copies records in reverse order into a contiguous output buffer
+/// for a single write_all syscall.
 pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -18,10 +15,8 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
     }
 }
 
-/// Reverse records of an owned Vec using the same streaming writev approach
-/// as tac_bytes. The owned data stays alive for the duration, so IoSlice
-/// entries can point directly into it. This is simpler and uses fewer passes
-/// than the in-place reversal approach (1 memchr scan + writev vs 3 passes).
+/// Reverse records of an owned Vec. Delegates to tac_bytes which uses
+/// reverse-copy into a contiguous buffer + single write_all.
 pub fn tac_bytes_owned(
     data: &mut [u8],
     separator: u8,
@@ -31,54 +26,54 @@ pub fn tac_bytes_owned(
     tac_bytes(data, separator, before, out)
 }
 
-/// After-separator mode: streaming zero-copy writev from mmap in reverse record order.
-/// Builds IoSlice batches of IOV_BATCH at a time and writes each batch with writev,
-/// avoiding the full Vec<IoSlice> allocation for all records.
+/// After-separator mode: reverse-copy records into a contiguous buffer, single write_all.
+/// For 10MB data with ~130K lines: 1 memchr scan + 130K memcpy (10MB total) + 1 write().
+/// This is faster than streaming writev which needs ~130 writev syscalls.
 fn tac_bytes_zerocopy_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    // Single-pass collect with estimated capacity.
-    // Estimate: assume ~50 bytes average per line. For 100MB, that's ~2M lines.
-    // Even if the estimate is off, Vec::collect only reallocates log2(N) times,
-    // and each reallocation is a memcpy (not a scan), which is cheaper than
-    // a second full SIMD memchr scan of the entire file.
+    // Single-pass collect separator positions with SIMD memchr.
     let est_capacity = (data.len() / 50).max(64);
     let mut positions: Vec<usize> = Vec::with_capacity(est_capacity);
     positions.extend(memchr::memchr_iter(sep, data));
 
     if positions.is_empty() {
-        // No separators found — output data as-is
         return out.write_all(data);
     }
 
-    // Streaming writev: build and write IoSlice batches of IOV_BATCH at a time.
-    // This avoids allocating the full Vec<IoSlice> for all records. For 200K records,
-    // this saves 3.2MB (200K * 16 bytes/IoSlice) of allocation.
-    // Each batch of IOV_BATCH entries is written with a single writev syscall.
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_BATCH);
+    // Reverse-copy into contiguous output buffer for single write_all.
+    // Each record is copied with copy_nonoverlapping (memcpy) which is
+    // highly optimized for sequential destination writes.
+    let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
+    unsafe { outbuf.set_len(data.len()) };
+    let dst = outbuf.as_mut_ptr();
+    let src = data.as_ptr();
+    let mut wp = 0;
+
     let mut end = data.len();
     for &pos in positions.iter().rev() {
         let rec_start = pos + 1;
-        if rec_start < end {
-            slices.push(IoSlice::new(&data[rec_start..end]));
-            if slices.len() >= IOV_BATCH {
-                write_ioslices(out, &slices)?;
-                slices.clear();
+        let rec_len = end - rec_start;
+        if rec_len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(rec_start), dst.add(wp), rec_len);
             }
+            wp += rec_len;
         }
         end = rec_start;
     }
     // Remaining prefix before the first separator
     if end > 0 {
-        slices.push(IoSlice::new(&data[..end]));
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, dst.add(wp), end);
+        }
+        wp += end;
     }
-    if !slices.is_empty() {
-        write_ioslices(out, &slices)?;
-    }
-    Ok(())
+
+    out.write_all(&outbuf[..wp])
 }
 
-/// Before-separator mode: zero-copy write from mmap in reverse record order.
+/// Before-separator mode: reverse-copy records into a contiguous buffer, single write_all.
 fn tac_bytes_zerocopy_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    // Single-pass collect with estimated capacity.
     let est_capacity = (data.len() / 50).max(64);
     let mut positions: Vec<usize> = Vec::with_capacity(est_capacity);
     positions.extend(memchr::memchr_iter(sep, data));
@@ -87,73 +82,33 @@ fn tac_bytes_zerocopy_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::
         return out.write_all(data);
     }
 
-    // Streaming writev: build and write batches of IOV_BATCH at a time.
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_BATCH);
+    // Reverse-copy into contiguous output buffer for single write_all.
+    let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
+    unsafe { outbuf.set_len(data.len()) };
+    let dst = outbuf.as_mut_ptr();
+    let src = data.as_ptr();
+    let mut wp = 0;
+
     let mut end = data.len();
     for &pos in positions.iter().rev() {
-        if pos < end {
-            slices.push(IoSlice::new(&data[pos..end]));
-            if slices.len() >= IOV_BATCH {
-                write_ioslices(out, &slices)?;
-                slices.clear();
+        let rec_len = end - pos;
+        if rec_len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(pos), dst.add(wp), rec_len);
             }
+            wp += rec_len;
         }
         end = pos;
     }
     if end > 0 {
-        slices.push(IoSlice::new(&data[..end]));
-    }
-    if !slices.is_empty() {
-        write_ioslices(out, &slices)?;
-    }
-    Ok(())
-}
-
-/// Write a slice array in batches of IOV_BATCH using write_vectored.
-/// Handles partial writes correctly by advancing past consumed slices.
-fn write_ioslices(out: &mut impl Write, slices: &[IoSlice<'_>]) -> io::Result<()> {
-    let mut offset = 0;
-    while offset < slices.len() {
-        let end = (offset + IOV_BATCH).min(slices.len());
-        let batch = &slices[offset..end];
-        let expected: usize = batch.iter().map(|s| s.len()).sum();
-        if expected == 0 {
-            offset = end;
-            continue;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, dst.add(wp), end);
         }
-
-        let n = out.write_vectored(batch)?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "write_vectored returned 0",
-            ));
-        }
-
-        if n >= expected {
-            // All slices in this batch were consumed
-            offset = end;
-        } else {
-            // Partial write — advance past fully consumed slices,
-            // then fall back to write_all for the remainder.
-            let mut consumed = n;
-            for (i, slice) in batch.iter().enumerate() {
-                if consumed >= slice.len() {
-                    consumed -= slice.len();
-                } else {
-                    // Partial slice — write remaining
-                    out.write_all(&slice[consumed..])?;
-                    // Write remaining full slices
-                    for s in &batch[i + 1..] {
-                        out.write_all(s)?;
-                    }
-                    break;
-                }
-            }
-            offset = end;
-        }
+        wp += end;
     }
-    Ok(())
+
+    out.write_all(&outbuf[..wp])
 }
 
 /// Reverse records using a multi-byte string separator.
@@ -183,8 +138,7 @@ pub fn tac_string_separator(
     }
 }
 
-/// Multi-byte string separator, after mode (separator at end of record).
-/// Zero-copy writev from input data in reverse record order.
+/// Multi-byte string separator, after mode: reverse-copy records, single write_all.
 fn tac_string_after(
     data: &[u8],
     separator: &[u8],
@@ -197,31 +151,36 @@ fn tac_string_after(
         return out.write_all(data);
     }
 
-    // Streaming writev: batch IoSlice entries and write in groups of IOV_BATCH.
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_BATCH);
+    let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
+    unsafe { outbuf.set_len(data.len()) };
+    let dst = outbuf.as_mut_ptr();
+    let src = data.as_ptr();
+    let mut wp = 0;
+
     let mut end = data.len();
     for &pos in positions.iter().rev() {
         let rec_start = pos + sep_len;
-        if rec_start < end {
-            slices.push(IoSlice::new(&data[rec_start..end]));
-            if slices.len() >= IOV_BATCH {
-                write_ioslices(out, &slices)?;
-                slices.clear();
+        let rec_len = end - rec_start;
+        if rec_len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(rec_start), dst.add(wp), rec_len);
             }
+            wp += rec_len;
         }
         end = rec_start;
     }
     if end > 0 {
-        slices.push(IoSlice::new(&data[..end]));
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, dst.add(wp), end);
+        }
+        wp += end;
     }
-    if !slices.is_empty() {
-        write_ioslices(out, &slices)?;
-    }
-    Ok(())
+
+    out.write_all(&outbuf[..wp])
 }
 
-/// Multi-byte string separator, before mode (separator at start of record).
-/// Zero-copy writev from input data in reverse record order.
+/// Multi-byte string separator, before mode: reverse-copy records, single write_all.
 fn tac_string_before(
     data: &[u8],
     separator: &[u8],
@@ -234,26 +193,32 @@ fn tac_string_before(
         return out.write_all(data);
     }
 
-    // Streaming writev: batch IoSlice entries and write in groups of IOV_BATCH.
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_BATCH);
+    let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
+    unsafe { outbuf.set_len(data.len()) };
+    let dst = outbuf.as_mut_ptr();
+    let src = data.as_ptr();
+    let mut wp = 0;
+
     let mut end = data.len();
     for &pos in positions.iter().rev() {
-        if pos < end {
-            slices.push(IoSlice::new(&data[pos..end]));
-            if slices.len() >= IOV_BATCH {
-                write_ioslices(out, &slices)?;
-                slices.clear();
+        let rec_len = end - pos;
+        if rec_len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(pos), dst.add(wp), rec_len);
             }
+            wp += rec_len;
         }
         end = pos;
     }
     if end > 0 {
-        slices.push(IoSlice::new(&data[..end]));
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, dst.add(wp), end);
+        }
+        wp += end;
     }
-    if !slices.is_empty() {
-        write_ioslices(out, &slices)?;
-    }
-    Ok(())
+
+    out.write_all(&outbuf[..wp])
 }
 
 /// Find regex matches using backward scanning, matching GNU tac's re_search behavior.
@@ -350,12 +315,22 @@ pub fn tac_regex_separator(
         }
     }
 
-    // Build IoSlice array and write with writev
-    let slices: Vec<IoSlice<'_>> = records
-        .iter()
-        .filter(|&&(_, len)| len > 0)
-        .map(|&(start, len)| IoSlice::new(&data[start..start + len]))
-        .collect();
+    // Reverse-copy records into contiguous buffer for single write_all.
+    let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
+    unsafe { outbuf.set_len(data.len()) };
+    let dst = outbuf.as_mut_ptr();
+    let src_ptr = data.as_ptr();
+    let mut wp = 0;
 
-    write_ioslices(out, &slices)
+    for &(start, len) in &records {
+        if len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src_ptr.add(start), dst.add(wp), len);
+            }
+            wp += len;
+        }
+    }
+
+    out.write_all(&outbuf[..wp])
 }
