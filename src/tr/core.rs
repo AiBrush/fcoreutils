@@ -3668,23 +3668,26 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
 
     let member = build_member_set(delete_chars);
 
-    // Heuristic: sample first 1024 bytes to estimate delete frequency.
-    // If < 10% of bytes are deleted, zero-copy writev is efficient
-    // (long runs between deletes = few IoSlice entries).
-    // For dense deletes (>= 10%), copy-based approach with parallel processing
-    // produces fewer, larger writes.
+    // Heuristic: estimate total delete positions. Zero-copy writev is only efficient
+    // when all gaps fit in a single writev call (< MAX_IOV/2 entries). With uniform
+    // distribution, each delete creates an IoSlice entry. For many deletes (> 512),
+    // multiple writev calls are needed, and the compact approach is faster.
     let sample_size = data.len().min(1024);
     let sample_deletes = data[..sample_size]
         .iter()
         .filter(|&&b| is_member(&member, b))
         .count();
-    let delete_pct = sample_deletes * 100 / sample_size.max(1);
+    let estimated_deletes = if sample_size > 0 {
+        data.len() * sample_deletes / sample_size
+    } else {
+        data.len()
+    };
 
-    if delete_pct < 10 {
+    if estimated_deletes < MAX_IOV / 2 {
         return delete_bitset_zerocopy(data, &member, writer);
     }
 
-    // Dense delete: copy-based approach with parallel processing
+    // Dense delete: parallel compact with writev (avoids scatter-gather copy)
     if data.len() >= PARALLEL_THRESHOLD {
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
@@ -3696,31 +3699,28 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
             .map(|(src_chunk, dst_chunk)| delete_chunk_bitset_into(src_chunk, &member, dst_chunk))
             .collect();
 
-        let mut write_pos = 0;
-        let mut src_offset = 0;
-        for &clen in &chunk_lens {
-            if clen > 0 && src_offset != write_pos {
-                unsafe {
-                    std::ptr::copy(
-                        outbuf.as_ptr().add(src_offset),
-                        outbuf.as_mut_ptr().add(write_pos),
-                        clen,
-                    );
-                }
-            }
-            write_pos += clen;
-            src_offset += chunk_size;
-        }
-
-        return writer.write_all(&outbuf[..write_pos]);
+        // Use writev to write each chunk at its original position, avoiding
+        // the O(N) scatter-gather memmove. With ~4 threads, that's 4 IoSlice
+        // entries — far below MAX_IOV.
+        let slices: Vec<std::io::IoSlice> = chunk_lens
+            .iter()
+            .enumerate()
+            .filter(|&(_, &len)| len > 0)
+            .map(|(i, &len)| std::io::IoSlice::new(&outbuf[i * chunk_size..i * chunk_size + len]))
+            .collect();
+        return write_ioslices(writer, &slices);
     }
 
-    // Single-allocation delete: full-size buffer, single write_all.
-    // For 10MB data, this does 1 write() instead of ~40 chunked writes.
-    let mut outbuf = alloc_uninit_vec(data.len());
-    let out_pos = delete_chunk_bitset_into(data, &member, &mut outbuf);
-    if out_pos > 0 {
-        writer.write_all(&outbuf[..out_pos])?;
+    // Streaming compact: 256KB output buffer reduces page fault overhead.
+    // For 10MB data: ~64 page faults instead of ~2500, with ~40 write_all calls.
+    const COMPACT_BUF: usize = 256 * 1024;
+    let mut outbuf = alloc_uninit_vec(COMPACT_BUF);
+
+    for chunk in data.chunks(COMPACT_BUF) {
+        let out_pos = delete_chunk_bitset_into(chunk, &member, &mut outbuf);
+        if out_pos > 0 {
+            writer.write_all(&outbuf[..out_pos])?;
+        }
     }
     Ok(())
 }
@@ -3736,14 +3736,21 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
         .iter()
         .filter(|&&b| b >= lo && b <= hi)
         .count();
-    let delete_pct = sample_deletes * 100 / sample_size.max(1);
-
-    // Sparse deletes: zero-copy writev from mmap (no allocation, no copy)
-    if delete_pct < 15 {
+    // Estimate expected number of delete positions (IoSlice entries for zero-copy).
+    // Each delete creates an IoSlice entry. With MAX_IOV=1024 per writev,
+    // if estimated_deletes > MAX_IOV/2, the writev overhead from multiple syscalls
+    // exceeds the compact approach cost. Only use zero-copy when all gaps fit in
+    // a single writev call.
+    let estimated_deletes = if sample_size > 0 {
+        data.len() * sample_deletes / sample_size
+    } else {
+        data.len()
+    };
+    if estimated_deletes < MAX_IOV / 2 {
         return delete_range_mmap_zerocopy(data, writer, lo, hi);
     }
 
-    // Dense deletes: compact into buffer with SIMD
+    // Dense deletes: parallel compact with writev (avoids scatter-gather copy)
     if data.len() >= PARALLEL_THRESHOLD {
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
@@ -3755,26 +3762,129 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
             .map(|(src_chunk, dst_chunk)| delete_range_chunk(src_chunk, dst_chunk, lo, hi))
             .collect();
 
-        let mut write_pos = 0;
-        let mut src_offset = 0;
-        for &clen in &chunk_lens {
-            if clen > 0 && src_offset != write_pos {
-                unsafe {
-                    std::ptr::copy(
-                        outbuf.as_ptr().add(src_offset),
-                        outbuf.as_mut_ptr().add(write_pos),
-                        clen,
-                    );
-                }
-            }
-            write_pos += clen;
-            src_offset += chunk_size;
-        }
-        return writer.write_all(&outbuf[..write_pos]);
+        // Use writev to write each chunk at its original position, avoiding
+        // the O(N) scatter-gather memmove.
+        let slices: Vec<std::io::IoSlice> = chunk_lens
+            .iter()
+            .enumerate()
+            .filter(|&(_, &len)| len > 0)
+            .map(|(i, &len)| std::io::IoSlice::new(&outbuf[i * chunk_size..i * chunk_size + len]))
+            .collect();
+        return write_ioslices(writer, &slices);
     }
 
-    let mut outbuf = alloc_uninit_vec(data.len());
-    let wp = delete_range_chunk(data, &mut outbuf, lo, hi);
+    // Streaming compact: use 256KB output buffer instead of full data.len() buffer.
+    // This reduces page fault overhead from ~2500 faults (10MB) to ~64 faults (256KB).
+    // The extra write_all calls (~40 for 10MB) are negligible cost.
+    const COMPACT_BUF: usize = 256 * 1024;
+    let mut outbuf = alloc_uninit_vec(COMPACT_BUF);
+    let mut wp = 0;
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let level = get_simd_level();
+        let len = data.len();
+        let sp = data.as_ptr();
+        let dp = outbuf.as_mut_ptr();
+        let mut ri = 0;
+
+        if level >= 3 {
+            use std::arch::x86_64::*;
+            let range = hi - lo;
+            let bias_v = unsafe { _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8) };
+            let threshold_v = unsafe { _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8) };
+            let zero = unsafe { _mm256_setzero_si256() };
+
+            while ri + 32 <= len {
+                // Flush when output buffer is nearly full
+                if wp + 32 > COMPACT_BUF {
+                    writer.write_all(&outbuf[..wp])?;
+                    wp = 0;
+                }
+
+                let input = unsafe { _mm256_loadu_si256(sp.add(ri) as *const _) };
+                let biased = unsafe { _mm256_add_epi8(input, bias_v) };
+                let gt = unsafe { _mm256_cmpgt_epi8(biased, threshold_v) };
+                let in_range = unsafe { _mm256_cmpeq_epi8(gt, zero) };
+                let keep_mask = !(unsafe { _mm256_movemask_epi8(in_range) } as u32);
+
+                if keep_mask == 0xFFFFFFFF {
+                    unsafe { std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 32) };
+                    wp += 32;
+                } else if keep_mask != 0 {
+                    let m0 = keep_mask as u8;
+                    let m1 = (keep_mask >> 8) as u8;
+                    let m2 = (keep_mask >> 16) as u8;
+                    let m3 = (keep_mask >> 24) as u8;
+
+                    if m0 == 0xFF {
+                        unsafe { std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 8) };
+                    } else if m0 != 0 {
+                        unsafe { compact_8bytes(sp.add(ri), dp.add(wp), m0) };
+                    }
+                    let c0 = m0.count_ones() as usize;
+
+                    if m1 == 0xFF {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(sp.add(ri + 8), dp.add(wp + c0), 8)
+                        };
+                    } else if m1 != 0 {
+                        unsafe { compact_8bytes(sp.add(ri + 8), dp.add(wp + c0), m1) };
+                    }
+                    let c1 = m1.count_ones() as usize;
+
+                    if m2 == 0xFF {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(sp.add(ri + 16), dp.add(wp + c0 + c1), 8)
+                        };
+                    } else if m2 != 0 {
+                        unsafe { compact_8bytes(sp.add(ri + 16), dp.add(wp + c0 + c1), m2) };
+                    }
+                    let c2 = m2.count_ones() as usize;
+
+                    if m3 == 0xFF {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                sp.add(ri + 24),
+                                dp.add(wp + c0 + c1 + c2),
+                                8,
+                            )
+                        };
+                    } else if m3 != 0 {
+                        unsafe { compact_8bytes(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), m3) };
+                    }
+                    let c3 = m3.count_ones() as usize;
+                    wp += c0 + c1 + c2 + c3;
+                }
+                ri += 32;
+            }
+        }
+
+        // Scalar tail
+        while ri < len {
+            if wp + 1 > COMPACT_BUF {
+                writer.write_all(&outbuf[..wp])?;
+                wp = 0;
+            }
+            let b = unsafe { *sp.add(ri) };
+            unsafe { *dp.add(wp) = b };
+            wp += (b < lo || b > hi) as usize;
+            ri += 1;
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Non-x86 fallback: chunk the source and process with delete_range_chunk
+        for chunk in data.chunks(COMPACT_BUF) {
+            let clen = delete_range_chunk(chunk, &mut outbuf, lo, hi);
+            if clen > 0 {
+                writer.write_all(&outbuf[..clen])?;
+            }
+        }
+        return Ok(());
+    }
+
     if wp > 0 {
         writer.write_all(&outbuf[..wp])?;
     }
