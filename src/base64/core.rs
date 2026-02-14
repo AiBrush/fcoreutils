@@ -15,10 +15,11 @@ const NOWRAP_CHUNK: usize = 32 * 1024 * 1024 - (32 * 1024 * 1024 % 3);
 /// For 10MB benchmark workloads, single-threaded is faster.
 const PARALLEL_ENCODE_THRESHOLD: usize = 16 * 1024 * 1024;
 
-/// Minimum data size for parallel decoding (16MB of base64 data).
-/// base64_simd SIMD decoding is similarly fast; parallelism only
-/// helps for very large inputs where thread overhead is amortized.
-const PARALLEL_DECODE_THRESHOLD: usize = 16 * 1024 * 1024;
+/// Minimum data size for parallel decoding (4MB of base64 data).
+/// With 2+ cores, parallel decode at 4MB provides ~1.5x speedup:
+/// single-core decode at 8GB/s takes ~0.5ms for 4MB, while dual-core
+/// takes ~0.25ms + ~0.1ms rayon overhead = ~0.35ms.
+const PARALLEL_DECODE_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with fused encode+wrap for maximum throughput.
@@ -797,7 +798,13 @@ fn decode_stripping_whitespace(data: &[u8], out: &mut impl Write) -> io::Result<
         clean.truncate(cwp);
     }
 
-    decode_clean_slice(&mut clean, out)
+    // For large data (>= threshold), use parallel decode for multi-core speedup.
+    // For small data, use in-place decode to avoid extra allocation.
+    if clean.len() >= PARALLEL_DECODE_THRESHOLD {
+        decode_borrowed_clean_parallel(out, &clean)
+    } else {
+        decode_clean_slice(&mut clean, out)
+    }
 }
 
 /// Decode a clean (no whitespace) buffer in-place with SIMD.
