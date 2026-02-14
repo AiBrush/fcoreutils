@@ -3,6 +3,8 @@ use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 
+use rayon::prelude::*;
+
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -601,6 +603,162 @@ pub fn blake2b_hash_stdin(output_bytes: usize) -> io::Result<String> {
     }
     blake2b_hash_reader(stdin.lock(), output_bytes)
 }
+
+/// Internal enum for file content in batch hashing.
+/// Keeps data alive (either as mmap or owned Vec) while hash_many references it.
+enum FileContent {
+    Mmap(memmap2::Mmap),
+    Buf(Vec<u8>),
+}
+
+impl AsRef<[u8]> for FileContent {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            FileContent::Mmap(m) => m,
+            FileContent::Buf(v) => v,
+        }
+    }
+}
+
+/// Open a file and load its content for batch hashing.
+/// Uses mmap for regular files (zero-copy), read for others.
+fn open_file_content(path: &Path) -> io::Result<FileContent> {
+    let (file, size, is_regular) = open_and_stat(path)?;
+    if is_regular && size == 0 {
+        return Ok(FileContent::Buf(Vec::new()));
+    }
+    if is_regular && size > 0 {
+        if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().populate().map(&file) } {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                if size >= 2 * 1024 * 1024 {
+                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                }
+            }
+            return Ok(FileContent::Mmap(mmap));
+        }
+        // Fallback: read into Vec
+        let mut buf = vec![0u8; size as usize];
+        let mut total = 0;
+        let mut f = file;
+        while total < size as usize {
+            match f.read(&mut buf[total..]) {
+                Ok(0) => break,
+                Ok(n) => total += n,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        buf.truncate(total);
+        return Ok(FileContent::Buf(buf));
+    }
+    // Non-regular: read to end
+    let mut buf = Vec::new();
+    let mut f = file;
+    f.read_to_end(&mut buf)?;
+    Ok(FileContent::Buf(buf))
+}
+
+/// Batch-hash multiple files with BLAKE2b using multi-buffer SIMD.
+///
+/// Uses blake2b_simd::many::hash_many for 4-way AVX2 parallel hashing.
+/// All files are pre-loaded into memory (mmap for large, read for small),
+/// then hashed simultaneously. Returns results in input order.
+///
+/// For 100 files on AVX2: 4x throughput from SIMD parallelism.
+pub fn blake2b_hash_files_many(
+    paths: &[&Path],
+    output_bytes: usize,
+) -> Vec<io::Result<String>> {
+    use blake2b_simd::many::{hash_many, HashManyJob};
+
+    // Phase 1: Read all files into memory in parallel using rayon
+    let file_data: Vec<io::Result<FileContent>> = paths
+        .par_iter()
+        .map(|&path| open_file_content(path))
+        .collect();
+
+    // Phase 2: Build hash_many jobs for successful reads
+    let hash_results = {
+        let mut params = blake2b_simd::Params::new();
+        params.hash_length(output_bytes);
+
+        let ok_entries: Vec<(usize, &[u8])> = file_data
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.as_ref().ok().map(|c| (i, c.as_ref())))
+            .collect();
+
+        let mut jobs: Vec<HashManyJob> = ok_entries
+            .iter()
+            .map(|(_, data)| HashManyJob::new(&params, data))
+            .collect();
+
+        // Phase 3: Run multi-buffer SIMD hash (4-way AVX2)
+        hash_many(jobs.iter_mut());
+
+        // Extract hashes into a map
+        let mut hm: Vec<Option<String>> = vec![None; paths.len()];
+        for (j, &(orig_i, _)) in ok_entries.iter().enumerate() {
+            hm[orig_i] = Some(hex_encode(jobs[j].to_hash().as_bytes()));
+        }
+        hm
+    }; // file_data borrow released here
+
+    // Phase 4: Combine hashes and errors in original order
+    hash_results
+        .into_iter()
+        .zip(file_data)
+        .map(|(hash_opt, result)| match result {
+            Ok(_) => Ok(hash_opt.unwrap()),
+            Err(e) => Err(e),
+        })
+        .collect()
+}
+
+/// Batch-hash multiple files with SHA-256/MD5 using rayon parallel processing.
+/// Pre-loads all files in parallel, then hashes them in parallel.
+/// Returns results in input order.
+pub fn hash_files_parallel(
+    paths: &[&Path],
+    algo: HashAlgorithm,
+) -> Vec<io::Result<String>> {
+    // Issue readahead for all files (no size threshold)
+    readahead_files_all(paths);
+
+    paths
+        .par_iter()
+        .map(|&path| hash_file(algo, path))
+        .collect()
+}
+
+/// Issue readahead hints for ALL file paths (no size threshold).
+/// For multi-file benchmarks, even small files benefit from batched readahead.
+#[cfg(target_os = "linux")]
+pub fn readahead_files_all(paths: &[&Path]) {
+    use std::os::unix::io::AsRawFd;
+    for path in paths {
+        if let Ok(file) = open_noatime(path) {
+            if let Ok(meta) = file.metadata() {
+                if meta.file_type().is_file() {
+                    let len = meta.len();
+                    unsafe {
+                        libc::posix_fadvise(
+                            file.as_raw_fd(),
+                            0,
+                            len as i64,
+                            libc::POSIX_FADV_WILLNEED,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn readahead_files_all(_paths: &[&Path]) {}
 
 /// Print hash result in GNU format: "hash  filename\n"
 /// Uses raw byte writes to avoid std::fmt overhead.

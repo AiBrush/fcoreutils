@@ -145,16 +145,20 @@ fn try_mmap_stdin_mut() -> Option<memmap2::MmapMut> {
     None
 }
 
-/// Enlarge pipe buffers on Linux for higher throughput.
-/// Default pipe buffer is 64KB; increasing to 8MB reduces syscalls
-/// when reading/writing through pipes (e.g., `cat file | ftr`).
-/// 8MB allows the 8MB stream buffer to be filled/written in one syscall.
+/// Enlarge pipe buffers on Linux to the maximum allowed size.
+/// Reads /proc/sys/fs/pipe-max-size for the system limit (typically 1MB for
+/// unprivileged users), falls back to requesting 16MB (kernel caps silently).
+/// Larger pipe buffers reduce the number of read/write syscalls for piped input.
 #[cfg(target_os = "linux")]
 fn enlarge_pipe_bufs() {
-    const PIPE_SIZE: i32 = 8 * 1024 * 1024;
+    // Try to read the system max pipe size
+    let max_size = std::fs::read_to_string("/proc/sys/fs/pipe-max-size")
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .unwrap_or(16 * 1024 * 1024);
     unsafe {
-        libc::fcntl(0, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdin
-        libc::fcntl(1, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdout
+        libc::fcntl(0, libc::F_SETPIPE_SZ, max_size); // stdin
+        libc::fcntl(1, libc::F_SETPIPE_SZ, max_size); // stdout
     }
 }
 
