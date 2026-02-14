@@ -664,11 +664,22 @@ fn process_default_sequential(data: &[u8], writer: &mut impl Write, term: u8) ->
     let mut last_output_end = first_end + 1; // exclusive end including terminator
 
     while cur_start < data_len {
-        let cur_end = match memchr::memchr(term, unsafe {
-            std::slice::from_raw_parts(base.add(cur_start), data_len - cur_start)
-        }) {
-            Some(offset) => cur_start + offset,
-            None => data_len, // last line without terminator
+        // Speculative line-end detection: if the previous line had length L,
+        // check if data[cur_start + L] is the terminator. This avoids the
+        // memchr SIMD call for repetitive data where all lines have the same length.
+        // Falls back to memchr if the speculation is wrong.
+        let cur_end = {
+            let speculative = cur_start + prev_len;
+            if speculative < data_len && unsafe { *base.add(speculative) } == term {
+                speculative
+            } else {
+                match memchr::memchr(term, unsafe {
+                    std::slice::from_raw_parts(base.add(cur_start), data_len - cur_start)
+                }) {
+                    Some(offset) => cur_start + offset,
+                    None => data_len,
+                }
+            }
         };
 
         let cur_len = cur_end - cur_start;
@@ -891,11 +902,22 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
             let mut last_out_start = chunk_start;
             let mut last_out_end = first_line_end;
 
+            let mut prev_len = first_term;
+            let chunk_base = chunk.as_ptr();
+            let chunk_len = chunk.len();
             let mut cur_start = first_term + 1;
-            while cur_start < chunk.len() {
-                let cur_end = match memchr::memchr(term, &chunk[cur_start..]) {
-                    Some(offset) => cur_start + offset,
-                    None => chunk.len(),
+            while cur_start < chunk_len {
+                // Speculative line-end: check if next line has same length
+                let cur_end = {
+                    let spec = cur_start + prev_len;
+                    if spec < chunk_len && unsafe { *chunk_base.add(spec) } == term {
+                        spec
+                    } else {
+                        match memchr::memchr(term, &chunk[cur_start..]) {
+                            Some(offset) => cur_start + offset,
+                            None => chunk_len,
+                        }
+                    }
                 };
 
                 if lines_equal_fast(&chunk[prev_start..prev_end], &chunk[cur_start..cur_end]) {
@@ -906,7 +928,7 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
                     }
                     // New run starts after this duplicate
                     run_start = chunk_start
-                        + if cur_end < chunk.len() {
+                        + if cur_end < chunk_len {
                             cur_end + 1
                         } else {
                             cur_end
@@ -914,11 +936,12 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
                 } else {
                     last_out_start = chunk_start + cur_start;
                     last_out_end = chunk_start + cur_end;
+                    prev_len = cur_end - cur_start;
                 }
                 prev_start = cur_start;
                 prev_end = cur_end;
 
-                if cur_end < chunk.len() {
+                if cur_end < chunk_len {
                     cur_start = cur_end + 1;
                 } else {
                     break;
