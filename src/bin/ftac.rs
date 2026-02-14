@@ -64,11 +64,12 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     #[cfg(target_os = "linux")]
     if let Some(ref m) = mmap {
         unsafe {
-            // tac now scans forward with memchr_iter — sequential readahead helps
+            // memrchr_iter scans backward — disable sequential readahead
+            libc::madvise(m.as_ptr() as *mut libc::c_void, m.len(), libc::MADV_RANDOM);
             libc::madvise(
                 m.as_ptr() as *mut libc::c_void,
                 m.len(),
-                libc::MADV_SEQUENTIAL,
+                libc::MADV_WILLNEED,
             );
             if m.len() >= 2 * 1024 * 1024 {
                 libc::madvise(
@@ -121,19 +122,24 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             }
         };
 
-        // tac uses backward SIMD scan (memrchr) for single-byte separator,
+        // tac uses backward SIMD scan (memrchr_iter) for single-byte separator,
         // so MADV_RANDOM is optimal — disables sequential readahead which
         // would prefetch the wrong (forward) pages during backward scan.
-        // WILLNEED still helps pre-fault all pages, HUGEPAGE reduces TLB misses.
+        // WILLNEED pre-faults all pages, HUGEPAGE reduces TLB misses.
         #[cfg(target_os = "linux")]
         {
             if let FileData::Mmap(ref mmap) = data {
                 unsafe {
-                    // tac now scans forward with memchr_iter — sequential readahead helps
+                    // memrchr_iter scans backward — disable sequential readahead
                     libc::madvise(
                         mmap.as_ptr() as *mut libc::c_void,
                         mmap.len(),
-                        libc::MADV_SEQUENTIAL,
+                        libc::MADV_RANDOM,
+                    );
+                    libc::madvise(
+                        mmap.as_ptr() as *mut libc::c_void,
+                        mmap.len(),
+                        libc::MADV_WILLNEED,
                     );
                     if mmap.len() >= 2 * 1024 * 1024 {
                         libc::madvise(
