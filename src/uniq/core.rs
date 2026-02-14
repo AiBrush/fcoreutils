@@ -252,6 +252,69 @@ fn lines_equal_fast(a: &[u8], b: &[u8]) -> bool {
     a == b
 }
 
+/// Compare two equal-length lines starting from byte 8.
+/// Caller has already checked: lengths are equal, both >= 9 bytes, first 8 bytes match.
+/// This avoids redundant checks when the calling loop already did prefix rejection.
+#[inline(always)]
+fn lines_equal_after_prefix(a: &[u8], b: &[u8]) -> bool {
+    let alen = a.len();
+    debug_assert!(alen == b.len());
+    debug_assert!(alen > 8);
+    unsafe {
+        let ap = a.as_ptr();
+        let bp = b.as_ptr();
+        // Check last 8 bytes first (overlapping for 9-16 byte lines)
+        if alen <= 16 {
+            let a_tail = (ap.add(alen - 8) as *const u64).read_unaligned();
+            let b_tail = (bp.add(alen - 8) as *const u64).read_unaligned();
+            return a_tail == b_tail;
+        }
+        if alen <= 32 {
+            let a16 = (ap.add(8) as *const u64).read_unaligned();
+            let b16 = (bp.add(8) as *const u64).read_unaligned();
+            if a16 != b16 {
+                return false;
+            }
+            let a_tail = (ap.add(alen - 8) as *const u64).read_unaligned();
+            let b_tail = (bp.add(alen - 8) as *const u64).read_unaligned();
+            return a_tail == b_tail;
+        }
+        if alen <= 256 {
+            let mut off = 8usize;
+            while off + 32 <= alen {
+                let a0 = (ap.add(off) as *const u64).read_unaligned();
+                let b0 = (bp.add(off) as *const u64).read_unaligned();
+                let a1 = (ap.add(off + 8) as *const u64).read_unaligned();
+                let b1 = (bp.add(off + 8) as *const u64).read_unaligned();
+                let a2 = (ap.add(off + 16) as *const u64).read_unaligned();
+                let b2 = (bp.add(off + 16) as *const u64).read_unaligned();
+                let a3 = (ap.add(off + 24) as *const u64).read_unaligned();
+                let b3 = (bp.add(off + 24) as *const u64).read_unaligned();
+                if (a0 ^ b0) | (a1 ^ b1) | (a2 ^ b2) | (a3 ^ b3) != 0 {
+                    return false;
+                }
+                off += 32;
+            }
+            while off + 8 <= alen {
+                let aw = (ap.add(off) as *const u64).read_unaligned();
+                let bw = (bp.add(off) as *const u64).read_unaligned();
+                if aw != bw {
+                    return false;
+                }
+                off += 8;
+            }
+            if off < alen {
+                let a_tail = (ap.add(alen - 8) as *const u64).read_unaligned();
+                let b_tail = (bp.add(alen - 8) as *const u64).read_unaligned();
+                return a_tail == b_tail;
+            }
+            return true;
+        }
+    }
+    // >256 bytes: use memcmp via slice comparison (skipping the already-compared prefix)
+    a[8..] == b[8..]
+}
+
 /// Write a count-prefixed line in GNU uniq format.
 /// GNU format: "%7lu " — right-aligned in 7-char field, followed by space.
 /// Combines prefix + line + term into a single write for short lines (< 240 bytes).
@@ -1153,7 +1216,9 @@ fn process_filter_fast_singlepass(
 
         let cur_len = cur_end - cur_start;
 
-        // Fast reject using length + 8-byte prefix
+        // Fast reject using length + 8-byte prefix.
+        // After prefix match, use lines_equal_after_prefix which skips
+        // the already-checked length/prefix/empty checks.
         let is_dup = if cur_len != prev_len {
             false
         } else if cur_len == 0 {
@@ -1168,7 +1233,7 @@ fn process_filter_fast_singlepass(
                 unsafe {
                     let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
                     let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
-                    lines_equal_fast(a, b)
+                    lines_equal_after_prefix(a, b)
                 }
             }
         } else {
@@ -1306,7 +1371,7 @@ fn process_count_fast_singlepass(
                 unsafe {
                     let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
                     let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
-                    lines_equal_fast(a, b)
+                    lines_equal_after_prefix(a, b)
                 }
             }
         } else {

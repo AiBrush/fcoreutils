@@ -972,13 +972,23 @@ fn line_prefix(data: &[u8], start: usize, end: usize) -> u64 {
 
 /// Extract an 8-byte uppercase prefix for case-insensitive comparison.
 /// Big-endian byte order ensures u64 comparison matches lexicographic order.
+/// Uses raw pointer access to eliminate bounds checking in the hot path.
 #[inline]
 fn line_prefix_upper(data: &[u8], start: usize, end: usize) -> u64 {
     let len = end - start;
     let mut bytes = [0u8; 8];
     let take = len.min(8);
-    for i in 0..take {
-        bytes[i] = data[start + i].to_ascii_uppercase();
+    let p = data.as_ptr();
+    // Copy and uppercase in a single pass with raw pointers
+    let mut i = 0usize;
+    while i < take {
+        let b = unsafe { *p.add(start + i) };
+        bytes[i] = if b >= b'a' && b <= b'z' {
+            b - 32
+        } else {
+            b
+        };
+        i += 1;
     }
     u64::from_be_bytes(bytes)
 }
