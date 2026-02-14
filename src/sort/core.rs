@@ -2083,7 +2083,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
 
         let n = entries.len();
         let stable = config.stable;
-        // Parallel case-insensitive sort: u64 prefix resolves most comparisons,
+        // Case-insensitive comparison: u64 prefix resolves most comparisons,
         // falls back to full case-insensitive compare, then raw line compare.
         let fold_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
             let la = &data[offsets[a.1].0..offsets[a.1].1];
@@ -2102,26 +2102,53 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 Ordering::Equal => super::compare::compare_ignore_case(la, lb),
                 ord => ord,
             };
-            let ord = if reverse { ord.reverse() } else { ord };
             if ord == Ordering::Equal && !stable {
                 data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
             } else {
                 ord
             }
         };
-        if n > 10_000 {
-            if stable {
-                entries.par_sort_by(fold_cmp);
-            } else {
-                entries.par_sort_unstable_by(fold_cmp);
-            }
-        } else if stable {
-            entries.sort_by(fold_cmp);
-        } else {
-            entries.sort_unstable_by(fold_cmp);
-        }
 
-        write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
+        // Use radix sort on uppercase prefix for large inputs.
+        // This distributes entries by their 8-byte uppercase prefix, then
+        // sorts within each bucket using the full case-insensitive comparator.
+        if n > 256 {
+            let mut entries =
+                radix_sort_numeric_entries(entries, data, &offsets, stable, false);
+            // The numeric radix sort treats u64 as opaque keys, which works for
+            // our uppercase prefix since it preserves lexicographic order.
+            // But we need to tiebreak within equal-prefix runs with the full
+            // case-insensitive comparator.
+            {
+                let mut i = 0;
+                while i < n {
+                    let key = entries[i].0;
+                    let mut j = i + 1;
+                    while j < n && entries[j].0 == key {
+                        j += 1;
+                    }
+                    if j - i > 1 {
+                        entries[i..j].sort_unstable_by(fold_cmp);
+                    }
+                    i = j;
+                }
+            }
+            if reverse {
+                entries.reverse();
+            }
+            write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
+        } else {
+            let fold_cmp_rev = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
+                let ord = fold_cmp(a, b);
+                if reverse { ord.reverse() } else { ord }
+            };
+            if stable {
+                entries.sort_by(fold_cmp_rev);
+            } else {
+                entries.sort_unstable_by(fold_cmp_rev);
+            }
+            write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
+        }
     } else if is_numeric_only {
         // FAST PATH 2: Pre-parsed numeric sort with u64 comparison.
         // For pure -n sort (not -g or -h), try integer-only fast path first:
