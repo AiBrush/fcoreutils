@@ -141,20 +141,25 @@ pub fn read_stdin() -> io::Result<Vec<u8>> {
 /// which adds an extra memcpy for every read; raw read() goes directly
 /// from the kernel pipe buffer to our Vec.
 ///
+/// Pre-allocates 64MB to avoid reallocation during reads. For a 10MB pipe
+/// input, this means zero reallocations (one 64MB alloc covers it).
+/// Each read() uses the full spare capacity to maximize bytes per syscall.
+///
 /// Note: callers (ftac, ftr, fbase64) are expected to enlarge the pipe
 /// buffer via fcntl(F_SETPIPE_SZ) before calling this function. We don't
 /// do it here to avoid accidentally shrinking a previously enlarged pipe.
 #[cfg(target_os = "linux")]
 fn read_stdin_raw() -> io::Result<Vec<u8>> {
-    const PREALLOC: usize = 16 * 1024 * 1024;
-    const READ_BUF: usize = 8 * 1024 * 1024;
+    const PREALLOC: usize = 64 * 1024 * 1024;
 
     let mut buf: Vec<u8> = Vec::with_capacity(PREALLOC);
 
     loop {
         let spare_cap = buf.capacity() - buf.len();
-        if spare_cap < READ_BUF {
-            buf.reserve(PREALLOC);
+        if spare_cap < 1024 * 1024 {
+            // Grow by doubling (or at least 64MB) to minimize realloc count
+            let new_cap = (buf.capacity() * 2).max(buf.len() + PREALLOC);
+            buf.reserve(new_cap - buf.capacity());
         }
         let spare_cap = buf.capacity() - buf.len();
         let start = buf.len();

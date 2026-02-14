@@ -79,47 +79,33 @@ fn main() {
     #[cfg(unix)]
     let mut raw = raw_stdout();
 
-    // For encode on Unix: write directly to raw fd (our callers write 3MB+ chunks).
-    // For decode: use BufWriter since decode writes variable-sized chunks.
+    // Write directly to raw fd for both encode and decode — bypasses BufWriter.
+    // Encode writes 3MB+ chunks; decode (now batch mode via read_stdin + decode_owned)
+    // writes the entire decoded output in a single write_all. No intermediate
+    // buffering needed since all callers produce large contiguous output.
     #[cfg(unix)]
-    if !cli.decode {
-        let result = if filename == "-" {
-            process_stdin(&cli, &mut *raw)
+    let result = if filename == "-" {
+        process_stdin(&cli, &mut *raw)
+    } else {
+        process_file(filename, &cli, &mut *raw)
+    };
+    #[cfg(not(unix))]
+    let result = {
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::with_capacity(8 * 1024 * 1024, stdout.lock());
+        let r = if filename == "-" {
+            process_stdin(&cli, &mut out)
         } else {
-            process_file(filename, &cli, &mut *raw)
+            process_file(filename, &cli, &mut out)
         };
-
-        if let Err(e) = result {
-            if e.kind() == io::ErrorKind::BrokenPipe {
-                process::exit(0);
-            }
-            if filename != "-" {
-                eprintln!("base64: {}: {}", filename, io_error_msg(&e));
-            } else {
-                eprintln!("base64: {}", io_error_msg(&e));
-            }
+        if let Err(e) = out.flush()
+            && e.kind() != io::ErrorKind::BrokenPipe
+        {
+            eprintln!("base64: {}", io_error_msg(&e));
             process::exit(1);
         }
-        return;
-    }
-
-    #[cfg(unix)]
-    let mut out = io::BufWriter::with_capacity(2 * 1024 * 1024, &mut *raw);
-    #[cfg(not(unix))]
-    let mut out = io::BufWriter::with_capacity(2 * 1024 * 1024, io::stdout().lock());
-
-    let result = if filename == "-" {
-        process_stdin(&cli, &mut out)
-    } else {
-        process_file(filename, &cli, &mut out)
+        r
     };
-
-    if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe
-    {
-        eprintln!("base64: {}", io_error_msg(&e));
-        process::exit(1);
-    }
 
     if let Err(e) = result {
         if e.kind() == io::ErrorKind::BrokenPipe {
@@ -181,11 +167,13 @@ fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
             return b64::decode_owned(&mut data, cli.ignore_garbage, out);
         }
 
-        // For piped stdin: use streaming decode which processes in chunks
-        // with SIMD whitespace stripping, instead of read_to_end() which
-        // does many small allocations via the Vec growth strategy.
-        let mut stdin = io::stdin().lock();
-        return b64::decode_stream(&mut stdin, cli.ignore_garbage, out);
+        // For piped stdin: read ALL input first with raw read_stdin (64MB pre-alloc,
+        // zero Vec growth overhead), then decode the entire buffer at once.
+        // This enables parallel decode for large inputs and eliminates the streaming
+        // carry-over/chunking overhead. For 10MB base64 input, this is:
+        // 1 batch read -> 1 whitespace strip -> 1 parallel decode -> 1 write.
+        let mut data = coreutils_rs::common::io::read_stdin()?;
+        return b64::decode_owned(&mut data, cli.ignore_garbage, out);
     }
 
     // For encode: try mmap for zero-copy stdin when redirected from a file
@@ -194,8 +182,9 @@ fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
         return b64::encode_to_writer(&mmap, cli.wrap, out);
     }
 
-    let mut stdin = io::stdin().lock();
-    b64::encode_stream(&mut stdin, cli.wrap, out)
+    // For piped encode: read ALL stdin first for parallel encode + zero-copy
+    let data = coreutils_rs::common::io::read_stdin()?;
+    b64::encode_to_writer(&data, cli.wrap, out)
 }
 
 fn process_file(filename: &str, cli: &Cli, out: &mut impl Write) -> io::Result<()> {

@@ -1,4 +1,4 @@
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Write};
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
 #[cfg(unix)]
@@ -97,9 +97,10 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
 }
 
 /// Enlarge pipe buffers on Linux for higher throughput.
+/// 8MB matches the other tools (ftr, ftac, fbase64) for consistent syscall reduction.
 #[cfg(target_os = "linux")]
 fn enlarge_pipes() {
-    const PIPE_SIZE: i32 = 4 * 1024 * 1024;
+    const PIPE_SIZE: i32 = 8 * 1024 * 1024;
     unsafe {
         libc::fcntl(0, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdin
         libc::fcntl(1, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdout
@@ -177,11 +178,11 @@ fn main() {
     #[cfg(unix)]
     let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
     #[cfg(unix)]
-    let mut out = BufWriter::with_capacity(4 * 1024 * 1024, &mut *raw);
+    let mut out = BufWriter::with_capacity(8 * 1024 * 1024, &mut *raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut out = BufWriter::with_capacity(4 * 1024 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(8 * 1024 * 1024, stdout.lock());
     let mut had_error = false;
 
     let cfg = cut::CutConfig {
@@ -205,33 +206,34 @@ fn main() {
     };
 
     // Pre-read all stdin data for piped input (avoids chunked reader overhead).
-    // This is the same strategy uniq/sort use: read_to_end then process_cut_data.
+    // Uses read_stdin() on Linux for raw libc::read() with 64MB pre-alloc,
+    // bypassing BufReader/read_to_end Vec growth pattern.
     #[cfg(unix)]
     let stdin_buf: Option<Vec<u8>> = if stdin_mmap.is_none() && files.iter().any(|f| f == "-") {
-        let mut buf = Vec::new();
-        if let Err(e) = io::stdin().lock().read_to_end(&mut buf) {
-            if e.kind() != io::ErrorKind::BrokenPipe {
-                eprintln!("cut: {}", io_error_msg(&e));
-                process::exit(1);
+        match coreutils_rs::common::io::read_stdin() {
+            Ok(buf) => Some(buf),
+            Err(e) => {
+                if e.kind() != io::ErrorKind::BrokenPipe {
+                    eprintln!("cut: {}", io_error_msg(&e));
+                    process::exit(1);
+                }
+                Some(Vec::new())
             }
-            Some(Vec::new())
-        } else {
-            Some(buf)
         }
     } else {
         None
     };
     #[cfg(not(unix))]
     let stdin_buf: Option<Vec<u8>> = if files.iter().any(|f| f == "-") {
-        let mut buf = Vec::new();
-        if let Err(e) = io::stdin().lock().read_to_end(&mut buf) {
-            if e.kind() != io::ErrorKind::BrokenPipe {
-                eprintln!("cut: {}", io_error_msg(&e));
-                process::exit(1);
+        match coreutils_rs::common::io::read_stdin() {
+            Ok(buf) => Some(buf),
+            Err(e) => {
+                if e.kind() != io::ErrorKind::BrokenPipe {
+                    eprintln!("cut: {}", io_error_msg(&e));
+                    process::exit(1);
+                }
+                Some(Vec::new())
             }
-            Some(Vec::new())
-        } else {
-            Some(buf)
         }
     } else {
         None
