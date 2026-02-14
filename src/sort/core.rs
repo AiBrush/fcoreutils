@@ -1152,21 +1152,16 @@ fn write_sorted_output(
 
         if n > 50_000 {
             // Large output: parallel buffer construction
-            let out_sizes: Vec<usize> = sorted_indices
-                .iter()
-                .map(|&idx| {
-                    let (s, e) = offsets[idx];
-                    (e - s) + 1
-                })
-                .collect();
-            let total_out: usize = out_sizes.iter().sum();
+            // Single-pass prefix sum (no intermediate out_sizes allocation)
             let mut out_offsets: Vec<usize> = Vec::with_capacity(n + 1);
             out_offsets.push(0);
             let mut acc = 0usize;
-            for &sz in &out_sizes {
-                acc += sz;
+            for &idx in sorted_indices {
+                let (s, e) = offsets[idx];
+                acc += (e - s) + 1;
                 out_offsets.push(acc);
             }
+            let total_out = acc;
 
             let mut out_buf: Vec<u8> = Vec::with_capacity(total_out);
             #[allow(clippy::uninit_vec)]
@@ -1294,21 +1289,16 @@ fn write_sorted_entries(
 
         if n > 50_000 {
             // Large output: parallel buffer construction
-            let out_sizes: Vec<usize> = entries
-                .iter()
-                .map(|&(_, idx)| {
-                    let (s, e) = offsets[idx];
-                    (e - s) + 1
-                })
-                .collect();
-            let total_out: usize = out_sizes.iter().sum();
+            // Single-pass prefix sum (no intermediate out_sizes allocation)
             let mut out_offsets: Vec<usize> = Vec::with_capacity(n + 1);
             out_offsets.push(0);
             let mut acc = 0usize;
-            for &sz in &out_sizes {
-                acc += sz;
+            for &(_, idx) in entries {
+                let (s, e) = offsets[idx];
+                acc += (e - s) + 1;
                 out_offsets.push(acc);
             }
+            let total_out = acc;
 
             let mut out_buf: Vec<u8> = Vec::with_capacity(total_out);
             #[allow(clippy::uninit_vec)]
@@ -1763,21 +1753,17 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
 
             if num_lines > 50_000 {
                 // Large output: parallel buffer construction for reversed output
-                let out_sizes: Vec<usize> = (0..num_lines)
-                    .rev()
-                    .map(|i| {
-                        let (s, e) = offsets[i];
-                        (e - s) + 1
-                    })
-                    .collect();
-                let total_out: usize = out_sizes.iter().sum();
+                // Single-pass prefix sum + rev_indices (no intermediate out_sizes)
+                let rev_indices: Vec<usize> = (0..num_lines).rev().collect();
                 let mut out_offsets: Vec<usize> = Vec::with_capacity(num_lines + 1);
                 out_offsets.push(0);
                 let mut acc = 0usize;
-                for &sz in &out_sizes {
-                    acc += sz;
+                for &ri in &rev_indices {
+                    let (s, e) = offsets[ri];
+                    acc += (e - s) + 1;
                     out_offsets.push(acc);
                 }
+                let total_out = acc;
                 let mut out_buf: Vec<u8> = Vec::with_capacity(total_out);
                 #[allow(clippy::uninit_vec)]
                 unsafe {
@@ -1786,7 +1772,6 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 let out_ptr = out_buf.as_mut_ptr() as usize;
                 let dp_addr = dp as usize;
                 const CHUNK: usize = 8192;
-                let rev_indices: Vec<usize> = (0..num_lines).rev().collect();
                 let chunks: Vec<_> = (0..num_lines).collect::<Vec<_>>();
                 chunks.par_chunks(CHUNK).for_each(|idxs| {
                     let dst = out_ptr as *mut u8;
