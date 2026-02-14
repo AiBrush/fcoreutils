@@ -1891,11 +1891,8 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         // Already-sorted detection: O(n) scan using 8-byte prefixes.
         // If data is already sorted, skip the entire radix sort.
         // Also detects reverse-sorted input (for sort -r optimization).
-        if num_lines > 1
-            && !config.unique
-            && !config.zero_terminated
-            && memchr::memchr(b'\r', data).is_none()
-        {
+        // Works with -u (unique) by applying linear dedup on sorted data.
+        if num_lines > 1 && !config.zero_terminated && memchr::memchr(b'\r', data).is_none() {
             let dp = data.as_ptr();
             let mut is_sorted_fwd = true;
             let mut is_sorted_rev = true;
@@ -1945,7 +1942,43 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
 
             if (!reverse && is_sorted_fwd) || (reverse && is_sorted_rev) {
                 // Already in desired order: output directly (O(n) vs O(n log n))
-                if data.last() == Some(&b'\n') {
+                if config.unique {
+                    // Linear dedup on already-sorted data
+                    const BATCH: usize = 512;
+                    let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+                    let mut prev_pfx = u64::MAX;
+                    let mut prev_s = u32::MAX;
+                    let mut prev_l = 0u32;
+                    for &(pfx, s, l) in &entries {
+                        let emit = prev_s == u32::MAX
+                            || pfx != prev_pfx
+                            || l != prev_l
+                            || unsafe {
+                                std::slice::from_raw_parts(dp.add(s as usize), l as usize)
+                                    != std::slice::from_raw_parts(
+                                        dp.add(prev_s as usize),
+                                        prev_l as usize,
+                                    )
+                            };
+                        if emit {
+                            let line = unsafe {
+                                std::slice::from_raw_parts(dp.add(s as usize), l as usize)
+                            };
+                            slices.push(io::IoSlice::new(line));
+                            slices.push(io::IoSlice::new(terminator));
+                            if slices.len() >= BATCH * 2 {
+                                write_all_vectored(&mut writer, &slices)?;
+                                slices.clear();
+                            }
+                            prev_pfx = pfx;
+                            prev_s = s;
+                            prev_l = l;
+                        }
+                    }
+                    if !slices.is_empty() {
+                        write_all_vectored(&mut writer, &slices)?;
+                    }
+                } else if data.last() == Some(&b'\n') {
                     writer.write_all(data)?;
                 } else if !data.is_empty() {
                     writer.write_all(data)?;
@@ -1959,8 +1992,30 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 // Reverse of desired order: output lines in reverse (O(n))
                 const BATCH: usize = 512;
                 let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+                let unique = config.unique;
+                let mut prev_pfx = u64::MAX;
+                let mut prev_s = u32::MAX;
+                let mut prev_l = 0u32;
                 for i in (0..entries.len()).rev() {
-                    let (_, s, l) = entries[i];
+                    let (pfx, s, l) = entries[i];
+                    if unique {
+                        let emit = prev_s == u32::MAX
+                            || pfx != prev_pfx
+                            || l != prev_l
+                            || unsafe {
+                                std::slice::from_raw_parts(dp.add(s as usize), l as usize)
+                                    != std::slice::from_raw_parts(
+                                        dp.add(prev_s as usize),
+                                        prev_l as usize,
+                                    )
+                            };
+                        if !emit {
+                            continue;
+                        }
+                        prev_pfx = pfx;
+                        prev_s = s;
+                        prev_l = l;
+                    }
                     let line =
                         unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
                     slices.push(io::IoSlice::new(line));
