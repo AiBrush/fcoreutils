@@ -102,9 +102,10 @@ impl Write for SortOutput {
     }
 }
 
-/// 8MB buffer for output — reduces flush frequency for large files.
+/// 16MB buffer for output — reduces flush frequency for large files.
 /// Larger buffer reduces write() syscall count which is significant for 100MB+ inputs.
-const OUTPUT_BUF_SIZE: usize = 8 * 1024 * 1024;
+/// 16MB stays within L3 cache on modern CPUs while significantly reducing syscalls.
+const OUTPUT_BUF_SIZE: usize = 16 * 1024 * 1024;
 
 /// Configuration for a sort operation.
 #[derive(Debug, Clone)]
@@ -344,7 +345,7 @@ fn read_all_input(
     // Find line boundaries using SIMD-accelerated memchr
     // Use parallel scanning for large files (>4MB) to leverage multiple cores
     let data = &*buffer;
-    let offsets = if data.len() > 4 * 1024 * 1024 {
+    let offsets = if data.len() > 2 * 1024 * 1024 {
         find_lines_parallel(data, delimiter)
     } else {
         let mut offsets = Vec::with_capacity(data.len() / 40 + 1);
@@ -646,10 +647,14 @@ fn radix_sort_entries(
     drop(entries);
     drop(cnts);
 
-    // Sort each non-trivial bucket independently with rayon
+    // Sort each non-trivial bucket independently with rayon.
+    // Optimized comparison: u64 prefix comparison resolves most entries,
+    // only falls through to byte-by-byte for prefix collisions.
+    // The skip=min(8,la,lb) optimization avoids re-comparing the prefix bytes.
     {
         let sorted_ptr = sorted.as_mut_ptr();
         let sorted_len = sorted.len();
+        let data_addr = data.as_ptr() as usize;
         let cmp_fn = |a: &(u64, u32, u32), b: &(u64, u32, u32)| -> Ordering {
             match a.0.cmp(&b.0) {
                 Ordering::Equal => {
@@ -658,7 +663,14 @@ fn radix_sort_entries(
                     let sb = b.1 as usize;
                     let lb = b.2 as usize;
                     let skip = 8.min(la).min(lb);
-                    data[sa + skip..sa + la].cmp(&data[sb + skip..sb + lb])
+                    // Use raw pointer arithmetic to avoid bounds checking
+                    // in this hot comparison path. data_addr is a usize (Send+Sync).
+                    unsafe {
+                        let dp = data_addr as *const u8;
+                        let slice_a = std::slice::from_raw_parts(dp.add(sa + skip), la - skip);
+                        let slice_b = std::slice::from_raw_parts(dp.add(sb + skip), lb - skip);
+                        slice_a.cmp(slice_b)
+                    }
                 }
                 ord => ord,
             }
@@ -852,7 +864,10 @@ fn write_sorted_output(
                 prev = Some(idx);
             }
         }
-    } else if sorted_indices.len() > 50_000 {
+    } else if sorted_indices.len() > 10_000 {
+        // For medium-to-large inputs, use single contiguous buffer with parallel fill.
+        // Threshold lowered from 50K to 10K because single-buffer + one write syscall
+        // beats N small write_vectored calls even at moderate sizes.
         write_sorted_single_buf_idx(data, offsets, sorted_indices, terminator, writer)?;
     } else {
         // Use write_vectored to batch line+terminator pairs into fewer syscalls.
@@ -921,7 +936,7 @@ fn write_sorted_single_buf_idx(
     let tl = terminator.len();
     let n = sorted_indices.len();
 
-    if n > 50_000 {
+    if n > 10_000 {
         let num_threads = rayon::current_num_threads().max(1);
         let chunk_size = (n + num_threads - 1) / num_threads;
 
@@ -1034,7 +1049,7 @@ fn write_sorted_entries(
                 prev = Some(idx);
             }
         }
-    } else if entries.len() > 50_000 {
+    } else if entries.len() > 10_000 {
         write_sorted_single_buf_entries(data, offsets, entries, terminator, writer)?;
     } else {
         // Use write_vectored to batch line+terminator pairs.
@@ -1068,7 +1083,7 @@ fn write_sorted_single_buf_entries(
     let tl = terminator.len();
     let n = entries.len();
 
-    if n > 50_000 {
+    if n > 10_000 {
         let num_threads = rayon::current_num_threads().max(1);
         let chunk_size = (n + num_threads - 1) / num_threads;
 
@@ -1218,9 +1233,9 @@ fn radix_sort_numeric_entries(
 }
 
 /// Threshold for switching to parallel sort. Below this, rayon thread pool
-/// overhead exceeds the sorting benefit. Empirically tuned: 50K lines is the
-/// break-even point for piped 10MB input (~200 bytes/line).
-const PARALLEL_SORT_THRESHOLD: usize = 50_000;
+/// overhead exceeds the sorting benefit. Set to 10K to enable parallel sort
+/// earlier, which helps for piped 10MB input (~50K-200K lines).
+const PARALLEL_SORT_THRESHOLD: usize = 10_000;
 
 /// Helper: perform a parallel or sequential sort on indices.
 fn do_sort(
@@ -1407,10 +1422,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         }
     }
 
-    // Switch to random access for sort phase (comparisons jump to arbitrary lines)
+    // Switch to random access for sort phase (comparisons jump to arbitrary lines).
+    // Only advise for truly large files (>10MB) where the prefetch pattern matters.
     #[cfg(target_os = "linux")]
-    if let FileData::Mmap(ref mmap) = buffer {
-        let _ = mmap.advise(memmap2::Advice::Random);
+    if data.len() > 10 * 1024 * 1024 {
+        if let FileData::Mmap(ref mmap) = buffer {
+            let _ = mmap.advise(memmap2::Advice::Random);
+        }
     }
 
     // Detect sort mode and use specialized fast path
