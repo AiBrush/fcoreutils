@@ -1516,9 +1516,8 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 .collect()
         };
 
-        // Two-level radix distribution + per-bucket sort via helper function
-        let (sorted, bk_starts) = radix_sort_entries(entries, data, config.stable, reverse);
-        let nbk = bk_starts.len() - 1;
+        // Full LSD radix sort on 8-byte prefix + tiebreak for collisions
+        let (sorted, _bk_starts) = radix_sort_entries(entries, data, config.stable, reverse);
 
         // Switch to sequential for output phase
         #[cfg(target_os = "linux")]
@@ -1530,65 +1529,48 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         // (within each bucket, entries are already in reverse order from the sort).
         // For forward, iterate linearly through the sorted array.
         if config.unique {
+            // After full LSD radix sort, entries are in ascending order.
+            // For reverse, iterate backwards; for forward, iterate forwards.
+            // Inline dedup loop avoids Box<dyn Iterator> vtable overhead.
             let dp = data.as_ptr();
             let mut prev_start = u32::MAX;
             let mut prev_len = 0u32;
-            if reverse {
-                for bi in (0..nbk).rev() {
-                    for &(_, s, l) in &sorted[bk_starts[bi]..bk_starts[bi + 1]] {
-                        let su = s as usize;
-                        let lu = l as usize;
-                        let line = unsafe { std::slice::from_raw_parts(dp.add(su), lu) };
-                        let emit = prev_start == u32::MAX || {
-                            let ps = prev_start as usize;
-                            let pl = prev_len as usize;
-                            let prev_line = unsafe { std::slice::from_raw_parts(dp.add(ps), pl) };
-                            compare_lines_for_dedup(prev_line, line, config) != Ordering::Equal
-                        };
-                        if emit {
-                            writer.write_all(line)?;
-                            writer.write_all(terminator)?;
-                            prev_start = s;
-                            prev_len = l;
-                        }
-                    }
+            let n_sorted = sorted.len();
+            let mut idx: usize = 0;
+            while idx < n_sorted {
+                let actual_idx = if reverse { n_sorted - 1 - idx } else { idx };
+                let (_, s, l) = sorted[actual_idx];
+                let su = s as usize;
+                let lu = l as usize;
+                let line = unsafe { std::slice::from_raw_parts(dp.add(su), lu) };
+                let emit = prev_start == u32::MAX || {
+                    let ps = prev_start as usize;
+                    let pl = prev_len as usize;
+                    let prev_line = unsafe { std::slice::from_raw_parts(dp.add(ps), pl) };
+                    compare_lines_for_dedup(prev_line, line, config) != Ordering::Equal
+                };
+                if emit {
+                    writer.write_all(line)?;
+                    writer.write_all(terminator)?;
+                    prev_start = s;
+                    prev_len = l;
                 }
-            } else {
-                for &(_, s, l) in &sorted {
-                    let su = s as usize;
-                    let lu = l as usize;
-                    let line = unsafe { std::slice::from_raw_parts(dp.add(su), lu) };
-                    let emit = prev_start == u32::MAX || {
-                        let ps = prev_start as usize;
-                        let pl = prev_len as usize;
-                        let prev_line = unsafe { std::slice::from_raw_parts(dp.add(ps), pl) };
-                        compare_lines_for_dedup(prev_line, line, config) != Ordering::Equal
-                    };
-                    if emit {
-                        writer.write_all(line)?;
-                        writer.write_all(terminator)?;
-                        prev_start = s;
-                        prev_len = l;
-                    }
-                }
+                idx += 1;
             }
         } else if reverse {
-            // Reverse: write buckets from highest to lowest using write_vectored.
-            // Zero-copy: IoSlice entries point directly into mmap data.
-            // Avoids per-bucket Vec<u8> buffer allocations entirely.
+            // Reverse: iterate the fully-sorted array backwards.
+            // After LSD radix sort, entries are in ascending order,
+            // so reverse iteration produces descending output.
             let dp = data.as_ptr();
             const BATCH: usize = 512;
             let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-            for bi in (0..nbk).rev() {
-                for &(_, s, l) in &sorted[bk_starts[bi]..bk_starts[bi + 1]] {
-                    let line =
-                        unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
-                    slices.push(io::IoSlice::new(line));
-                    slices.push(io::IoSlice::new(terminator));
-                    if slices.len() >= BATCH * 2 {
-                        write_all_vectored(&mut writer, &slices)?;
-                        slices.clear();
-                    }
+            for &(_, s, l) in sorted.iter().rev() {
+                let line = unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
+                slices.push(io::IoSlice::new(line));
+                slices.push(io::IoSlice::new(terminator));
+                if slices.len() >= BATCH * 2 {
+                    write_all_vectored(&mut writer, &slices)?;
+                    slices.clear();
                 }
             }
             if !slices.is_empty() {

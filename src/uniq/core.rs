@@ -6,6 +6,34 @@ fn write_all_raw(writer: &mut impl Write, buf: &[u8]) -> io::Result<()> {
     writer.write_all(buf)
 }
 
+/// Write all IoSlices to the writer, handling partial writes correctly.
+fn write_all_vectored(writer: &mut impl Write, slices: &[io::IoSlice<'_>]) -> io::Result<()> {
+    let n = writer.write_vectored(slices)?;
+    let expected: usize = slices.iter().map(|s| s.len()).sum();
+    if n >= expected {
+        return Ok(());
+    }
+    if n == 0 && expected > 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "write_vectored returned 0",
+        ));
+    }
+    // Slow path: partial write — fall back to write_all per remaining slice.
+    let mut consumed = n;
+    for slice in slices {
+        if consumed == 0 {
+            writer.write_all(slice)?;
+        } else if consumed >= slice.len() {
+            consumed -= slice.len();
+        } else {
+            writer.write_all(&slice[consumed..])?;
+            consumed = 0;
+        }
+    }
+    Ok(())
+}
+
 /// How to delimit groups when using --all-repeated
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllRepeatedMethod {
@@ -912,7 +940,10 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
         })
         .collect();
 
-    // Write results, adjusting cross-chunk boundaries
+    // Write results, adjusting cross-chunk boundaries.
+    // Batch output runs via write_vectored to reduce syscall count.
+    const BATCH: usize = 256;
+    let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH);
     for (i, result) in results.iter().enumerate() {
         let skip_first = if i > 0 {
             let prev = &results[i - 1];
@@ -933,9 +964,16 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
         for &(rs, re) in &result.runs {
             let actual_start = rs.max(skip_end);
             if actual_start < re {
-                writer.write_all(&data[actual_start..re])?;
+                slices.push(io::IoSlice::new(&data[actual_start..re]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(writer, &slices)?;
+                    slices.clear();
+                }
             }
         }
+    }
+    if !slices.is_empty() {
+        write_all_vectored(writer, &slices)?;
     }
 
     // Ensure trailing terminator
