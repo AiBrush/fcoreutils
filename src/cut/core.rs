@@ -1897,15 +1897,12 @@ fn process_bytes_from_start(
         let results: Vec<Vec<u8>> = chunks
             .par_iter()
             .map(|chunk| {
-                // Pre-estimate output size: each line contributes max_bytes + 1 (delimiter)
-                // Count newlines to estimate output size (more accurate than chunk.len())
-                let n_lines = memchr_iter(line_delim, chunk).count()
-                    + if chunk.last() != Some(&line_delim) {
-                        1
-                    } else {
-                        0
-                    };
-                let est_out = n_lines * (max_bytes + 1);
+                // Estimate output size without scanning: assume average line
+                // is at least (max_bytes+1) bytes (otherwise no truncation).
+                // For cut -b1-5 on 50-char lines: output ~ chunk.len() * 6/51 ~ chunk/8.
+                // Using chunk.len()/4 as initial capacity handles most cases
+                // without reallocation, while avoiding the extra memchr scan.
+                let est_out = (chunk.len() / 4).max(max_bytes + 2);
                 let mut buf = Vec::with_capacity(est_out.min(chunk.len()));
                 bytes_from_start_chunk(chunk, max_bytes, line_delim, &mut buf);
                 buf
@@ -1924,14 +1921,9 @@ fn process_bytes_from_start(
         // Copying max_bytes+1 bytes into a contiguous buffer is cheaper than
         // managing millions of IoSlice entries through the kernel.
         if max_bytes <= 64 {
-            // Estimate output size
-            let n_lines = memchr_iter(line_delim, data).count()
-                + if data.last() != Some(&line_delim) {
-                    1
-                } else {
-                    0
-                };
-            let est_out = n_lines * (max_bytes + 1);
+            // Estimate output size without scanning: output <= data.len(),
+            // typically ~data.len()/4 for short max_bytes on longer lines.
+            let est_out = (data.len() / 4).max(max_bytes + 2);
             let mut buf = Vec::with_capacity(est_out.min(data.len()));
             bytes_from_start_chunk(data, max_bytes, line_delim, &mut buf);
             if !buf.is_empty() {
