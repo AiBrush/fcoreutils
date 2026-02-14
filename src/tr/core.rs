@@ -608,7 +608,12 @@ fn translate_to(src: &[u8], dst: &mut [u8], table: &[u8; 256]) {
     {
         let level = get_simd_level();
         if level >= 3 {
-            unsafe { translate_to_avx2_table(src, dst, table) };
+            // Use nontemporal stores when dst is 32-byte aligned (large Vec allocations)
+            if dst.as_ptr() as usize & 31 == 0 {
+                unsafe { translate_to_avx2_table_nt(src, dst, table) };
+            } else {
+                unsafe { translate_to_avx2_table(src, dst, table) };
+            }
             return;
         }
         if level >= 2 {
@@ -866,6 +871,165 @@ unsafe fn translate_to_avx2_table(src: &[u8], dst: &mut [u8], table: &[u8; 256])
             *dp.add(i) = *table.get_unchecked(*sp.add(i) as usize);
             i += 1;
         }
+    }
+}
+
+/// Nontemporal variant of translate_to_avx2_table: uses _mm256_stream_si256 for stores.
+/// Avoids RFO cache traffic for the destination buffer in streaming translate operations.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn translate_to_avx2_table_nt(src: &[u8], dst: &mut [u8], table: &[u8; 256]) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let len = src.len();
+        let sp = src.as_ptr();
+        let dp = dst.as_mut_ptr();
+
+        // Pre-build 16 lookup vectors
+        let mut lut = [_mm256_setzero_si256(); 16];
+        for h in 0u8..16 {
+            let base = (h as usize) * 16;
+            let row: [u8; 16] = std::array::from_fn(|i| *table.get_unchecked(base + i));
+            let row128 = _mm_loadu_si128(row.as_ptr() as *const _);
+            lut[h as usize] = _mm256_broadcastsi128_si256(row128);
+        }
+
+        let lo_mask = _mm256_set1_epi8(0x0F);
+        let mut i = 0;
+
+        // 2x unrolled with nontemporal stores
+        while i + 64 <= len {
+            let input0 = _mm256_loadu_si256(sp.add(i) as *const _);
+            let input1 = _mm256_loadu_si256(sp.add(i + 32) as *const _);
+
+            let lo0 = _mm256_and_si256(input0, lo_mask);
+            let hi0 = _mm256_and_si256(_mm256_srli_epi16(input0, 4), lo_mask);
+            let lo1 = _mm256_and_si256(input1, lo_mask);
+            let hi1 = _mm256_and_si256(_mm256_srli_epi16(input1, 4), lo_mask);
+
+            let mut r0 = _mm256_setzero_si256();
+            let mut r1 = _mm256_setzero_si256();
+
+            macro_rules! do_nibble2 {
+                ($h:expr) => {
+                    let h_val = _mm256_set1_epi8($h as i8);
+                    let m0 = _mm256_cmpeq_epi8(hi0, h_val);
+                    let l0 = _mm256_shuffle_epi8(lut[$h], lo0);
+                    r0 = _mm256_or_si256(r0, _mm256_and_si256(m0, l0));
+                    let m1 = _mm256_cmpeq_epi8(hi1, h_val);
+                    let l1 = _mm256_shuffle_epi8(lut[$h], lo1);
+                    r1 = _mm256_or_si256(r1, _mm256_and_si256(m1, l1));
+                };
+            }
+            do_nibble2!(0);
+            do_nibble2!(1);
+            do_nibble2!(2);
+            do_nibble2!(3);
+            do_nibble2!(4);
+            do_nibble2!(5);
+            do_nibble2!(6);
+            do_nibble2!(7);
+            do_nibble2!(8);
+            do_nibble2!(9);
+            do_nibble2!(10);
+            do_nibble2!(11);
+            do_nibble2!(12);
+            do_nibble2!(13);
+            do_nibble2!(14);
+            do_nibble2!(15);
+
+            _mm256_stream_si256(dp.add(i) as *mut _, r0);
+            _mm256_stream_si256(dp.add(i + 32) as *mut _, r1);
+            i += 64;
+        }
+
+        // Remaining 32-byte chunk
+        if i + 32 <= len {
+            let input = _mm256_loadu_si256(sp.add(i) as *const _);
+            let lo_nibble = _mm256_and_si256(input, lo_mask);
+            let hi_nibble = _mm256_and_si256(_mm256_srli_epi16(input, 4), lo_mask);
+
+            let mut result = _mm256_setzero_si256();
+            macro_rules! do_nibble {
+                ($h:expr) => {
+                    let h_val = _mm256_set1_epi8($h as i8);
+                    let mask = _mm256_cmpeq_epi8(hi_nibble, h_val);
+                    let looked_up = _mm256_shuffle_epi8(lut[$h], lo_nibble);
+                    result = _mm256_or_si256(result, _mm256_and_si256(mask, looked_up));
+                };
+            }
+            do_nibble!(0);
+            do_nibble!(1);
+            do_nibble!(2);
+            do_nibble!(3);
+            do_nibble!(4);
+            do_nibble!(5);
+            do_nibble!(6);
+            do_nibble!(7);
+            do_nibble!(8);
+            do_nibble!(9);
+            do_nibble!(10);
+            do_nibble!(11);
+            do_nibble!(12);
+            do_nibble!(13);
+            do_nibble!(14);
+            do_nibble!(15);
+
+            _mm256_stream_si256(dp.add(i) as *mut _, result);
+            i += 32;
+        }
+
+        // SSSE3 tail for remaining 16-byte chunk (regular store)
+        if i + 16 <= len {
+            let lo_mask128 = _mm_set1_epi8(0x0F);
+            let mut lut128 = [_mm_setzero_si128(); 16];
+            for h in 0u8..16 {
+                lut128[h as usize] = _mm256_castsi256_si128(lut[h as usize]);
+            }
+
+            let input = _mm_loadu_si128(sp.add(i) as *const _);
+            let lo_nib = _mm_and_si128(input, lo_mask128);
+            let hi_nib = _mm_and_si128(_mm_srli_epi16(input, 4), lo_mask128);
+
+            let mut res = _mm_setzero_si128();
+            macro_rules! do_nibble128 {
+                ($h:expr) => {
+                    let h_val = _mm_set1_epi8($h as i8);
+                    let mask = _mm_cmpeq_epi8(hi_nib, h_val);
+                    let looked_up = _mm_shuffle_epi8(lut128[$h], lo_nib);
+                    res = _mm_or_si128(res, _mm_and_si128(mask, looked_up));
+                };
+            }
+            do_nibble128!(0);
+            do_nibble128!(1);
+            do_nibble128!(2);
+            do_nibble128!(3);
+            do_nibble128!(4);
+            do_nibble128!(5);
+            do_nibble128!(6);
+            do_nibble128!(7);
+            do_nibble128!(8);
+            do_nibble128!(9);
+            do_nibble128!(10);
+            do_nibble128!(11);
+            do_nibble128!(12);
+            do_nibble128!(13);
+            do_nibble128!(14);
+            do_nibble128!(15);
+
+            _mm_storeu_si128(dp.add(i) as *mut _, res);
+            i += 16;
+        }
+
+        // Scalar tail
+        while i < len {
+            *dp.add(i) = *table.get_unchecked(*sp.add(i) as usize);
+            i += 1;
+        }
+
+        // Fence: ensure nontemporal stores are visible before write() syscall
+        _mm_sfence();
     }
 }
 
@@ -1357,10 +1521,18 @@ unsafe fn translate_range_to_constant_sse2(
 /// SIMD-accelerated range translation for mmap'd data.
 /// For tables where only a contiguous range [lo..=hi] is translated by a constant offset,
 /// uses AVX2 (32 bytes/iter) or SSE2 (16 bytes/iter) vectorized arithmetic.
+/// When dst is 32-byte aligned (true for large Vec allocations from mmap), uses
+/// nontemporal stores to bypass cache, avoiding read-for-ownership overhead and
+/// reducing memory traffic by ~33% for streaming writes.
 #[cfg(target_arch = "x86_64")]
 fn translate_range_simd(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, offset: i8) {
     if get_simd_level() >= 3 {
-        unsafe { translate_range_avx2(src, dst, lo, hi, offset) };
+        // Use nontemporal stores when dst is 32-byte aligned (typical for large allocs)
+        if dst.as_ptr() as usize & 31 == 0 {
+            unsafe { translate_range_avx2_nt(src, dst, lo, hi, offset) };
+        } else {
+            unsafe { translate_range_avx2(src, dst, lo, hi, offset) };
+        }
     } else {
         unsafe { translate_range_sse2(src, dst, lo, hi, offset) };
     }
@@ -1446,6 +1618,92 @@ unsafe fn translate_range_avx2(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, offse
             };
             i += 1;
         }
+    }
+}
+
+/// Nontemporal variant of translate_range_avx2: uses _mm256_stream_si256 for stores.
+/// This bypasses the cache for writes, avoiding read-for-ownership (RFO) traffic on
+/// the destination buffer. For streaming translate (src → dst, dst not read again),
+/// this reduces memory traffic by ~33% (10MB input: 20MB vs 30MB total traffic).
+/// Requires dst to be 32-byte aligned (guaranteed for large Vec/mmap allocations).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn translate_range_avx2_nt(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, offset: i8) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let range = hi - lo;
+        let bias_v = _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let offset_v = _mm256_set1_epi8(offset);
+        let zero = _mm256_setzero_si256();
+
+        let len = src.len();
+        let sp = src.as_ptr();
+        let dp = dst.as_mut_ptr();
+        let mut i = 0;
+
+        // 2x unrolled with nontemporal stores
+        while i + 64 <= len {
+            let in0 = _mm256_loadu_si256(sp.add(i) as *const _);
+            let in1 = _mm256_loadu_si256(sp.add(i + 32) as *const _);
+            let bi0 = _mm256_add_epi8(in0, bias_v);
+            let bi1 = _mm256_add_epi8(in1, bias_v);
+            let gt0 = _mm256_cmpgt_epi8(bi0, threshold_v);
+            let gt1 = _mm256_cmpgt_epi8(bi1, threshold_v);
+            let m0 = _mm256_cmpeq_epi8(gt0, zero);
+            let m1 = _mm256_cmpeq_epi8(gt1, zero);
+            let om0 = _mm256_and_si256(m0, offset_v);
+            let om1 = _mm256_and_si256(m1, offset_v);
+            let r0 = _mm256_add_epi8(in0, om0);
+            let r1 = _mm256_add_epi8(in1, om1);
+            _mm256_stream_si256(dp.add(i) as *mut _, r0);
+            _mm256_stream_si256(dp.add(i + 32) as *mut _, r1);
+            i += 64;
+        }
+
+        // Remaining 32-byte chunk (still nontemporal if aligned)
+        if i + 32 <= len {
+            let input = _mm256_loadu_si256(sp.add(i) as *const _);
+            let biased = _mm256_add_epi8(input, bias_v);
+            let gt = _mm256_cmpgt_epi8(biased, threshold_v);
+            let mask = _mm256_cmpeq_epi8(gt, zero);
+            let offset_masked = _mm256_and_si256(mask, offset_v);
+            let result = _mm256_add_epi8(input, offset_masked);
+            _mm256_stream_si256(dp.add(i) as *mut _, result);
+            i += 32;
+        }
+
+        // SSE2 tail for 16-byte remainder (regular store — only 16 bytes)
+        if i + 16 <= len {
+            let bias_v128 = _mm_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+            let threshold_v128 = _mm_set1_epi8(0x80u8.wrapping_add(range) as i8);
+            let offset_v128 = _mm_set1_epi8(offset);
+            let zero128 = _mm_setzero_si128();
+
+            let input = _mm_loadu_si128(sp.add(i) as *const _);
+            let biased = _mm_add_epi8(input, bias_v128);
+            let gt = _mm_cmpgt_epi8(biased, threshold_v128);
+            let mask = _mm_cmpeq_epi8(gt, zero128);
+            let offset_masked = _mm_and_si128(mask, offset_v128);
+            let result = _mm_add_epi8(input, offset_masked);
+            _mm_storeu_si128(dp.add(i) as *mut _, result);
+            i += 16;
+        }
+
+        // Scalar tail
+        while i < len {
+            let b = *sp.add(i);
+            *dp.add(i) = if b >= lo && b <= hi {
+                b.wrapping_add(offset as u8)
+            } else {
+                b
+            };
+            i += 1;
+        }
+
+        // Fence: ensure nontemporal stores are visible before write() syscall
+        _mm_sfence();
     }
 }
 
@@ -3256,26 +3514,20 @@ fn translate_to_separate_buf(
         return writer.write_all(&out_buf);
     }
 
-    // Chunked translate: 256KB buffer fits in L2 cache on both x86 and ARM.
-    // For 10MB data, this does 40 chunks. Each chunk's source + dest (512KB total)
-    // stays in L2, eliminating cache misses that hurt ARM64 scalar performance.
-    // The extra syscalls (~40 write() calls) add only ~40us overhead total.
-    const CHUNK: usize = 256 * 1024;
-    let buf_size = data.len().min(CHUNK);
-    let mut out_buf = alloc_uninit_vec(buf_size);
-
-    for chunk in data.chunks(CHUNK) {
-        let clen = chunk.len();
-        if let Some((lo, hi, offset)) = range_info {
-            translate_range_simd(chunk, &mut out_buf[..clen], lo, hi, offset);
-        } else if let Some((lo, hi, replacement)) = const_info {
-            translate_range_to_constant_simd(chunk, &mut out_buf[..clen], lo, hi, replacement);
-        } else {
-            translate_to(chunk, &mut out_buf[..clen], table);
-        }
-        writer.write_all(&out_buf[..clen])?;
+    // Single-allocation translate: full-size output buffer, single translate, single write.
+    // For 10MB data, this does 1 write() instead of 40 chunked writes, eliminating
+    // 39 write() syscalls. SIMD translate streams through src and dst sequentially,
+    // so the L2 cache argument for 256KB chunks doesn't apply (src data doesn't fit
+    // in L2 anyway). The reduced syscall overhead more than compensates.
+    let mut out_buf = alloc_uninit_vec(data.len());
+    if let Some((lo, hi, offset)) = range_info {
+        translate_range_simd(data, &mut out_buf, lo, hi, offset);
+    } else if let Some((lo, hi, replacement)) = const_info {
+        translate_range_to_constant_simd(data, &mut out_buf, lo, hi, replacement);
+    } else {
+        translate_to(data, &mut out_buf, table);
     }
-    Ok(())
+    writer.write_all(&out_buf)
 }
 
 /// Translate from a read-only mmap (or any byte slice) to a separate output buffer.
