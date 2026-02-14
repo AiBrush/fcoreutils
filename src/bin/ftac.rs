@@ -124,9 +124,9 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
                 unsafe {
                     let ptr = mmap.as_ptr() as *mut libc::c_void;
                     let len = mmap.len();
-                    // Sequential readahead: optimizes the forward memchr_iter scan
-                    libc::madvise(ptr, len, libc::MADV_SEQUENTIAL);
-                    // Pre-fault pages: avoids page fault stalls during the scan
+                    // WILLNEED pre-faults all pages into the page cache,
+                    // eliminating page fault stalls during both the forward
+                    // memchr scan and the reverse record copy.
                     libc::madvise(ptr, len, libc::MADV_WILLNEED);
                     if len >= 2 * 1024 * 1024 {
                         libc::madvise(ptr, len, libc::MADV_HUGEPAGE);

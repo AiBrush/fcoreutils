@@ -83,8 +83,13 @@ pub fn tac_bytes_owned(
 /// buffer and writes with large write_all calls (cheaper than millions of
 /// writev IoSlice entries). For files with few records, uses writev directly.
 fn tac_bytes_zerocopy_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    // Collect separator positions with forward SIMD memchr (single fast pass).
-    let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
+    // Two-pass approach: count first for exact-capacity allocation, then collect.
+    // memchr SIMD scan runs at ~50 GB/s, so two passes cost ~2x2ms for 100MB.
+    // This avoids Vec growth reallocations (log2(2M) = 21 reallocations for 2M records)
+    // which each involve copying the entire positions array.
+    let count = memchr::memchr_iter(sep, data).count();
+    let mut positions: Vec<usize> = Vec::with_capacity(count);
+    positions.extend(memchr::memchr_iter(sep, data));
 
     if positions.is_empty() {
         // No separators found — output data as-is
@@ -163,7 +168,10 @@ fn tac_bytes_buffered_after(
 
 /// Before-separator mode: zero-copy write from mmap in reverse record order.
 fn tac_bytes_zerocopy_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
+    // Two-pass: count for exact-capacity allocation, then collect.
+    let count = memchr::memchr_iter(sep, data).count();
+    let mut positions: Vec<usize> = Vec::with_capacity(count);
+    positions.extend(memchr::memchr_iter(sep, data));
 
     if positions.is_empty() {
         return out.write_all(data);
