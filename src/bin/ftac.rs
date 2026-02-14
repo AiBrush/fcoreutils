@@ -117,8 +117,14 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             }
         };
 
-        // madvise is already set in try_mmap_stdin / read_file.
-        // No duplicate madvise calls needed here.
+        // Re-advise mmap for tac's reverse access pattern.
+        // read_file sets MADV_SEQUENTIAL (forward readahead), but tac
+        // accesses pages backward. MADV_RANDOM disables forward readahead.
+        #[cfg(target_os = "linux")]
+        if let FileData::Mmap(ref mmap) = data {
+            let _ = mmap.advise(memmap2::Advice::Random);
+        }
+
         let result = if cli.regex {
             let bytes: &[u8] = &data;
             let sep = cli.separator.as_deref().unwrap_or("\n");
