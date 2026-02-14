@@ -2212,8 +2212,8 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     // comparison hot path. The 8-byte prefix is already resolved by
                     // the radix pass, so we only compare bytes after the prefix.
                     {
-                        let sorted_ptr = sorted.as_mut_ptr();
-                        let sorted_len = sorted.len();
+                        let sorted_ptr = sorted.as_mut_ptr() as usize;
+                        let _sorted_len = sorted.len();
                         let data_addr = data.as_ptr() as usize;
                         let bucket_cmp = |a: &(u64, usize), b: &(u64, usize)| -> Ordering {
                             let ord = match a.0.cmp(&b.0) {
@@ -2260,23 +2260,106 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                                 Ordering::Equal
                             }
                         };
-                        let mut slices: Vec<&mut [(u64, usize)]> = Vec::new();
+                        // Collect non-trivial buckets and process them.
+                        // For large buckets (>64): second-level radix on bits 32-47.
+                        let mut slices: Vec<(usize, usize)> = Vec::new();
                         for i in 0..nbk {
                             let lo = bk_starts[i];
                             let hi = bk_starts[i + 1];
                             if hi - lo > 1 {
-                                debug_assert!(hi <= sorted_len);
-                                slices.push(unsafe {
-                                    std::slice::from_raw_parts_mut(sorted_ptr.add(lo), hi - lo)
-                                });
+                                slices.push((lo, hi));
                             }
                         }
-                        if stable {
-                            slices.into_par_iter().for_each(|sl| sl.sort_by(bucket_cmp));
-                        } else {
+                        let chunk_fn = |(lo, hi): (usize, usize)| {
+                            let bucket = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    (sorted_ptr as *mut (u64, usize)).add(lo),
+                                    hi - lo,
+                                )
+                            };
+                            let blen = bucket.len();
+
+                            // Second-level radix for large buckets
+                            if blen > 64 {
+                                let shift = 32u32;
+                                let mask: u64 = 0xFFFF;
+                                let first_bits = (bucket[0].0 >> shift) & mask;
+                                let mut has_variation = false;
+                                for e in &bucket[1..] {
+                                    if ((e.0 >> shift) & mask) != first_bits {
+                                        has_variation = true;
+                                        break;
+                                    }
+                                }
+                                if has_variation {
+                                    let sub_nbk: usize = 65536;
+                                    let mut sub_cnts = vec![0u32; sub_nbk];
+                                    for &(pfx, _) in bucket.iter() {
+                                        sub_cnts[((pfx >> shift) & mask) as usize] += 1;
+                                    }
+                                    let mut sub_starts = vec![0usize; sub_nbk + 1];
+                                    {
+                                        let mut s = 0usize;
+                                        for i in 0..sub_nbk {
+                                            sub_starts[i] = s;
+                                            s += sub_cnts[i] as usize;
+                                        }
+                                        sub_starts[sub_nbk] = s;
+                                    }
+                                    let mut temp: Vec<(u64, usize)> = Vec::with_capacity(blen);
+                                    #[allow(clippy::uninit_vec)]
+                                    unsafe { temp.set_len(blen); }
+                                    {
+                                        let mut wpos = sub_starts.clone();
+                                        let temp_ptr = temp.as_mut_ptr();
+                                        for &ent in bucket.iter() {
+                                            let b = ((ent.0 >> shift) & mask) as usize;
+                                            unsafe { *temp_ptr.add(wpos[b]) = ent; }
+                                            wpos[b] += 1;
+                                        }
+                                    }
+                                    bucket.copy_from_slice(&temp);
+                                    drop(temp);
+                                    for sb in 0..sub_nbk {
+                                        let slo = sub_starts[sb];
+                                        let shi = sub_starts[sb + 1];
+                                        if shi - slo > 1 {
+                                            let sub = &mut bucket[slo..shi];
+                                            if stable {
+                                                sub.sort_by(bucket_cmp);
+                                            } else {
+                                                sub.sort_unstable_by(bucket_cmp);
+                                            }
+                                        }
+                                    }
+                                    return;
+                                }
+                            }
+
+                            // Comparison sort for small buckets or no variation
+                            if blen <= 16 {
+                                for k in 1..blen {
+                                    let mut pos = k;
+                                    while pos > 0 && bucket_cmp(&bucket[pos], &bucket[pos - 1]) == Ordering::Less {
+                                        bucket.swap(pos, pos - 1);
+                                        pos -= 1;
+                                    }
+                                }
+                            } else if stable {
+                                bucket.sort_by(bucket_cmp);
+                            } else {
+                                bucket.sort_unstable_by(bucket_cmp);
+                            }
+                        };
+
+                        if slices.len() > 16 {
                             slices
                                 .into_par_iter()
-                                .for_each(|sl| sl.sort_unstable_by(bucket_cmp));
+                                .for_each(|(lo, hi)| chunk_fn((lo, hi)));
+                        } else {
+                            for (lo, hi) in slices {
+                                chunk_fn((lo, hi));
+                            }
                         }
                     }
 
