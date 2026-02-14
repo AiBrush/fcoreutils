@@ -18,11 +18,11 @@ const BUF_SIZE: usize = 4 * 1024 * 1024;
 const STREAM_BUF: usize = 16 * 1024 * 1024;
 
 /// Minimum data size to engage rayon parallel processing for mmap paths.
-/// AVX2 translation runs at ~10 GB/s per core, processing 10MB in ~1ms.
-/// Rayon thread pool creation + sync costs ~100-500us, which nearly
-/// negates the parallelism benefit for data under 16MB. Single-threaded
-/// AVX2 is faster for typical benchmark workloads (10MB).
-const PARALLEL_THRESHOLD: usize = 16 * 1024 * 1024;
+/// AVX2 translation runs at ~10 GB/s per core. At 4MB, parallel
+/// processing with 2 cores provides ~1.5x speedup (2MB/core in ~0.2ms)
+/// while rayon overhead is ~100us (thread pool is pre-warmed after first use).
+/// Lowered from 16MB to benefit 4-10MB inputs common in benchmarks.
+const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Write multiple IoSlice buffers using write_vectored, batching into MAX_IOV-sized groups.
 /// Falls back to write_all per slice for partial writes.
@@ -2289,6 +2289,64 @@ fn translate_mmap_table(data: &[u8], writer: &mut impl Write, table: &[u8; 256])
         writer.write_all(&buf[..chunk.len()])?;
     }
     Ok(())
+}
+
+/// Translate bytes in-place on a mutable buffer (e.g., MAP_PRIVATE mmap).
+/// Eliminates the output buffer allocation entirely — the kernel's COW
+/// semantics mean only modified pages are physically copied.
+///
+/// For data >= PARALLEL_THRESHOLD: rayon parallel in-place translate.
+/// Otherwise: single-threaded in-place translate.
+pub fn translate_mmap_inplace(
+    set1: &[u8],
+    set2: &[u8],
+    data: &mut [u8],
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let table = build_translate_table(set1, set2);
+
+    // Check if table is identity — pure passthrough
+    let is_identity = table.iter().enumerate().all(|(i, &v)| v == i as u8);
+    if is_identity {
+        return writer.write_all(data);
+    }
+
+    // Try SIMD fast path for single-range constant-offset translations (e.g., a-z -> A-Z)
+    if let Some((lo, hi, offset)) = detect_range_offset(&table) {
+        if data.len() >= PARALLEL_THRESHOLD {
+            let n_threads = rayon::current_num_threads().max(1);
+            let chunk_size = (data.len() / n_threads).max(32 * 1024);
+            data.par_chunks_mut(chunk_size)
+                .for_each(|chunk| translate_range_simd_inplace(chunk, lo, hi, offset));
+        } else {
+            translate_range_simd_inplace(data, lo, hi, offset);
+        }
+        return writer.write_all(data);
+    }
+
+    // Try SIMD fast path for range-to-constant translations
+    if let Some((lo, hi, replacement)) = detect_range_to_constant(&table) {
+        if data.len() >= PARALLEL_THRESHOLD {
+            let n_threads = rayon::current_num_threads().max(1);
+            let chunk_size = (data.len() / n_threads).max(32 * 1024);
+            data.par_chunks_mut(chunk_size)
+                .for_each(|chunk| translate_range_to_constant_simd_inplace(chunk, lo, hi, replacement));
+        } else {
+            translate_range_to_constant_simd_inplace(data, lo, hi, replacement);
+        }
+        return writer.write_all(data);
+    }
+
+    // General case: in-place table lookup
+    if data.len() >= PARALLEL_THRESHOLD {
+        let n_threads = rayon::current_num_threads().max(1);
+        let chunk_size = (data.len() / n_threads).max(32 * 1024);
+        data.par_chunks_mut(chunk_size)
+            .for_each(|chunk| translate_inplace(chunk, &table));
+    } else {
+        translate_inplace(data, &table);
+    }
+    writer.write_all(data)
 }
 
 /// Translate + squeeze from mmap'd byte slice.

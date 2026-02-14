@@ -604,6 +604,136 @@ pub fn decode_to_writer(data: &[u8], ignore_garbage: bool, out: &mut impl Write)
     decode_stripping_whitespace(data, out)
 }
 
+/// Decode base64 from a mutable buffer (MAP_PRIVATE mmap or owned Vec).
+/// Strips whitespace in-place using SIMD memchr2 gap-copy, then decodes
+/// in-place with base64_simd::decode_inplace. Zero additional allocations.
+///
+/// For MAP_PRIVATE mmap: the kernel uses COW semantics, so only pages
+/// containing whitespace (newlines) get physically copied (~1.3% for
+/// 76-char line base64). The decode writes to the same buffer, but decoded
+/// data is always shorter than encoded (3/4 ratio), so it fits in-place.
+pub fn decode_mmap_inplace(data: &mut [u8], ignore_garbage: bool, out: &mut impl Write) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    if ignore_garbage {
+        // Strip non-base64 chars in-place
+        let ptr = data.as_mut_ptr();
+        let len = data.len();
+        let mut wp = 0;
+        for rp in 0..len {
+            let b = unsafe { *ptr.add(rp) };
+            if is_base64_char(b) {
+                unsafe { *ptr.add(wp) = b };
+                wp += 1;
+            }
+        }
+        match BASE64_ENGINE.decode_inplace(&mut data[..wp]) {
+            Ok(decoded) => return out.write_all(decoded),
+            Err(_) => return decode_error(),
+        }
+    }
+
+    // Fast path: strip whitespace in-place, then decode in-place.
+    // Uses SIMD memchr2 gap-copy for \n/\r (dominant whitespace in base64).
+
+    // Quick check: no newlines at all — maybe already clean
+    if memchr::memchr2(b'\n', b'\r', data).is_none() {
+        // Check for rare whitespace
+        if !data.iter().any(|&b| b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c) {
+            // Perfectly clean — decode in-place directly
+            match BASE64_ENGINE.decode_inplace(data) {
+                Ok(decoded) => return out.write_all(decoded),
+                Err(_) => return decode_error(),
+            }
+        }
+        // Rare whitespace only — strip in-place
+        let ptr = data.as_mut_ptr();
+        let len = data.len();
+        let mut wp = 0;
+        for rp in 0..len {
+            let b = unsafe { *ptr.add(rp) };
+            if NOT_WHITESPACE[b as usize] {
+                unsafe { *ptr.add(wp) = b };
+                wp += 1;
+            }
+        }
+        match BASE64_ENGINE.decode_inplace(&mut data[..wp]) {
+            Ok(decoded) => return out.write_all(decoded),
+            Err(_) => return decode_error(),
+        }
+    }
+
+    // SIMD gap-copy: strip \n and \r in-place using memchr2
+    let ptr = data.as_mut_ptr();
+    let len = data.len();
+    let mut wp = 0usize;
+    let mut gap_start = 0usize;
+    let mut has_rare_ws = false;
+
+    // SAFETY: memchr2_iter reads from the original data. We write to positions
+    // [0..wp] which are always <= gap_start, so we never overwrite unread data.
+    for pos in memchr::memchr2_iter(b'\n', b'\r', data) {
+        let gap_len = pos - gap_start;
+        if gap_len > 0 {
+            if !has_rare_ws {
+                // Check for rare whitespace during the gap-copy
+                has_rare_ws = unsafe {
+                    std::slice::from_raw_parts(ptr.add(gap_start), gap_len)
+                        .iter()
+                        .any(|&b| b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c)
+                };
+            }
+            if wp != gap_start {
+                unsafe { std::ptr::copy(ptr.add(gap_start), ptr.add(wp), gap_len) };
+            }
+            wp += gap_len;
+        }
+        gap_start = pos + 1;
+    }
+    // Final gap
+    let tail_len = len - gap_start;
+    if tail_len > 0 {
+        if !has_rare_ws {
+            has_rare_ws = unsafe {
+                std::slice::from_raw_parts(ptr.add(gap_start), tail_len)
+                    .iter()
+                    .any(|&b| b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c)
+            };
+        }
+        if wp != gap_start {
+            unsafe { std::ptr::copy(ptr.add(gap_start), ptr.add(wp), tail_len) };
+        }
+        wp += tail_len;
+    }
+
+    // Second pass for rare whitespace if needed
+    if has_rare_ws {
+        let mut rp = 0;
+        let mut cwp = 0;
+        while rp < wp {
+            let b = unsafe { *ptr.add(rp) };
+            if NOT_WHITESPACE[b as usize] {
+                unsafe { *ptr.add(cwp) = b };
+                cwp += 1;
+            }
+            rp += 1;
+        }
+        wp = cwp;
+    }
+
+    // Decode in-place: decoded data is always shorter than encoded (3/4 ratio)
+    if wp >= PARALLEL_DECODE_THRESHOLD {
+        // For large data, use parallel decode from the cleaned slice
+        return decode_borrowed_clean_parallel(out, &data[..wp]);
+    }
+    match BASE64_ENGINE.decode_inplace(&mut data[..wp]) {
+        Ok(decoded) => out.write_all(decoded),
+        Err(_) => decode_error(),
+    }
+}
+
 /// Decode base64 from an owned Vec (in-place whitespace strip + decode).
 pub fn decode_owned(
     data: &mut Vec<u8>,
