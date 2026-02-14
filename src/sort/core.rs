@@ -1888,6 +1888,96 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 .collect()
         };
 
+        // Already-sorted detection: O(n) scan using 8-byte prefixes.
+        // If data is already sorted, skip the entire radix sort.
+        // Also detects reverse-sorted input (for sort -r optimization).
+        if num_lines > 1
+            && !config.unique
+            && !config.zero_terminated
+            && memchr::memchr(b'\r', data).is_none()
+        {
+            let dp = data.as_ptr();
+            let mut is_sorted_fwd = true;
+            let mut is_sorted_rev = true;
+            let stable = config.stable;
+            for i in 1..entries.len() {
+                let (pa, sa, la) = entries[i - 1];
+                let (pb, sb, lb) = entries[i];
+                let ord = match pa.cmp(&pb) {
+                    Ordering::Equal => unsafe {
+                        let skip_a = 8.min(la as usize);
+                        let skip_b = 8.min(lb as usize);
+                        std::slice::from_raw_parts(
+                            dp.add(sa as usize + skip_a),
+                            la as usize - skip_a,
+                        )
+                        .cmp(std::slice::from_raw_parts(
+                            dp.add(sb as usize + skip_b),
+                            lb as usize - skip_b,
+                        ))
+                    },
+                    ord => ord,
+                };
+                match ord {
+                    Ordering::Greater => is_sorted_fwd = false,
+                    Ordering::Less => is_sorted_rev = false,
+                    Ordering::Equal => {
+                        if !stable {
+                            // For unstable sort, equal-key lines are ordered by full line
+                            let line_ord = unsafe {
+                                std::slice::from_raw_parts(dp.add(sa as usize), la as usize).cmp(
+                                    std::slice::from_raw_parts(dp.add(sb as usize), lb as usize),
+                                )
+                            };
+                            if line_ord == Ordering::Greater {
+                                is_sorted_fwd = false;
+                            }
+                            if line_ord == Ordering::Less {
+                                is_sorted_rev = false;
+                            }
+                        }
+                    }
+                }
+                if !is_sorted_fwd && !is_sorted_rev {
+                    break;
+                }
+            }
+
+            if (!reverse && is_sorted_fwd) || (reverse && is_sorted_rev) {
+                // Already in desired order: output directly (O(n) vs O(n log n))
+                if data.last() == Some(&b'\n') {
+                    writer.write_all(data)?;
+                } else if !data.is_empty() {
+                    writer.write_all(data)?;
+                    writer.write_all(b"\n")?;
+                }
+                writer.flush()?;
+                return Ok(());
+            }
+
+            if (!reverse && is_sorted_rev) || (reverse && is_sorted_fwd) {
+                // Reverse of desired order: output lines in reverse (O(n))
+                const BATCH: usize = 512;
+                let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+                for i in (0..entries.len()).rev() {
+                    let (_, s, l) = entries[i];
+                    let line =
+                        unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
+                    slices.push(io::IoSlice::new(line));
+                    slices.push(io::IoSlice::new(terminator));
+                    if slices.len() >= BATCH * 2 {
+                        write_all_vectored(&mut writer, &slices)?;
+                        slices.clear();
+                    }
+                }
+                if !slices.is_empty() {
+                    write_all_vectored(&mut writer, &slices)?;
+                }
+                writer.flush()?;
+                return Ok(());
+            }
+        }
+
         // Full LSD radix sort on 8-byte prefix + tiebreak for collisions
         let sorted = radix_sort_entries(entries, data, config.stable, reverse);
 

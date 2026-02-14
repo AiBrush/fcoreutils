@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
 #[cfg(unix)]
@@ -177,20 +177,25 @@ fn main() {
         cli.files.clone()
     };
 
-    // Write directly to raw fd stdout — tac already batches output into either:
-    // - A single write_all (buffered copy path for many records)
-    // - Batched write_vectored calls (writev path for few records)
-    // BufWriter would add an unnecessary memcpy of the entire output buffer.
+    // BufWriter(16MB) batches the many small write_all calls from tac's
+    // reverse iteration into ~7 actual write() syscalls for 100MB output.
+    // Raw writev with 1024 iovecs required ~1270 syscalls for the same data.
     #[cfg(unix)]
     let had_error = {
-        let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        run(&cli, &files, &mut *raw)
+        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, &*raw);
+        let err = run(&cli, &files, &mut writer);
+        let _ = writer.flush();
+        err
     };
     #[cfg(not(unix))]
     let had_error = {
         let stdout = io::stdout();
-        let mut lock = stdout.lock();
-        run(&cli, &files, &mut lock)
+        let lock = stdout.lock();
+        let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, lock);
+        let err = run(&cli, &files, &mut writer);
+        let _ = writer.flush();
+        err
     };
 
     if had_error {

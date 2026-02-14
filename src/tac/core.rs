@@ -1,9 +1,9 @@
 use std::io::{self, IoSlice, Write};
 
 /// Reverse records separated by a single byte.
-/// Zero-copy writev approach: scans for separators with SIMD memchr,
-/// then outputs records in reverse order directly from input buffer
-/// using batched write_vectored (writev) syscalls.
+/// Scans for separators with SIMD memchr, then outputs records in reverse
+/// order directly from the input buffer. Expects the caller to provide
+/// a buffered writer (e.g., BufWriter) for efficient syscall batching.
 pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -25,110 +25,54 @@ pub fn tac_bytes_owned(
     tac_bytes(data, separator, before, out)
 }
 
-/// Write all IoSlices using write_vectored, handling partial writes.
-/// Advances through the slice array on partial writes instead of
-/// falling back to individual write_all calls.
-#[inline]
-fn write_all_vectored(out: &mut impl Write, slices: &[IoSlice<'_>]) -> io::Result<()> {
-    if slices.is_empty() {
-        return Ok(());
-    }
-
-    let written = out.write_vectored(slices)?;
-    if written == 0 && slices.iter().any(|s| !s.is_empty()) {
-        return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
-    }
-
-    // Fast path: all data written in one call (common case)
-    let total: usize = slices.iter().map(|s| s.len()).sum();
-    if written >= total {
-        return Ok(());
-    }
-
-    // Partial write: skip past fully-written slices, then write_all the rest
-    let mut skip = written;
-    for slice in slices {
-        let len = slice.len();
-        if skip >= len {
-            skip -= len;
-            continue;
-        }
-        out.write_all(&slice[skip..])?;
-        skip = 0;
-    }
-    Ok(())
-}
-
-/// After-separator mode: zero-copy writev directly from input buffer.
-/// Builds IoSlice entries directly (no intermediate records Vec),
-/// uses memrchr_iter for SIMD backward scan, batches at IOV_MAX.
+/// After-separator mode: write_all each record in reverse.
+/// Relies on caller's BufWriter for syscall batching.
+/// Eliminates IoSlice construction and writev overhead.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if memchr::memchr(sep, data).is_none() {
         return out.write_all(data);
     }
 
-    // IOV_MAX is 1024 on Linux. Build IoSlice directly to avoid
-    // intermediate Vec<(usize, usize)> + conversion overhead.
-    const IOV_MAX: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_MAX);
     let mut end = data.len();
 
     for pos in memchr::memrchr_iter(sep, data) {
         let rec_start = pos + 1;
         if rec_start < end {
-            slices.push(IoSlice::new(&data[rec_start..end]));
-            if slices.len() >= IOV_MAX {
-                write_all_vectored(out, &slices)?;
-                slices.clear();
-            }
+            out.write_all(&data[rec_start..end])?;
         }
         end = rec_start;
     }
 
     // Remaining prefix before the first separator
     if end > 0 {
-        slices.push(IoSlice::new(&data[..end]));
-    }
-
-    if !slices.is_empty() {
-        write_all_vectored(out, &slices)?;
+        out.write_all(&data[..end])?;
     }
     Ok(())
 }
 
-/// Before-separator mode: zero-copy writev directly from input buffer.
+/// Before-separator mode: write_all each record in reverse.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if memchr::memchr(sep, data).is_none() {
         return out.write_all(data);
     }
 
-    const IOV_MAX: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_MAX);
     let mut end = data.len();
 
     for pos in memchr::memrchr_iter(sep, data) {
         if pos < end {
-            slices.push(IoSlice::new(&data[pos..end]));
-            if slices.len() >= IOV_MAX {
-                write_all_vectored(out, &slices)?;
-                slices.clear();
-            }
+            out.write_all(&data[pos..end])?;
         }
         end = pos;
     }
 
     if end > 0 {
-        slices.push(IoSlice::new(&data[..end]));
-    }
-
-    if !slices.is_empty() {
-        write_all_vectored(out, &slices)?;
+        out.write_all(&data[..end])?;
     }
     Ok(())
 }
 
 /// Reverse records using a multi-byte string separator.
-/// Uses SIMD-accelerated memmem + zero-copy writev output.
+/// Uses SIMD-accelerated memmem + write_all output.
 ///
 /// For single-byte separators, delegates to tac_bytes which uses memchr (faster).
 pub fn tac_string_separator(
@@ -154,8 +98,7 @@ pub fn tac_string_separator(
     }
 }
 
-/// Multi-byte string separator, after mode: zero-copy writev output.
-/// Uses forward memmem scan (better cache prefetching) + reverse iteration.
+/// Multi-byte string separator, after mode.
 fn tac_string_after(
     data: &[u8],
     separator: &[u8],
@@ -168,31 +111,21 @@ fn tac_string_after(
         return out.write_all(data);
     }
 
-    const IOV_MAX: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_MAX);
-
     let mut end = data.len();
     for &pos in positions.iter().rev() {
         let rec_start = pos + sep_len;
         if rec_start < end {
-            slices.push(IoSlice::new(&data[rec_start..end]));
-            if slices.len() >= IOV_MAX {
-                write_all_vectored(out, &slices)?;
-                slices.clear();
-            }
+            out.write_all(&data[rec_start..end])?;
         }
         end = rec_start;
     }
     if end > 0 {
-        slices.push(IoSlice::new(&data[..end]));
-    }
-    if !slices.is_empty() {
-        write_all_vectored(out, &slices)?;
+        out.write_all(&data[..end])?;
     }
     Ok(())
 }
 
-/// Multi-byte string separator, before mode: zero-copy writev output.
+/// Multi-byte string separator, before mode.
 fn tac_string_before(
     data: &[u8],
     separator: &[u8],
@@ -205,25 +138,15 @@ fn tac_string_before(
         return out.write_all(data);
     }
 
-    const IOV_MAX: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_MAX);
-
     let mut end = data.len();
     for &pos in positions.iter().rev() {
         if pos < end {
-            slices.push(IoSlice::new(&data[pos..end]));
-            if slices.len() >= IOV_MAX {
-                write_all_vectored(out, &slices)?;
-                slices.clear();
-            }
+            out.write_all(&data[pos..end])?;
         }
         end = pos;
     }
     if end > 0 {
-        slices.push(IoSlice::new(&data[..end]));
-    }
-    if !slices.is_empty() {
-        write_all_vectored(out, &slices)?;
+        out.write_all(&data[..end])?;
     }
     Ok(())
 }
@@ -260,7 +183,7 @@ fn find_regex_matches_backward(data: &[u8], re: &regex::bytes::Regex) -> Vec<(us
 }
 
 /// Reverse records using a regex separator.
-/// Zero-copy writev from input data.
+/// Uses write_vectored for regex path (typically few large records).
 pub fn tac_regex_separator(
     data: &[u8],
     pattern: &str,
@@ -288,7 +211,8 @@ pub fn tac_regex_separator(
         return Ok(());
     }
 
-    // Build IoSlice entries in reverse record order, then flush via writev.
+    // For regex separators, use write_vectored since there are typically
+    // few large records. Build all IoSlices at once and flush.
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(matches.len() + 2);
 
     if !before {
@@ -323,4 +247,35 @@ pub fn tac_regex_separator(
     }
 
     write_all_vectored(out, &slices)
+}
+
+/// Write all IoSlices, handling partial writes.
+#[inline]
+fn write_all_vectored(out: &mut impl Write, slices: &[IoSlice<'_>]) -> io::Result<()> {
+    if slices.is_empty() {
+        return Ok(());
+    }
+
+    let written = out.write_vectored(slices)?;
+    if written == 0 && slices.iter().any(|s| !s.is_empty()) {
+        return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
+    }
+
+    let total: usize = slices.iter().map(|s| s.len()).sum();
+    if written >= total {
+        return Ok(());
+    }
+
+    // Partial write: skip past fully-written slices, then write_all the rest
+    let mut skip = written;
+    for slice in slices {
+        let len = slice.len();
+        if skip >= len {
+            skip -= len;
+            continue;
+        }
+        out.write_all(&slice[skip..])?;
+        skip = 0;
+    }
+    Ok(())
 }
