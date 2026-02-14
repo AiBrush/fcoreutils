@@ -25,14 +25,37 @@ pub fn tac_bytes_owned(
     tac_bytes(data, separator, before, out)
 }
 
+/// Collect separator positions with pre-allocated Vec.
+/// memchr_iter's size_hint returns (0, Some(len)), so collect() starts at
+/// capacity 0 and doubles ~20 times for 1M+ separators. Pre-allocating
+/// with an estimated line length avoids all reallocations.
+#[inline]
+fn collect_positions_byte(data: &[u8], sep: u8) -> Vec<usize> {
+    let estimated = data.len() / 40 + 64; // ~40 bytes per line, conservative
+    let mut positions = Vec::with_capacity(estimated);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos);
+    }
+    positions
+}
+
+/// Collect multi-byte separator positions with pre-allocated Vec.
+#[inline]
+fn collect_positions_str(data: &[u8], separator: &[u8]) -> Vec<usize> {
+    let estimated = data.len() / 40 + 64;
+    let mut positions = Vec::with_capacity(estimated);
+    for pos in memchr::memmem::find_iter(data, separator) {
+        positions.push(pos);
+    }
+    positions
+}
+
 /// After-separator mode: forward SIMD scan + writev batching.
 /// Forward scan is cache-friendly with sequential mmap access (MADV_SEQUENTIAL).
 /// writev batching sends up to 1024 IoSlices per syscall for zero-copy output
 /// from mmap pages (when caller provides raw File, not BufWriter).
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    // Forward scan: collect all separator positions using SIMD memchr.
-    // Sequential access pattern benefits from hardware prefetching and mmap readahead.
-    let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
+    let positions = collect_positions_byte(data, sep);
 
     if positions.is_empty() {
         return out.write_all(data);
@@ -70,7 +93,7 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
 
 /// Before-separator mode: forward SIMD scan + writev batching.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
+    let positions = collect_positions_byte(data, sep);
 
     if positions.is_empty() {
         return out.write_all(data);
@@ -134,7 +157,7 @@ fn tac_string_after(
     sep_len: usize,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    let positions: Vec<usize> = memchr::memmem::find_iter(data, separator).collect();
+    let positions = collect_positions_str(data, separator);
 
     if positions.is_empty() {
         return out.write_all(data);
@@ -171,7 +194,7 @@ fn tac_string_before(
     _sep_len: usize,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    let positions: Vec<usize> = memchr::memmem::find_iter(data, separator).collect();
+    let positions = collect_positions_str(data, separator);
 
     if positions.is_empty() {
         return out.write_all(data);
