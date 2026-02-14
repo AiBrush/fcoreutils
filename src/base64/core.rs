@@ -89,10 +89,13 @@ fn encode_no_wrap_parallel(data: &[u8], out: &mut impl Write) -> io::Result<()> 
     write_all_vectored(out, &iov)
 }
 
-/// Encode with line wrapping — uses writev to interleave encoded segments
-/// with newlines without copying data. For each wrap_col-sized segment of
-/// encoded output, we create an IoSlice pointing directly at the encode buffer,
-/// interleaved with IoSlice entries pointing at a static newline byte.
+/// Encode with line wrapping using in-place expansion.
+/// Phase 1: bulk-encode the entire input in one SIMD pass into a buffer.
+/// Phase 2: expand backwards to insert newlines between wrap_col-sized segments.
+/// Phase 3: single write_all of the completed output.
+///
+/// This avoids both fuse_wrap's copy pass and writev's 300+ syscall overhead,
+/// using only one allocation and one write syscall for the entire output.
 fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
     // Calculate bytes_per_line: input bytes that produce exactly wrap_col encoded chars.
     // For default wrap_col=76: 76*3/4 = 57 bytes per line.
@@ -108,37 +111,149 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
         return encode_wrapped_parallel(data, wrap_col, bytes_per_line, out);
     }
 
-    // Bulk-encode + zero-copy writev: encode the entire input in one SIMD pass,
-    // then use write_vectored to interleave encoded segments with newlines.
-    // This avoids the fuse_wrap copy pass (saves 13.5MB allocation + copy for 10MB input).
-    // Phase 1: SIMD encode amortizes setup over the entire input.
-    // Phase 2: writev writes directly from the encode buffer with newline interleaving.
+    // In-place expansion approach:
+    // 1. Compute encoded length and final output length (with newlines)
+    // 2. Allocate one buffer at the final output size
+    // 3. Encode into the beginning of the buffer
+    // 4. Expand backwards: move wrap_col-sized segments and insert newlines
+    // 5. Single write_all
+    //
+    // Working backwards is safe because each segment moves to a higher offset
+    // (output position > encoded position for all segments except the first).
+    // For line N: encoded position = N * wrap_col, output position = N * (wrap_col + 1).
+    // Since output_pos >= encoded_pos for all N, backwards expansion never overwrites unread data.
     if bytes_per_line.is_multiple_of(3) {
         let enc_len = BASE64_ENGINE.encoded_length(data.len());
-        let mut enc_buf: Vec<u8> = Vec::with_capacity(enc_len);
+        let num_full_lines = enc_len / wrap_col;
+        let remainder = enc_len % wrap_col;
+        let out_len =
+            num_full_lines * (wrap_col + 1) + if remainder > 0 { remainder + 1 } else { 0 };
+
+        // Allocate at final output size; encode fills the first enc_len bytes
+        let mut buf: Vec<u8> = Vec::with_capacity(out_len);
         #[allow(clippy::uninit_vec)]
         unsafe {
-            enc_buf.set_len(enc_len);
+            buf.set_len(out_len);
         }
-        let encoded = BASE64_ENGINE.encode(data, enc_buf[..enc_len].as_out());
-        return write_wrapped_iov(encoded, wrap_col, out);
+        let _ = BASE64_ENGINE.encode(data, buf[..enc_len].as_out());
+
+        // Expand backwards: insert newlines between segments
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            let mut rp = enc_len; // read position (end of encoded data)
+            let mut wp = out_len; // write position (end of output)
+
+            // Handle remainder (last partial line)
+            if remainder > 0 {
+                wp -= 1;
+                *ptr.add(wp) = b'\n';
+                wp -= remainder;
+                rp -= remainder;
+                if rp != wp {
+                    std::ptr::copy(ptr.add(rp), ptr.add(wp), remainder);
+                }
+            }
+
+            // Handle full lines in reverse order
+            // Process 4 lines at a time for better ILP
+            let mut lines_remaining = num_full_lines;
+            while lines_remaining >= 4 {
+                // Line 4 (furthest from start)
+                wp -= 1;
+                *ptr.add(wp) = b'\n';
+                wp -= wrap_col;
+                rp -= wrap_col;
+                if rp != wp {
+                    std::ptr::copy(ptr.add(rp), ptr.add(wp), wrap_col);
+                }
+                // Line 3
+                wp -= 1;
+                *ptr.add(wp) = b'\n';
+                wp -= wrap_col;
+                rp -= wrap_col;
+                if rp != wp {
+                    std::ptr::copy(ptr.add(rp), ptr.add(wp), wrap_col);
+                }
+                // Line 2
+                wp -= 1;
+                *ptr.add(wp) = b'\n';
+                wp -= wrap_col;
+                rp -= wrap_col;
+                if rp != wp {
+                    std::ptr::copy(ptr.add(rp), ptr.add(wp), wrap_col);
+                }
+                // Line 1 (closest to start)
+                wp -= 1;
+                *ptr.add(wp) = b'\n';
+                wp -= wrap_col;
+                rp -= wrap_col;
+                if rp != wp {
+                    std::ptr::copy(ptr.add(rp), ptr.add(wp), wrap_col);
+                }
+                lines_remaining -= 4;
+            }
+
+            // Handle remaining lines
+            while lines_remaining > 0 {
+                wp -= 1;
+                *ptr.add(wp) = b'\n';
+                wp -= wrap_col;
+                rp -= wrap_col;
+                if rp != wp {
+                    std::ptr::copy(ptr.add(rp), ptr.add(wp), wrap_col);
+                }
+                lines_remaining -= 1;
+            }
+        }
+
+        return out.write_all(&buf[..out_len]);
     }
 
-    // Fallback for non-3-aligned bytes_per_line: chunk + writev
+    // Fallback for non-3-aligned bytes_per_line: chunk + in-place expansion
     let lines_per_chunk = (32 * 1024 * 1024) / bytes_per_line;
     let max_input_chunk = (lines_per_chunk * bytes_per_line).max(bytes_per_line);
 
     let enc_max = BASE64_ENGINE.encoded_length(max_input_chunk.min(data.len()));
-    let mut encode_buf: Vec<u8> = Vec::with_capacity(enc_max);
+    let num_lines_max = enc_max / wrap_col + 1;
+    let out_max = num_lines_max * (wrap_col + 1) + wrap_col + 1;
+    let mut buf: Vec<u8> = Vec::with_capacity(out_max);
     #[allow(clippy::uninit_vec)]
     unsafe {
-        encode_buf.set_len(enc_max);
+        buf.set_len(out_max);
     }
 
     for chunk in data.chunks(max_input_chunk.max(1)) {
         let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
-        let encoded = BASE64_ENGINE.encode(chunk, encode_buf[..enc_len].as_out());
-        write_wrapped_iov(encoded, wrap_col, out)?;
+        let _ = BASE64_ENGINE.encode(chunk, buf[..enc_len].as_out());
+        let num_full = enc_len / wrap_col;
+        let rem = enc_len % wrap_col;
+        let chunk_out_len = num_full * (wrap_col + 1) + if rem > 0 { rem + 1 } else { 0 };
+
+        // Expand backwards
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            let mut rp = enc_len;
+            let mut wp = chunk_out_len;
+            if rem > 0 {
+                wp -= 1;
+                *ptr.add(wp) = b'\n';
+                wp -= rem;
+                rp -= rem;
+                if rp != wp {
+                    std::ptr::copy(ptr.add(rp), ptr.add(wp), rem);
+                }
+            }
+            for _ in 0..num_full {
+                wp -= 1;
+                *ptr.add(wp) = b'\n';
+                wp -= wrap_col;
+                rp -= wrap_col;
+                if rp != wp {
+                    std::ptr::copy(ptr.add(rp), ptr.add(wp), wrap_col);
+                }
+            }
+        }
+        out.write_all(&buf[..chunk_out_len])?;
     }
 
     Ok(())
@@ -152,6 +267,7 @@ static NEWLINE: [u8; 1] = [b'\n'];
 /// interleaved with newline IoSlices, then writes in batches of MAX_WRITEV_IOV.
 /// This is zero-copy: no fused output buffer needed.
 #[inline]
+#[allow(dead_code)]
 fn write_wrapped_iov(encoded: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
     // Max IoSlice entries per writev batch. Linux UIO_MAXIOV is 1024.
     // Each line needs 2 entries (data + newline), so 512 lines per batch.
