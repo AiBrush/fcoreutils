@@ -415,6 +415,9 @@ fn encode_wrapped_parallel(
     // SAFETY: tasks have non-overlapping output regions.
     let out_addr = outbuf.as_mut_ptr() as usize;
 
+    // Each thread uses a thread-local temp buffer for bulk encode
+    const PAR_LINES_PER_CHUNK: usize = 256;
+
     tasks.par_iter().for_each(|&(in_off, out_off, chunk_len)| {
         let input = &data[in_off..in_off + chunk_len];
         let full_lines = chunk_len / bytes_per_line;
@@ -422,60 +425,64 @@ fn encode_wrapped_parallel(
 
         let out_ptr = out_addr as *mut u8;
 
-        // Encode each line directly into its final position in the output buffer.
-        // No thread-local buffer needed — each 57-byte input -> 76 encoded bytes
-        // written directly at out_off + line_idx * 77.
+        // Bulk-encode chunks of PAR_LINES_PER_CHUNK lines at once, then copy
+        // with newline insertions into the output buffer.
         if full_lines > 0 {
             let dst = unsafe { out_ptr.add(out_off) };
-            let mut line_idx = 0;
-
-            // 4-line unrolled loop for ILP
-            while line_idx + 4 <= full_lines {
-                let in_base = line_idx * bytes_per_line;
-                let out_base = line_idx * line_out;
-                unsafe {
-                    let s0 = std::slice::from_raw_parts_mut(dst.add(out_base), wrap_col);
-                    let _ = BASE64_ENGINE
-                        .encode(&input[in_base..in_base + bytes_per_line], s0.as_out());
-                    *dst.add(out_base + wrap_col) = b'\n';
-
-                    let s1 = std::slice::from_raw_parts_mut(dst.add(out_base + line_out), wrap_col);
-                    let _ = BASE64_ENGINE.encode(
-                        &input[in_base + bytes_per_line..in_base + 2 * bytes_per_line],
-                        s1.as_out(),
-                    );
-                    *dst.add(out_base + line_out + wrap_col) = b'\n';
-
-                    let s2 =
-                        std::slice::from_raw_parts_mut(dst.add(out_base + 2 * line_out), wrap_col);
-                    let _ = BASE64_ENGINE.encode(
-                        &input[in_base + 2 * bytes_per_line..in_base + 3 * bytes_per_line],
-                        s2.as_out(),
-                    );
-                    *dst.add(out_base + 2 * line_out + wrap_col) = b'\n';
-
-                    let s3 =
-                        std::slice::from_raw_parts_mut(dst.add(out_base + 3 * line_out), wrap_col);
-                    let _ = BASE64_ENGINE.encode(
-                        &input[in_base + 3 * bytes_per_line..in_base + 4 * bytes_per_line],
-                        s3.as_out(),
-                    );
-                    *dst.add(out_base + 3 * line_out + wrap_col) = b'\n';
-                }
-                line_idx += 4;
+            let chunk_input = PAR_LINES_PER_CHUNK * bytes_per_line;
+            let chunk_encoded = BASE64_ENGINE.encoded_length(chunk_input);
+            let mut enc_buf: Vec<u8> = Vec::with_capacity(chunk_encoded);
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                enc_buf.set_len(chunk_encoded);
             }
 
-            // Remaining lines one at a time
-            while line_idx < full_lines {
-                let in_base = line_idx * bytes_per_line;
-                let out_base = line_idx * line_out;
+            let mut line_idx = 0usize;
+
+            while line_idx + PAR_LINES_PER_CHUNK <= full_lines {
+                let in_start = line_idx * bytes_per_line;
+                let in_end = in_start + chunk_input;
+                let encoded = BASE64_ENGINE
+                    .encode(&input[in_start..in_end], enc_buf[..chunk_encoded].as_out());
+
+                let out_start = line_idx * line_out;
                 unsafe {
-                    let s = std::slice::from_raw_parts_mut(dst.add(out_base), wrap_col);
-                    let _ =
-                        BASE64_ENGINE.encode(&input[in_base..in_base + bytes_per_line], s.as_out());
-                    *dst.add(out_base + wrap_col) = b'\n';
+                    let sp = encoded.as_ptr();
+                    let dp = dst.add(out_start);
+                    for li in 0..PAR_LINES_PER_CHUNK {
+                        std::ptr::copy_nonoverlapping(
+                            sp.add(li * wrap_col),
+                            dp.add(li * line_out),
+                            wrap_col,
+                        );
+                        *dp.add(li * line_out + wrap_col) = b'\n';
+                    }
                 }
-                line_idx += 1;
+                line_idx += PAR_LINES_PER_CHUNK;
+            }
+
+            // Remaining full lines
+            let remaining = full_lines - line_idx;
+            if remaining > 0 {
+                let in_start = line_idx * bytes_per_line;
+                let in_end = in_start + remaining * bytes_per_line;
+                let enc_len = BASE64_ENGINE.encoded_length(in_end - in_start);
+                let encoded =
+                    BASE64_ENGINE.encode(&input[in_start..in_end], enc_buf[..enc_len].as_out());
+
+                let out_start = line_idx * line_out;
+                unsafe {
+                    let sp = encoded.as_ptr();
+                    let dp = dst.add(out_start);
+                    for li in 0..remaining {
+                        std::ptr::copy_nonoverlapping(
+                            sp.add(li * wrap_col),
+                            dp.add(li * line_out),
+                            wrap_col,
+                        );
+                        *dp.add(li * line_out + wrap_col) = b'\n';
+                    }
+                }
             }
         }
 
@@ -847,12 +854,11 @@ fn decode_fixed_stride(data: &[u8], stride: usize, out: &mut impl Write) -> io::
     // Calculate exact decoded output size
     let clean_len = num_full_lines * line_len
         + if remainder > 0 {
-            let tail = if data[data.len() - 1] == b'\n' {
+            if data[data.len() - 1] == b'\n' {
                 remainder - 1
             } else {
                 remainder.min(line_len)
-            };
-            tail
+            }
         } else {
             0
         };
