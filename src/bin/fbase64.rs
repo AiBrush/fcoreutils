@@ -43,24 +43,113 @@ struct Cli {
     file: Option<String>,
 }
 
-/// Raw fd stdout for zero-overhead writes on Unix.
-/// Bypasses BufWriter/StdoutLock overhead — our callers already batch
-/// output into large (4MB+) chunks, so no intermediate buffering needed.
-#[cfg(unix)]
+/// Raw fd stdout for zero-overhead writes on Unix (non-Linux).
+/// On Linux, VmspliceWriter is used instead for zero-copy pipe output.
+#[cfg(all(unix, not(target_os = "linux")))]
 #[inline]
 fn raw_stdout() -> ManuallyDrop<std::fs::File> {
     unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) }
 }
 
+/// Writer that uses vmsplice(2) for zero-copy pipe output on Linux.
+/// vmsplice transfers user-space pages to a pipe without memcpy — the kernel
+/// pins the pages and the pipe reader reads directly from them.
+/// Falls back to regular write() for non-pipe fds or on error.
+#[cfg(target_os = "linux")]
+struct VmspliceWriter {
+    raw: ManuallyDrop<std::fs::File>,
+    is_pipe: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl VmspliceWriter {
+    fn new() -> Self {
+        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        // Check if stdout is a pipe (vmsplice only works on pipes)
+        let is_pipe = unsafe {
+            let mut stat: libc::stat = std::mem::zeroed();
+            libc::fstat(1, &mut stat) == 0
+                && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
+        };
+        Self { raw, is_pipe }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Write for VmspliceWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write(buf);
+        }
+        let iov = libc::iovec {
+            iov_base: buf.as_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
+        };
+        let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+        if n >= 0 {
+            Ok(n as usize)
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                return Ok(0);
+            }
+            // Fall back to regular write on error
+            self.is_pipe = false;
+            (&*self.raw).write(buf)
+        }
+    }
+
+    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write_all(buf);
+        }
+        while !buf.is_empty() {
+            let iov = libc::iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            };
+            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+            if n > 0 {
+                buf = &buf[n as usize..];
+            } else if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "vmsplice wrote 0"));
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                // Fall back to regular write
+                self.is_pipe = false;
+                return (&*self.raw).write_all(buf);
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(()) // Pipes don't need flushing
+    }
+}
+
 /// Enlarge pipe buffers on Linux for higher throughput.
-/// 8MB pipe buffers allow larger reads/writes per syscall, reducing total
-/// syscall count for the streaming encode/decode paths.
+/// Reads system max from /proc, falls back through decreasing sizes.
+/// Larger pipe buffers = fewer write() syscalls for encode/decode output.
 #[cfg(target_os = "linux")]
 fn enlarge_pipes() {
-    const PIPE_SIZE: i32 = 8 * 1024 * 1024;
-    unsafe {
-        libc::fcntl(0, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdin
-        libc::fcntl(1, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdout
+    let max_size = std::fs::read_to_string("/proc/sys/fs/pipe-max-size")
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    for &fd in &[0i32, 1] {
+        if let Some(max) = max_size
+            && unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, max) } > 0
+        {
+            continue;
+        }
+        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
+            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
+                break;
+            }
+        }
     }
 }
 
@@ -74,16 +163,21 @@ fn main() {
 
     let filename = cli.file.as_deref().unwrap_or("-");
 
-    // Encode path: write directly to raw fd (chunks are 3MB+, BufWriter is overhead).
-    // Decode path: use BufWriter since decode_clean_slice writes variable-sized chunks.
-    #[cfg(unix)]
+    // On Linux: use VmspliceWriter for zero-copy pipe output (vmsplice(2)).
+    // Eliminates memcpy from user buffer to kernel pipe buffer, saving ~1-2ms
+    // for 10MB+ output. Falls back to write() for non-pipe stdout.
+    // On other Unix: use raw fd (no BufWriter since callers produce large chunks).
+    #[cfg(target_os = "linux")]
+    let mut writer = VmspliceWriter::new();
+    #[cfg(target_os = "linux")]
+    let result = if filename == "-" {
+        process_stdin(&cli, &mut writer)
+    } else {
+        process_file(filename, &cli, &mut writer)
+    };
+    #[cfg(all(unix, not(target_os = "linux")))]
     let mut raw = raw_stdout();
-
-    // Write directly to raw fd for both encode and decode — bypasses BufWriter.
-    // Encode writes 3MB+ chunks; decode (now batch mode via read_stdin + decode_owned)
-    // writes the entire decoded output in a single write_all. No intermediate
-    // buffering needed since all callers produce large contiguous output.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     let result = if filename == "-" {
         process_stdin(&cli, &mut *raw)
     } else {
@@ -152,52 +246,17 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     mmap
 }
 
-/// Try to create a MAP_PRIVATE (copy-on-write) mmap of stdin for in-place decode.
-/// MAP_PRIVATE means writes only affect our process's copy. For base64 decode,
-/// the whitespace stripping only modifies ~1.3% of pages (newline positions),
-/// and decode_inplace writes shorter data back, so total COW is minimal.
-#[cfg(unix)]
-fn try_mmap_stdin_mut() -> Option<memmap2::MmapMut> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-    let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return None;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
-        return None;
-    }
-
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mmap = unsafe { MmapOptions::new().populate().map_copy(&file) }.ok();
-    std::mem::forget(file);
-    #[cfg(target_os = "linux")]
-    if let Some(ref m) = mmap {
-        unsafe {
-            let ptr = m.as_ptr() as *mut libc::c_void;
-            let len = m.len();
-            libc::madvise(ptr, len, libc::MADV_SEQUENTIAL | libc::MADV_WILLNEED);
-            if len >= 2 * 1024 * 1024 {
-                libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
-            }
-        }
-    }
-    mmap
-}
 
 fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
     if cli.decode {
-        // Try MAP_PRIVATE mmap for in-place strip+decode (zero allocation)
+        // Try read-only mmap for stdin decode (avoids MAP_PRIVATE COW overhead).
+        // For large data, decode_to_writer uses bulk strip+decode (faster than per-line).
         #[cfg(unix)]
-        if let Some(mut mmap) = try_mmap_stdin_mut() {
-            return b64::decode_mmap_inplace(&mut mmap, cli.ignore_garbage, out);
+        if let Some(mmap) = try_mmap_stdin() {
+            return b64::decode_to_writer(&mmap, cli.ignore_garbage, out);
         }
 
         // For piped stdin: use streaming decode to avoid 64MB read_stdin pre-alloc.
-        // decode_stream reads 16MB chunks, strips whitespace with SIMD memchr2,
-        // and decodes in-place. For 10MB input this processes everything in 1 chunk.
         let stdin = io::stdin();
         let mut reader = stdin.lock();
         return b64::decode_stream(&mut reader, cli.ignore_garbage, out);
@@ -209,44 +268,21 @@ fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
         return b64::encode_to_writer(&mmap, cli.wrap, out);
     }
 
-    // For piped encode: use streaming to overlap pipe read with encode+write.
-    // read_full reads 12MB aligned chunks from the pipe, encodes + fuse_wraps
-    // each chunk, then writes in a single syscall. For 10MB input this processes
-    // everything in 1 iteration, avoiding the 64MB read_stdin pre-allocation.
+    // For piped encode: streaming to overlap pipe read with encode+write.
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     b64::encode_stream(&mut reader, cli.wrap, out)
 }
 
 fn process_file(filename: &str, cli: &Cli, out: &mut impl Write) -> io::Result<()> {
+    // Use read-only mmap for both encode and decode.
+    // For decode: read-only mmap avoids MAP_PRIVATE COW page faults (~3ms for 13MB).
+    // The bulk strip+decode path in decode_to_writer is faster than in-place decode
+    // for large files (SIMD gap-copy to clean buffer + single-shot decode).
+    let data = read_file(Path::new(filename))?;
     if cli.decode {
-        // For decode: try MAP_PRIVATE mmap for in-place strip+decode (zero alloc).
-        // Falls back to read_file + decode_to_writer for small files or non-mmap platforms.
-        #[cfg(unix)]
-        {
-            let file = std::fs::File::open(Path::new(filename))?;
-            let metadata = file.metadata()?;
-            if metadata.len() > 0
-                && metadata.file_type().is_file()
-                && let Ok(mut mmap) = unsafe { MmapOptions::new().populate().map_copy(&file) }
-            {
-                #[cfg(target_os = "linux")]
-                unsafe {
-                    let ptr = mmap.as_ptr() as *mut libc::c_void;
-                    let len = mmap.len();
-                    libc::madvise(ptr, len, libc::MADV_SEQUENTIAL | libc::MADV_WILLNEED);
-                    if len >= 2 * 1024 * 1024 {
-                        libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
-                    }
-                }
-                return b64::decode_mmap_inplace(&mut mmap, cli.ignore_garbage, out);
-            }
-        }
-        let data = read_file(Path::new(filename))?;
         b64::decode_to_writer(&data, cli.ignore_garbage, out)
     } else {
-        // For encode: use read-only mmap (no modification needed)
-        let data = read_file(Path::new(filename))?;
         b64::encode_to_writer(&data, cli.wrap, out)
     }
 }
