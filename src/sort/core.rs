@@ -1122,10 +1122,50 @@ fn radix_sort_numeric_entries(
         return entries;
     }
 
-    // 4-pass LSD radix sort on 16-bit groups (65536 buckets per pass).
-    // Pass order: bits [0:16), [16:32), [32:48), [48:64)
-    // LSD processes least significant first, so final pass is on most significant bits.
+    // LSD radix sort on 16-bit groups. Up to 4 passes: bits [0:16), [16:32), [32:48), [48:64)
+    // Skip passes where all entries share the same 16-bit group (common for numeric data
+    // in a limited range, e.g., integers 0-999999 all share the same top 32 bits).
     let nbk: usize = 65536;
+
+    // Pre-scan: determine which 16-bit groups actually have variation.
+    // XOR all values to find bits that differ, then check each 16-bit group.
+    let first_val = entries[0].0;
+    let mut xor_all = 0u64;
+    for &(val, _) in &entries[1..] {
+        xor_all |= val ^ first_val;
+    }
+
+    // Build list of passes that need sorting (where bits differ)
+    let mut passes_needed: Vec<u32> = Vec::with_capacity(4);
+    for pass in 0..4u32 {
+        let shift = pass * 16;
+        if ((xor_all >> shift) & 0xFFFF) != 0 {
+            passes_needed.push(pass);
+        }
+    }
+
+    // If no passes needed, all values are identical — already sorted
+    if passes_needed.is_empty() {
+        let mut sorted = entries;
+        // Still need last-resort comparison for non-stable sort
+        if !stable {
+            let mut i = 0;
+            while i < n {
+                let key = sorted[i].0;
+                let mut j = i + 1;
+                while j < n && sorted[j].0 == key {
+                    j += 1;
+                }
+                if j - i > 1 {
+                    sorted[i..j].sort_unstable_by(|a, b| {
+                        data[offsets[a.1].0..offsets[a.1].1].cmp(&data[offsets[b.1].0..offsets[b.1].1])
+                    });
+                }
+                i = j;
+            }
+        }
+        return sorted;
+    }
 
     let mut src = entries;
     let mut dst: Vec<(u64, usize)> = Vec::with_capacity(n);
@@ -1136,7 +1176,7 @@ fn radix_sort_numeric_entries(
 
     let mut cnts = vec![0u32; nbk];
 
-    for pass in 0..4u32 {
+    for &pass in &passes_needed {
         let shift = pass * 16;
 
         // Count occurrences
@@ -1167,7 +1207,8 @@ fn radix_sort_numeric_entries(
         std::mem::swap(&mut src, &mut dst);
     }
 
-    // After 4 passes, result is in `src` (they got swapped 4 times = back to original)
+    // After N passes, result is in `src` (swapped N times).
+    // If N is odd, the result ended up in the original `dst` (now in `src` after swap).
     let mut sorted = src;
 
     // For non-stable sort: sort entries with equal u64 keys by raw line content
@@ -1302,7 +1343,15 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         && !gopts.ignore_leading_blanks
         && !gopts.reverse;
 
-    if num_lines > 1 {
+    // Pre-detect numeric mode to skip the generic sorted check.
+    // Numeric mode does its own sorted check after parsing u64 values.
+    let is_numeric_only_precheck = no_keys
+        && (gopts.numeric || gopts.general_numeric || gopts.human_numeric)
+        && !gopts.dictionary_order
+        && !gopts.ignore_case
+        && !gopts.ignore_nonprinting;
+
+    if num_lines > 1 && !is_numeric_only_precheck {
         let is_sorted = if is_plain_lex_for_check {
             // Fast path: 8-byte prefix comparison for plain lexicographic sort.
             // Most lines can be resolved with a single u64 comparison, avoiding
@@ -1752,6 +1801,35 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     .collect()
             }
         };
+
+        // Fast already-sorted check using pre-parsed u64 values.
+        // O(n) u64 comparisons instead of O(n) string-parsing comparisons.
+        // For reverse mode, check descending order.
+        if entries.len() > 1 {
+            let is_sorted = if reverse {
+                entries.windows(2).all(|w| w[0].0 >= w[1].0)
+            } else {
+                entries.windows(2).all(|w| w[0].0 <= w[1].0)
+            };
+            if is_sorted {
+                // Data is already sorted by numeric value
+                if !config.unique && !config.zero_terminated && memchr::memchr(b'\r', data).is_none()
+                {
+                    if data.last() == Some(&b'\n') {
+                        writer.write_all(data)?;
+                    } else if !data.is_empty() {
+                        writer.write_all(data)?;
+                        writer.write_all(b"\n")?;
+                    }
+                    writer.flush()?;
+                    return Ok(());
+                }
+                // Handle unique/zero-terminated
+                write_sorted_entries(data, &offsets, &entries, config, &mut writer, terminator)?;
+                writer.flush()?;
+                return Ok(());
+            }
+        }
 
         // Use radix sort for large numeric inputs (>256 entries).
         // Radix distribution on top 16 bits resolves ~99.9% of ordering without
