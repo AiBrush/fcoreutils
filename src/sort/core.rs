@@ -1507,83 +1507,25 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 write_all_vectored(&mut writer, &slices)?;
             }
         } else {
-            // Forward: single contiguous output buffer with parallel fill.
-            // One allocation + one write syscall vs N allocations + N writes.
-            // Reduces memory allocation overhead and write syscall count.
-            let tl = terminator.len();
-            let n = sorted.len();
-            if n > 10_000 {
-                let num_threads = rayon::current_num_threads().max(1);
-                let chunk_size = (n + num_threads - 1) / num_threads;
-
-                // Phase 1: compute per-chunk output sizes (parallel)
-                let chunk_sizes: Vec<usize> = sorted
-                    .par_chunks(chunk_size)
-                    .map(|chunk| chunk.iter().map(|&(_, _, l)| l as usize + tl).sum())
-                    .collect();
-
-                // Phase 2: prefix sum for chunk write offsets (serial, tiny)
-                let mut chunk_offsets: Vec<usize> = Vec::with_capacity(chunk_sizes.len() + 1);
-                chunk_offsets.push(0usize);
-                let mut total_out = 0usize;
-                for &sz in &chunk_sizes {
-                    total_out += sz;
-                    chunk_offsets.push(total_out);
-                }
-
-                // Phase 3: single allocation (no zero-init)
-                let mut output: Vec<u8> = Vec::with_capacity(total_out);
-                // SAFETY: every byte in [0..total_out) is written by the parallel fill below.
-                #[allow(clippy::uninit_vec)]
-                unsafe {
-                    output.set_len(total_out);
-                }
-
-                // Phase 4: parallel fill — each thread writes to its disjoint region
-                // SAFETY: chunk_offsets guarantees non-overlapping write regions.
-                let output_addr = output.as_mut_ptr() as usize;
-                let data_addr = data.as_ptr() as usize;
-                sorted
-                    .par_chunks(chunk_size)
-                    .enumerate()
-                    .for_each(|(ci, chunk)| {
-                        let op = output_addr as *mut u8;
-                        let dp = data_addr as *const u8;
-                        let mut wp = chunk_offsets[ci];
-                        for &(_, s, l) in chunk {
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(
-                                    dp.add(s as usize),
-                                    op.add(wp),
-                                    l as usize,
-                                );
-                                wp += l as usize;
-                                std::ptr::copy_nonoverlapping(terminator.as_ptr(), op.add(wp), tl);
-                                wp += tl;
-                            }
-                        }
-                    });
-
-                // Phase 5: single write
-                writer.write_all(&output)?;
-            } else {
-                // Use write_vectored to batch line+terminator pairs.
-                let dp = data.as_ptr();
-                const BATCH: usize = 512;
-                let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-                for &(_, s, l) in &sorted {
-                    let line =
-                        unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
-                    slices.push(io::IoSlice::new(line));
-                    slices.push(io::IoSlice::new(terminator));
-                    if slices.len() >= BATCH * 2 {
-                        write_all_vectored(&mut writer, &slices)?;
-                        slices.clear();
-                    }
-                }
-                if !slices.is_empty() {
+            // Forward: write_vectored batching from sorted entries.
+            // Zero-copy: IoSlice entries point directly into mmap data.
+            // Eliminates the ~100MB contiguous output buffer allocation that
+            // the parallel fill approach required.
+            let dp = data.as_ptr();
+            const BATCH: usize = 512;
+            let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+            for &(_, s, l) in &sorted {
+                let line =
+                    unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
+                slices.push(io::IoSlice::new(line));
+                slices.push(io::IoSlice::new(terminator));
+                if slices.len() >= BATCH * 2 {
                     write_all_vectored(&mut writer, &slices)?;
+                    slices.clear();
                 }
+            }
+            if !slices.is_empty() {
+                write_all_vectored(&mut writer, &slices)?;
             }
         }
     } else if is_fold_case_lex && num_lines > 256 {
