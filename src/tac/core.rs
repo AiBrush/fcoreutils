@@ -60,7 +60,9 @@ pub fn tac_bytes_owned(
     // After step 1, records are in the right order but each record's bytes are reversed.
     let sub = &mut data[1..];
     let sub_len = sub.len();
-    let positions: Vec<usize> = memchr::memchr_iter(separator, sub).collect();
+    let count = memchr::memchr_iter(separator, sub).count();
+    let mut positions: Vec<usize> = Vec::with_capacity(count);
+    positions.extend(memchr::memchr_iter(separator, sub));
     let mut start = 0;
     for &pos in &positions {
         if pos > start {
