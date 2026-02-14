@@ -1402,11 +1402,22 @@ pub fn translate_squeeze(
     let table = build_translate_table(set1, set2);
     let squeeze_set = build_member_set(set2);
 
+    // For single-char squeeze set with range-to-constant translation, use
+    // fused approach: translate via SIMD, then use memmem to find squeeze points.
+    if set2.len() == 1 || (set2.len() > 1 && set2.iter().all(|&b| b == set2[0])) {
+        let squeeze_ch = set2.last().copied().unwrap_or(0);
+        return translate_squeeze_single_ch(
+            &table,
+            squeeze_ch,
+            &squeeze_set,
+            reader,
+            writer,
+        );
+    }
+
     // Two-pass optimization for range translations:
     // Pass 1: SIMD range translate in-place (10x faster than scalar table lookup)
     // Pass 2: scalar squeeze (inherently sequential due to state dependency)
-    // Even though it's two passes, the translate pass is so much faster with SIMD
-    // that the total is still a net win.
     let range_info = detect_range_offset(&table);
     let range_const_info = if range_info.is_none() {
         detect_range_to_constant(&table)
@@ -1430,14 +1441,43 @@ pub fn translate_squeeze(
         } else {
             translate_inplace(&mut buf[..n], &table);
         }
-        // Pass 2: squeeze in-place
+        // Pass 2: squeeze in-place using 8x-unrolled loop
         let mut wp = 0;
         unsafe {
             let ptr = buf.as_mut_ptr();
-            for i in 0..n {
+            let mut i = 0;
+            while i + 8 <= n {
+                macro_rules! squeeze_byte {
+                    ($off:expr) => {
+                        let b = *ptr.add(i + $off);
+                        if is_member(&squeeze_set, b) {
+                            if last_squeezed != b as u16 {
+                                last_squeezed = b as u16;
+                                *ptr.add(wp) = b;
+                                wp += 1;
+                            }
+                        } else {
+                            last_squeezed = 256;
+                            *ptr.add(wp) = b;
+                            wp += 1;
+                        }
+                    };
+                }
+                squeeze_byte!(0);
+                squeeze_byte!(1);
+                squeeze_byte!(2);
+                squeeze_byte!(3);
+                squeeze_byte!(4);
+                squeeze_byte!(5);
+                squeeze_byte!(6);
+                squeeze_byte!(7);
+                i += 8;
+            }
+            while i < n {
                 let b = *ptr.add(i);
                 if is_member(&squeeze_set, b) {
                     if last_squeezed == b as u16 {
+                        i += 1;
                         continue;
                     }
                     last_squeezed = b as u16;
@@ -1446,9 +1486,98 @@ pub fn translate_squeeze(
                 }
                 *ptr.add(wp) = b;
                 wp += 1;
+                i += 1;
             }
         }
         writer.write_all(&buf[..wp])?;
+    }
+    Ok(())
+}
+
+/// Optimized translate+squeeze for single squeeze character.
+/// After SIMD translation, uses memmem to find consecutive pairs
+/// of the squeeze char and does zero-copy writev from the buffer.
+fn translate_squeeze_single_ch(
+    table: &[u8; 256],
+    squeeze_ch: u8,
+    _squeeze_set: &[u8; 32],
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let range_info = detect_range_offset(table);
+    let range_const_info = if range_info.is_none() {
+        detect_range_to_constant(table)
+    } else {
+        None
+    };
+
+    let pair = [squeeze_ch, squeeze_ch];
+    let finder = memchr::memmem::Finder::new(&pair);
+    let mut buf = alloc_uninit_vec(STREAM_BUF);
+    let mut was_squeeze_char = false;
+
+    loop {
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        // Pass 1: SIMD translate in-place
+        if let Some((lo, hi, offset)) = range_info {
+            translate_range_simd_inplace(&mut buf[..n], lo, hi, offset);
+        } else if let Some((lo, hi, replacement)) = range_const_info {
+            translate_range_to_constant_simd_inplace(&mut buf[..n], lo, hi, replacement);
+        } else {
+            translate_inplace(&mut buf[..n], table);
+        }
+
+        // Pass 2: squeeze using memmem pair-finding + writev (zero-copy)
+        let mut i = 0;
+
+        // Handle carry-over from previous chunk
+        if was_squeeze_char {
+            while i < n && unsafe { *buf.as_ptr().add(i) } == squeeze_ch {
+                i += 1;
+            }
+            if i >= n {
+                continue;
+            }
+        }
+
+        let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(64);
+
+        loop {
+            match finder.find(&buf[i..n]) {
+                Some(offset) => {
+                    let seg_end = i + offset + 1;
+                    if seg_end > i {
+                        iov.push(std::io::IoSlice::new(&buf[i..seg_end]));
+                    }
+                    i = seg_end;
+                    while i < n && unsafe { *buf.as_ptr().add(i) } == squeeze_ch {
+                        i += 1;
+                    }
+                    if i >= n {
+                        was_squeeze_char = true;
+                        break;
+                    }
+                    if iov.len() >= MAX_IOV {
+                        write_ioslices(writer, &iov)?;
+                        iov.clear();
+                    }
+                }
+                None => {
+                    if i < n {
+                        iov.push(std::io::IoSlice::new(&buf[i..n]));
+                    }
+                    was_squeeze_char = n > 0 && unsafe { *buf.as_ptr().add(n - 1) } == squeeze_ch;
+                    break;
+                }
+            }
+        }
+
+        if !iov.is_empty() {
+            write_ioslices(writer, &iov)?;
+        }
     }
     Ok(())
 }
