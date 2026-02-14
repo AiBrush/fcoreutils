@@ -974,6 +974,110 @@ fn translate_range_to_constant_simd_inplace(data: &mut [u8], lo: u8, hi: u8, rep
     }
 }
 
+/// SIMD range-to-constant translation from src to dst (no intermediate copy needed).
+/// Reads from src, writes translated result to dst in a single pass.
+#[cfg(target_arch = "x86_64")]
+fn translate_range_to_constant_simd(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, replacement: u8) {
+    if get_simd_level() >= 3 {
+        unsafe { translate_range_to_constant_avx2(src, dst, lo, hi, replacement) };
+    } else {
+        unsafe { translate_range_to_constant_sse2(src, dst, lo, hi, replacement) };
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn translate_range_to_constant_simd(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, replacement: u8) {
+    for (i, &b) in src.iter().enumerate() {
+        unsafe {
+            *dst.get_unchecked_mut(i) = if b >= lo && b <= hi { replacement } else { b };
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn translate_range_to_constant_avx2(
+    src: &[u8], dst: &mut [u8], lo: u8, hi: u8, replacement: u8,
+) {
+    use std::arch::x86_64::*;
+    unsafe {
+        let range = hi - lo;
+        let bias_v = _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let repl_v = _mm256_set1_epi8(replacement as i8);
+        let zero = _mm256_setzero_si256();
+        let len = src.len();
+        let sp = src.as_ptr();
+        let dp = dst.as_mut_ptr();
+        let mut i = 0;
+        while i + 64 <= len {
+            let in0 = _mm256_loadu_si256(sp.add(i) as *const _);
+            let in1 = _mm256_loadu_si256(sp.add(i + 32) as *const _);
+            let bi0 = _mm256_add_epi8(in0, bias_v);
+            let bi1 = _mm256_add_epi8(in1, bias_v);
+            let gt0 = _mm256_cmpgt_epi8(bi0, threshold_v);
+            let gt1 = _mm256_cmpgt_epi8(bi1, threshold_v);
+            let ir0 = _mm256_cmpeq_epi8(gt0, zero);
+            let ir1 = _mm256_cmpeq_epi8(gt1, zero);
+            let r0 = _mm256_blendv_epi8(in0, repl_v, ir0);
+            let r1 = _mm256_blendv_epi8(in1, repl_v, ir1);
+            _mm256_storeu_si256(dp.add(i) as *mut _, r0);
+            _mm256_storeu_si256(dp.add(i + 32) as *mut _, r1);
+            i += 64;
+        }
+        if i + 32 <= len {
+            let input = _mm256_loadu_si256(sp.add(i) as *const _);
+            let biased = _mm256_add_epi8(input, bias_v);
+            let gt = _mm256_cmpgt_epi8(biased, threshold_v);
+            let in_range = _mm256_cmpeq_epi8(gt, zero);
+            let result = _mm256_blendv_epi8(input, repl_v, in_range);
+            _mm256_storeu_si256(dp.add(i) as *mut _, result);
+            i += 32;
+        }
+        while i < len {
+            let b = *sp.add(i);
+            *dp.add(i) = if b >= lo && b <= hi { replacement } else { b };
+            i += 1;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn translate_range_to_constant_sse2(
+    src: &[u8], dst: &mut [u8], lo: u8, hi: u8, replacement: u8,
+) {
+    use std::arch::x86_64::*;
+    unsafe {
+        let range = hi - lo;
+        let bias_v = _mm_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let repl_v = _mm_set1_epi8(replacement as i8);
+        let zero = _mm_setzero_si128();
+        let len = src.len();
+        let sp = src.as_ptr();
+        let dp = dst.as_mut_ptr();
+        let mut i = 0;
+        while i + 16 <= len {
+            let input = _mm_loadu_si128(sp.add(i) as *const _);
+            let biased = _mm_add_epi8(input, bias_v);
+            let gt = _mm_cmpgt_epi8(biased, threshold_v);
+            let in_range = _mm_cmpeq_epi8(gt, zero);
+            let result = _mm_or_si128(
+                _mm_and_si128(in_range, repl_v),
+                _mm_andnot_si128(in_range, input),
+            );
+            _mm_storeu_si128(dp.add(i) as *mut _, result);
+            i += 16;
+        }
+        while i < len {
+            let b = *sp.add(i);
+            *dp.add(i) = if b >= lo && b <= hi { replacement } else { b };
+            i += 1;
+        }
+    }
+}
+
 /// SIMD-accelerated range translation for mmap'd data.
 /// For tables where only a contiguous range [lo..=hi] is translated by a constant offset,
 /// uses AVX2 (32 bytes/iter) or SSE2 (16 bytes/iter) vectorized arithmetic.
@@ -2623,13 +2727,7 @@ fn translate_to_separate_buf(
             data.par_chunks(chunk_size)
                 .zip(out_buf.par_chunks_mut(chunk_size))
                 .for_each(|(src, dst)| {
-                    dst[..src.len()].copy_from_slice(src);
-                    translate_range_to_constant_simd_inplace(
-                        &mut dst[..src.len()],
-                        lo,
-                        hi,
-                        replacement,
-                    );
+                    translate_range_to_constant_simd(src, &mut dst[..src.len()], lo, hi, replacement);
                 });
         } else {
             data.par_chunks(chunk_size)
@@ -2651,8 +2749,7 @@ fn translate_to_separate_buf(
     if let Some((lo, hi, offset)) = range_info {
         translate_range_simd(data, &mut out_buf, lo, hi, offset);
     } else if let Some((lo, hi, replacement)) = const_info {
-        out_buf.copy_from_slice(data);
-        translate_range_to_constant_simd_inplace(&mut out_buf, lo, hi, replacement);
+        translate_range_to_constant_simd(data, &mut out_buf, lo, hi, replacement);
     } else {
         translate_to(data, &mut out_buf, table);
     }
