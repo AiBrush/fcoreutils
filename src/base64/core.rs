@@ -9,19 +9,16 @@ const BASE64_ENGINE: &base64_simd::Base64 = &base64_simd::STANDARD;
 /// Larger chunks = fewer write() syscalls for big files.
 const NOWRAP_CHUNK: usize = 32 * 1024 * 1024 - (32 * 1024 * 1024 % 3);
 
-/// Minimum data size for parallel encoding (32MB).
-/// The parallel path encodes per-line (57 bytes each), which has significant
-/// per-call overhead from base64_simd function setup. For 10MB benchmarks,
-/// bulk encode (one SIMD pass) + writev is faster than parallel per-line encode.
-/// Only use parallel for genuinely large files where the parallel throughput
-/// exceeds the per-call overhead.
-const PARALLEL_ENCODE_THRESHOLD: usize = 32 * 1024 * 1024;
+/// Minimum data size for parallel encoding (4MB).
+/// For wrapped encoding, the parallel path assigns line-aligned chunks to each thread,
+/// with each thread encoding directly to its position in a shared output buffer.
+/// At 4MB+ the parallel speedup (2-4x on 4+ cores) exceeds rayon overhead (~200us).
+const PARALLEL_ENCODE_THRESHOLD: usize = 4 * 1024 * 1024;
 
-/// Minimum data size for parallel decoding (32MB of base64 data).
-/// For 10MB benchmark inputs (~13MB base64), rayon overhead dominates.
-/// Single-core SIMD decode is already fast enough. Only parallelize
-/// for large files where the parallel speedup exceeds rayon overhead.
-const PARALLEL_DECODE_THRESHOLD: usize = 32 * 1024 * 1024;
+/// Minimum data size for parallel decoding (4MB of base64 data).
+/// At 4MB+ the parallel speedup on multi-core exceeds rayon overhead (~200us).
+/// For 10MB benchmark inputs (~13MB base64), this enables parallel decode.
+const PARALLEL_DECODE_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with fused encode+wrap for maximum throughput.
@@ -39,7 +36,7 @@ pub fn encode_to_writer(data: &[u8], wrap_col: usize, out: &mut impl Write) -> i
 
 /// Encode without wrapping — parallel SIMD encoding for large data, sequential for small.
 fn encode_no_wrap(data: &[u8], out: &mut impl Write) -> io::Result<()> {
-    if data.len() >= PARALLEL_ENCODE_THRESHOLD {
+    if data.len() >= PARALLEL_ENCODE_THRESHOLD && rayon::current_num_threads() > 1 {
         return encode_no_wrap_parallel(data, out);
     }
 
@@ -1099,78 +1096,180 @@ fn try_line_decode(data: &[u8], out: &mut impl Write) -> Option<io::Result<()>> 
     }
 
     let dst = out_buf.as_mut_ptr();
-    let mut i = 0;
 
-    // 4x unrolled decode loop
-    while i + 4 <= full_lines {
-        let in_base = i * line_stride;
-        let out_base = i * decoded_per_line;
-        unsafe {
-            let s0 = std::slice::from_raw_parts_mut(dst.add(out_base), decoded_per_line);
-            if BASE64_ENGINE
-                .decode(&data[in_base..in_base + line_len], s0.as_out())
-                .is_err()
-            {
-                return Some(decode_error());
-            }
+    // Parallel line decode for large inputs (>= 4MB): split lines across threads.
+    // Each thread decodes a contiguous block of lines directly to its final position
+    // in the shared output buffer. SAFETY: non-overlapping output regions per thread.
+    if data.len() >= PARALLEL_DECODE_THRESHOLD && full_lines >= 64 {
+        let out_addr = dst as usize;
+        let num_threads = rayon::current_num_threads().max(1);
+        let lines_per_chunk = (full_lines / num_threads).max(1);
 
-            let s1 = std::slice::from_raw_parts_mut(
-                dst.add(out_base + decoded_per_line),
-                decoded_per_line,
-            );
-            if BASE64_ENGINE
-                .decode(
-                    &data[in_base + line_stride..in_base + line_stride + line_len],
-                    s1.as_out(),
-                )
-                .is_err()
-            {
-                return Some(decode_error());
-            }
-
-            let s2 = std::slice::from_raw_parts_mut(
-                dst.add(out_base + 2 * decoded_per_line),
-                decoded_per_line,
-            );
-            if BASE64_ENGINE
-                .decode(
-                    &data[in_base + 2 * line_stride..in_base + 2 * line_stride + line_len],
-                    s2.as_out(),
-                )
-                .is_err()
-            {
-                return Some(decode_error());
-            }
-
-            let s3 = std::slice::from_raw_parts_mut(
-                dst.add(out_base + 3 * decoded_per_line),
-                decoded_per_line,
-            );
-            if BASE64_ENGINE
-                .decode(
-                    &data[in_base + 3 * line_stride..in_base + 3 * line_stride + line_len],
-                    s3.as_out(),
-                )
-                .is_err()
-            {
-                return Some(decode_error());
-            }
+        // Build per-thread task ranges: (start_line, end_line)
+        let mut tasks: Vec<(usize, usize)> = Vec::new();
+        let mut line_off = 0;
+        while line_off < full_lines {
+            let end = (line_off + lines_per_chunk).min(full_lines);
+            tasks.push((line_off, end));
+            line_off = end;
         }
-        i += 4;
-    }
 
-    // Remaining full lines
-    while i < full_lines {
-        let in_start = i * line_stride;
-        let in_end = in_start + line_len;
-        let out_off = i * decoded_per_line;
-        let out_slice =
-            unsafe { std::slice::from_raw_parts_mut(dst.add(out_off), decoded_per_line) };
-        match BASE64_ENGINE.decode(&data[in_start..in_end], out_slice.as_out()) {
-            Ok(_) => {}
-            Err(_) => return Some(decode_error()),
+        let decode_result: Result<Vec<()>, io::Error> = tasks
+            .par_iter()
+            .map(|&(start_line, end_line)| {
+                let out_ptr = out_addr as *mut u8;
+                let mut i = start_line;
+
+                // 4x unrolled decode within each thread's range
+                while i + 4 <= end_line {
+                    let in_base = i * line_stride;
+                    let ob = i * decoded_per_line;
+                    unsafe {
+                        let s0 = std::slice::from_raw_parts_mut(out_ptr.add(ob), decoded_per_line);
+                        if BASE64_ENGINE
+                            .decode(&data[in_base..in_base + line_len], s0.as_out())
+                            .is_err()
+                        {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input"));
+                        }
+                        let s1 = std::slice::from_raw_parts_mut(
+                            out_ptr.add(ob + decoded_per_line),
+                            decoded_per_line,
+                        );
+                        if BASE64_ENGINE
+                            .decode(
+                                &data[in_base + line_stride..in_base + line_stride + line_len],
+                                s1.as_out(),
+                            )
+                            .is_err()
+                        {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input"));
+                        }
+                        let s2 = std::slice::from_raw_parts_mut(
+                            out_ptr.add(ob + 2 * decoded_per_line),
+                            decoded_per_line,
+                        );
+                        if BASE64_ENGINE
+                            .decode(
+                                &data[in_base + 2 * line_stride..in_base + 2 * line_stride + line_len],
+                                s2.as_out(),
+                            )
+                            .is_err()
+                        {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input"));
+                        }
+                        let s3 = std::slice::from_raw_parts_mut(
+                            out_ptr.add(ob + 3 * decoded_per_line),
+                            decoded_per_line,
+                        );
+                        if BASE64_ENGINE
+                            .decode(
+                                &data[in_base + 3 * line_stride..in_base + 3 * line_stride + line_len],
+                                s3.as_out(),
+                            )
+                            .is_err()
+                        {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input"));
+                        }
+                    }
+                    i += 4;
+                }
+
+                while i < end_line {
+                    let in_start = i * line_stride;
+                    let out_off = i * decoded_per_line;
+                    let out_slice = unsafe {
+                        std::slice::from_raw_parts_mut(out_ptr.add(out_off), decoded_per_line)
+                    };
+                    if BASE64_ENGINE
+                        .decode(&data[in_start..in_start + line_len], out_slice.as_out())
+                        .is_err()
+                    {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input"));
+                    }
+                    i += 1;
+                }
+
+                Ok(())
+            })
+            .collect();
+
+        if decode_result.is_err() {
+            return Some(decode_error());
         }
-        i += 1;
+    } else {
+        // Sequential decode with 4x unrolling for smaller inputs
+        let mut i = 0;
+
+        while i + 4 <= full_lines {
+            let in_base = i * line_stride;
+            let out_base = i * decoded_per_line;
+            unsafe {
+                let s0 = std::slice::from_raw_parts_mut(dst.add(out_base), decoded_per_line);
+                if BASE64_ENGINE
+                    .decode(&data[in_base..in_base + line_len], s0.as_out())
+                    .is_err()
+                {
+                    return Some(decode_error());
+                }
+
+                let s1 = std::slice::from_raw_parts_mut(
+                    dst.add(out_base + decoded_per_line),
+                    decoded_per_line,
+                );
+                if BASE64_ENGINE
+                    .decode(
+                        &data[in_base + line_stride..in_base + line_stride + line_len],
+                        s1.as_out(),
+                    )
+                    .is_err()
+                {
+                    return Some(decode_error());
+                }
+
+                let s2 = std::slice::from_raw_parts_mut(
+                    dst.add(out_base + 2 * decoded_per_line),
+                    decoded_per_line,
+                );
+                if BASE64_ENGINE
+                    .decode(
+                        &data[in_base + 2 * line_stride..in_base + 2 * line_stride + line_len],
+                        s2.as_out(),
+                    )
+                    .is_err()
+                {
+                    return Some(decode_error());
+                }
+
+                let s3 = std::slice::from_raw_parts_mut(
+                    dst.add(out_base + 3 * decoded_per_line),
+                    decoded_per_line,
+                );
+                if BASE64_ENGINE
+                    .decode(
+                        &data[in_base + 3 * line_stride..in_base + 3 * line_stride + line_len],
+                        s3.as_out(),
+                    )
+                    .is_err()
+                {
+                    return Some(decode_error());
+                }
+            }
+            i += 4;
+        }
+
+        while i < full_lines {
+            let in_start = i * line_stride;
+            let in_end = in_start + line_len;
+            let out_off = i * decoded_per_line;
+            let out_slice =
+                unsafe { std::slice::from_raw_parts_mut(dst.add(out_off), decoded_per_line) };
+            match BASE64_ENGINE.decode(&data[in_start..in_end], out_slice.as_out()) {
+                Ok(_) => {}
+                Err(_) => return Some(decode_error()),
+            }
+            i += 1;
+        }
     }
 
     // Decode remainder
