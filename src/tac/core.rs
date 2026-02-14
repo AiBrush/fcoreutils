@@ -39,7 +39,9 @@ fn tac_bytes_zerocopy_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
     // Allocate output buffer. For after-separator mode, output size <= input size.
     let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
     #[allow(clippy::uninit_vec)]
-    unsafe { outbuf.set_len(data.len()) };
+    unsafe {
+        outbuf.set_len(data.len())
+    };
     let dst = outbuf.as_mut_ptr();
     let src = data.as_ptr();
     let mut wp = 0;
@@ -80,7 +82,9 @@ fn tac_bytes_zerocopy_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::
 
     let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
     #[allow(clippy::uninit_vec)]
-    unsafe { outbuf.set_len(data.len()) };
+    unsafe {
+        outbuf.set_len(data.len())
+    };
     let dst = outbuf.as_mut_ptr();
     let src = data.as_ptr();
     let mut wp = 0;
@@ -150,7 +154,9 @@ fn tac_string_after(
 
     let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
     #[allow(clippy::uninit_vec)]
-    unsafe { outbuf.set_len(data.len()) };
+    unsafe {
+        outbuf.set_len(data.len())
+    };
     let dst = outbuf.as_mut_ptr();
     let src = data.as_ptr();
     let mut wp = 0;
@@ -192,7 +198,9 @@ fn tac_string_before(
 
     let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
     #[allow(clippy::uninit_vec)]
-    unsafe { outbuf.set_len(data.len()) };
+    unsafe {
+        outbuf.set_len(data.len())
+    };
     let dst = outbuf.as_mut_ptr();
     let src = data.as_ptr();
     let mut wp = 0;
@@ -315,7 +323,9 @@ pub fn tac_regex_separator(
     // Reverse-copy records into contiguous buffer for single write_all.
     let mut outbuf: Vec<u8> = Vec::with_capacity(data.len());
     #[allow(clippy::uninit_vec)]
-    unsafe { outbuf.set_len(data.len()) };
+    unsafe {
+        outbuf.set_len(data.len())
+    };
     let dst = outbuf.as_mut_ptr();
     let src_ptr = data.as_ptr();
     let mut wp = 0;

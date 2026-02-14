@@ -997,7 +997,11 @@ fn translate_range_to_constant_simd(src: &[u8], dst: &mut [u8], lo: u8, hi: u8, 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn translate_range_to_constant_avx2(
-    src: &[u8], dst: &mut [u8], lo: u8, hi: u8, replacement: u8,
+    src: &[u8],
+    dst: &mut [u8],
+    lo: u8,
+    hi: u8,
+    replacement: u8,
 ) {
     use std::arch::x86_64::*;
     unsafe {
@@ -1045,7 +1049,11 @@ unsafe fn translate_range_to_constant_avx2(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn translate_range_to_constant_sse2(
-    src: &[u8], dst: &mut [u8], lo: u8, hi: u8, replacement: u8,
+    src: &[u8],
+    dst: &mut [u8],
+    lo: u8,
+    hi: u8,
+    replacement: u8,
 ) {
     use std::arch::x86_64::*;
     unsafe {
@@ -2727,7 +2735,13 @@ fn translate_to_separate_buf(
             data.par_chunks(chunk_size)
                 .zip(out_buf.par_chunks_mut(chunk_size))
                 .for_each(|(src, dst)| {
-                    translate_range_to_constant_simd(src, &mut dst[..src.len()], lo, hi, replacement);
+                    translate_range_to_constant_simd(
+                        src,
+                        &mut dst[..src.len()],
+                        lo,
+                        hi,
+                        replacement,
+                    );
                 });
         } else {
             data.par_chunks(chunk_size)
