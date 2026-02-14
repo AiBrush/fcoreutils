@@ -710,14 +710,9 @@ fn radix_sort_entries(
                         std::arch::x86_64::_MM_HINT_T0,
                     );
                 }
-                #[cfg(target_arch = "aarch64")]
-                unsafe {
-                    std::arch::aarch64::_prefetch(
-                        sptr.add(future_pos) as *const i8,
-                        std::arch::aarch64::_PREFETCH_WRITE,
-                        std::arch::aarch64::_PREFETCH_LOCALITY3,
-                    );
-                }
+                // aarch64 prefetch requires nightly, skip it
+                #[cfg(not(target_arch = "x86_64"))]
+                let _ = future_pos;
             }
         }
     }
@@ -1234,9 +1229,8 @@ fn float_to_sortable_u64(f: f64) -> u64 {
 }
 
 /// Write sorted indices to output, with optional unique dedup.
-/// For large outputs (>1MB), builds a single contiguous output buffer and writes
-/// it in one call, eliminating per-line write_all overhead (~10M function calls
-/// for a 100MB file). The parallel copy phase uses rayon to fill the buffer.
+/// Zero-copy writev: writes directly from mmap data through BufWriter.
+/// Eliminates ~110MB intermediate buffer allocation for 100MB files.
 fn write_sorted_output(
     data: &[u8],
     offsets: &[(usize, usize)],
@@ -1245,8 +1239,8 @@ fn write_sorted_output(
     writer: &mut impl Write,
     terminator: &[u8],
 ) -> io::Result<()> {
+    let dp = data.as_ptr();
     if config.unique {
-        let dp = data.as_ptr();
         let mut prev: Option<usize> = None;
         const UBATCH: usize = 512;
         let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(UBATCH * 2);
@@ -1275,66 +1269,20 @@ fn write_sorted_output(
             write_all_vectored(writer, &slices)?;
         }
     } else {
-        let dp = data.as_ptr();
-        let n = sorted_indices.len();
-        let term_byte = terminator[0];
-
-        if n > 50_000 {
-            // Large output: parallel buffer construction
-            // Single-pass prefix sum (no intermediate out_sizes allocation)
-            let mut out_offsets: Vec<usize> = Vec::with_capacity(n + 1);
-            out_offsets.push(0);
-            let mut acc = 0usize;
-            for &idx in sorted_indices {
-                let (s, e) = offsets[idx];
-                acc += (e - s) + 1;
-                out_offsets.push(acc);
-            }
-            let total_out = acc;
-
-            let mut out_buf: Vec<u8> = Vec::with_capacity(total_out);
-            #[allow(clippy::uninit_vec)]
-            unsafe {
-                out_buf.set_len(total_out);
-            }
-            let out_ptr = out_buf.as_mut_ptr() as usize;
-            let dp_addr = dp as usize;
-            const CHUNK: usize = 16384;
-            let n_chunks = (n + CHUNK - 1) / CHUNK;
-            (0..n_chunks).into_par_iter().for_each(|chunk_idx| {
-                let dst = out_ptr as *mut u8;
-                let src = dp_addr as *const u8;
-                let start = chunk_idx * CHUNK;
-                let end = (start + CHUNK).min(n);
-                for i in start..end {
-                    let idx = sorted_indices[i];
-                    let (s, e) = offsets[idx];
-                    let lu = e - s;
-                    let off = out_offsets[i];
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(src.add(s), dst.add(off), lu);
-                        *dst.add(off + lu) = term_byte;
-                    }
-                }
-            });
-            writer.write_all(&out_buf)?;
-        } else {
-            // Smaller output: write_vectored batching
-            const BATCH: usize = 512;
-            let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-            for &idx in sorted_indices {
-                let (s, e) = offsets[idx];
-                let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
-                slices.push(io::IoSlice::new(line));
-                slices.push(io::IoSlice::new(terminator));
-                if slices.len() >= BATCH * 2 {
-                    write_all_vectored(writer, &slices)?;
-                    slices.clear();
-                }
-            }
-            if !slices.is_empty() {
+        const BATCH: usize = 512;
+        let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+        for &idx in sorted_indices {
+            let (s, e) = offsets[idx];
+            let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
+            slices.push(io::IoSlice::new(line));
+            slices.push(io::IoSlice::new(terminator));
+            if slices.len() >= BATCH * 2 {
                 write_all_vectored(writer, &slices)?;
+                slices.clear();
             }
+        }
+        if !slices.is_empty() {
+            write_all_vectored(writer, &slices)?;
         }
     }
     Ok(())
@@ -1877,65 +1825,22 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         // This is O(n) instead of O(n log n), turning the "reverse sorted" case
         // from 2.7x to near-instant (like the already-sorted case).
         if is_reverse_sorted && !config.unique {
+            // Zero-copy writev: output lines in reverse directly from mmap data.
             let dp = data.as_ptr();
-            let term_byte = terminator[0];
-
-            if num_lines > 50_000 {
-                // Large output: parallel buffer construction for reversed output.
-                // No rev_indices Vec needed — compute reversed index inline.
-                let mut out_offsets: Vec<usize> = Vec::with_capacity(num_lines + 1);
-                out_offsets.push(0);
-                let mut acc = 0usize;
-                for i in (0..num_lines).rev() {
-                    let (s, e) = offsets[i];
-                    acc += (e - s) + 1;
-                    out_offsets.push(acc);
-                }
-                let total_out = acc;
-                let mut out_buf: Vec<u8> = Vec::with_capacity(total_out);
-                #[allow(clippy::uninit_vec)]
-                unsafe {
-                    out_buf.set_len(total_out);
-                }
-                let out_ptr = out_buf.as_mut_ptr() as usize;
-                let dp_addr = dp as usize;
-                let nlines = num_lines; // capture for closure
-                const CHUNK: usize = 16384;
-                let n_chunks = (num_lines + CHUNK - 1) / CHUNK;
-                (0..n_chunks).into_par_iter().for_each(|chunk_idx| {
-                    let dst = out_ptr as *mut u8;
-                    let src = dp_addr as *const u8;
-                    let start = chunk_idx * CHUNK;
-                    let end = (start + CHUNK).min(nlines);
-                    for i in start..end {
-                        let orig_idx = nlines - 1 - i;
-                        let (s, e) = offsets[orig_idx];
-                        let lu = e - s;
-                        let off = out_offsets[i];
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(src.add(s), dst.add(off), lu);
-                            *dst.add(off + lu) = term_byte;
-                        }
-                    }
-                });
-                writer.write_all(&out_buf)?;
-            } else {
-                const BATCH: usize = 512;
-                let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-                // Output in reversed order (last line first)
-                for i in (0..num_lines).rev() {
-                    let (s, e) = offsets[i];
-                    let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
-                    slices.push(io::IoSlice::new(line));
-                    slices.push(io::IoSlice::new(terminator));
-                    if slices.len() >= BATCH * 2 {
-                        write_all_vectored(&mut writer, &slices)?;
-                        slices.clear();
-                    }
-                }
-                if !slices.is_empty() {
+            const BATCH: usize = 512;
+            let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+            for i in (0..num_lines).rev() {
+                let (s, e) = offsets[i];
+                let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
+                slices.push(io::IoSlice::new(line));
+                slices.push(io::IoSlice::new(terminator));
+                if slices.len() >= BATCH * 2 {
                     write_all_vectored(&mut writer, &slices)?;
+                    slices.clear();
                 }
+            }
+            if !slices.is_empty() {
+                write_all_vectored(&mut writer, &slices)?;
             }
             writer.flush()?;
             return Ok(());
@@ -2088,131 +1993,41 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 write_all_vectored(&mut writer, &slices)?;
             }
         } else if reverse {
-            // Reverse: output buffer construction for large data.
-            // Single-pass prefix sum directly from reversed iteration (no intermediate Vecs).
+            // Reverse: zero-copy writev directly from mmap data in reverse order.
+            // Eliminates ~110MB allocation for 100MB files.
             let dp = data.as_ptr();
-            let n_sorted = sorted.len();
-            let term_byte = terminator[0];
-
-            if n_sorted > 50_000 {
-                // Single-pass prefix sum over reversed entries (no out_sizes Vec needed).
-                let mut out_offsets: Vec<usize> = Vec::with_capacity(n_sorted + 1);
-                out_offsets.push(0);
-                let mut acc = 0usize;
-                for i in (0..n_sorted).rev() {
-                    acc += sorted[i].2 as usize + 1;
-                    out_offsets.push(acc);
-                }
-                let total_out = acc;
-
-                let mut out_buf: Vec<u8> = Vec::with_capacity(total_out);
-                #[allow(clippy::uninit_vec)]
-                unsafe {
-                    out_buf.set_len(total_out);
-                }
-                let out_ptr = out_buf.as_mut_ptr() as usize;
-                let dp_addr = dp as usize;
-                let sorted_len = n_sorted; // capture for closure
-                const CHUNK: usize = 16384;
-                let n_chunks = (n_sorted + CHUNK - 1) / CHUNK;
-                (0..n_chunks).into_par_iter().for_each(|chunk_idx| {
-                    let dst = out_ptr as *mut u8;
-                    let src = dp_addr as *const u8;
-                    let start = chunk_idx * CHUNK;
-                    let end = (start + CHUNK).min(sorted_len);
-                    for idx in start..end {
-                        // Map output index to reversed sorted index
-                        let rev_idx = sorted_len - 1 - idx;
-                        let (_, s, l) = sorted[rev_idx];
-                        let off = out_offsets[idx];
-                        let lu = l as usize;
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(src.add(s as usize), dst.add(off), lu);
-                            *dst.add(off + lu) = term_byte;
-                        }
-                    }
-                });
-                writer.write_all(&out_buf)?;
-            } else {
-                const BATCH: usize = 512;
-                let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-                for &(_, s, l) in sorted.iter().rev() {
-                    let line =
-                        unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
-                    slices.push(io::IoSlice::new(line));
-                    slices.push(io::IoSlice::new(terminator));
-                    if slices.len() >= BATCH * 2 {
-                        write_all_vectored(&mut writer, &slices)?;
-                        slices.clear();
-                    }
-                }
-                if !slices.is_empty() {
+            const BATCH: usize = 512;
+            let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+            for &(_, s, l) in sorted.iter().rev() {
+                let line = unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
+                slices.push(io::IoSlice::new(line));
+                slices.push(io::IoSlice::new(terminator));
+                if slices.len() >= BATCH * 2 {
                     write_all_vectored(&mut writer, &slices)?;
+                    slices.clear();
                 }
             }
+            if !slices.is_empty() {
+                write_all_vectored(&mut writer, &slices)?;
+            }
         } else {
-            // Forward: parallel output buffer construction for large data,
-            // write_vectored batching for smaller data.
+            // Forward: zero-copy writev directly from mmap data.
+            // Eliminates ~110MB allocation (out_offsets + out_buf) for 100MB files.
+            // BufWriter(16MB) handles batching; writev syscall count is minimal.
             let dp = data.as_ptr();
-            let n_sorted = sorted.len();
-            let term_byte = terminator[0];
-
-            if n_sorted > 50_000 {
-                // Large output: build contiguous buffer with parallel memcpy.
-                // Single-pass prefix sum (no intermediate out_sizes allocation).
-                let mut out_offsets: Vec<usize> = Vec::with_capacity(n_sorted + 1);
-                out_offsets.push(0);
-                let mut acc = 0usize;
-                for &(_, _, l) in &sorted {
-                    acc += l as usize + 1;
-                    out_offsets.push(acc);
-                }
-                let total_out = acc;
-
-                // Step 2: parallel memcpy into output buffer
-                let mut out_buf: Vec<u8> = Vec::with_capacity(total_out);
-                #[allow(clippy::uninit_vec)]
-                unsafe {
-                    out_buf.set_len(total_out);
-                }
-                let out_ptr = out_buf.as_mut_ptr() as usize;
-                let dp_addr = dp as usize;
-                const CHUNK: usize = 16384;
-                let n_chunks = (n_sorted + CHUNK - 1) / CHUNK;
-                (0..n_chunks).into_par_iter().for_each(|chunk_idx| {
-                    let dst = out_ptr as *mut u8;
-                    let src = dp_addr as *const u8;
-                    let start = chunk_idx * CHUNK;
-                    let end = (start + CHUNK).min(n_sorted);
-                    for idx in start..end {
-                        let (_, s, l) = sorted[idx];
-                        let off = out_offsets[idx];
-                        let lu = l as usize;
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(src.add(s as usize), dst.add(off), lu);
-                            *dst.add(off + lu) = term_byte;
-                        }
-                    }
-                });
-
-                writer.write_all(&out_buf)?;
-            } else {
-                // Smaller output: write_vectored batching
-                const BATCH: usize = 512;
-                let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-                for &(_, s, l) in &sorted {
-                    let line =
-                        unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
-                    slices.push(io::IoSlice::new(line));
-                    slices.push(io::IoSlice::new(terminator));
-                    if slices.len() >= BATCH * 2 {
-                        write_all_vectored(&mut writer, &slices)?;
-                        slices.clear();
-                    }
-                }
-                if !slices.is_empty() {
+            const BATCH: usize = 512;
+            let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+            for &(_, s, l) in &sorted {
+                let line = unsafe { std::slice::from_raw_parts(dp.add(s as usize), l as usize) };
+                slices.push(io::IoSlice::new(line));
+                slices.push(io::IoSlice::new(terminator));
+                if slices.len() >= BATCH * 2 {
                     write_all_vectored(&mut writer, &slices)?;
+                    slices.clear();
                 }
+            }
+            if !slices.is_empty() {
+                write_all_vectored(&mut writer, &slices)?;
             }
         }
     } else if is_fold_case_lex && num_lines > 256 {
