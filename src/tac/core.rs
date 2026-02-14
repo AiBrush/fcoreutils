@@ -184,6 +184,7 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
     }
 
     let mut output = Vec::with_capacity(data.len());
+    #[allow(clippy::uninit_vec)]
     unsafe {
         output.set_len(data.len());
     }
