@@ -160,11 +160,10 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
 
 fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
     if cli.decode {
-        // Try mmap first for file-redirected stdin (zero-copy + parallel decode)
+        // Try mmap first for file-redirected stdin (zero-copy decode)
         #[cfg(unix)]
         if let Some(mmap) = try_mmap_stdin() {
-            let mut data = mmap.to_vec();
-            return b64::decode_owned(&mut data, cli.ignore_garbage, out);
+            return b64::decode_to_writer(&mmap, cli.ignore_garbage, out);
         }
 
         // For piped stdin: use streaming decode to avoid 64MB read_stdin pre-alloc.
