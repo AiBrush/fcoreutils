@@ -812,8 +812,23 @@ fn write_sorted_output(
     } else {
         const BATCH: usize = 512;
         let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-        for &idx in sorted_indices {
-            let (s, e) = offsets[idx];
+        let n = sorted_indices.len();
+        for j in 0..n {
+            if j + 8 < n {
+                let (ps, _) = offsets[sorted_indices[j + 8]];
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch(dp.add(ps) as *const i8, 0);
+                }
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    let addr = dp.add(ps) as *const u8;
+                    std::arch::asm!("prfm pldl1keep, [{x}]", x = in(reg) addr, options(nostack, preserves_flags));
+                }
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                let _ = ps;
+            }
+            let (s, e) = offsets[sorted_indices[j]];
             let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
             slices.push(io::IoSlice::new(line));
             slices.push(io::IoSlice::new(terminator));
@@ -906,8 +921,26 @@ fn write_sorted_entries(
         let dp = data.as_ptr();
         const BATCH: usize = 512;
         let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-        for &(_, idx) in entries {
-            let (s, e) = offsets[idx];
+        let n = entries.len();
+        for j in 0..n {
+            // Prefetch data for entries 8 ahead to hide memory latency.
+            // After sort, entries access data in random order — prefetching
+            // ensures cache lines are loaded before they're needed.
+            if j + 8 < n {
+                let (ps, _) = offsets[entries[j + 8].1];
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch(dp.add(ps) as *const i8, 0);
+                }
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    let addr = dp.add(ps) as *const u8;
+                    std::arch::asm!("prfm pldl1keep, [{x}]", x = in(reg) addr, options(nostack, preserves_flags));
+                }
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                let _ = ps;
+            }
+            let (s, e) = offsets[entries[j].1];
             let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
             slices.push(io::IoSlice::new(line));
             slices.push(io::IoSlice::new(terminator));

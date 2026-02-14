@@ -178,10 +178,9 @@ fn main() {
     // which maps to system writev on Unix — zero-copy from mmap pages.
     // For regex/string separator: use BufWriter since those paths
     // use many small write_all calls that benefit from buffering.
-    let is_byte_sep = !cli.regex && cli.separator.is_none();
-
     #[cfg(unix)]
     let had_error = {
+        let is_byte_sep = !cli.regex && cli.separator.is_none();
         let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
         if is_byte_sep {
             run(&cli, &files, &mut &*raw)
