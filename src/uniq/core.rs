@@ -1242,8 +1242,6 @@ fn process_count_fast_singlepass(
 ) -> io::Result<()> {
     let data_len = data.len();
     let base = data.as_ptr();
-    let is_default = matches!(config.mode, OutputMode::Default);
-
     let first_term = match memchr::memchr(term, data) {
         Some(pos) => pos,
         None => {
@@ -1278,9 +1276,6 @@ fn process_count_fast_singlepass(
     let mut batch_buf: Vec<u8> = Vec::with_capacity(BATCH_BUF_SIZE);
 
     while cur_start < data_len {
-        // Speculative line-end detection: if previous line had length L,
-        // check if data[cur_start + L] is the terminator. This avoids
-        // the memchr SIMD call for repetitive data where lines are same length.
         let cur_end = {
             let speculative = cur_start + prev_len;
             if speculative < data_len && unsafe { *base.add(speculative) } == term {
@@ -1297,7 +1292,6 @@ fn process_count_fast_singlepass(
 
         let cur_len = cur_end - cur_start;
 
-        // Fast reject using length + 8-byte prefix before full comparison
         let is_dup = if cur_len != prev_len {
             false
         } else if cur_len == 0 {
@@ -1326,15 +1320,10 @@ fn process_count_fast_singlepass(
         if is_dup {
             count += 1;
         } else {
-            // Output previous group with count
-            let should_print = if is_default {
-                true
-            } else {
-                match config.mode {
-                    OutputMode::RepeatedOnly => count > 1,
-                    OutputMode::UniqueOnly => count == 1,
-                    _ => true,
-                }
+            let should_print = match config.mode {
+                OutputMode::RepeatedOnly => count > 1,
+                OutputMode::UniqueOnly => count == 1,
+                _ => true,
             };
             if should_print {
                 write_count_line_buf(&mut batch_buf, count, &data[prev_start..prev_end], term);
@@ -1362,14 +1351,10 @@ fn process_count_fast_singlepass(
     }
 
     // Output last group
-    let should_print = if is_default {
-        true
-    } else {
-        match config.mode {
-            OutputMode::RepeatedOnly => count > 1,
-            OutputMode::UniqueOnly => count == 1,
-            _ => true,
-        }
+    let should_print = match config.mode {
+        OutputMode::RepeatedOnly => count > 1,
+        OutputMode::UniqueOnly => count == 1,
+        _ => true,
     };
     if should_print {
         write_count_line_buf(&mut batch_buf, count, &data[prev_start..prev_end], term);

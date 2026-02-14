@@ -269,7 +269,10 @@ fn process_fields_multi_select(
     Ok(())
 }
 
-/// Process a chunk for multi-field extraction.
+/// Process a chunk for multi-field extraction using a single memchr2 SIMD pass.
+/// Scans for both delim and line_delim in one SIMD pass, tracking field positions
+/// inline and emitting selected fields directly. This eliminates per-line memchr
+/// setup overhead compared to the two-pass (outer newline + inner delim) approach.
 fn multi_select_chunk(
     data: &[u8],
     delim: u8,
@@ -280,121 +283,100 @@ fn multi_select_chunk(
     buf: &mut Vec<u8>,
 ) {
     buf.reserve(data.len());
-    let mut start = 0;
-    for end_pos in memchr_iter(line_delim, data) {
-        let line = &data[start..end_pos];
-        multi_select_line(line, delim, line_delim, ranges, max_field, suppress, buf);
-        start = end_pos + 1;
-    }
-    if start < data.len() {
-        multi_select_line(&data[start..], delim, line_delim, ranges, max_field, suppress, buf);
-    }
-}
 
-/// Extract multiple non-contiguous fields from one line.
-/// Collects delimiter positions into a small stack array, then uses
-/// direct indexing to extract selected fields.
-/// For lines with < 64 fields (common), uses a stack-allocated array.
-#[inline(always)]
-fn multi_select_line(
-    line: &[u8],
-    delim: u8,
-    line_delim: u8,
-    ranges: &[Range],
-    max_field: usize,
-    suppress: bool,
-    buf: &mut Vec<u8>,
-) {
-    let len = line.len();
-    if len == 0 {
-        if !suppress {
-            buf.push(line_delim);
-        }
-        return;
-    }
+    // Pre-compute field selection mask for O(1) field lookup
+    let field_mask = compute_field_mask(ranges, false);
 
-    buf.reserve(len + 1);
-    let base = line.as_ptr();
-
-    // Collect delimiter positions (up to max_field delimiters needed).
-    // Stack-allocated for <= 63 fields (covers 99%+ of CSV/TSV data).
-    // delim_pos[i] = position of the (i+1)th delimiter in the line.
-    let mut stack_delims = [0usize; 64];
-    let mut num_delims: usize = 0;
-    let need = max_field; // We need at most max_field delimiters
-
-    // Use memchr SIMD for all line lengths — the SIMD setup cost (~5ns)
-    // is negligible compared to the scalar byte-by-byte scan overhead.
-    for pos in memchr_iter(delim, line) {
-        if num_delims < 64 {
-            stack_delims[num_delims] = pos;
-        }
-        num_delims += 1;
-        if num_delims >= need {
-            break;
-        }
-    }
-
-    if num_delims == 0 {
-        // No delimiter in line
-        if !suppress {
-            unsafe {
-                buf_extend(buf, line);
-                buf_push(buf, line_delim);
-            }
-        }
-        return;
-    }
-
-    let total_fields = num_delims + 1;
-    let delims = &stack_delims[..num_delims.min(64)];
-
-    // Extract selected fields using direct indexing into delimiter positions
+    let base = data.as_ptr();
+    let data_len = data.len();
+    let mut line_start: usize = 0;
+    let mut field_start: usize = 0;
+    let mut field_num: usize = 1; // 1-based
     let mut first_output = true;
-    for r in ranges {
-        let r_start = r.start;
-        let r_end = r.end.min(total_fields);
-        if r_start > total_fields {
-            break;
-        }
-        for field_num in r_start..=r_end {
-            if field_num > total_fields {
-                break;
-            }
-            if !first_output {
-                unsafe { buf_push(buf, delim) };
-            }
-            // field_num is 1-based
-            let field_start = if field_num == 1 {
-                0
-            } else if (field_num - 2) < delims.len() {
-                delims[field_num - 2] + 1
+    let mut has_delim = false;
+
+    for pos in memchr::memchr2_iter(delim, line_delim, data) {
+        let byte = unsafe { *base.add(pos) };
+
+        if byte == line_delim {
+            // End of line
+            if has_delim {
+                // Check if current (last) field is selected
+                if field_num <= max_field && is_selected(field_num, field_mask, ranges, false) {
+                    if !first_output {
+                        unsafe { buf_push(buf, delim) };
+                    }
+                    unsafe {
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(field_start), pos - field_start),
+                        );
+                    }
+                }
+                unsafe { buf_push(buf, line_delim) };
             } else {
-                // Not enough delimiter positions cached — field doesn't exist
-                break;
-            };
-            let field_end = if (field_num - 1) < delims.len() {
-                delims[field_num - 1]
-            } else {
-                len // last field extends to end of line
-            };
-            if field_start <= len && field_end <= len {
+                // No delimiter in line
+                if !suppress {
+                    unsafe {
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(line_start), pos - line_start),
+                        );
+                        buf_push(buf, line_delim);
+                    }
+                }
+            }
+
+            // Reset for next line
+            line_start = pos + 1;
+            field_start = pos + 1;
+            field_num = 1;
+            first_output = true;
+            has_delim = false;
+        } else {
+            // Delimiter found
+            has_delim = true;
+            if field_num <= max_field && is_selected(field_num, field_mask, ranges, false) {
+                if !first_output {
+                    unsafe { buf_push(buf, delim) };
+                }
                 unsafe {
                     buf_extend(
                         buf,
-                        std::slice::from_raw_parts(base.add(field_start), field_end - field_start),
+                        std::slice::from_raw_parts(base.add(field_start), pos - field_start),
                     );
                 }
+                first_output = false;
             }
-            first_output = false;
+            field_num += 1;
+            field_start = pos + 1;
         }
     }
 
-    if first_output {
-        // No fields were selected (all fields beyond line's field count)
-        unsafe { buf_push(buf, line_delim) };
-    } else {
-        unsafe { buf_push(buf, line_delim) };
+    // Handle last line without trailing line_delim
+    if line_start < data_len {
+        if has_delim {
+            if field_num <= max_field && is_selected(field_num, field_mask, ranges, false) {
+                if !first_output {
+                    unsafe { buf_push(buf, delim) };
+                }
+                unsafe {
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(field_start), data_len - field_start),
+                    );
+                }
+            }
+            unsafe { buf_push(buf, line_delim) };
+        } else if !suppress {
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(line_start), data_len - line_start),
+                );
+                buf_push(buf, line_delim);
+            }
+        }
     }
 }
 
