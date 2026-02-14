@@ -2597,59 +2597,10 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
 
     let member = build_member_set(delete_chars);
 
-    // Parallel path: pre-allocate a single output buffer of data.len() and have each
-    // thread write to its non-overlapping slice, then do a single write_all.
-    // This avoids per-chunk Vec allocations that the old approach had.
-    if data.len() >= PARALLEL_THRESHOLD {
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        // Each thread deletes into its slice of outbuf and returns bytes written.
-        let mut outbuf = alloc_uninit_vec(data.len());
-        let chunk_lens: Vec<usize> = data
-            .par_chunks(chunk_size)
-            .zip(outbuf.par_chunks_mut(chunk_size))
-            .map(|(src_chunk, dst_chunk)| delete_chunk_bitset_into(src_chunk, &member, dst_chunk))
-            .collect();
-
-        // Compact: move each chunk's output to be contiguous.
-        // chunk_lens[i] is how many bytes thread i wrote into its slice.
-        // We need to shift them together since each dst_chunk started at chunk_size offsets.
-        let mut write_pos = 0;
-        let mut src_offset = 0;
-        for &clen in &chunk_lens {
-            if clen > 0 && src_offset != write_pos {
-                unsafe {
-                    std::ptr::copy(
-                        outbuf.as_ptr().add(src_offset),
-                        outbuf.as_mut_ptr().add(write_pos),
-                        clen,
-                    );
-                }
-            }
-            write_pos += clen;
-            src_offset += chunk_size;
-        }
-
-        return writer.write_all(&outbuf[..write_pos]);
-    }
-
-    // Single-write fast path: delete into one buffer, one write
-    if data.len() <= SINGLE_WRITE_LIMIT {
-        let mut outbuf = alloc_uninit_vec(data.len());
-        let out_pos = delete_chunk_bitset_into(data, &member, &mut outbuf);
-        return writer.write_all(&outbuf[..out_pos]);
-    }
-
-    // Chunked path for large data
-    let buf_size = data.len().min(BUF_SIZE);
-    let mut outbuf = alloc_uninit_vec(buf_size);
-
-    for chunk in data.chunks(buf_size) {
-        let out_pos = delete_chunk_bitset_into(chunk, &member, &mut outbuf);
-        writer.write_all(&outbuf[..out_pos])?;
-    }
-    Ok(())
+    // Zero-copy writev path: scan for runs of kept bytes, build IoSlice entries
+    // pointing directly into the source data. No data copying needed.
+    // For sparse deletes (few bytes deleted), most data stays in long runs.
+    delete_bitset_zerocopy(data, &member, writer)
 }
 
 /// SIMD range delete for mmap data, with rayon parallel processing.
@@ -2696,6 +2647,7 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
 /// Delete bytes from chunk using bitset, writing into pre-allocated buffer.
 /// Returns number of bytes written.
 #[inline]
+#[allow(dead_code)]
 fn delete_chunk_bitset_into(chunk: &[u8], member: &[u8; 32], outbuf: &mut [u8]) -> usize {
     let len = chunk.len();
     let mut out_pos = 0;
@@ -2742,6 +2694,50 @@ fn delete_chunk_bitset_into(chunk: &[u8], member: &[u8; 32], outbuf: &mut [u8]) 
     }
 
     out_pos
+}
+
+/// Zero-copy delete for general bitset: scan for runs of kept bytes,
+/// build IoSlice entries pointing directly into the source data.
+/// No allocation for output data — just ~16 bytes per IoSlice entry.
+/// Flushes in MAX_IOV-sized batches for efficient writev.
+fn delete_bitset_zerocopy(
+    data: &[u8],
+    member: &[u8; 32],
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let mut iov: Vec<std::io::IoSlice> = Vec::with_capacity(MAX_IOV);
+    let len = data.len();
+    let mut i = 0;
+    let mut run_start: Option<usize> = None;
+
+    while i < len {
+        let b = unsafe { *data.get_unchecked(i) };
+        if is_member(member, b) {
+            // This byte should be deleted
+            if let Some(rs) = run_start {
+                iov.push(std::io::IoSlice::new(&data[rs..i]));
+                run_start = None;
+                if iov.len() >= MAX_IOV {
+                    write_ioslices(writer, &iov)?;
+                    iov.clear();
+                }
+            }
+        } else {
+            // This byte should be kept
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+        }
+        i += 1;
+    }
+    // Flush final run
+    if let Some(rs) = run_start {
+        iov.push(std::io::IoSlice::new(&data[rs..]));
+    }
+    if !iov.is_empty() {
+        write_ioslices(writer, &iov)?;
+    }
+    Ok(())
 }
 
 fn delete_single_char_mmap(ch: u8, data: &[u8], writer: &mut impl Write) -> io::Result<()> {
