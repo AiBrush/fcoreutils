@@ -9,13 +9,16 @@ const BASE64_ENGINE: &base64_simd::Base64 = &base64_simd::STANDARD;
 /// Larger chunks = fewer write() syscalls for big files.
 const NOWRAP_CHUNK: usize = 32 * 1024 * 1024 - (32 * 1024 * 1024 % 3);
 
-/// Minimum data size for parallel encoding (1MB).
-/// Lowered from 4MB so 10MB benchmark workloads get multi-core processing.
-const PARALLEL_ENCODE_THRESHOLD: usize = 1024 * 1024;
+/// Minimum data size for parallel encoding (16MB).
+/// base64_simd SIMD encoding runs at ~8 GB/s per core, processing 10MB
+/// in ~1.25ms. Rayon thread pool creation + sync costs ~100-500us.
+/// For 10MB benchmark workloads, single-threaded is faster.
+const PARALLEL_ENCODE_THRESHOLD: usize = 16 * 1024 * 1024;
 
-/// Minimum data size for parallel decoding (1MB of base64 data).
-/// Lowered from 4MB for better parallelism on typical workloads.
-const PARALLEL_DECODE_THRESHOLD: usize = 1024 * 1024;
+/// Minimum data size for parallel decoding (16MB of base64 data).
+/// base64_simd SIMD decoding is similarly fast; parallelism only
+/// helps for very large inputs where thread overhead is amortized.
+const PARALLEL_DECODE_THRESHOLD: usize = 16 * 1024 * 1024;
 
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with fused encode+wrap for maximum throughput.
@@ -102,7 +105,39 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
         return encode_wrapped_parallel(data, wrap_col, bytes_per_line, out);
     }
 
-    // Align input chunk to bytes_per_line for complete output lines.
+    // For data that fits in a single chunk, use fuse_wrap to build a contiguous
+    // output buffer with newlines interleaved, then write_all in one syscall.
+    // This is much faster than writev with many small IoSlice entries for piped
+    // output (single write() vs hundreds of writev() calls).
+    if bytes_per_line.is_multiple_of(3) {
+        let line_out = wrap_col + 1;
+        let total_full_lines = data.len() / bytes_per_line;
+        let remainder_input = data.len() % bytes_per_line;
+        let remainder_encoded = if remainder_input > 0 {
+            BASE64_ENGINE.encoded_length(remainder_input) + 1
+        } else {
+            0
+        };
+        let total_output = total_full_lines * line_out + remainder_encoded;
+
+        let enc_max = BASE64_ENGINE.encoded_length(data.len());
+        let total_buf_size = total_output + enc_max;
+        let mut work_buf: Vec<u8> = Vec::with_capacity(total_buf_size);
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            work_buf.set_len(total_buf_size);
+        }
+
+        // Encode into second region, fuse_wrap into first region
+        let encode_start = total_output;
+        let _ = BASE64_ENGINE.encode(data, work_buf[encode_start..encode_start + enc_max].as_out());
+        let (fused_region, encode_region) = work_buf.split_at_mut(total_output);
+        let encoded = &encode_region[..enc_max];
+        let wp = fuse_wrap(encoded, wrap_col, fused_region);
+        return out.write_all(&fused_region[..wp]);
+    }
+
+    // Fallback for non-3-aligned bytes_per_line: use writev
     let lines_per_chunk = (32 * 1024 * 1024) / bytes_per_line;
     let max_input_chunk = (lines_per_chunk * bytes_per_line).max(bytes_per_line);
     let input_chunk = max_input_chunk.min(data.len());
@@ -117,10 +152,6 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
     for chunk in data.chunks(max_input_chunk.max(1)) {
         let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
         let encoded = BASE64_ENGINE.encode(chunk, encode_buf[..enc_len].as_out());
-
-        // Use writev: build IoSlice entries pointing at wrap_col-sized segments
-        // of the encoded buffer interleaved with newline IoSlices.
-        // This eliminates the fused_buf copy entirely.
         write_wrapped_iov(encoded, wrap_col, out)?;
     }
 

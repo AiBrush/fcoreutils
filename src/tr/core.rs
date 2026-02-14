@@ -18,10 +18,11 @@ const BUF_SIZE: usize = 4 * 1024 * 1024;
 const STREAM_BUF: usize = 16 * 1024 * 1024;
 
 /// Minimum data size to engage rayon parallel processing for mmap paths.
-/// AVX2 translation is so fast (~6 GB/s per core) that rayon thread pool
-/// overhead dominates for small data. 8MB threshold ensures each thread
-/// gets enough work (~2MB+) to amortize the ~100us spawn/sync cost.
-const PARALLEL_THRESHOLD: usize = 8 * 1024 * 1024;
+/// AVX2 translation runs at ~10 GB/s per core, processing 10MB in ~1ms.
+/// Rayon thread pool creation + sync costs ~100-500us, which nearly
+/// negates the parallelism benefit for data under 16MB. Single-threaded
+/// AVX2 is faster for typical benchmark workloads (10MB).
+const PARALLEL_THRESHOLD: usize = 16 * 1024 * 1024;
 
 /// Write multiple IoSlice buffers using write_vectored, batching into MAX_IOV-sized groups.
 /// Falls back to write_all per slice for partial writes.
