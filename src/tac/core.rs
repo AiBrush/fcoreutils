@@ -48,7 +48,7 @@ fn flush_iov(out: &mut impl Write, slices: &[IoSlice]) -> io::Result<()> {
 ///
 /// Only works for after-separator mode with single-byte separator.
 pub fn tac_bytes_owned(
-    data: &mut Vec<u8>,
+    data: &mut [u8],
     separator: u8,
     before: bool,
     out: &mut impl Write,

@@ -143,9 +143,8 @@ fn main() {
             tr::expand_set2(set2_str, set1.len())
         };
 
-        let result = if mmap.is_some() {
+        let result = if let Some(ref m) = mmap {
             // File-redirected stdin: use mmap batch path (zero-copy + parallel)
-            let m = mmap.as_ref().unwrap();
             #[cfg(unix)]
             {
                 tr::translate_mmap(&set1, &set2, m.as_ref(), &mut *raw)
@@ -182,9 +181,9 @@ fn main() {
         return;
     }
 
-    if mmap.is_some() {
+    if let Some(m) = mmap {
         // File-redirected stdin: use batch path with mmap data
-        let data = FileData::Mmap(mmap.unwrap());
+        let data = FileData::Mmap(m);
         #[cfg(unix)]
         let result = run_mmap_mode(&cli, set1_str, &data, &mut *raw);
         #[cfg(not(unix))]
