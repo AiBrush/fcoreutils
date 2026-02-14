@@ -65,7 +65,11 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     if let Some(ref m) = mmap {
         unsafe {
             // tac now scans forward with memchr_iter — sequential readahead helps
-            libc::madvise(m.as_ptr() as *mut libc::c_void, m.len(), libc::MADV_SEQUENTIAL);
+            libc::madvise(
+                m.as_ptr() as *mut libc::c_void,
+                m.len(),
+                libc::MADV_SEQUENTIAL,
+            );
             if m.len() >= 2 * 1024 * 1024 {
                 libc::madvise(
                     m.as_ptr() as *mut libc::c_void,
