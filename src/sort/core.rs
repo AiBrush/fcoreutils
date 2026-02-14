@@ -323,10 +323,11 @@ fn read_all_input(
         let mut data = Vec::new();
         for input in inputs {
             if input == "-" {
-                // Use BufReader with 8MB buffer for high-throughput stdin reads.
-                // This reduces the number of read syscalls for piped input.
-                let mut reader = BufReader::with_capacity(8 * 1024 * 1024, io::stdin().lock());
-                reader.read_to_end(&mut data)?;
+                // Use raw libc::read() via read_stdin() for high-throughput stdin reads.
+                // Bypasses BufReader/StdinLock overhead, pre-allocates 64MB, uses
+                // full spare capacity per read() call to minimize syscall count.
+                let stdin_data = crate::common::io::read_stdin()?;
+                data.extend_from_slice(&stdin_data);
             } else {
                 let mut file = File::open(input).map_err(|e| {
                     io::Error::new(
@@ -854,10 +855,43 @@ fn write_sorted_output(
     } else if sorted_indices.len() > 50_000 {
         write_sorted_single_buf_idx(data, offsets, sorted_indices, terminator, writer)?;
     } else {
+        // Use write_vectored to batch line+terminator pairs into fewer syscalls.
+        // Each entry produces 2 IoSlices (line data + terminator), batched in
+        // groups of 512 entries (1024 IoSlices) to stay within typical writev limits.
+        const BATCH: usize = 512;
+        let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
         for &idx in sorted_indices {
             let (s, e) = offsets[idx];
-            writer.write_all(&data[s..e])?;
-            writer.write_all(terminator)?;
+            slices.push(io::IoSlice::new(&data[s..e]));
+            slices.push(io::IoSlice::new(terminator));
+            if slices.len() >= BATCH * 2 {
+                write_all_vectored(writer, &slices)?;
+                slices.clear();
+            }
+        }
+        if !slices.is_empty() {
+            write_all_vectored(writer, &slices)?;
+        }
+    }
+    Ok(())
+}
+
+/// Write all IoSlices, handling partial writes.
+fn write_all_vectored(writer: &mut impl Write, slices: &[io::IoSlice<'_>]) -> io::Result<()> {
+    let total: usize = slices.iter().map(|s| s.len()).sum();
+    let mut written = 0usize;
+    while written < total {
+        let n = writer.write_vectored(slices)?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write_vectored returned 0",
+            ));
+        }
+        written += n;
+        // BufWriter will typically consume all in one call, so we break early
+        if written >= total {
+            break;
         }
     }
     Ok(())
@@ -1194,10 +1228,11 @@ fn do_sort(
 /// 3. Single-key sorts: pre-extracts key offsets + optional numeric pre-parse
 /// 4. General: index-based sort with full comparison function
 pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()> {
-    // Enlarge pipe buffers on Linux for higher throughput when reading from stdin
+    // Enlarge pipe buffers on Linux for higher throughput when reading from stdin.
+    // 8MB matches other tools (ftac, fbase64, ftr, fcut) for consistent syscall reduction.
     #[cfg(target_os = "linux")]
     {
-        const PIPE_SIZE: i32 = 4 * 1024 * 1024;
+        const PIPE_SIZE: i32 = 8 * 1024 * 1024;
         unsafe {
             libc::fcntl(0, libc::F_SETPIPE_SZ, PIPE_SIZE);
             libc::fcntl(1, libc::F_SETPIPE_SZ, PIPE_SIZE);
