@@ -619,6 +619,144 @@ fn detect_range_offset(table: &[u8; 256]) -> Option<(u8, u8, i8)> {
     lo.map(|l| (l, hi, offset as i8))
 }
 
+/// Detect if the translate table maps a contiguous range [lo..=hi] to a single constant byte,
+/// and all other bytes are identity. This covers cases like `tr '\000-\037' 'X'` where
+/// a range maps to one replacement character.
+/// Returns Some((lo, hi, replacement)) if the pattern matches.
+#[inline]
+fn detect_range_to_constant(table: &[u8; 256]) -> Option<(u8, u8, u8)> {
+    let mut lo: Option<u8> = None;
+    let mut hi = 0u8;
+    let mut replacement = 0u8;
+
+    for i in 0..256 {
+        if table[i] != i as u8 {
+            match lo {
+                None => {
+                    lo = Some(i as u8);
+                    hi = i as u8;
+                    replacement = table[i];
+                }
+                Some(_) => {
+                    if table[i] != replacement || i as u8 != hi.wrapping_add(1) {
+                        return None;
+                    }
+                    hi = i as u8;
+                }
+            }
+        }
+    }
+
+    lo.map(|l| (l, hi, replacement))
+}
+
+/// SIMD-accelerated range-to-constant translation.
+/// For tables where a contiguous range [lo..=hi] maps to a single byte, and all
+/// other bytes are identity. Uses vectorized range check + blend (5 SIMD ops per
+/// 32 bytes with AVX2, vs 48 for general nibble decomposition).
+#[cfg(target_arch = "x86_64")]
+fn translate_range_to_constant_simd_inplace(data: &mut [u8], lo: u8, hi: u8, replacement: u8) {
+    if get_simd_level() >= 3 {
+        unsafe { translate_range_to_constant_avx2_inplace(data, lo, hi, replacement) };
+    } else {
+        unsafe { translate_range_to_constant_sse2_inplace(data, lo, hi, replacement) };
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn translate_range_to_constant_avx2_inplace(data: &mut [u8], lo: u8, hi: u8, replacement: u8) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let range = hi - lo;
+        let bias_v = _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let repl_v = _mm256_set1_epi8(replacement as i8);
+        let zero = _mm256_setzero_si256();
+
+        let len = data.len();
+        let ptr = data.as_mut_ptr();
+        let mut i = 0;
+
+        while i + 32 <= len {
+            let input = _mm256_loadu_si256(ptr.add(i) as *const _);
+            let biased = _mm256_add_epi8(input, bias_v);
+            let gt = _mm256_cmpgt_epi8(biased, threshold_v);
+            // mask = 0xFF where IN range (to replace), 0 where to KEEP
+            let in_range = _mm256_cmpeq_epi8(gt, zero);
+            // Use blendvb: for each byte, if in_range bit is set, use replacement, else use input
+            let result = _mm256_blendv_epi8(input, repl_v, in_range);
+            _mm256_storeu_si256(ptr.add(i) as *mut _, result);
+            i += 32;
+        }
+
+        if i + 16 <= len {
+            let bias_v128 = _mm_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+            let threshold_v128 = _mm_set1_epi8(0x80u8.wrapping_add(range) as i8);
+            let repl_v128 = _mm_set1_epi8(replacement as i8);
+            let zero128 = _mm_setzero_si128();
+
+            let input = _mm_loadu_si128(ptr.add(i) as *const _);
+            let biased = _mm_add_epi8(input, bias_v128);
+            let gt = _mm_cmpgt_epi8(biased, threshold_v128);
+            let in_range = _mm_cmpeq_epi8(gt, zero128);
+            let result = _mm_blendv_epi8(input, repl_v128, in_range);
+            _mm_storeu_si128(ptr.add(i) as *mut _, result);
+            i += 16;
+        }
+
+        while i < len {
+            let b = *ptr.add(i);
+            *ptr.add(i) = if b >= lo && b <= hi { replacement } else { b };
+            i += 1;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn translate_range_to_constant_sse2_inplace(data: &mut [u8], lo: u8, hi: u8, replacement: u8) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let range = hi - lo;
+        let bias_v = _mm_set1_epi8(0x80u8.wrapping_sub(lo) as i8);
+        let threshold_v = _mm_set1_epi8(0x80u8.wrapping_add(range) as i8);
+        let repl_v = _mm_set1_epi8(replacement as i8);
+        let zero = _mm_setzero_si128();
+
+        let len = data.len();
+        let ptr = data.as_mut_ptr();
+        let mut i = 0;
+
+        while i + 16 <= len {
+            let input = _mm_loadu_si128(ptr.add(i) as *const _);
+            let biased = _mm_add_epi8(input, bias_v);
+            let gt = _mm_cmpgt_epi8(biased, threshold_v);
+            let in_range = _mm_cmpeq_epi8(gt, zero);
+            let result = _mm_blendv_epi8(input, repl_v, in_range);
+            _mm_storeu_si128(ptr.add(i) as *mut _, result);
+            i += 16;
+        }
+
+        while i < len {
+            let b = *ptr.add(i);
+            *ptr.add(i) = if b >= lo && b <= hi { replacement } else { b };
+            i += 1;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn translate_range_to_constant_simd_inplace(data: &mut [u8], lo: u8, hi: u8, replacement: u8) {
+    for b in data.iter_mut() {
+        if *b >= lo && *b <= hi {
+            *b = replacement;
+        }
+    }
+}
+
 /// SIMD-accelerated range translation for mmap'd data.
 /// For tables where only a contiguous range [lo..=hi] is translated by a constant offset,
 /// uses AVX2 (32 bytes/iter) or SSE2 (16 bytes/iter) vectorized arithmetic.
@@ -1131,9 +1269,15 @@ pub fn translate(
         return passthrough_stream(reader, writer);
     }
 
-    // Try SIMD fast path for range translations (in-place, single buffer)
+    // Try SIMD fast path for constant-offset range translations (in-place, single buffer)
     if let Some((lo, hi, offset)) = detect_range_offset(&table) {
         return translate_range_stream(lo, hi, offset, reader, writer);
+    }
+
+    // Try SIMD fast path for range-to-constant translations (e.g., '\000-\037' -> 'X').
+    // Uses blendv (5 SIMD ops/32 bytes) instead of nibble decomposition (48 ops/32 bytes).
+    if let Some((lo, hi, replacement)) = detect_range_to_constant(&table) {
+        return translate_range_to_constant_stream(lo, hi, replacement, reader, writer);
     }
 
     // General case: IN-PLACE translation on a SINGLE 16MB buffer.
@@ -1172,6 +1316,27 @@ fn translate_range_stream(
             break;
         }
         translate_range_simd_inplace(&mut buf[..n], lo, hi, offset);
+        writer.write_all(&buf[..n])?;
+    }
+    Ok(())
+}
+
+/// Streaming SIMD range-to-constant translation — single buffer, in-place transform.
+/// Uses blendv instead of nibble decomposition for ~10x fewer SIMD ops per vector.
+fn translate_range_to_constant_stream(
+    lo: u8,
+    hi: u8,
+    replacement: u8,
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let mut buf = alloc_uninit_vec(STREAM_BUF);
+    loop {
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        translate_range_to_constant_simd_inplace(&mut buf[..n], lo, hi, replacement);
         writer.write_all(&buf[..n])?;
     }
     Ok(())
@@ -1228,6 +1393,11 @@ pub fn translate_squeeze(
     // Even though it's two passes, the translate pass is so much faster with SIMD
     // that the total is still a net win.
     let range_info = detect_range_offset(&table);
+    let range_const_info = if range_info.is_none() {
+        detect_range_to_constant(&table)
+    } else {
+        None
+    };
 
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     let mut last_squeezed: u16 = 256;
@@ -1240,6 +1410,8 @@ pub fn translate_squeeze(
         // Pass 1: translate
         if let Some((lo, hi, offset)) = range_info {
             translate_range_simd_inplace(&mut buf[..n], lo, hi, offset);
+        } else if let Some((lo, hi, replacement)) = range_const_info {
+            translate_range_to_constant_simd_inplace(&mut buf[..n], lo, hi, replacement);
         } else {
             translate_inplace(&mut buf[..n], &table);
         }
@@ -1655,6 +1827,20 @@ pub fn translate_owned(
         return writer.write_all(data);
     }
 
+    // SIMD range-to-constant fast path (in-place)
+    if let Some((lo, hi, replacement)) = detect_range_to_constant(&table) {
+        if data.len() >= PARALLEL_THRESHOLD {
+            let n_threads = rayon::current_num_threads().max(1);
+            let chunk_size = (data.len() / n_threads).max(32 * 1024);
+            data.par_chunks_mut(chunk_size).for_each(|chunk| {
+                translate_range_to_constant_simd_inplace(chunk, lo, hi, replacement);
+            });
+        } else {
+            translate_range_to_constant_simd_inplace(data, lo, hi, replacement);
+        }
+        return writer.write_all(data);
+    }
+
     // General table lookup (in-place)
     if data.len() >= PARALLEL_THRESHOLD {
         let n_threads = rayon::current_num_threads().max(1);
@@ -1704,6 +1890,11 @@ pub fn translate_mmap(
         return translate_mmap_range(data, writer, lo, hi, offset);
     }
 
+    // Try SIMD fast path for range-to-constant translations
+    if let Some((lo, hi, replacement)) = detect_range_to_constant(&table) {
+        return translate_mmap_range_to_constant(data, writer, lo, hi, replacement);
+    }
+
     // General case: table lookup (with parallel processing for large data)
     translate_mmap_table(data, writer, &table)
 }
@@ -1742,6 +1933,46 @@ fn translate_mmap_range(
     let mut buf = alloc_uninit_vec(BUF_SIZE);
     for chunk in data.chunks(BUF_SIZE) {
         translate_range_simd(chunk, &mut buf[..chunk.len()], lo, hi, offset);
+        writer.write_all(&buf[..chunk.len()])?;
+    }
+    Ok(())
+}
+
+/// SIMD range-to-constant translate for mmap data.
+/// Uses blendv (5 SIMD ops/32 bytes) for range-to-constant patterns.
+fn translate_mmap_range_to_constant(
+    data: &[u8],
+    writer: &mut impl Write,
+    lo: u8,
+    hi: u8,
+    replacement: u8,
+) -> io::Result<()> {
+    // For mmap data (read-only), copy to buffer and translate in-place
+    if data.len() >= PARALLEL_THRESHOLD {
+        let mut buf = alloc_uninit_vec(data.len());
+        let n_threads = rayon::current_num_threads().max(1);
+        let chunk_size = (data.len() / n_threads).max(32 * 1024);
+
+        // Copy + translate in parallel
+        data.par_chunks(chunk_size)
+            .zip(buf.par_chunks_mut(chunk_size))
+            .for_each(|(src_chunk, dst_chunk)| {
+                dst_chunk[..src_chunk.len()].copy_from_slice(src_chunk);
+                translate_range_to_constant_simd_inplace(&mut dst_chunk[..src_chunk.len()], lo, hi, replacement);
+            });
+
+        return writer.write_all(&buf);
+    }
+
+    if data.len() <= SINGLE_WRITE_LIMIT {
+        let mut buf = data.to_vec();
+        translate_range_to_constant_simd_inplace(&mut buf, lo, hi, replacement);
+        return writer.write_all(&buf);
+    }
+    let mut buf = alloc_uninit_vec(BUF_SIZE);
+    for chunk in data.chunks(BUF_SIZE) {
+        buf[..chunk.len()].copy_from_slice(chunk);
+        translate_range_to_constant_simd_inplace(&mut buf[..chunk.len()], lo, hi, replacement);
         writer.write_all(&buf[..chunk.len()])?;
     }
     Ok(())
