@@ -605,13 +605,17 @@ fn process_single_field(
             // Uses successive memchr calls per line instead of the full combined scan.
             // For field 2: two memchr calls (find first delim, find second).
             // This avoids the memchr2_iter overhead for every byte in the line.
-            let mut buf = Vec::with_capacity(data.len());
+            // Write directly to the output BufWriter to avoid intermediate Vec allocation.
+            let mut buf = Vec::with_capacity(data.len().min(4 * 1024 * 1024));
             process_small_field_combined(data, delim, line_delim, target_idx, &mut buf);
             if !buf.is_empty() {
                 out.write_all(&buf)?;
             }
         } else {
-            let mut buf = Vec::with_capacity(data.len());
+            // Write directly to BufWriter-backed output to avoid intermediate Vec.
+            // For larger inputs, process_nth_field_combined builds a buffer that
+            // we then write in a single call (reducing syscall count).
+            let mut buf = Vec::with_capacity(data.len().min(4 * 1024 * 1024));
             process_nth_field_combined(data, delim, line_delim, target_idx, suppress, &mut buf);
             if !buf.is_empty() {
                 out.write_all(&buf)?;

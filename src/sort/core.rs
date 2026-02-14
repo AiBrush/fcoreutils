@@ -1578,7 +1578,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             // Reduces memory allocation overhead and write syscall count.
             let tl = terminator.len();
             let n = sorted.len();
-            if n > 50_000 {
+            if n > 10_000 {
                 let num_threads = rayon::current_num_threads().max(1);
                 let chunk_size = (n + num_threads - 1) / num_threads;
 
