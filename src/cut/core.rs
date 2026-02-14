@@ -227,6 +227,194 @@ fn split_into_chunks<'a>(data: &'a [u8], line_delim: u8) -> Vec<&'a [u8]> {
     chunks
 }
 
+// ── Fast path: multi-field non-contiguous extraction ─────────────────────
+
+/// Multi-field non-contiguous extraction (e.g., `cut -d, -f1,3,5`).
+/// Pre-collects delimiter positions per line into a stack-allocated array,
+/// then directly indexes into them for each selected field.
+/// This is O(max_field) per line instead of O(num_fields * scan_length).
+fn process_fields_multi_select(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    ranges: &[Range],
+    suppress: bool,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let max_field = ranges.last().map_or(0, |r| r.end);
+
+    if data.len() >= PARALLEL_THRESHOLD {
+        let chunks = split_into_chunks(data, line_delim);
+        let results: Vec<Vec<u8>> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut buf = Vec::with_capacity(chunk.len());
+                multi_select_chunk(chunk, delim, line_delim, ranges, max_field, suppress, &mut buf);
+                buf
+            })
+            .collect();
+        let slices: Vec<IoSlice> = results
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| IoSlice::new(r))
+            .collect();
+        write_ioslices(out, &slices)?;
+    } else {
+        let mut buf = Vec::with_capacity(data.len());
+        multi_select_chunk(data, delim, line_delim, ranges, max_field, suppress, &mut buf);
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for multi-field extraction.
+fn multi_select_chunk(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    ranges: &[Range],
+    max_field: usize,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    buf.reserve(data.len());
+    let mut start = 0;
+    for end_pos in memchr_iter(line_delim, data) {
+        let line = &data[start..end_pos];
+        multi_select_line(line, delim, line_delim, ranges, max_field, suppress, buf);
+        start = end_pos + 1;
+    }
+    if start < data.len() {
+        multi_select_line(&data[start..], delim, line_delim, ranges, max_field, suppress, buf);
+    }
+}
+
+/// Extract multiple non-contiguous fields from one line.
+/// Collects delimiter positions into a small stack array, then uses
+/// direct indexing to extract selected fields.
+/// For lines with < 64 fields (common), uses a stack-allocated array.
+#[inline(always)]
+fn multi_select_line(
+    line: &[u8],
+    delim: u8,
+    line_delim: u8,
+    ranges: &[Range],
+    max_field: usize,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    let len = line.len();
+    if len == 0 {
+        if !suppress {
+            buf.push(line_delim);
+        }
+        return;
+    }
+
+    buf.reserve(len + 1);
+    let base = line.as_ptr();
+
+    // Collect delimiter positions (up to max_field delimiters needed).
+    // Stack-allocated for <= 63 fields (covers 99%+ of CSV/TSV data).
+    // delim_pos[i] = position of the (i+1)th delimiter in the line.
+    let mut stack_delims = [0usize; 64];
+    let mut num_delims: usize = 0;
+    let need = max_field; // We need at most max_field delimiters
+
+    if len <= 256 {
+        // Scalar path for short lines
+        let mut i = 0usize;
+        unsafe {
+            while i < len {
+                if *base.add(i) == delim {
+                    if num_delims < 64 {
+                        stack_delims[num_delims] = i;
+                    }
+                    num_delims += 1;
+                    if num_delims >= need {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+        }
+    } else {
+        for pos in memchr_iter(delim, line) {
+            if num_delims < 64 {
+                stack_delims[num_delims] = pos;
+            }
+            num_delims += 1;
+            if num_delims >= need {
+                break;
+            }
+        }
+    }
+
+    if num_delims == 0 {
+        // No delimiter in line
+        if !suppress {
+            unsafe {
+                buf_extend(buf, line);
+                buf_push(buf, line_delim);
+            }
+        }
+        return;
+    }
+
+    let total_fields = num_delims + 1;
+    let delims = &stack_delims[..num_delims.min(64)];
+
+    // Extract selected fields using direct indexing into delimiter positions
+    let mut first_output = true;
+    for r in ranges {
+        let r_start = r.start;
+        let r_end = r.end.min(total_fields);
+        if r_start > total_fields {
+            break;
+        }
+        for field_num in r_start..=r_end {
+            if field_num > total_fields {
+                break;
+            }
+            if !first_output {
+                unsafe { buf_push(buf, delim) };
+            }
+            // field_num is 1-based
+            let field_start = if field_num == 1 {
+                0
+            } else if (field_num - 2) < delims.len() {
+                delims[field_num - 2] + 1
+            } else {
+                // Not enough delimiter positions cached — field doesn't exist
+                break;
+            };
+            let field_end = if (field_num - 1) < delims.len() {
+                delims[field_num - 1]
+            } else {
+                len // last field extends to end of line
+            };
+            if field_start <= len && field_end <= len {
+                unsafe {
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(field_start), field_end - field_start),
+                    );
+                }
+            }
+            first_output = false;
+        }
+    }
+
+    if first_output {
+        // No fields were selected (all fields beyond line's field count)
+        unsafe { buf_push(buf, line_delim) };
+    } else {
+        unsafe { buf_push(buf, line_delim) };
+    }
+}
+
 // ── Fast path: field extraction with batched output ──────────────────────
 
 /// Optimized field extraction with early exit and batched output.
@@ -305,6 +493,21 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
             suppress,
             out,
         );
+    }
+
+    // Fast path: multi-field non-contiguous extraction (e.g., cut -f1,3,5)
+    // Uses delimiter position caching: find all delimiter positions per line,
+    // then directly index into them for each selected field.
+    // This is faster than the general extract_fields_to_buf which re-checks
+    // is_selected() for every field encountered.
+    if !complement
+        && ranges.len() > 1
+        && ranges.last().map_or(false, |r| r.end < usize::MAX)
+        && output_delim.len() == 1
+        && output_delim[0] == delim
+        && delim != line_delim
+    {
+        return process_fields_multi_select(data, delim, line_delim, ranges, suppress, out);
     }
 
     // General field extraction

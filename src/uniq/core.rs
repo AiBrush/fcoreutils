@@ -1008,10 +1008,9 @@ fn process_default_parallel(data: &[u8], writer: &mut impl Write, term: u8) -> i
 }
 
 /// Fast single-pass for RepeatedOnly (-d) and UniqueOnly (-u) modes.
-/// Batched output: accumulates output lines in a 64KB buffer before flushing,
-/// reducing the number of write() syscalls.
-/// Uses cached prefix comparison for fast duplicate detection.
-/// Uses raw pointer arithmetic throughout to avoid bounds checking.
+/// Zero-copy: writes directly from mmap data through BufWriter.
+/// Uses speculative line-end detection and 8-byte prefix caching for fast
+/// duplicate detection without full memcmp.
 fn process_filter_fast_singlepass(
     data: &[u8],
     writer: &mut impl Write,
@@ -1034,34 +1033,64 @@ fn process_filter_fast_singlepass(
         }
     };
 
-    // Write directly to the BufWriter (already 16MB) — no batch_buf needed.
-    // This is zero-copy: we write slices from the original mmap data.
     let mut prev_start: usize = 0;
     let mut prev_end: usize = first_term;
     let mut prev_len = prev_end;
+    let mut prev_prefix: u64 = if prev_len >= 8 {
+        unsafe { (base.add(prev_start) as *const u64).read_unaligned() }
+    } else {
+        0
+    };
     let mut count: u64 = 1;
     let mut cur_start = first_term + 1;
 
     while cur_start < data_len {
-        let cur_end = match memchr::memchr(term, unsafe {
-            std::slice::from_raw_parts(base.add(cur_start), data_len - cur_start)
-        }) {
-            Some(offset) => cur_start + offset,
-            None => data_len,
+        // Speculative line-end detection
+        let cur_end = {
+            let speculative = cur_start + prev_len;
+            if speculative < data_len && unsafe { *base.add(speculative) } == term {
+                speculative
+            } else {
+                match memchr::memchr(term, unsafe {
+                    std::slice::from_raw_parts(base.add(cur_start), data_len - cur_start)
+                }) {
+                    Some(offset) => cur_start + offset,
+                    None => data_len,
+                }
+            }
         };
 
         let cur_len = cur_end - cur_start;
-        let is_dup = cur_len == prev_len
-            && unsafe {
+
+        // Fast reject using length + 8-byte prefix
+        let is_dup = if cur_len != prev_len {
+            false
+        } else if cur_len == 0 {
+            true
+        } else if cur_len >= 8 {
+            let cur_prefix = unsafe { (base.add(cur_start) as *const u64).read_unaligned() };
+            if cur_prefix != prev_prefix {
+                false
+            } else if cur_len <= 8 {
+                true
+            } else {
+                unsafe {
+                    let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
+                    let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
+                    lines_equal_fast(a, b)
+                }
+            }
+        } else {
+            unsafe {
                 let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
                 let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
-                lines_equal_fast(a, b)
-            };
+                a == b
+            }
+        };
 
         if is_dup {
             count += 1;
         } else {
-            // Output previous group directly from mmap data
             let should_print = if repeated { count > 1 } else { count == 1 };
             if should_print {
                 writer.write_all(&data[prev_start..prev_end])?;
@@ -1070,6 +1099,11 @@ fn process_filter_fast_singlepass(
             prev_start = cur_start;
             prev_end = cur_end;
             prev_len = cur_len;
+            prev_prefix = if cur_len >= 8 {
+                unsafe { (base.add(cur_start) as *const u64).read_unaligned() }
+            } else {
+                0
+            };
             count = 1;
         }
 
@@ -1096,9 +1130,12 @@ fn process_filter_fast_singlepass(
 /// Uses cached length comparison for fast duplicate rejection.
 /// Uses raw pointer arithmetic to avoid bounds checking.
 ///
-/// Batched output: accumulates count-prefixed lines in a 64KB buffer and
-/// flushes periodically, reducing the number of write() syscalls from
-/// one-per-group to one-per-64KB.
+/// Optimizations:
+/// - Speculative line-end detection: if all lines have the same length (common
+///   in repetitive data), we can skip the memchr SIMD scan entirely by checking
+///   if data[cur_start + prev_len] is the terminator.
+/// - Cached 8-byte prefix rejection: avoids full comparison for most non-equal lines.
+/// - Batched write_count_line: combines prefix + line + term into single writes.
 fn process_count_fast_singlepass(
     data: &[u8],
     writer: &mut impl Write,
@@ -1129,29 +1166,64 @@ fn process_count_fast_singlepass(
     let mut prev_start: usize = 0;
     let mut prev_end: usize = first_term;
     let mut prev_len = prev_end;
+    let mut prev_prefix: u64 = if prev_len >= 8 {
+        unsafe { (base.add(prev_start) as *const u64).read_unaligned() }
+    } else {
+        0
+    };
     let mut count: u64 = 1;
     let mut cur_start = first_term + 1;
 
     while cur_start < data_len {
-        let cur_end = match memchr::memchr(term, unsafe {
-            std::slice::from_raw_parts(base.add(cur_start), data_len - cur_start)
-        }) {
-            Some(offset) => cur_start + offset,
-            None => data_len,
+        // Speculative line-end detection: if previous line had length L,
+        // check if data[cur_start + L] is the terminator. This avoids
+        // the memchr SIMD call for repetitive data where lines are same length.
+        let cur_end = {
+            let speculative = cur_start + prev_len;
+            if speculative < data_len && unsafe { *base.add(speculative) } == term {
+                speculative
+            } else {
+                match memchr::memchr(term, unsafe {
+                    std::slice::from_raw_parts(base.add(cur_start), data_len - cur_start)
+                }) {
+                    Some(offset) => cur_start + offset,
+                    None => data_len,
+                }
+            }
         };
 
         let cur_len = cur_end - cur_start;
-        let is_dup = cur_len == prev_len
-            && unsafe {
+
+        // Fast reject using length + 8-byte prefix before full comparison
+        let is_dup = if cur_len != prev_len {
+            false
+        } else if cur_len == 0 {
+            true
+        } else if cur_len >= 8 {
+            let cur_prefix = unsafe { (base.add(cur_start) as *const u64).read_unaligned() };
+            if cur_prefix != prev_prefix {
+                false
+            } else if cur_len <= 8 {
+                true
+            } else {
+                unsafe {
+                    let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
+                    let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
+                    lines_equal_fast(a, b)
+                }
+            }
+        } else {
+            unsafe {
                 let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
                 let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
-                lines_equal_fast(a, b)
-            };
+                a == b
+            }
+        };
 
         if is_dup {
             count += 1;
         } else {
-            // Output previous group with count — directly via BufWriter
+            // Output previous group with count
             let should_print = if is_default {
                 true
             } else {
@@ -1167,6 +1239,11 @@ fn process_count_fast_singlepass(
             prev_start = cur_start;
             prev_end = cur_end;
             prev_len = cur_len;
+            prev_prefix = if cur_len >= 8 {
+                unsafe { (base.add(cur_start) as *const u64).read_unaligned() }
+            } else {
+                0
+            };
             count = 1;
         }
 

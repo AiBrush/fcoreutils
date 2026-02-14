@@ -748,27 +748,34 @@ fn radix_sort_entries(
             };
             let blen = bucket.len();
 
-            // For large buckets (>64): second-level MSD radix on byte 5
-            // (bits 40-47). Uses 256 buckets (1KB count array, fits in L1 cache)
-            // instead of 65536 (256KB, spills to L2/L3).
+            // For large buckets (>64): second-level MSD radix on bits 32-47
+            // (2 bytes). Uses 65536 buckets (256KB count array, fits in L2 cache).
+            // For very large buckets, the wider radix is worthwhile because it
+            // reduces per-bucket sizes by 65536x vs the first-level radix.
+            // For medium buckets (65-512), uses 8-bit radix (256 buckets, 1KB).
             if blen > 64 {
-                // Check if second-level radix has variation in byte 5
-                let first_b5 = ((bucket[0].0 >> 40) & 0xFF) as u8;
+                // Check if second-level radix has variation in the next 2 bytes
+                let first_bits = ((bucket[0].0 >> 32) & 0xFFFF) as u16;
                 let mut has_variation = false;
                 for e in &bucket[1..] {
-                    if ((e.0 >> 40) & 0xFF) as u8 != first_b5 {
+                    if ((e.0 >> 32) & 0xFFFF) as u16 != first_bits {
                         has_variation = true;
                         break;
                     }
                 }
 
                 if has_variation {
-                    let sub_nbk: usize = 256;
-                    let mut sub_cnts = [0u32; 256];
+                    // Use 16-bit radix for large buckets (>512), 8-bit for medium
+                    let use_wide = blen > 512;
+                    let sub_nbk: usize = if use_wide { 65536 } else { 256 };
+                    let shift = if use_wide { 32u32 } else { 40u32 };
+                    let mask: u64 = if use_wide { 0xFFFF } else { 0xFF };
+
+                    let mut sub_cnts = vec![0u32; sub_nbk];
                     for &(pfx, _, _) in bucket.iter() {
-                        sub_cnts[((pfx >> 40) & 0xFF) as usize] += 1;
+                        sub_cnts[((pfx >> shift) & mask) as usize] += 1;
                     }
-                    let mut sub_starts = [0usize; 257];
+                    let mut sub_starts = vec![0usize; sub_nbk + 1];
                     {
                         let mut s = 0usize;
                         for i in 0..sub_nbk {
@@ -784,10 +791,10 @@ fn radix_sort_entries(
                         temp.set_len(blen);
                     }
                     {
-                        let mut wpos = sub_starts;
+                        let mut wpos = sub_starts.clone();
                         let temp_ptr = temp.as_mut_ptr();
                         for &ent in bucket.iter() {
-                            let b = ((ent.0 >> 40) & 0xFF) as usize;
+                            let b = ((ent.0 >> shift) & mask) as usize;
                             unsafe {
                                 *temp_ptr.add(wpos[b]) = ent;
                             }
@@ -1405,64 +1412,73 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         && !gopts.ignore_nonprinting;
 
     if num_lines > 1 && !is_numeric_only_precheck {
-        let is_sorted = if is_plain_lex_for_check {
-            // Fast path: 8-byte prefix comparison for plain lexicographic sort.
-            // Most lines can be resolved with a single u64 comparison, avoiding
-            // full memcmp. Only falls back to full comparison on prefix collision.
-            // For -r (reverse), check descending order instead of ascending.
+        // Check both ascending and descending order simultaneously.
+        // If ascending: data is already sorted -> output as-is.
+        // If descending: data is reverse-sorted -> reverse and output (O(n) vs O(n log n)).
+        // This is especially valuable for `sort reverse_sorted.txt` (currently 2.7x).
+        let (is_sorted, is_reverse_sorted) = if is_plain_lex_for_check {
             let dp = data.as_ptr();
             let reverse = gopts.reverse;
-            let mut sorted = true;
+            let mut asc = true;
+            let mut desc = true;
             let mut prev_prefix = line_prefix(data, offsets[0].0, offsets[0].1);
             for i in 1..num_lines {
                 let (s2, e2) = offsets[i];
                 let cur_prefix = line_prefix(data, s2, e2);
-                if !reverse {
+                if asc {
                     if prev_prefix > cur_prefix {
-                        sorted = false;
-                        break;
-                    }
-                    if prev_prefix == cur_prefix {
+                        asc = false;
+                    } else if prev_prefix == cur_prefix {
                         let (s1, e1) = offsets[i - 1];
                         let a = unsafe { std::slice::from_raw_parts(dp.add(s1), e1 - s1) };
                         let b = unsafe { std::slice::from_raw_parts(dp.add(s2), e2 - s2) };
                         if a > b {
-                            sorted = false;
-                            break;
+                            asc = false;
                         }
                     }
-                } else {
-                    // Reverse: check descending order
+                }
+                if desc {
                     if prev_prefix < cur_prefix {
-                        sorted = false;
-                        break;
-                    }
-                    if prev_prefix == cur_prefix {
+                        desc = false;
+                    } else if prev_prefix == cur_prefix {
                         let (s1, e1) = offsets[i - 1];
                         let a = unsafe { std::slice::from_raw_parts(dp.add(s1), e1 - s1) };
                         let b = unsafe { std::slice::from_raw_parts(dp.add(s2), e2 - s2) };
                         if a < b {
-                            sorted = false;
-                            break;
+                            desc = false;
                         }
                     }
                 }
+                if !asc && !desc {
+                    break;
+                }
                 prev_prefix = cur_prefix;
             }
-            sorted
+            // For -r (reverse), swap: ascending input needs reversal, descending is "sorted"
+            if reverse {
+                (desc, asc)
+            } else {
+                (asc, desc)
+            }
         } else {
-            let mut sorted = true;
+            let mut asc = true;
+            let mut desc = true;
             for i in 1..num_lines {
                 let (s1, e1) = offsets[i - 1];
                 let (s2, e2) = offsets[i];
                 let cmp = compare_lines(&data[s1..e1], &data[s2..e2], config);
-                if cmp == Ordering::Greater {
-                    sorted = false;
+                match cmp {
+                    Ordering::Greater => asc = false,
+                    Ordering::Less => desc = false,
+                    _ => {}
+                }
+                if !asc && !desc {
                     break;
                 }
             }
-            sorted
+            (asc, desc)
         };
+
         if is_sorted {
             // Zero-copy fast path: write mmap data directly when possible.
             // Conditions: non-unique, newline-terminated, no \r in data.
@@ -1478,7 +1494,6 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             }
 
             // Line-by-line output for unique/\r\n/zero-terminated cases
-            // Write directly to BufWriter — it already handles batching.
             if config.unique {
                 let dp = data.as_ptr();
                 let mut prev: Option<usize> = None;
@@ -1501,8 +1516,6 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                 }
             } else {
-                // Already sorted: write lines directly using write_vectored batching.
-                // Zero-copy: IoSlice entries point into mmap data, no output buffer allocation.
                 let dp = data.as_ptr();
                 const BATCH: usize = 512;
                 let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
@@ -1518,6 +1531,58 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 }
                 if !slices.is_empty() {
                     write_all_vectored(&mut writer, &slices)?;
+                }
+            }
+            writer.flush()?;
+            return Ok(());
+        }
+
+        // Reverse-sorted detection: if data is in descending order and user wants
+        // ascending (or vice versa with -r), just reverse the offsets array.
+        // This is O(n) instead of O(n log n), turning the "reverse sorted" case
+        // from 2.7x to near-instant (like the already-sorted case).
+        if is_reverse_sorted && !config.unique {
+            let dp = data.as_ptr();
+            const BATCH: usize = 512;
+            let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
+            // Output in reversed order (last line first)
+            for i in (0..num_lines).rev() {
+                let (s, e) = offsets[i];
+                let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
+                slices.push(io::IoSlice::new(line));
+                slices.push(io::IoSlice::new(terminator));
+                if slices.len() >= BATCH * 2 {
+                    write_all_vectored(&mut writer, &slices)?;
+                    slices.clear();
+                }
+            }
+            if !slices.is_empty() {
+                write_all_vectored(&mut writer, &slices)?;
+            }
+            writer.flush()?;
+            return Ok(());
+        }
+
+        if is_reverse_sorted && config.unique {
+            // Reverse-sorted with unique: output in reverse with dedup
+            let dp = data.as_ptr();
+            let mut prev: Option<usize> = None;
+            for i in (0..num_lines).rev() {
+                let (s, e) = offsets[i];
+                let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
+                let emit = match prev {
+                    Some(p) => {
+                        let (ps, pe) = offsets[p];
+                        let prev_line =
+                            unsafe { std::slice::from_raw_parts(dp.add(ps), pe - ps) };
+                        compare_lines_for_dedup(prev_line, line, config) != Ordering::Equal
+                    }
+                    None => true,
+                };
+                if emit {
+                    writer.write_all(line)?;
+                    writer.write_all(terminator)?;
+                    prev = Some(i);
                 }
             }
             writer.flush()?;
