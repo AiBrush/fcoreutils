@@ -2370,7 +2370,107 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         Ordering::Equal
                     }
                 };
-                if num_lines > 10_000 {
+                if num_lines > 4096 && !reverse && !stable {
+                    // Hybrid MSD radix + parallel bucket pdqsort for single-key lex.
+                    // Same approach as lex FAST PATH 1: distribute by top byte of key
+                    // prefix, then pdqsort each bucket independently.
+                    let n = entries.len();
+                    let mut temp: Vec<(u64, usize)> = Vec::with_capacity(n);
+                    #[allow(clippy::uninit_vec)]
+                    unsafe {
+                        temp.set_len(n);
+                    }
+                    let mut cnts = [0u32; 256];
+                    for &(pfx, _) in entries.iter() {
+                        cnts[(pfx >> 56) as usize] += 1;
+                    }
+                    let mut bk_starts = [0usize; 257];
+                    {
+                        let mut s = 0;
+                        for i in 0..256 {
+                            bk_starts[i] = s;
+                            s += cnts[i] as usize;
+                        }
+                        bk_starts[256] = s;
+                    }
+                    {
+                        let mut wpos = bk_starts;
+                        let tptr = temp.as_mut_ptr();
+                        let sptr = entries.as_ptr();
+                        for idx in 0..n {
+                            let ent = unsafe { *sptr.add(idx) };
+                            let b = (ent.0 >> 56) as usize;
+                            unsafe {
+                                *tptr.add(wpos[b]) = ent;
+                            }
+                            wpos[b] += 1;
+                        }
+                    }
+                    entries = temp;
+
+                    // Parallel bucket sort
+                    let entries_ptr = entries.as_mut_ptr() as usize;
+                    let key_offs_ptr = key_offs.as_ptr() as usize;
+                    let offsets_ptr = offsets.as_ptr() as usize;
+                    let buckets: Vec<(usize, usize)> = (0..256)
+                        .filter(|&i| bk_starts[i + 1] - bk_starts[i] > 1)
+                        .map(|i| (bk_starts[i], bk_starts[i + 1]))
+                        .collect();
+                    buckets.into_par_iter().for_each(|(lo, hi)| {
+                        let group = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                (entries_ptr as *mut (u64, usize)).add(lo),
+                                hi - lo,
+                            )
+                        };
+                        group.sort_unstable_by(|a, b| {
+                            let ord = match a.0.cmp(&b.0) {
+                                Ordering::Equal => {
+                                    let ko = key_offs_ptr as *const (usize, usize);
+                                    let (sa, ea) = unsafe { *ko.add(a.1) };
+                                    let (sb, eb) = unsafe { *ko.add(b.1) };
+                                    let la = ea - sa;
+                                    let lb = eb - sb;
+                                    let skip = 8.min(la).min(lb);
+                                    unsafe {
+                                        let dp = data_addr as *const u8;
+                                        let pa = dp.add(sa + skip);
+                                        let pb = dp.add(sb + skip);
+                                        let rem_a = la - skip;
+                                        let rem_b = lb - skip;
+                                        let min_rem = rem_a.min(rem_b);
+                                        let mut i = 0usize;
+                                        while i + 8 <= min_rem {
+                                            let wa =
+                                                u64::from_be_bytes(*(pa.add(i) as *const [u8; 8]));
+                                            let wb =
+                                                u64::from_be_bytes(*(pb.add(i) as *const [u8; 8]));
+                                            if wa != wb {
+                                                return wa.cmp(&wb);
+                                            }
+                                            i += 8;
+                                        }
+                                        std::slice::from_raw_parts(pa.add(i), rem_a - i)
+                                            .cmp(std::slice::from_raw_parts(pb.add(i), rem_b - i))
+                                    }
+                                }
+                                ord => ord,
+                            };
+                            if ord != Ordering::Equal {
+                                return ord;
+                            }
+                            // Last-resort: full line comparison
+                            let off = offsets_ptr as *const (usize, usize);
+                            let (la, ra) = unsafe { *off.add(a.1) };
+                            let (lb, rb) = unsafe { *off.add(b.1) };
+                            unsafe {
+                                let dp = data_addr as *const u8;
+                                std::slice::from_raw_parts(dp.add(la), ra - la)
+                                    .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
+                            }
+                        });
+                    });
+                } else if num_lines > 10_000 {
                     entries.par_sort_unstable_by(prefix_cmp);
                 } else if stable {
                     entries.sort_by(prefix_cmp);
