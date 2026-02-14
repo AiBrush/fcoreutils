@@ -1119,7 +1119,9 @@ fn complement_single_field_chunk(
 }
 
 /// Extract all fields except skip_idx from one line.
-/// Uses scalar byte scanning for short lines (< 256 bytes) and memchr_iter for longer.
+/// Optimized: finds only the delimiters bounding the skip field (skip_idx-th
+/// and (skip_idx+1)-th delimiters), then copies prefix + suffix in 2 bulk
+/// copies instead of iterating through all fields.
 #[inline(always)]
 fn complement_single_field_line(
     line: &[u8],
@@ -1140,55 +1142,33 @@ fn complement_single_field_line(
     buf.reserve(len + 1);
     let base = line.as_ptr();
 
-    let mut field_idx = 0;
-    let mut field_start = 0;
-    let mut first_output = true;
-    let mut has_delim = false;
+    // Find the delimiters bounding the skip field:
+    // - We need skip_idx delimiters to find where the skip field starts
+    // - We need one more delimiter to find where it ends
+    // For skip_idx == 0 (skip field 1): skip field starts at 0, ends at first delimiter
+    // For skip_idx == 1 (skip field 2): skip field starts after 1st delim, ends at 2nd delim
+    let need_before = skip_idx;       // delimiters before skip field
+    let need_total = skip_idx + 1;    // delimiters to find end of skip field
 
-    if len <= 256 {
-        // Scalar path for short lines
-        let mut i = 0;
-        unsafe {
-            while i < len {
-                if *base.add(i) == delim {
-                    has_delim = true;
-                    if field_idx != skip_idx {
-                        if !first_output {
-                            buf_push(buf, delim);
-                        }
-                        buf_extend(
-                            buf,
-                            std::slice::from_raw_parts(base.add(field_start), i - field_start),
-                        );
-                        first_output = false;
-                    }
-                    field_idx += 1;
-                    field_start = i + 1;
-                }
-                i += 1;
-            }
+    let mut delim_count: usize = 0;
+    let mut skip_start_pos: usize = 0;  // byte start of skip field
+    let mut skip_end_pos: usize = len;   // byte position of delimiter after skip field (or EOL)
+    let mut found_end = false;
+
+    for pos in memchr_iter(delim, line) {
+        delim_count += 1;
+        if delim_count == need_before {
+            skip_start_pos = pos + 1;
         }
-    } else {
-        for pos in memchr_iter(delim, line) {
-            has_delim = true;
-            if field_idx != skip_idx {
-                if !first_output {
-                    unsafe { buf_push(buf, delim) };
-                }
-                unsafe {
-                    buf_extend(
-                        buf,
-                        std::slice::from_raw_parts(base.add(field_start), pos - field_start),
-                    )
-                };
-                first_output = false;
-            }
-            field_idx += 1;
-            field_start = pos + 1;
+        if delim_count == need_total {
+            skip_end_pos = pos;
+            found_end = true;
+            break;
         }
     }
 
-    if !has_delim {
+    if delim_count == 0 {
+        // No delimiter in line
         if !suppress {
             unsafe {
                 buf_extend(buf, line);
@@ -1198,20 +1178,51 @@ fn complement_single_field_line(
         return;
     }
 
-    // Last field
-    if field_idx != skip_idx {
-        if !first_output {
-            unsafe { buf_push(buf, delim) };
+    // Not enough delimiters to reach the skip field: output entire line
+    if delim_count < need_before {
+        unsafe {
+            buf_extend(buf, line);
+            buf_push(buf, line_delim);
         }
+        return;
+    }
+
+    // skip field is at positions skip_start_pos..skip_end_pos
+    // Output prefix (before skip field) + suffix (after skip field)
+    let has_prefix = skip_idx > 0 && skip_start_pos > 0;
+    let has_suffix = found_end && skip_end_pos + 1 <= len;
+
+    if has_prefix && has_suffix {
+        // prefix = line[0..skip_start_pos-1] (before the delimiter that starts skip field)
+        // suffix = line[skip_end_pos+1..] (after the delimiter that ends skip field)
+        unsafe {
+            buf_extend(buf, std::slice::from_raw_parts(base, skip_start_pos - 1));
+            buf_push(buf, delim);
+            buf_extend(
+                buf,
+                std::slice::from_raw_parts(base.add(skip_end_pos + 1), len - skip_end_pos - 1),
+            );
+            buf_push(buf, line_delim);
+        }
+    } else if has_prefix {
+        // Only prefix (skip field is the last field)
+        unsafe {
+            buf_extend(buf, std::slice::from_raw_parts(base, skip_start_pos - 1));
+            buf_push(buf, line_delim);
+        }
+    } else if has_suffix {
+        // No prefix (skip field is the first field)
         unsafe {
             buf_extend(
                 buf,
-                std::slice::from_raw_parts(base.add(field_start), len - field_start),
-            )
-        };
+                std::slice::from_raw_parts(base.add(skip_end_pos + 1), len - skip_end_pos - 1),
+            );
+            buf_push(buf, line_delim);
+        }
+    } else {
+        // Skip field is the only field (or entire line)
+        unsafe { buf_push(buf, line_delim) };
     }
-
-    unsafe { buf_push(buf, line_delim) };
 }
 
 /// Contiguous from-start field range extraction (e.g., `cut -f1-5`).
