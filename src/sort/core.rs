@@ -2185,50 +2185,77 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
 
             if !has_flags {
                 // Already-sorted check for single-key lexicographic path.
-                // Uses 8-byte prefix comparison on extracted keys for fast detection.
-                // This is valuable for pre-sorted CSV data (e.g., sort -t, -k2 on already-sorted).
+                // Detects both forward-sorted and reverse-sorted input in O(n).
+                // Handles all combinations of input order vs -r flag.
                 if num_lines > 1 {
-                    let mut is_sorted = true;
+                    let mut is_sorted_fwd = true;
+                    let mut is_sorted_rev = true;
                     let mut prev_pfx = if key_offs[0].0 < key_offs[0].1 {
                         line_prefix(data, key_offs[0].0, key_offs[0].1)
                     } else {
                         0u64
                     };
                     for i in 1..num_lines {
+                        if !is_sorted_fwd && !is_sorted_rev {
+                            break;
+                        }
                         let (ks, ke) = key_offs[i];
                         let cur_pfx = if ks < ke {
                             line_prefix(data, ks, ke)
                         } else {
                             0u64
                         };
-                        if cur_pfx < prev_pfx {
-                            is_sorted = false;
-                            break;
-                        }
-                        if cur_pfx == prev_pfx {
-                            let (ps, pe) = key_offs[i - 1];
-                            let pk = &data[ps..pe];
-                            let ck = &data[ks..ke];
-                            if pk > ck {
-                                is_sorted = false;
-                                break;
+                        if is_sorted_fwd {
+                            if cur_pfx < prev_pfx {
+                                is_sorted_fwd = false;
+                            } else if cur_pfx == prev_pfx {
+                                let (ps, pe) = key_offs[i - 1];
+                                let pk = &data[ps..pe];
+                                let ck = &data[ks..ke];
+                                if pk > ck {
+                                    is_sorted_fwd = false;
+                                } else if !config.stable && pk == ck {
+                                    let (ls, le) = offsets[i - 1];
+                                    let (cs, ce) = offsets[i];
+                                    if data[ls..le] > data[cs..ce] {
+                                        is_sorted_fwd = false;
+                                    }
+                                }
                             }
-                            // Last-resort whole-line comparison for equal keys
-                            if !config.stable && pk == ck {
-                                let (ls, le) = offsets[i - 1];
-                                let (cs, ce) = offsets[i];
-                                if data[ls..le] > data[cs..ce] {
-                                    is_sorted = false;
-                                    break;
+                        }
+                        if is_sorted_rev {
+                            if cur_pfx > prev_pfx {
+                                is_sorted_rev = false;
+                            } else if cur_pfx == prev_pfx {
+                                let (ps, pe) = key_offs[i - 1];
+                                let pk = &data[ps..pe];
+                                let ck = &data[ks..ke];
+                                if pk < ck {
+                                    is_sorted_rev = false;
+                                } else if !config.stable && pk == ck {
+                                    let (ls, le) = offsets[i - 1];
+                                    let (cs, ce) = offsets[i];
+                                    if data[ls..le] < data[cs..ce] {
+                                        is_sorted_rev = false;
+                                    }
                                 }
                             }
                         }
                         prev_pfx = cur_pfx;
                     }
 
-                    if is_sorted {
-                        // Already sorted: output directly
-                        if !config.unique
+                    // Determine if input order matches desired output order:
+                    // - forward sorted + no -r: output directly
+                    // - reverse sorted + -r: output directly
+                    // - forward sorted + -r: output in reverse
+                    // - reverse sorted + no -r: output in reverse
+                    let already_correct = (is_sorted_fwd && !reverse) || (is_sorted_rev && reverse);
+                    let needs_reverse = (is_sorted_fwd && reverse) || (is_sorted_rev && !reverse);
+
+                    if already_correct || needs_reverse {
+                        let forward = already_correct;
+                        if forward
+                            && !config.unique
                             && !config.zero_terminated
                             && memchr::memchr(b'\r', data).is_none()
                         {
@@ -2241,16 +2268,20 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             writer.flush()?;
                             return Ok(());
                         }
-                        // Line-by-line output for unique/special cases
                         let dp = data.as_ptr();
                         if config.unique {
-                            let mut prev: Option<usize> = None;
+                            let mut prev_idx: Option<usize> = None;
                             const BATCH: usize = 512;
                             let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-                            for i in 0..num_lines {
+                            let iter: Box<dyn Iterator<Item = usize>> = if forward {
+                                Box::new(0..num_lines)
+                            } else {
+                                Box::new((0..num_lines).rev())
+                            };
+                            for i in iter {
                                 let (s, e) = offsets[i];
                                 let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
-                                let emit = match prev {
+                                let emit = match prev_idx {
                                     Some(p) => {
                                         let (ps, pe) = offsets[p];
                                         let prev_line = unsafe {
@@ -2268,7 +2299,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                                         write_all_vectored(&mut writer, &slices)?;
                                         slices.clear();
                                     }
-                                    prev = Some(i);
+                                    prev_idx = Some(i);
                                 }
                             }
                             if !slices.is_empty() {
@@ -2277,7 +2308,12 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         } else {
                             const BATCH: usize = 512;
                             let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
-                            for i in 0..num_lines {
+                            let iter: Box<dyn Iterator<Item = usize>> = if forward {
+                                Box::new(0..num_lines)
+                            } else {
+                                Box::new((0..num_lines).rev())
+                            };
+                            for i in iter {
                                 let (s, e) = offsets[i];
                                 let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
                                 slices.push(io::IoSlice::new(line));

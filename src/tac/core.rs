@@ -25,48 +25,77 @@ pub fn tac_bytes_owned(
     tac_bytes(data, separator, before, out)
 }
 
-/// After-separator mode: write_all each record in reverse.
-/// Relies on caller's BufWriter for syscall batching.
-/// Eliminates IoSlice construction and writev overhead.
+/// After-separator mode: forward SIMD scan + writev batching.
+/// Forward scan is cache-friendly with sequential mmap access (MADV_SEQUENTIAL).
+/// writev batching sends up to 1024 IoSlices per syscall for zero-copy output
+/// from mmap pages (when caller provides raw File, not BufWriter).
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    if memchr::memchr(sep, data).is_none() {
+    // Forward scan: collect all separator positions using SIMD memchr.
+    // Sequential access pattern benefits from hardware prefetching and mmap readahead.
+    let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
+
+    if positions.is_empty() {
         return out.write_all(data);
     }
 
+    // Output records in reverse order using writev batching.
+    // Each batch sends up to BATCH IoSlices pointing directly at mmap pages.
+    // With raw File: zero-copy writev syscall (no intermediate buffer copy).
+    // With BufWriter: degrades to per-slice write_all (still correct).
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
 
-    for pos in memchr::memrchr_iter(sep, data) {
+    for &pos in positions.iter().rev() {
         let rec_start = pos + 1;
         if rec_start < end {
-            out.write_all(&data[rec_start..end])?;
+            slices.push(IoSlice::new(&data[rec_start..end]));
+            if slices.len() >= BATCH {
+                write_all_vectored(out, &slices)?;
+                slices.clear();
+            }
         }
         end = rec_start;
     }
 
     // Remaining prefix before the first separator
     if end > 0 {
-        out.write_all(&data[..end])?;
+        slices.push(IoSlice::new(&data[..end]));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
     }
     Ok(())
 }
 
-/// Before-separator mode: write_all each record in reverse.
+/// Before-separator mode: forward SIMD scan + writev batching.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
-    if memchr::memchr(sep, data).is_none() {
+    let positions: Vec<usize> = memchr::memchr_iter(sep, data).collect();
+
+    if positions.is_empty() {
         return out.write_all(data);
     }
 
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
 
-    for pos in memchr::memrchr_iter(sep, data) {
+    for &pos in positions.iter().rev() {
         if pos < end {
-            out.write_all(&data[pos..end])?;
+            slices.push(IoSlice::new(&data[pos..end]));
+            if slices.len() >= BATCH {
+                write_all_vectored(out, &slices)?;
+                slices.clear();
+            }
         }
         end = pos;
     }
 
     if end > 0 {
-        out.write_all(&data[..end])?;
+        slices.push(IoSlice::new(&data[..end]));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
     }
     Ok(())
 }
@@ -98,7 +127,7 @@ pub fn tac_string_separator(
     }
 }
 
-/// Multi-byte string separator, after mode.
+/// Multi-byte string separator, after mode. Uses writev batching.
 fn tac_string_after(
     data: &[u8],
     separator: &[u8],
@@ -111,21 +140,31 @@ fn tac_string_after(
         return out.write_all(data);
     }
 
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
+
     for &pos in positions.iter().rev() {
         let rec_start = pos + sep_len;
         if rec_start < end {
-            out.write_all(&data[rec_start..end])?;
+            slices.push(IoSlice::new(&data[rec_start..end]));
+            if slices.len() >= BATCH {
+                write_all_vectored(out, &slices)?;
+                slices.clear();
+            }
         }
         end = rec_start;
     }
     if end > 0 {
-        out.write_all(&data[..end])?;
+        slices.push(IoSlice::new(&data[..end]));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
     }
     Ok(())
 }
 
-/// Multi-byte string separator, before mode.
+/// Multi-byte string separator, before mode. Uses writev batching.
 fn tac_string_before(
     data: &[u8],
     separator: &[u8],
@@ -138,15 +177,25 @@ fn tac_string_before(
         return out.write_all(data);
     }
 
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
+
     for &pos in positions.iter().rev() {
         if pos < end {
-            out.write_all(&data[pos..end])?;
+            slices.push(IoSlice::new(&data[pos..end]));
+            if slices.len() >= BATCH {
+                write_all_vectored(out, &slices)?;
+                slices.clear();
+            }
         }
         end = pos;
     }
     if end > 0 {
-        out.write_all(&data[..end])?;
+        slices.push(IoSlice::new(&data[..end]));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
     }
     Ok(())
 }
