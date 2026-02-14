@@ -1025,10 +1025,20 @@ fn write_sorted_entries(
     } else if entries.len() > 50_000 {
         write_sorted_single_buf_entries(data, offsets, entries, terminator, writer)?;
     } else {
+        // Use write_vectored to batch line+terminator pairs.
+        const BATCH: usize = 512;
+        let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
         for &(_, idx) in entries {
             let (s, e) = offsets[idx];
-            writer.write_all(&data[s..e])?;
-            writer.write_all(terminator)?;
+            slices.push(io::IoSlice::new(&data[s..e]));
+            slices.push(io::IoSlice::new(terminator));
+            if slices.len() >= BATCH * 2 {
+                write_all_vectored(writer, &slices)?;
+                slices.clear();
+            }
+        }
+        if !slices.is_empty() {
+            write_all_vectored(writer, &slices)?;
         }
     }
     Ok(())
@@ -1364,10 +1374,20 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                 }
             } else {
+                // Use write_vectored to batch line+terminator pairs.
+                const BATCH: usize = 512;
+                let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
                 for i in 0..num_lines {
                     let (s, e) = offsets[i];
-                    writer.write_all(&data[s..e])?;
-                    writer.write_all(terminator)?;
+                    slices.push(io::IoSlice::new(&data[s..e]));
+                    slices.push(io::IoSlice::new(terminator));
+                    if slices.len() >= BATCH * 2 {
+                        write_all_vectored(&mut writer, &slices)?;
+                        slices.clear();
+                    }
+                }
+                if !slices.is_empty() {
+                    write_all_vectored(&mut writer, &slices)?;
                 }
             }
             writer.flush()?;
@@ -1575,9 +1595,19 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 // Phase 5: single write
                 writer.write_all(&output)?;
             } else {
+                // Use write_vectored to batch line+terminator pairs.
+                const BATCH: usize = 512;
+                let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH * 2);
                 for &(_, s, l) in &sorted {
-                    writer.write_all(&data[s as usize..(s + l) as usize])?;
-                    writer.write_all(terminator)?;
+                    slices.push(io::IoSlice::new(&data[s as usize..(s + l) as usize]));
+                    slices.push(io::IoSlice::new(terminator));
+                    if slices.len() >= BATCH * 2 {
+                        write_all_vectored(&mut writer, &slices)?;
+                        slices.clear();
+                    }
+                }
+                if !slices.is_empty() {
+                    write_all_vectored(&mut writer, &slices)?;
                 }
             }
         }
