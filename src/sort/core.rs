@@ -1658,27 +1658,34 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         if config.unique {
             // After full LSD radix sort, entries are in ascending order.
             // For reverse, iterate backwards; for forward, iterate forwards.
-            // Inline dedup loop avoids Box<dyn Iterator> vtable overhead.
+            // Optimized dedup: use prefix u64 as first-pass rejection.
+            // If prefixes differ, lines are definitely not equal (skip memcmp).
             let dp = data.as_ptr();
+            let mut prev_prefix = u64::MAX;
             let mut prev_start = u32::MAX;
             let mut prev_len = 0u32;
             let n_sorted = sorted.len();
             let mut idx: usize = 0;
             while idx < n_sorted {
                 let actual_idx = if reverse { n_sorted - 1 - idx } else { idx };
-                let (_, s, l) = sorted[actual_idx];
+                let (pfx, s, l) = sorted[actual_idx];
                 let su = s as usize;
                 let lu = l as usize;
                 let line = unsafe { std::slice::from_raw_parts(dp.add(su), lu) };
-                let emit = prev_start == u32::MAX || {
+                let emit = prev_start == u32::MAX || pfx != prev_prefix || {
                     let ps = prev_start as usize;
                     let pl = prev_len as usize;
-                    let prev_line = unsafe { std::slice::from_raw_parts(dp.add(ps), pl) };
-                    compare_lines_for_dedup(prev_line, line, config) != Ordering::Equal
+                    if pl != lu {
+                        true
+                    } else {
+                        let prev_line = unsafe { std::slice::from_raw_parts(dp.add(ps), pl) };
+                        prev_line != line
+                    }
                 };
                 if emit {
                     writer.write_all(line)?;
                     writer.write_all(terminator)?;
+                    prev_prefix = pfx;
                     prev_start = s;
                     prev_len = l;
                 }

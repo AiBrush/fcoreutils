@@ -437,18 +437,38 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
         return process_single_field(data, delim, line_delim, ranges[0].start, suppress, out);
     }
 
-    // Fast path: complement of single field with default output delimiter.
+    // Fast path: complement of single field or contiguous range with default output delimiter.
     if complement
         && ranges.len() == 1
-        && ranges[0].start == ranges[0].end
         && output_delim.len() == 1
         && output_delim[0] == delim
+        && ranges[0].start == ranges[0].end
     {
         return process_complement_single_field(
             data,
             delim,
             line_delim,
             ranges[0].start,
+            suppress,
+            out,
+        );
+    }
+
+    // Fast path: complement of contiguous range (e.g., --complement -f3-5 = output fields 1,2,6+).
+    // This is equivalent to outputting a prefix and a suffix, skipping the middle range.
+    if complement
+        && ranges.len() == 1
+        && ranges[0].start > 1
+        && ranges[0].end < usize::MAX
+        && output_delim.len() == 1
+        && output_delim[0] == delim
+    {
+        return process_complement_range(
+            data,
+            delim,
+            line_delim,
+            ranges[0].start,
+            ranges[0].end,
             suppress,
             out,
         );
@@ -868,6 +888,183 @@ fn process_single_field(
         }
     }
     Ok(())
+}
+
+/// Complement range extraction: skip fields start..=end, output rest (e.g., --complement -f3-5).
+/// For each line: output fields 1..start-1, then fields end+1..EOF, skipping fields start..end.
+fn process_complement_range(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    skip_start: usize,
+    skip_end: usize,
+    suppress: bool,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    if data.len() >= PARALLEL_THRESHOLD {
+        let chunks = split_into_chunks(data, line_delim);
+        let results: Vec<Vec<u8>> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut buf = Vec::with_capacity(chunk.len());
+                complement_range_chunk(
+                    chunk, delim, skip_start, skip_end, line_delim, suppress, &mut buf,
+                );
+                buf
+            })
+            .collect();
+        let slices: Vec<IoSlice> = results
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| IoSlice::new(r))
+            .collect();
+        write_ioslices(out, &slices)?;
+    } else {
+        let mut buf = Vec::with_capacity(data.len());
+        complement_range_chunk(
+            data, delim, skip_start, skip_end, line_delim, suppress, &mut buf,
+        );
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for complement range extraction.
+fn complement_range_chunk(
+    data: &[u8],
+    delim: u8,
+    skip_start: usize,
+    skip_end: usize,
+    line_delim: u8,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    let mut start = 0;
+    for end_pos in memchr_iter(line_delim, data) {
+        let line = &data[start..end_pos];
+        complement_range_line(line, delim, skip_start, skip_end, line_delim, suppress, buf);
+        start = end_pos + 1;
+    }
+    if start < data.len() {
+        complement_range_line(
+            &data[start..],
+            delim,
+            skip_start,
+            skip_end,
+            line_delim,
+            suppress,
+            buf,
+        );
+    }
+}
+
+/// Extract all fields except skip_start..=skip_end from one line.
+/// Outputs fields 1..skip_start-1, then fields skip_end+1..EOF.
+#[inline(always)]
+fn complement_range_line(
+    line: &[u8],
+    delim: u8,
+    skip_start: usize,
+    skip_end: usize,
+    line_delim: u8,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    let len = line.len();
+    if len == 0 {
+        if !suppress {
+            buf.push(line_delim);
+        }
+        return;
+    }
+
+    buf.reserve(len + 1);
+    let base = line.as_ptr();
+
+    // Find delimiter positions to identify field boundaries
+    let mut field_idx: usize = 0; // 0-based field counter
+    let mut field_start: usize = 0;
+    let mut first_output = true;
+    let mut has_delim = false;
+
+    // 0-based indices to skip: skip_start-1 through skip_end-1
+    let skip_start_idx = skip_start - 1;
+    let skip_end_idx = skip_end - 1;
+
+    if len <= 256 {
+        let mut i = 0usize;
+        unsafe {
+            while i < len {
+                if *base.add(i) == delim {
+                    has_delim = true;
+                    if field_idx < skip_start_idx || field_idx > skip_end_idx {
+                        if !first_output {
+                            buf_push(buf, delim);
+                        }
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(field_start), i - field_start),
+                        );
+                        first_output = false;
+                    }
+                    field_idx += 1;
+                    field_start = i + 1;
+                }
+                i += 1;
+            }
+        }
+    } else {
+        for pos in memchr_iter(delim, line) {
+            has_delim = true;
+            if field_idx < skip_start_idx || field_idx > skip_end_idx {
+                if !first_output {
+                    unsafe { buf_push(buf, delim) };
+                }
+                unsafe {
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(field_start), pos - field_start),
+                    )
+                };
+                first_output = false;
+            }
+            field_idx += 1;
+            field_start = pos + 1;
+        }
+    }
+
+    if !has_delim {
+        if !suppress {
+            unsafe {
+                buf_extend(buf, line);
+                buf_push(buf, line_delim);
+            }
+        }
+        return;
+    }
+
+    // Last field
+    if field_idx < skip_start_idx || field_idx > skip_end_idx {
+        if !first_output {
+            unsafe { buf_push(buf, delim) };
+        }
+        unsafe {
+            buf_extend(
+                buf,
+                std::slice::from_raw_parts(base.add(field_start), len - field_start),
+            )
+        };
+        first_output = false;
+    }
+
+    if !first_output {
+        unsafe { buf_push(buf, line_delim) };
+    } else {
+        // All fields were skipped
+        unsafe { buf_push(buf, line_delim) };
+    }
 }
 
 /// Complement single-field extraction: skip one field, output rest unchanged.
