@@ -638,11 +638,10 @@ fn radix_sort_entries(
     data: &[u8],
     stable: bool,
     _reverse: bool,
-) -> (Vec<(u64, u32, u32)>, Vec<usize>) {
+) -> Vec<(u64, u32, u32)> {
     let n = entries.len();
     if n <= 1 {
-        let bk_starts = vec![0, n];
-        return (entries, bk_starts);
+        return entries;
     }
 
     // LSD radix sort on 16-bit groups. Up to 4 passes: bits [0:16), [16:32), [32:48), [48:64)
@@ -697,8 +696,7 @@ fn radix_sort_entries(
                 }
             });
         }
-        let bk_starts = vec![0, n];
-        return (sorted, bk_starts);
+        return sorted;
     }
 
     let mut src = entries;
@@ -776,6 +774,7 @@ fn radix_sort_entries(
                 tail_a.cmp(tail_b)
             }
         };
+        let dp = data.as_ptr();
         let mut i = 0;
         while i < n {
             let key = sorted[i].0;
@@ -784,34 +783,46 @@ fn radix_sort_entries(
                 j += 1;
             }
             if j - i > 1 {
-                if stable {
-                    sorted[i..j].sort_by(cmp_fn);
-                } else {
-                    sorted[i..j].sort_unstable_by(cmp_fn);
+                // For repetitive data: check if all entries in this run have
+                // identical content. If so, skip the sort entirely.
+                // Check first vs last: if they're equal, high probability all are.
+                let run_len = j - i;
+                let ref_s = sorted[i].1 as usize;
+                let ref_l = sorted[i].2 as usize;
+                let last_s = sorted[j - 1].1 as usize;
+                let last_l = sorted[j - 1].2 as usize;
+                let all_same = ref_l == last_l
+                    && unsafe {
+                        let a = std::slice::from_raw_parts(dp.add(ref_s), ref_l);
+                        let b = std::slice::from_raw_parts(dp.add(last_s), last_l);
+                        a == b
+                    };
+                if !all_same {
+                    // For small runs, use insertion sort instead of pdqsort
+                    // to avoid function call overhead.
+                    if run_len <= 16 {
+                        // Insertion sort for tiny runs
+                        for k in (i + 1)..j {
+                            let mut pos = k;
+                            while pos > i
+                                && cmp_fn(&sorted[pos], &sorted[pos - 1]) == Ordering::Less
+                            {
+                                sorted.swap(pos, pos - 1);
+                                pos -= 1;
+                            }
+                        }
+                    } else if stable {
+                        sorted[i..j].sort_by(cmp_fn);
+                    } else {
+                        sorted[i..j].sort_unstable_by(cmp_fn);
+                    }
                 }
             }
             i = j;
         }
     }
 
-    // Build bucket starts for output iteration (used by reverse output path).
-    // After full radix sort, we build bucket starts based on top 16 bits.
-    let mut bk_starts = vec![0usize; nbk + 1];
-    {
-        let mut prev_bucket = 0usize;
-        for i in 0..n {
-            let b = (sorted[i].0 >> 48) as usize;
-            while prev_bucket < b {
-                prev_bucket += 1;
-                bk_starts[prev_bucket] = i;
-            }
-        }
-        for b in prev_bucket + 1..=nbk {
-            bk_starts[b] = n;
-        }
-    }
-
-    (sorted, bk_starts)
+    sorted
 }
 
 /// Extract an 8-byte prefix from a line for cache-friendly comparison.
@@ -1517,7 +1528,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         };
 
         // Full LSD radix sort on 8-byte prefix + tiebreak for collisions
-        let (sorted, _bk_starts) = radix_sort_entries(entries, data, config.stable, reverse);
+        let sorted = radix_sort_entries(entries, data, config.stable, reverse);
 
         // Switch to sequential for output phase
         #[cfg(target_os = "linux")]
