@@ -436,17 +436,11 @@ fn main() {
                         tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut lock)
                     }
                 } else {
-                    // Fallback: streaming path
-                    #[cfg(target_os = "linux")]
+                    // Fallback: streaming path (no vmsplice — buffer reuse conflicts
+                    // with vmsplice's zero-copy page references)
+                    #[cfg(unix)]
                     {
-                        let mut writer = VmspliceWriter::new();
-                        tr::translate(&set1, &set2, &mut RawStdin, &mut writer)
-                    }
-                    #[cfg(all(unix, not(target_os = "linux")))]
-                    {
-                        let stdin = io::stdin();
-                        let mut reader = stdin.lock();
-                        tr::translate(&set1, &set2, &mut reader, &mut *raw)
+                        tr::translate(&set1, &set2, &mut RawStdin, &mut *raw)
                     }
                     #[cfg(not(unix))]
                     {
@@ -459,17 +453,13 @@ fn main() {
                 }
             }
         } else {
-            // Piped stdin: use streaming path with VmspliceWriter for zero-copy output.
-            #[cfg(target_os = "linux")]
+            // Piped stdin: streaming path with raw write (not vmsplice).
+            // vmsplice puts page references into the pipe buffer. The streaming
+            // path reuses the same buffer across iterations, so vmsplice'd pages
+            // get overwritten before the pipe reader consumes them.
+            #[cfg(unix)]
             {
-                let mut writer = VmspliceWriter::new();
-                tr::translate(&set1, &set2, &mut RawStdin, &mut writer)
-            }
-            #[cfg(all(unix, not(target_os = "linux")))]
-            {
-                let stdin = io::stdin();
-                let mut reader = stdin.lock();
-                tr::translate(&set1, &set2, &mut reader, &mut *raw)
+                tr::translate(&set1, &set2, &mut RawStdin, &mut *raw)
             }
             #[cfg(not(unix))]
             {
@@ -515,13 +505,9 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: use streaming functions with VmspliceWriter for zero-copy output.
-        #[cfg(target_os = "linux")]
-        let result = {
-            let mut writer = VmspliceWriter::new();
-            run_streaming_mode(&cli, set1_str, &mut writer)
-        };
-        #[cfg(all(unix, not(target_os = "linux")))]
+        // Piped stdin: streaming path with raw write (not vmsplice — buffer reuse
+        // conflicts with vmsplice's zero-copy page references).
+        #[cfg(unix)]
         let result = run_streaming_mode(&cli, set1_str, &mut *raw);
         #[cfg(not(unix))]
         let result = {
