@@ -3,9 +3,9 @@ use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 
+use std::sync::atomic::AtomicUsize;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::atomic::AtomicUsize;
 
 #[cfg(not(target_os = "linux"))]
 use digest::Digest;
@@ -343,9 +343,9 @@ fn hash_file_pipelined(algo: HashAlgorithm, mut file: File, file_size: u64) -> i
         let mut own_buf = vec![0u8; PIPE_BUF_SIZE];
         loop {
             // Try to get a returned buffer from hasher, or use our own
-            let mut buf = buf_rx.try_recv().unwrap_or_else(|_| {
-                std::mem::take(&mut own_buf)
-            });
+            let mut buf = buf_rx
+                .try_recv()
+                .unwrap_or_else(|_| std::mem::take(&mut own_buf));
             if buf.is_empty() {
                 buf = vec![0u8; PIPE_BUF_SIZE];
             }
@@ -372,9 +372,8 @@ fn hash_file_pipelined(algo: HashAlgorithm, mut file: File, file_size: u64) -> i
     // Hasher runs on the calling thread
     let hash_result = match algo {
         HashAlgorithm::Sha256 => {
-            let mut hasher =
-                openssl::hash::Hasher::new(openssl::hash::MessageDigest::sha256())
-                    .map_err(|e| io::Error::other(e))?;
+            let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::sha256())
+                .map_err(|e| io::Error::other(e))?;
             while let Ok((buf, n)) = rx.recv() {
                 hasher.update(&buf[..n]).map_err(|e| io::Error::other(e))?;
                 // Return the buffer to reader for reuse
@@ -384,9 +383,8 @@ fn hash_file_pipelined(algo: HashAlgorithm, mut file: File, file_size: u64) -> i
             Ok(hex_encode(&digest))
         }
         HashAlgorithm::Md5 => {
-            let mut hasher =
-                openssl::hash::Hasher::new(openssl::hash::MessageDigest::md5())
-                    .map_err(|e| io::Error::other(e))?;
+            let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::md5())
+                .map_err(|e| io::Error::other(e))?;
             while let Ok((buf, n)) = rx.recv() {
                 hasher.update(&buf[..n]).map_err(|e| io::Error::other(e))?;
                 let _ = buf_tx.send(buf);
