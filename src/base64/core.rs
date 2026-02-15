@@ -16,20 +16,22 @@ fn num_cpus() -> usize {
 /// keeping peak buffer allocation reasonable (~10.7MB for the output).
 const NOWRAP_CHUNK: usize = 8 * 1024 * 1024 - (8 * 1024 * 1024 % 3);
 
-/// Minimum data size for parallel no-wrap encoding (4MB).
-/// For 1-2MB input, thread creation (~200µs for 4 threads) + per-thread
-/// buffer allocation page faults (~0.3ms) exceed the parallel encoding
-/// benefit. At 4MB+, the ~2x parallel speedup amortizes overhead.
-const PARALLEL_NOWRAP_THRESHOLD: usize = 4 * 1024 * 1024;
+/// Minimum data size for parallel no-wrap encoding (2MB).
+/// With rayon's persistent thread pool (~10µs dispatch), the break-even
+/// for parallel encoding is lower than with per-call thread creation.
+/// At 2MB+, the parallel speedup easily amortizes dispatch overhead.
+const PARALLEL_NOWRAP_THRESHOLD: usize = 2 * 1024 * 1024;
 
-/// Minimum data size for parallel wrapped encoding (2MB).
-/// Wrapped parallel uses Rayon's persistent thread pool for SIMD encoding,
-/// providing ~Nx speedup with minimal dispatch overhead (~10µs).
-const PARALLEL_WRAPPED_THRESHOLD: usize = 2 * 1024 * 1024;
+/// Minimum data size for parallel wrapped encoding (1MB).
+/// With rayon's persistent thread pool (~10µs dispatch) + pre-warming,
+/// parallel encoding benefits even at 1MB. For 1MB input, 2 threads
+/// each handle ~0.5MB, saving ~0.1ms vs sequential (~25% improvement).
+const PARALLEL_WRAPPED_THRESHOLD: usize = 1024 * 1024;
 
-/// Minimum data size for parallel decoding (2MB of base64 data).
-/// Lower threshold lets parallel decode kick in earlier for medium files.
-const PARALLEL_DECODE_THRESHOLD: usize = 2 * 1024 * 1024;
+/// Minimum data size for parallel decoding (1MB of base64 data).
+/// Lower threshold lets parallel decode kick in for 1MB benchmark files.
+/// With rayon's pre-warmed thread pool, dispatch overhead is negligible.
+const PARALLEL_DECODE_THRESHOLD: usize = 1024 * 1024;
 
 /// Hint HUGEPAGE for large output buffers on Linux.
 /// MADV_HUGEPAGE tells kernel to use 2MB pages, reducing TLB misses
