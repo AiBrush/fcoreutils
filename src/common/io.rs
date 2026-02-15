@@ -151,7 +151,14 @@ pub fn read_file_mmap(path: &Path) -> io::Result<FileData> {
     let len = metadata.len();
 
     if len > 0 && metadata.file_type().is_file() {
-        match unsafe { MmapOptions::new().map(&file) } {
+        // Use MAP_POPULATE for files >= 4MB to prefault all pages during mmap().
+        // This avoids thousands of minor page faults during sequential access.
+        let mmap_result = if len >= 4 * 1024 * 1024 {
+            unsafe { MmapOptions::new().populate().map(&file) }
+        } else {
+            unsafe { MmapOptions::new().map(&file) }
+        };
+        match mmap_result {
             Ok(mmap) => {
                 #[cfg(target_os = "linux")]
                 {
