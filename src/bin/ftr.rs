@@ -9,103 +9,8 @@ use coreutils_rs::common::io::FileData;
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::tr;
 
-/// Writer that uses vmsplice(2) for zero-copy pipe output on Linux.
-/// When stdout is a pipe, vmsplice references user-space pages directly
-/// in the pipe buffer (no kernel memcpy). Falls back to regular write
-/// for non-pipe fds (files, terminals).
-#[cfg(target_os = "linux")]
-struct VmspliceWriter {
-    raw: ManuallyDrop<std::fs::File>,
-    is_pipe: bool,
-}
-
-#[cfg(target_os = "linux")]
-impl VmspliceWriter {
-    fn new() -> Self {
-        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        let is_pipe = unsafe {
-            let mut stat: libc::stat = std::mem::zeroed();
-            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
-        };
-        Self { raw, is_pipe }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Write for VmspliceWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if !self.is_pipe || buf.is_empty() {
-            return (&*self.raw).write(buf);
-        }
-        let iov = libc::iovec {
-            iov_base: buf.as_ptr() as *mut libc::c_void,
-            iov_len: buf.len(),
-        };
-        let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-        if n >= 0 {
-            Ok(n as usize)
-        } else {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                return Ok(0);
-            }
-            self.is_pipe = false;
-            (&*self.raw).write(buf)
-        }
-    }
-
-    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
-        if !self.is_pipe || buf.is_empty() {
-            return (&*self.raw).write_all(buf);
-        }
-        while !buf.is_empty() {
-            let iov = libc::iovec {
-                iov_base: buf.as_ptr() as *mut libc::c_void,
-                iov_len: buf.len(),
-            };
-            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-            if n > 0 {
-                buf = &buf[n as usize..];
-            } else if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "vmsplice wrote 0"));
-            } else {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                self.is_pipe = false;
-                return (&*self.raw).write_all(buf);
-            }
-        }
-        Ok(())
-    }
-
-    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
-        if !self.is_pipe || bufs.is_empty() {
-            return (&*self.raw).write_vectored(bufs);
-        }
-        let count = bufs.len().min(1024);
-        let iovs = bufs.as_ptr() as *const libc::iovec;
-        let n = unsafe { libc::vmsplice(1, iovs, count, 0) };
-        if n >= 0 {
-            Ok(n as usize)
-        } else {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                return Ok(0);
-            }
-            self.is_pipe = false;
-            (&*self.raw).write_vectored(bufs)
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-// Note: RawStdin removed — Linux piped path now uses streaming translate
-// for pipeline parallelism with upstream cat.
+// Note: VmspliceWriter and RawStdin removed — all paths now use raw write(2)
+// for simplicity. The mmap paths use ManuallyDrop<File> for raw fd output.
 
 struct Cli {
     complement: bool,
@@ -389,8 +294,8 @@ fn main() {
             // the pipe reader releases its references.
             #[cfg(target_os = "linux")]
             {
-                let mut writer = VmspliceWriter::new();
-                tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut writer)
+                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut *raw_out)
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -406,8 +311,8 @@ fn main() {
             // Fallback: read-only mmap + separate buffer translate
             #[cfg(target_os = "linux")]
             {
-                let mut writer = VmspliceWriter::new();
-                tr::translate_mmap_readonly(&set1, &set2, &mm, &mut writer)
+                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                tr::translate_mmap_readonly(&set1, &set2, &mm, &mut *raw_out)
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -424,7 +329,8 @@ fn main() {
             // Read chunks, translate in-place with SIMD, write immediately.
             // This overlaps I/O with compute: while ftr translates chunk N,
             // upstream cat writes chunk N+1 to the pipe.
-            // MUST use raw write (not vmsplice) since the streaming buffer is reused.
+            // MUST use raw write (not vmsplice) — stdin is read in chunks via a
+            // locked reader, and the internal buffer is overwritten each iteration.
             #[cfg(target_os = "linux")]
             {
                 let stdin = io::stdin();

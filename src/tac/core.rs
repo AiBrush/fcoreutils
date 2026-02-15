@@ -9,6 +9,10 @@ use rayon::prelude::*;
 /// large files where multi-core scanning pays off.
 const PARALLEL_THRESHOLD: usize = 64 * 1024 * 1024;
 
+/// Maximum IoSlice entries per write_vectored batch.
+/// Matches Linux UIO_MAXIOV limit (1024).
+const IOSLICE_BATCH_SIZE: usize = 1024;
+
 /// Reverse records separated by a single byte.
 /// For large data (>= 64MB): parallel forward SIMD scan + zero-copy IoSlice output.
 /// For small data: single-threaded backward SIMD scan + IoSlice batches.
@@ -87,8 +91,7 @@ fn parallel_scan_positions(data: &[u8], sep: u8) -> Vec<Vec<usize>> {
 fn tac_bytes_after_contiguous(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let chunk_positions = parallel_scan_positions(data, sep);
 
-    const BATCH: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
     let mut end = data.len();
 
     for positions in chunk_positions.iter().rev() {
@@ -96,7 +99,7 @@ fn tac_bytes_after_contiguous(data: &[u8], sep: u8, out: &mut impl Write) -> io:
             let rec_start = pos + 1;
             if rec_start < end {
                 slices.push(IoSlice::new(&data[rec_start..end]));
-                if slices.len() >= BATCH {
+                if slices.len() >= IOSLICE_BATCH_SIZE {
                     write_all_vectored(out, &slices)?;
                     slices.clear();
                 }
@@ -118,15 +121,14 @@ fn tac_bytes_after_contiguous(data: &[u8], sep: u8, out: &mut impl Write) -> io:
 fn tac_bytes_before_contiguous(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let chunk_positions = parallel_scan_positions(data, sep);
 
-    const BATCH: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
     let mut end = data.len();
 
     for positions in chunk_positions.iter().rev() {
         for &pos in positions.iter().rev() {
             if pos < end {
                 slices.push(IoSlice::new(&data[pos..end]));
-                if slices.len() >= BATCH {
+                if slices.len() >= IOSLICE_BATCH_SIZE {
                     write_all_vectored(out, &slices)?;
                     slices.clear();
                 }
@@ -151,15 +153,14 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
         return Ok(());
     }
 
-    const BATCH: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
     let mut end = data.len();
 
     for pos in memchr::memrchr_iter(sep, data) {
         let rec_start = pos + 1;
         if rec_start < end {
             slices.push(IoSlice::new(&data[rec_start..end]));
-            if slices.len() >= BATCH {
+            if slices.len() >= IOSLICE_BATCH_SIZE {
                 write_all_vectored(out, &slices)?;
                 slices.clear();
             }
@@ -182,14 +183,13 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
         return Ok(());
     }
 
-    const BATCH: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
     let mut end = data.len();
 
     for pos in memchr::memrchr_iter(sep, data) {
         if pos < end {
             slices.push(IoSlice::new(&data[pos..end]));
-            if slices.len() >= BATCH {
+            if slices.len() >= IOSLICE_BATCH_SIZE {
                 write_all_vectored(out, &slices)?;
                 slices.clear();
             }
@@ -246,15 +246,14 @@ fn tac_string_after(
         return out.write_all(data);
     }
 
-    const BATCH: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
     let mut end = data.len();
 
     for &pos in positions.iter().rev() {
         let rec_start = pos + sep_len;
         if rec_start < end {
             slices.push(IoSlice::new(&data[rec_start..end]));
-            if slices.len() >= BATCH {
+            if slices.len() >= IOSLICE_BATCH_SIZE {
                 write_all_vectored(out, &slices)?;
                 slices.clear();
             }
@@ -283,14 +282,13 @@ fn tac_string_before(
         return out.write_all(data);
     }
 
-    const BATCH: usize = 1024;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
     let mut end = data.len();
 
     for &pos in positions.iter().rev() {
         if pos < end {
             slices.push(IoSlice::new(&data[pos..end]));
-            if slices.len() >= BATCH {
+            if slices.len() >= IOSLICE_BATCH_SIZE {
                 write_all_vectored(out, &slices)?;
                 slices.clear();
             }
