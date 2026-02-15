@@ -386,16 +386,12 @@ fn write_wrapped_iov_streaming(
     Ok(())
 }
 
-/// Parallel wrapped encoding with per-thread bulk SIMD encode + IoSlice writev.
+/// Parallel wrapped encoding: each thread does bulk SIMD encode + fuse with newlines.
 ///
-/// Each thread encodes its aligned chunk into a contiguous buffer (no newlines).
-/// Main thread then writes each chunk with IoSlice wrapping (writev interleaves
-/// data slices with newlines). This eliminates:
-/// - The shared output buffer (~13.5MB for 10MB input) and its page faults
-/// - Per-thread scatter copy and L1 temp buffer management
-/// - Shared buffer pointer arithmetic
-///
-/// Encoding runs in parallel (compute-bound), writev runs sequentially (I/O-bound).
+/// Threads produce ready-to-write output buffers (encoded data + newlines).
+/// Main thread combines them with a single writev call.
+/// This fully parallelizes both encoding and newline insertion, leaving
+/// only the final I/O on the critical path.
 fn encode_wrapped_parallel(
     data: &[u8],
     wrap_col: usize,
@@ -409,42 +405,54 @@ fn encode_wrapped_parallel(
     // Split input at bytes_per_line boundaries (last chunk may have remainder)
     let chunks: Vec<&[u8]> = data.chunks(chunk_input.max(bytes_per_line)).collect();
 
-    // Parallel bulk SIMD encode — each thread produces a contiguous encoded buffer
-    let encoded_chunks: Vec<Vec<u8>> = std::thread::scope(|s| {
+    // Each thread: bulk SIMD encode + fuse newlines into output buffer
+    let fused_chunks: Vec<Vec<u8>> = std::thread::scope(|s| {
         let handles: Vec<_> = chunks
             .iter()
             .map(|chunk| {
-                s.spawn(|| {
+                s.spawn(move || {
+                    // Step 1: SIMD encode into contiguous buffer
                     let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
-                    let mut buf: Vec<u8> = Vec::with_capacity(enc_len);
+                    let mut encoded: Vec<u8> = Vec::with_capacity(enc_len);
                     #[allow(clippy::uninit_vec)]
                     unsafe {
-                        buf.set_len(enc_len);
+                        encoded.set_len(enc_len);
+                    }
+                    let _ = BASE64_ENGINE.encode(chunk, encoded[..enc_len].as_out());
+
+                    // Step 2: Fuse with newlines into output buffer
+                    let line_out = wrap_col + 1;
+                    let full_lines = enc_len / wrap_col;
+                    let remainder = enc_len % wrap_col;
+                    let out_size =
+                        full_lines * line_out + if remainder > 0 { remainder + 1 } else { 0 };
+                    let mut output: Vec<u8> = Vec::with_capacity(out_size);
+                    #[allow(clippy::uninit_vec)]
+                    unsafe {
+                        output.set_len(out_size);
                     }
                     #[cfg(target_os = "linux")]
-                    if enc_len >= 2 * 1024 * 1024 {
+                    if out_size >= 2 * 1024 * 1024 {
                         unsafe {
                             libc::madvise(
-                                buf.as_mut_ptr() as *mut libc::c_void,
-                                enc_len,
+                                output.as_mut_ptr() as *mut libc::c_void,
+                                out_size,
                                 libc::MADV_HUGEPAGE,
                             );
                         }
                     }
-                    let _ = BASE64_ENGINE.encode(chunk, buf[..enc_len].as_out());
-                    buf
+                    // fuse_wrap handles full lines + partial last line
+                    let _n = fuse_wrap(&encoded, wrap_col, &mut output);
+                    output
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    // Sequential writev per chunk (maintains output order, I/O-bound)
-    for encoded in &encoded_chunks {
-        write_wrapped_iov(encoded, wrap_col, out)?;
-    }
-
-    Ok(())
+    // Single writev combining all thread outputs in order
+    let slices: Vec<io::IoSlice> = fused_chunks.iter().map(|c| io::IoSlice::new(c)).collect();
+    write_all_vectored(out, &slices)
 }
 
 /// Fuse encoded base64 data with newlines in a single pass.
