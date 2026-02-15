@@ -2809,8 +2809,13 @@ pub fn translate_squeeze(
         if n == 0 {
             if total > 0 {
                 let wp = translate_squeeze_process(
-                    &mut buf, total, &table, &squeeze_set,
-                    range_info, range_const_info, &mut last_squeezed,
+                    &mut buf,
+                    total,
+                    &table,
+                    &squeeze_set,
+                    range_info,
+                    range_const_info,
+                    &mut last_squeezed,
                 );
                 if wp > 0 {
                     writer.write_all(&buf[..wp])?;
@@ -2821,8 +2826,13 @@ pub fn translate_squeeze(
         total += n;
         if buf.len() - total < 256 * 1024 {
             let wp = translate_squeeze_process(
-                &mut buf, total, &table, &squeeze_set,
-                range_info, range_const_info, &mut last_squeezed,
+                &mut buf,
+                total,
+                &table,
+                &squeeze_set,
+                range_info,
+                range_const_info,
+                &mut last_squeezed,
             );
             if wp > 0 {
                 writer.write_all(&buf[..wp])?;
@@ -2930,8 +2940,14 @@ fn translate_squeeze_single_ch(
         if n == 0 {
             if total > 0 {
                 let wp = translate_squeeze_single_process(
-                    &mut buf, total, table, squeeze_ch, &finder,
-                    range_info, range_const_info, &mut was_squeeze_char,
+                    &mut buf,
+                    total,
+                    table,
+                    squeeze_ch,
+                    &finder,
+                    range_info,
+                    range_const_info,
+                    &mut was_squeeze_char,
                 );
                 if wp > 0 {
                     writer.write_all(&buf[..wp])?;
@@ -2942,8 +2958,14 @@ fn translate_squeeze_single_ch(
         total += n;
         if buf.len() - total < 256 * 1024 {
             let wp = translate_squeeze_single_process(
-                &mut buf, total, table, squeeze_ch, &finder,
-                range_info, range_const_info, &mut was_squeeze_char,
+                &mut buf,
+                total,
+                table,
+                squeeze_ch,
+                &finder,
+                range_info,
+                range_const_info,
+                &mut was_squeeze_char,
             );
             if wp > 0 {
                 writer.write_all(&buf[..wp])?;
@@ -3298,11 +3320,7 @@ fn delete_single_inplace(buf: &mut [u8], n: usize, ch: u8) -> usize {
                 if offset > 0 {
                     if wp != i {
                         unsafe {
-                            std::ptr::copy(
-                                buf.as_ptr().add(i),
-                                buf.as_mut_ptr().add(wp),
-                                offset,
-                            );
+                            std::ptr::copy(buf.as_ptr().add(i), buf.as_mut_ptr().add(wp), offset);
                         }
                     }
                     wp += offset;
@@ -3314,11 +3332,7 @@ fn delete_single_inplace(buf: &mut [u8], n: usize, ch: u8) -> usize {
                 if run_len > 0 {
                     if wp != i {
                         unsafe {
-                            std::ptr::copy(
-                                buf.as_ptr().add(i),
-                                buf.as_mut_ptr().add(wp),
-                                run_len,
-                            );
+                            std::ptr::copy(buf.as_ptr().add(i), buf.as_mut_ptr().add(wp), run_len);
                         }
                     }
                     wp += run_len;
@@ -3378,11 +3392,7 @@ fn delete_multi_inplace(buf: &mut [u8], n: usize, chars: &[u8]) -> usize {
                 if offset > 0 {
                     if wp != i {
                         unsafe {
-                            std::ptr::copy(
-                                buf.as_ptr().add(i),
-                                buf.as_mut_ptr().add(wp),
-                                offset,
-                            );
+                            std::ptr::copy(buf.as_ptr().add(i), buf.as_mut_ptr().add(wp), offset);
                         }
                     }
                     wp += offset;
@@ -3394,11 +3404,7 @@ fn delete_multi_inplace(buf: &mut [u8], n: usize, chars: &[u8]) -> usize {
                 if run_len > 0 {
                     if wp != i {
                         unsafe {
-                            std::ptr::copy(
-                                buf.as_ptr().add(i),
-                                buf.as_mut_ptr().add(wp),
-                                run_len,
-                            );
+                            std::ptr::copy(buf.as_ptr().add(i), buf.as_mut_ptr().add(wp), run_len);
                         }
                     }
                     wp += run_len;
@@ -3427,7 +3433,11 @@ pub fn delete_squeeze(
         if n == 0 {
             if total > 0 {
                 let wp = delete_squeeze_inplace(
-                    &mut buf, total, &delete_set, &squeeze_set, &mut last_squeezed,
+                    &mut buf,
+                    total,
+                    &delete_set,
+                    &squeeze_set,
+                    &mut last_squeezed,
                 );
                 if wp > 0 {
                     writer.write_all(&buf[..wp])?;
@@ -3438,7 +3448,11 @@ pub fn delete_squeeze(
         total += n;
         if buf.len() - total < 256 * 1024 {
             let wp = delete_squeeze_inplace(
-                &mut buf, total, &delete_set, &squeeze_set, &mut last_squeezed,
+                &mut buf,
+                total,
+                &delete_set,
+                &squeeze_set,
+                &mut last_squeezed,
             );
             if wp > 0 {
                 writer.write_all(&buf[..wp])?;
@@ -3707,7 +3721,8 @@ fn squeeze_single_stream(
         let n = read_once(reader, &mut buf[total..])?;
         if n == 0 {
             if total > 0 {
-                let wp = squeeze_single_compact(&mut buf, total, ch, &finder, &mut was_squeeze_char);
+                let wp =
+                    squeeze_single_compact(&mut buf, total, ch, &finder, &mut was_squeeze_char);
                 if wp > 0 {
                     writer.write_all(&buf[..wp])?;
                 }
