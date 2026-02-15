@@ -106,10 +106,7 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect()
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // Stream IoSlice entries in 1024-entry batches. Chunks are processed in
@@ -175,10 +172,7 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect()
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // Stream IoSlice entries in 1024-entry batches (same as after mode).
