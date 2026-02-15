@@ -249,7 +249,7 @@ fn compare_lines_inner(
 /// Parallel line boundary detection for large files (>4MB).
 /// Splits data into thread-count chunks aligned at delimiter boundaries,
 /// then scans each chunk concurrently with SIMD memchr.
-fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
+fn find_lines_parallel(data: &[u8], delimiter: u8) -> (Vec<(usize, usize)>, bool) {
     let num_threads = rayon::current_num_threads().max(1);
     let chunk_size = data.len() / num_threads;
 
@@ -277,7 +277,7 @@ fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
     // Uses raw pointer arithmetic (via data_addr usize) to eliminate bounds checking
     // in the \r\n detection hot path.
     let data_addr = data.as_ptr() as usize;
-    let chunk_offsets: Vec<Vec<(usize, usize)>> = boundaries
+    let chunk_results: Vec<(Vec<(usize, usize)>, bool)> = boundaries
         .windows(2)
         .collect::<Vec<_>>()
         .par_iter()
@@ -289,6 +289,7 @@ fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
                 unsafe { std::slice::from_raw_parts(dp.add(chunk_start), chunk_end - chunk_start) };
             let mut offsets = Vec::with_capacity(chunk.len() / 40 + 1);
             let mut line_start = chunk_start;
+            let mut found_cr = false;
 
             for pos in memchr::memchr_iter(delimiter, chunk) {
                 let abs_pos = chunk_start + pos;
@@ -296,6 +297,7 @@ fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
                 if is_newline && line_end > line_start && unsafe { *dp.add(line_end - 1) } == b'\r'
                 {
                     line_end -= 1;
+                    found_cr = true;
                 }
                 offsets.push((line_start, line_end));
                 line_start = abs_pos + 1;
@@ -307,28 +309,31 @@ fn find_lines_parallel(data: &[u8], delimiter: u8) -> Vec<(usize, usize)> {
                 if is_newline && line_end > line_start && unsafe { *dp.add(line_end - 1) } == b'\r'
                 {
                     line_end -= 1;
+                    found_cr = true;
                 }
                 offsets.push((line_start, line_end));
             }
 
-            offsets
+            (offsets, found_cr)
         })
         .collect();
 
-    let total: usize = chunk_offsets.iter().map(|v| v.len()).sum();
+    let total: usize = chunk_results.iter().map(|(v, _)| v.len()).sum();
+    let has_cr = chunk_results.iter().any(|(_, cr)| *cr);
     let mut offsets = Vec::with_capacity(total);
-    for chunk in chunk_offsets {
+    for (chunk, _) in chunk_results {
         offsets.extend_from_slice(&chunk);
     }
-    offsets
+    (offsets, has_cr)
 }
 
 /// Read all input into a single contiguous buffer and compute line offsets.
 /// Uses mmap for single-file input (zero-copy), Vec for stdin/multi-file.
+/// Returns (buffer, offsets, has_cr) where has_cr indicates CRLF line endings were found.
 fn read_all_input(
     inputs: &[String],
     zero_terminated: bool,
-) -> io::Result<(FileData, Vec<(usize, usize)>)> {
+) -> io::Result<(FileData, Vec<(usize, usize)>, bool)> {
     let delimiter = if zero_terminated { b'\0' } else { b'\n' };
 
     // Single file (non-stdin): use mmap directly for zero-copy
@@ -390,19 +395,22 @@ fn read_all_input(
 
     // Find line boundaries using SIMD-accelerated memchr
     // Use parallel scanning for large files (>4MB) to leverage multiple cores
+    // Also track whether any CRLF endings were found (avoids O(n) memchr scan later)
     let data = &*buffer;
-    let offsets = if data.len() > 2 * 1024 * 1024 {
+    let (offsets, has_cr) = if data.len() > 2 * 1024 * 1024 {
         find_lines_parallel(data, delimiter)
     } else {
         let dp = data.as_ptr();
         let mut offsets = Vec::with_capacity(data.len() / 40 + 1);
         let mut start = 0usize;
+        let mut found_cr = false;
 
         for pos in memchr::memchr_iter(delimiter, data) {
             let mut end = pos;
             // Strip trailing CR before LF (raw pointer to avoid bounds check)
             if delimiter == b'\n' && end > start && unsafe { *dp.add(end - 1) } == b'\r' {
                 end -= 1;
+                found_cr = true;
             }
             offsets.push((start, end));
             start = pos + 1;
@@ -413,13 +421,14 @@ fn read_all_input(
             let mut end = data.len();
             if delimiter == b'\n' && end > start && unsafe { *dp.add(end - 1) } == b'\r' {
                 end -= 1;
+                found_cr = true;
             }
             offsets.push((start, end));
         }
-        offsets
+        (offsets, found_cr)
     };
 
-    Ok((buffer, offsets))
+    Ok((buffer, offsets, has_cr))
 }
 
 /// Read all lines from inputs (legacy API, used by merge_sorted).
@@ -472,7 +481,7 @@ fn read_delimited_lines<R: Read>(
 
 /// Check if input is sorted using the optimized buffer path.
 pub fn check_sorted(inputs: &[String], config: &SortConfig) -> io::Result<bool> {
-    let (buffer, offsets) = read_all_input(inputs, config.zero_terminated)?;
+    let (buffer, offsets, _has_cr) = read_all_input(inputs, config.zero_terminated)?;
     let data = &*buffer;
 
     let dp = data.as_ptr();
@@ -1350,7 +1359,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
     }
 
     // Read all input BEFORE opening output file (supports -o same-file)
-    let (buffer, offsets) = read_all_input(inputs, config.zero_terminated)?;
+    let (buffer, offsets, has_cr) = read_all_input(inputs, config.zero_terminated)?;
     let data: &[u8] = &buffer;
     let num_lines = offsets.len();
 
@@ -1460,7 +1469,8 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         if is_sorted {
             // Zero-copy fast path: write mmap data directly when possible.
             // Conditions: non-unique, newline-terminated, no \r in data.
-            if !config.unique && !config.zero_terminated && memchr::memchr(b'\r', data).is_none() {
+            // Uses has_cr from line parsing instead of O(n) memchr scan.
+            if !config.unique && !config.zero_terminated && !has_cr {
                 if data.last() == Some(&b'\n') {
                     writer.write_all_direct(data)?;
                 } else if !data.is_empty() {
@@ -1471,14 +1481,14 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 return Ok(());
             }
 
-            // Contiguous buffer output for unique/\r\n/zero-terminated cases
+            // Zero-copy writev for unique/\r\n/zero-terminated sorted output
             let dp = data.as_ptr();
             let term_byte = terminator[0];
+            let term_sl: &[u8] = &[term_byte];
+            let data_len = data.len();
+            const BATCH: usize = 1024;
+            let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH);
             if config.unique {
-                let buf_cap = data.len() + num_lines + 1;
-                let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
-                let bptr = buf.as_mut_ptr();
-                let mut pos = 0usize;
                 let mut prev: Option<usize> = None;
                 for i in 0..num_lines {
                     let (s, e) = offsets[i];
@@ -1494,40 +1504,36 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         None => true,
                     };
                     if emit {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(dp.add(s), bptr.add(pos), len);
-                            *bptr.add(pos + len) = term_byte;
+                        if e < data_len && data[e] == term_byte {
+                            slices.push(io::IoSlice::new(&data[s..e + 1]));
+                        } else {
+                            slices.push(io::IoSlice::new(&data[s..e]));
+                            slices.push(io::IoSlice::new(term_sl));
                         }
-                        pos += len + 1;
+                        if slices.len() >= BATCH {
+                            write_all_vectored_sort(&mut writer, &slices)?;
+                            slices.clear();
+                        }
                         prev = Some(i);
                     }
                 }
-                unsafe {
-                    buf.set_len(pos);
-                }
-                writer.write_all_direct(&buf)?;
             } else {
-                let total_size = if data.last() == Some(&term_byte) {
-                    data.len()
-                } else {
-                    data.len() + 1
-                };
-                let mut buf: Vec<u8> = Vec::with_capacity(total_size);
-                let bptr = buf.as_mut_ptr();
-                let mut pos = 0usize;
                 for i in 0..num_lines {
                     let (s, e) = offsets[i];
-                    let len = e - s;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(dp.add(s), bptr.add(pos), len);
-                        *bptr.add(pos + len) = term_byte;
+                    if e < data_len && data[e] == term_byte {
+                        slices.push(io::IoSlice::new(&data[s..e + 1]));
+                    } else {
+                        slices.push(io::IoSlice::new(&data[s..e]));
+                        slices.push(io::IoSlice::new(term_sl));
                     }
-                    pos += len + 1;
+                    if slices.len() >= BATCH {
+                        write_all_vectored_sort(&mut writer, &slices)?;
+                        slices.clear();
+                    }
                 }
-                unsafe {
-                    buf.set_len(pos);
-                }
-                writer.write_all_direct(&buf)?;
+            }
+            if !slices.is_empty() {
+                write_all_vectored_sort(&mut writer, &slices)?;
             }
             writer.flush()?;
             return Ok(());
@@ -1540,15 +1546,15 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         if is_reverse_sorted {
             let dp = data.as_ptr();
             let term_byte = terminator[0];
-            let buf_cap = data.len() + num_lines + 1;
-            let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
-            let bptr = buf.as_mut_ptr();
-            let mut pos = 0usize;
+            let term_sl: &[u8] = &[term_byte];
+            let data_len = data.len();
+            const BATCH: usize = 1024;
+            let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH);
             let mut prev: Option<usize> = None;
             for i in (0..num_lines).rev() {
                 let (s, e) = offsets[i];
-                let len = e - s;
                 if config.unique {
+                    let len = e - s;
                     let line = unsafe { std::slice::from_raw_parts(dp.add(s), len) };
                     let emit = match prev {
                         Some(p) => {
@@ -1564,16 +1570,21 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                     prev = Some(i);
                 }
-                unsafe {
-                    std::ptr::copy_nonoverlapping(dp.add(s), bptr.add(pos), len);
-                    *bptr.add(pos + len) = term_byte;
+                // Zero-copy: point IoSlice directly into mmap data
+                if e < data_len && data[e] == term_byte {
+                    slices.push(io::IoSlice::new(&data[s..e + 1]));
+                } else {
+                    slices.push(io::IoSlice::new(&data[s..e]));
+                    slices.push(io::IoSlice::new(term_sl));
                 }
-                pos += len + 1;
+                if slices.len() >= BATCH {
+                    write_all_vectored_sort(&mut writer, &slices)?;
+                    slices.clear();
+                }
             }
-            unsafe {
-                buf.set_len(pos);
+            if !slices.is_empty() {
+                write_all_vectored_sort(&mut writer, &slices)?;
             }
-            writer.write_all_direct(&buf)?;
             writer.flush()?;
             return Ok(());
         }

@@ -97,8 +97,11 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
                 s.spawn(move || {
                     let chunk = &data[start..end];
                     let chunk_len = chunk.len();
-                    let sep_count = memchr::memchr_iter(sep, chunk).count();
-                    let mut records: Vec<(usize, usize)> = Vec::with_capacity(sep_count + 1);
+                    // Estimate capacity instead of counting separators: avoids a full
+                    // O(n) SIMD forward pass. Over-estimates ~2x for typical text;
+                    // under-estimates cause cheap amortized Vec reallocation.
+                    let estimated = chunk_len / 32 + 64;
+                    let mut records: Vec<(usize, usize)> = Vec::with_capacity(estimated);
 
                     let mut rec_end = chunk_len;
                     for pos in memchr::memrchr_iter(sep, chunk) {
@@ -149,8 +152,8 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
                 s.spawn(move || {
                     let chunk = &data[start..end];
                     let chunk_len = chunk.len();
-                    let sep_count = memchr::memchr_iter(sep, chunk).count();
-                    let mut records: Vec<(usize, usize)> = Vec::with_capacity(sep_count + 1);
+                    let estimated = chunk_len / 32 + 64;
+                    let mut records: Vec<(usize, usize)> = Vec::with_capacity(estimated);
 
                     let mut rec_end = chunk_len;
                     for pos in memchr::memrchr_iter(sep, chunk) {
