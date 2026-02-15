@@ -290,16 +290,20 @@ const FADVISE_MIN_SIZE: u64 = 1024 * 1024;
 
 /// Maximum file size for single-read hash optimization.
 /// Files up to this size are read entirely into a thread-local buffer and hashed
-/// with single-shot hash (avoids Hasher allocation + streaming overhead).
-const SMALL_FILE_LIMIT: u64 = 1024 * 1024;
+/// with single-shot hash. This avoids mmap/munmap overhead (~100µs each) and
+/// MAP_POPULATE page faults (~300ns/page). The thread-local buffer is reused
+/// across files in sequential mode, saving re-allocation.
+/// 16MB covers typical benchmark files (10MB) while keeping memory usage bounded.
+const SMALL_FILE_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Threshold for tiny files that can be read into a stack buffer.
 /// Below this size, we use a stack-allocated buffer + single read() syscall,
 /// completely avoiding any heap allocation for the data path.
 const TINY_FILE_LIMIT: u64 = 8 * 1024;
 
-// Thread-local reusable buffer for small-file single-read hash.
-// Avoids repeated allocation for many small files (e.g., 100 files of 1KB each).
+// Thread-local reusable buffer for single-read hash.
+// Grows lazily up to SMALL_FILE_LIMIT (16MB). Initial 64KB allocation
+// handles tiny files; larger files trigger one grow that persists for reuse.
 thread_local! {
     static SMALL_FILE_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64 * 1024));
 }
