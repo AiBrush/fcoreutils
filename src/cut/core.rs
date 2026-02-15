@@ -1096,6 +1096,7 @@ fn process_complement_range(
 }
 
 /// Process a chunk for complement range extraction.
+/// Uses memchr2_iter single-pass + write-pointer when delim != line_delim.
 fn complement_range_chunk(
     data: &[u8],
     delim: u8,
@@ -1105,25 +1106,157 @@ fn complement_range_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
-    // Pre-reserve entire chunk capacity to eliminate per-line reserve overhead.
+    if delim == line_delim {
+        buf.reserve(data.len());
+        let mut start = 0;
+        for end_pos in memchr_iter(line_delim, data) {
+            let line = &data[start..end_pos];
+            complement_range_line(line, delim, skip_start, skip_end, line_delim, suppress, buf);
+            start = end_pos + 1;
+        }
+        if start < data.len() {
+            complement_range_line(
+                &data[start..],
+                delim,
+                skip_start,
+                skip_end,
+                line_delim,
+                suppress,
+                buf,
+            );
+        }
+        return;
+    }
+
+    // Write-pointer + memchr2_iter single-pass
     buf.reserve(data.len());
-    let mut start = 0;
-    for end_pos in memchr_iter(line_delim, data) {
-        let line = &data[start..end_pos];
-        complement_range_line(line, delim, skip_start, skip_end, line_delim, suppress, buf);
-        start = end_pos + 1;
+    let src = data.as_ptr();
+    let dst = buf.as_mut_ptr();
+    let mut wp = buf.len();
+    let data_len = data.len();
+    let prefix_delims = skip_start - 1;
+    let skip_end_delims = skip_end;
+
+    let mut line_start: usize = 0;
+    let mut delim_count: usize = 0;
+    let mut has_delim = false;
+    let mut prefix_end: usize = 0;
+    let mut suffix_start: usize = 0;
+    let mut found_prefix = prefix_delims == 0;
+    let mut found_suffix = false;
+
+    for pos in memchr::memchr2_iter(delim, line_delim, data) {
+        let byte = unsafe { *src.add(pos) };
+
+        if byte == line_delim {
+            if !has_delim {
+                if !suppress {
+                    let len = pos - line_start;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), len);
+                        *dst.add(wp + len) = line_delim;
+                    }
+                    wp += len + 1;
+                }
+            } else if found_suffix {
+                if prefix_delims > 0 {
+                    let len = prefix_end - line_start;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), len);
+                        *dst.add(wp + len) = delim;
+                    }
+                    wp += len + 1;
+                }
+                let len = pos - suffix_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(suffix_start), dst.add(wp), len);
+                    *dst.add(wp + len) = line_delim;
+                }
+                wp += len + 1;
+            } else if found_prefix && prefix_delims > 0 {
+                let len = prefix_end - line_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), len);
+                    *dst.add(wp + len) = line_delim;
+                }
+                wp += len + 1;
+            } else if found_prefix {
+                unsafe { *dst.add(wp) = line_delim };
+                wp += 1;
+            } else {
+                let len = pos - line_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), len);
+                    *dst.add(wp + len) = line_delim;
+                }
+                wp += len + 1;
+            }
+
+            line_start = pos + 1;
+            delim_count = 0;
+            has_delim = false;
+            found_prefix = prefix_delims == 0;
+            found_suffix = false;
+        } else {
+            has_delim = true;
+            delim_count += 1;
+            if delim_count == prefix_delims {
+                prefix_end = pos;
+                found_prefix = true;
+            }
+            if delim_count == skip_end_delims {
+                suffix_start = pos + 1;
+                found_suffix = true;
+            }
+        }
     }
-    if start < data.len() {
-        complement_range_line(
-            &data[start..],
-            delim,
-            skip_start,
-            skip_end,
-            line_delim,
-            suppress,
-            buf,
-        );
+
+    if line_start < data_len {
+        if !has_delim {
+            if !suppress {
+                let len = data_len - line_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), len);
+                    *dst.add(wp + len) = line_delim;
+                }
+                wp += len + 1;
+            }
+        } else if found_suffix {
+            if prefix_delims > 0 {
+                let len = prefix_end - line_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), len);
+                    *dst.add(wp + len) = delim;
+                }
+                wp += len + 1;
+            }
+            let len = data_len - suffix_start;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(suffix_start), dst.add(wp), len);
+                *dst.add(wp + len) = line_delim;
+            }
+            wp += len + 1;
+        } else if found_prefix && prefix_delims > 0 {
+            let len = prefix_end - line_start;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), len);
+                *dst.add(wp + len) = line_delim;
+            }
+            wp += len + 1;
+        } else if found_prefix {
+            unsafe { *dst.add(wp) = line_delim };
+            wp += 1;
+        } else {
+            let len = data_len - line_start;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), len);
+                *dst.add(wp + len) = line_delim;
+            }
+            wp += len + 1;
+        }
     }
+
+    unsafe { buf.set_len(wp) };
 }
 
 /// Extract all fields except skip_start..=skip_end from one line.
@@ -1315,96 +1448,59 @@ fn complement_single_field_chunk(
         return;
     }
 
+    // Write-pointer pattern: single set_len at end, no per-copy Vec overhead.
     buf.reserve(data.len());
-    let base = data.as_ptr();
+    let src = data.as_ptr();
+    let dst = buf.as_mut_ptr();
+    let mut wp = buf.len();
     let data_len = data.len();
-    let need_before = skip_idx; // delimiters before skip field
-    let need_total = skip_idx + 1; // delimiters to find end of skip field
+    let need_before = skip_idx;
+    let need_total = skip_idx + 1;
 
-    // Per-line state
     let mut line_start: usize = 0;
     let mut delim_count: usize = 0;
     let mut skip_start_pos: usize = 0;
     let mut skip_end_pos: usize = 0;
-    let mut found_start = need_before == 0; // skip_idx==0 means skip starts at line start
+    let mut found_start = need_before == 0;
     let mut found_end = false;
 
+    macro_rules! wp_copy {
+        ($from:expr, $len:expr, $byte:expr) => {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add($from), dst.add(wp), $len);
+                *dst.add(wp + $len) = $byte;
+            }
+            wp += $len + 1;
+        };
+    }
+
     for pos in memchr::memchr2_iter(delim, line_delim, data) {
-        let byte = unsafe { *base.add(pos) };
+        let byte = unsafe { *src.add(pos) };
 
         if byte == line_delim {
-            // End of line: emit based on what we found
             if delim_count == 0 {
-                // No delimiter in line
                 if !suppress {
-                    unsafe {
-                        buf_extend(
-                            buf,
-                            std::slice::from_raw_parts(base.add(line_start), pos - line_start),
-                        );
-                        buf_push(buf, line_delim);
-                    }
+                    wp_copy!(line_start, pos - line_start, line_delim);
                 }
             } else if !found_start || delim_count < need_before {
-                // Not enough delimiters to reach skip field — output entire line
-                unsafe {
-                    buf_extend(
-                        buf,
-                        std::slice::from_raw_parts(base.add(line_start), pos - line_start),
-                    );
-                    buf_push(buf, line_delim);
-                }
+                wp_copy!(line_start, pos - line_start, line_delim);
             } else {
                 let has_prefix = skip_idx > 0;
                 let has_suffix = found_end && skip_end_pos < pos;
 
                 if has_prefix && has_suffix {
-                    unsafe {
-                        buf_extend(
-                            buf,
-                            std::slice::from_raw_parts(
-                                base.add(line_start),
-                                skip_start_pos - 1 - line_start,
-                            ),
-                        );
-                        buf_push(buf, delim);
-                        buf_extend(
-                            buf,
-                            std::slice::from_raw_parts(
-                                base.add(skip_end_pos + 1),
-                                pos - skip_end_pos - 1,
-                            ),
-                        );
-                        buf_push(buf, line_delim);
-                    }
+                    wp_copy!(line_start, skip_start_pos - 1 - line_start, delim);
+                    wp_copy!(skip_end_pos + 1, pos - skip_end_pos - 1, line_delim);
                 } else if has_prefix {
-                    unsafe {
-                        buf_extend(
-                            buf,
-                            std::slice::from_raw_parts(
-                                base.add(line_start),
-                                skip_start_pos - 1 - line_start,
-                            ),
-                        );
-                        buf_push(buf, line_delim);
-                    }
+                    wp_copy!(line_start, skip_start_pos - 1 - line_start, line_delim);
                 } else if has_suffix {
-                    unsafe {
-                        buf_extend(
-                            buf,
-                            std::slice::from_raw_parts(
-                                base.add(skip_end_pos + 1),
-                                pos - skip_end_pos - 1,
-                            ),
-                        );
-                        buf_push(buf, line_delim);
-                    }
+                    wp_copy!(skip_end_pos + 1, pos - skip_end_pos - 1, line_delim);
                 } else {
-                    unsafe { buf_push(buf, line_delim) };
+                    unsafe { *dst.add(wp) = line_delim };
+                    wp += 1;
                 }
             }
 
-            // Reset for next line
             line_start = pos + 1;
             delim_count = 0;
             skip_start_pos = 0;
@@ -1412,7 +1508,6 @@ fn complement_single_field_chunk(
             found_start = need_before == 0;
             found_end = false;
         } else {
-            // Delimiter found
             delim_count += 1;
             if delim_count == need_before {
                 skip_start_pos = pos + 1;
@@ -1430,72 +1525,29 @@ fn complement_single_field_chunk(
         let pos = data_len;
         if delim_count == 0 {
             if !suppress {
-                unsafe {
-                    buf_extend(
-                        buf,
-                        std::slice::from_raw_parts(base.add(line_start), pos - line_start),
-                    );
-                    buf_push(buf, line_delim);
-                }
+                wp_copy!(line_start, pos - line_start, line_delim);
             }
         } else if !found_start || delim_count < need_before {
-            unsafe {
-                buf_extend(
-                    buf,
-                    std::slice::from_raw_parts(base.add(line_start), pos - line_start),
-                );
-                buf_push(buf, line_delim);
-            }
+            wp_copy!(line_start, pos - line_start, line_delim);
         } else {
             let has_prefix = skip_idx > 0;
             let has_suffix = found_end && skip_end_pos < pos;
 
             if has_prefix && has_suffix {
-                unsafe {
-                    buf_extend(
-                        buf,
-                        std::slice::from_raw_parts(
-                            base.add(line_start),
-                            skip_start_pos - 1 - line_start,
-                        ),
-                    );
-                    buf_push(buf, delim);
-                    buf_extend(
-                        buf,
-                        std::slice::from_raw_parts(
-                            base.add(skip_end_pos + 1),
-                            pos - skip_end_pos - 1,
-                        ),
-                    );
-                    buf_push(buf, line_delim);
-                }
+                wp_copy!(line_start, skip_start_pos - 1 - line_start, delim);
+                wp_copy!(skip_end_pos + 1, pos - skip_end_pos - 1, line_delim);
             } else if has_prefix {
-                unsafe {
-                    buf_extend(
-                        buf,
-                        std::slice::from_raw_parts(
-                            base.add(line_start),
-                            skip_start_pos - 1 - line_start,
-                        ),
-                    );
-                    buf_push(buf, line_delim);
-                }
+                wp_copy!(line_start, skip_start_pos - 1 - line_start, line_delim);
             } else if has_suffix {
-                unsafe {
-                    buf_extend(
-                        buf,
-                        std::slice::from_raw_parts(
-                            base.add(skip_end_pos + 1),
-                            pos - skip_end_pos - 1,
-                        ),
-                    );
-                    buf_push(buf, line_delim);
-                }
+                wp_copy!(skip_end_pos + 1, pos - skip_end_pos - 1, line_delim);
             } else {
-                unsafe { buf_push(buf, line_delim) };
+                unsafe { *dst.add(wp) = line_delim };
+                wp += 1;
             }
         }
     }
+
+    unsafe { buf.set_len(wp) };
 }
 
 /// Fallback per-line complement single-field extraction (for delim == line_delim).
