@@ -63,7 +63,7 @@ fn split_into_chunks(data: &[u8], sep: u8) -> Vec<usize> {
         }
         if let Some(p) = memchr::memchr(sep, &data[target..]) {
             let b = target + p + 1;
-            if b > *boundaries.last().unwrap() && b <= data.len() {
+            if b > *boundaries.last().unwrap() && b < data.len() {
                 boundaries.push(b);
             }
         }
