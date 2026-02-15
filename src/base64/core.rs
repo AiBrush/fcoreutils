@@ -476,7 +476,6 @@ fn encode_wrapped_parallel(
 ) -> io::Result<()> {
     let line_out = wrap_col + 1;
     let total_full_lines = data.len() / bytes_per_line;
-    let remainder_input = data.len() % bytes_per_line;
 
     // Split work at line boundaries for parallel processing
     let num_threads = rayon::current_num_threads().max(1);
