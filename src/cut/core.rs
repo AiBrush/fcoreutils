@@ -959,40 +959,41 @@ fn process_single_field(
 ) -> io::Result<()> {
     let target_idx = target - 1;
 
-    // Combined SIMD scan: single pass using memchr2 for any target field.
     if delim != line_delim {
+        // Zero-copy writev path for field 1: no allocation, no copy.
+        // Uses two-level scan: outer memchr(newline) + inner memchr(delim).
+        // Faster than parallel+copy because field 1 is a prefix of each line,
+        // so inner scan exits immediately after the first delimiter.
+        // Also faster than memchr2 single-pass (which scans ALL delimiters
+        // on each line — for 10-column CSV that's ~9 wasted scans per line).
+        if target_idx == 0 && !suppress {
+            return single_field1_zerocopy(data, delim, line_delim, out);
+        }
+
+        // Two-level approach for field N: outer newline scan + inner delim scan
+        // with early exit at target_idx. Faster than memchr2 single-pass because
+        // we only scan delimiters up to target_idx per line (not all of them).
         if data.len() >= PARALLEL_THRESHOLD {
             let chunks = split_into_chunks(data, line_delim);
             let results: Vec<Vec<u8>> = chunks
                 .par_iter()
                 .map(|chunk| {
-                    let mut buf = Vec::with_capacity(chunk.len());
-                    process_nth_field_combined(
-                        chunk, delim, line_delim, target_idx, suppress, &mut buf,
+                    let mut buf = Vec::with_capacity(chunk.len() / 2);
+                    process_single_field_chunk(
+                        chunk, delim, target_idx, line_delim, suppress, &mut buf,
                     );
                     buf
                 })
                 .collect();
-            // Use write_vectored (writev) to batch N writes into fewer syscalls
             let slices: Vec<IoSlice> = results
                 .iter()
                 .filter(|r| !r.is_empty())
                 .map(|r| IoSlice::new(r))
                 .collect();
             write_ioslices(out, &slices)?;
-        } else if target_idx == 0 && !suppress {
-            // Zero-copy fast path for field 1 (most common case):
-            // For each line, either truncate at the first delimiter, or pass through.
-            // Since most lines have a delimiter, and field 1 is a prefix of each line,
-            // we can write contiguous runs directly from the source data.
-            single_field1_zerocopy(data, delim, line_delim, out)?;
         } else {
-            // Single-pass SIMD scan using memchr2_iter for both delimiter and
-            // line_delim simultaneously. For large files this is faster than the
-            // two-pass approach (outer newline scan + inner scalar field scan)
-            // because it processes the entire file in one SIMD sweep.
             let mut buf = Vec::with_capacity(data.len().min(4 * 1024 * 1024));
-            process_nth_field_combined(data, delim, line_delim, target_idx, suppress, &mut buf);
+            process_single_field_chunk(data, delim, target_idx, line_delim, suppress, &mut buf);
             if !buf.is_empty() {
                 out.write_all(&buf)?;
             }

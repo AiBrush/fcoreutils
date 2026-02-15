@@ -9,14 +9,14 @@ const BASE64_ENGINE: &base64_simd::Base64 = &base64_simd::STANDARD;
 /// Larger chunks = fewer write() syscalls for big files.
 const NOWRAP_CHUNK: usize = 32 * 1024 * 1024 - (32 * 1024 * 1024 % 3);
 
-/// Minimum data size for parallel encoding (4MB).
-/// Rayon thread pool init costs ~300µs. At 4MB+ the parallel speedup
-/// (2-4x on multi-core) amortizes this cost.
-const PARALLEL_ENCODE_THRESHOLD: usize = 4 * 1024 * 1024;
+/// Minimum data size for parallel encoding (2MB).
+/// Rayon thread pool is cached after first use (~100µs subsequent dispatch).
+/// At 2MB+ the parallel speedup (2-4x on multi-core) amortizes this cost.
+const PARALLEL_ENCODE_THRESHOLD: usize = 2 * 1024 * 1024;
 
-/// Minimum data size for parallel decoding (4MB of base64 data).
-/// Same threshold as encoding to avoid rayon overhead on small inputs.
-const PARALLEL_DECODE_THRESHOLD: usize = 4 * 1024 * 1024;
+/// Minimum data size for parallel decoding (2MB of base64 data).
+/// Lower threshold lets parallel decode kick in earlier for medium files.
+const PARALLEL_DECODE_THRESHOLD: usize = 2 * 1024 * 1024;
 
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with fused encode+wrap for maximum throughput.
@@ -638,12 +638,12 @@ pub fn decode_to_writer(data: &[u8], ignore_garbage: bool, out: &mut impl Write)
         return decode_clean_slice(&mut cleaned, out);
     }
 
-    // For large data (>= 1MB): use bulk strip + single-shot decode.
+    // For large data (>= 512KB): use bulk strip + single-shot decode.
     // try_line_decode decodes per-line (~25ns overhead per 76-byte line call),
     // while strip+decode uses SIMD gap-copy + single-shot SIMD decode at ~6.5 GB/s.
     // For 10MB decode benchmark: ~2ms (bulk) vs ~4ms (per-line) = 2x faster.
-    // For small data (< 1MB): per-line decode avoids allocation overhead.
-    if data.len() < 1_000_000 && data.len() >= 77 {
+    // For small data (< 512KB): per-line decode avoids allocation overhead.
+    if data.len() < 512 * 1024 && data.len() >= 77 {
         if let Some(result) = try_line_decode(data, out) {
             return result;
         }
@@ -671,8 +671,8 @@ pub fn decode_mmap_inplace(
     }
 
     // For small data: try line-by-line decode (avoids COW page faults).
-    // For large data (>= 1MB): bulk strip+decode is faster than per-line decode.
-    if !ignore_garbage && data.len() >= 77 && data.len() < 1_000_000 {
+    // For large data (>= 512KB): bulk strip+decode is faster than per-line decode.
+    if !ignore_garbage && data.len() >= 77 && data.len() < 512 * 1024 {
         if let Some(result) = try_line_decode(data, out) {
             return result;
         }
@@ -990,7 +990,7 @@ fn try_decode_uniform_lines(data: &[u8], out: &mut impl Write) -> Option<io::Res
         let src_ptr = data.as_ptr() as usize;
         let num_threads = rayon::current_num_threads().max(1);
         let lines_per_thread = (full_lines + num_threads - 1) / num_threads;
-        let lines_per_sub = (128 * 1024 / line_len).max(1);
+        let lines_per_sub = (256 * 1024 / line_len).max(1);
 
         let result: Result<Vec<()>, io::Error> = (0..num_threads)
             .into_par_iter()
@@ -1058,9 +1058,10 @@ fn try_decode_uniform_lines(data: &[u8], out: &mut impl Write) -> Option<io::Res
         return Some(out.write_all(&output[..total_decoded]));
     }
 
-    // Sequential path: fused strip+decode in 64KB sub-chunks.
+    // Sequential path: fused strip+decode in 256KB sub-chunks.
+    // Larger sub-chunks give SIMD decode more data per call, improving throughput.
     // Uses decode_inplace on a small reusable buffer — no large allocations at all.
-    let lines_per_sub = (64 * 1024 / line_len).max(1);
+    let lines_per_sub = (256 * 1024 / line_len).max(1);
     let sub_buf_size = lines_per_sub * line_len;
     let mut local_buf: Vec<u8> = Vec::with_capacity(sub_buf_size);
     #[allow(clippy::uninit_vec)]
