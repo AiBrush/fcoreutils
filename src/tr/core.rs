@@ -3319,13 +3319,7 @@ pub fn delete_squeeze(
         if n == 0 {
             break;
         }
-        let wp = delete_squeeze_inplace(
-            &mut buf,
-            n,
-            &delete_set,
-            &squeeze_set,
-            &mut last_squeezed,
-        );
+        let wp = delete_squeeze_inplace(&mut buf, n, &delete_set, &squeeze_set, &mut last_squeezed);
         if wp > 0 {
             writer.write_all(&buf[..wp])?;
         }
