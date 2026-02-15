@@ -134,22 +134,24 @@ pub fn read_file_vec(path: &Path) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Read a file using mmap with MAP_POPULATE for pre-faulting page tables.
-/// Used by tac for large files (>= 16MB) that benefit from zero-copy
-/// vmsplice output and parallel scanning. Callers should use read_file_vec()
-/// for smaller files to avoid mmap page fault overhead.
+/// Read a file always using mmap, with MADV_WILLNEED (no MADV_SEQUENTIAL).
+/// Used by tac which scans forward then outputs in reverse, and benefits
+/// from zero-copy vmsplice output from mmap pages.
+/// Skips the MMAP_THRESHOLD — even small files benefit from mmap since:
+///   - No memcpy from page cache to userspace (zero-copy)
+///   - vmsplice can reference mmap pages directly in the pipe
+///   - mmap setup cost for small files (~25 pages) is comparable to read()
 ///
-/// MAP_POPULATE pre-faults all page table entries in a single kernel call.
-/// For 100MB = 25,600 pages, this batched pre-fault is faster than 25,600
-/// individual minor faults during parallel scanning, because the kernel
-/// can optimize the batch (TLB flush once, sequential page table updates).
+/// No MAP_POPULATE: for warm page cache (hyperfine warmup), populate()
+/// synchronously faults all pages (~5ms for 100MB). MADV_WILLNEED triggers
+/// async readahead which overlaps with scanning.
 pub fn read_file_mmap(path: &Path) -> io::Result<FileData> {
     let file = open_noatime(path)?;
     let metadata = file.metadata()?;
     let len = metadata.len();
 
     if len > 0 && metadata.file_type().is_file() {
-        match unsafe { MmapOptions::new().populate().map(&file) } {
+        match unsafe { MmapOptions::new().map(&file) } {
             Ok(mmap) => {
                 #[cfg(target_os = "linux")]
                 {

@@ -1,13 +1,11 @@
 use std::io::{self, IoSlice, Write};
 
-/// Threshold for parallel processing (32MB).
-/// Thread creation costs ~50µs per thread with std::thread::scope (~200µs for 4),
-/// plus Vec<u32> positions allocation triggers page faults.
-/// For 10MB, sequential memrchr_iter (zero allocation, ~0.5ms scan) is faster
-/// than parallel (0.2ms thread overhead + 0.1ms Vec faults + 0.15ms scan = 0.45ms
-/// but with worse cache behavior). Crossover favors parallel at ~25MB+.
-/// At 32MB+, parallel scan saves ~1ms+ which amortizes all overhead.
-const PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
+/// Threshold for parallel processing (4MB).
+/// Thread creation costs ~50µs per thread with std::thread::scope (~200µs for 4).
+/// For 4MB files, sequential memchr scan takes ~0.05ms — too fast for parallel.
+/// At 4MB+, parallel scanning of N chunks provides (N-1)/N speedup which
+/// amortizes the thread creation cost. 10MB files see ~2x speedup from parallel.
+const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Reverse records separated by a single byte.
 /// Scans for separators with SIMD memchr, then outputs records in reverse
