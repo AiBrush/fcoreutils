@@ -111,6 +111,66 @@ path = "src/bin/fpaste.rs"
 name = "fnl"
 path = "src/bin/fnl.rs"
 
+[[bin]]
+name = "ftrue"
+path = "src/bin/ftrue.rs"
+
+[[bin]]
+name = "ffalse"
+path = "src/bin/ffalse.rs"
+
+[[bin]]
+name = "flink"
+path = "src/bin/flink.rs"
+
+[[bin]]
+name = "funlink"
+path = "src/bin/funlink.rs"
+
+[[bin]]
+name = "fsync"
+path = "src/bin/fsync.rs"
+
+[[bin]]
+name = "fhostid"
+path = "src/bin/fhostid.rs"
+
+[[bin]]
+name = "flogname"
+path = "src/bin/flogname.rs"
+
+[[bin]]
+name = "fwhoami"
+path = "src/bin/fwhoami.rs"
+
+[[bin]]
+name = "ftty"
+path = "src/bin/ftty.rs"
+
+[[bin]]
+name = "fnproc"
+path = "src/bin/fnproc.rs"
+
+[[bin]]
+name = "farch"
+path = "src/bin/farch.rs"
+
+[[bin]]
+name = "fprintenv"
+path = "src/bin/fprintenv.rs"
+
+[[bin]]
+name = "fpwd"
+path = "src/bin/fpwd.rs"
+
+[[bin]]
+name = "fmkfifo"
+path = "src/bin/fmkfifo.rs"
+
+[[bin]]
+name = "frmdir"
+path = "src/bin/frmdir.rs"
+
 [dependencies]
 # CLI argument parsing
 clap = { version = "4", features = ["derive", "cargo"] }
