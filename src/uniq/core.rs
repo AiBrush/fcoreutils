@@ -418,14 +418,19 @@ pub fn process_uniq_bytes(
 ) -> io::Result<()> {
     let term = if config.zero_terminated { b'\0' } else { b'\n' };
 
-    // Zero-copy fast path for default mode: bypass BufWriter entirely.
-    // The single-pass path writes contiguous runs from the original mmap data.
+    // Zero-copy fast path: bypass BufWriter for modes with run/IoSlice output.
+    // Default mode: writes contiguous runs directly from mmap data.
+    // Filter modes (-d/-u): use IoSlice batching (512 lines per writev).
     // Without BufWriter, writes go directly via writev/vmsplice (zero-copy).
-    // For mostly-unique data (the common case), this produces 1-2 large writes
-    // instead of copying ~10MB through BufWriter's internal heap buffer.
     let fast = !needs_key_extraction(config) && !config.ignore_case;
-    if fast && !config.count && matches!(config.mode, OutputMode::Default) {
-        return process_default_fast_singlepass(data, &mut output, term);
+    if fast
+        && !config.count
+        && matches!(
+            config.mode,
+            OutputMode::Default | OutputMode::RepeatedOnly | OutputMode::UniqueOnly
+        )
+    {
+        return process_standard_bytes(data, &mut output, config, term);
     }
 
     // General path with BufWriter for modes that need formatting/buffering.
