@@ -1,10 +1,10 @@
 use std::io::{self, IoSlice, Write};
 
 /// Threshold for parallel processing (4MB).
-/// With contiguous per-thread output buffers, the parallel path amortizes thread
-/// creation (~200us for 4 threads) at 4MB+. Below 4MB, sequential memrchr_iter
-/// is fast enough. The sequential IoSlice writev path was tested but is actually
-/// 2x slower for 100MB (too many writev syscalls with 1024 iovec entries each).
+/// The parallel path uses zero-copy scatter-gather: threads scan in parallel
+/// to find separator positions, then IoSlice entries point directly at the
+/// original mmap data — no full-file copy. Thread creation (~200us for 4 threads)
+/// is amortized at 4MB+. Below 4MB, sequential memrchr_iter + IoSlice is fast enough.
 const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Reverse records separated by a single byte.
@@ -74,17 +74,18 @@ fn split_into_chunks(data: &[u8], sep: u8) -> Vec<usize> {
     boundaries
 }
 
-/// Parallel after-separator mode: each thread scans its chunk with memrchr_iter
-/// (backward), copying records in reverse into a contiguous output buffer.
-/// Then a single writev of N buffers (in reverse chunk order) outputs everything.
+/// Parallel after-separator mode: zero-copy scatter-gather from mmap pages.
 ///
-/// This eliminates:
-/// - The Vec<u32> positions allocation (~10MB for 100MB)
-/// - The sequential IoSlice-per-record loop (~2.5M iterations)
-/// - ~2500 writev calls (reduced to 1)
+/// Phase 1 (parallel): Each thread scans its chunk backward with memrchr_iter,
+/// collecting separator positions into a compact Vec<u32>. No data is copied.
 ///
-/// Each thread's contiguous buffer uses MADV_HUGEPAGE to reduce page faults
-/// from ~6400 (4KB pages for ~25MB) to ~12 (2MB pages).
+/// Phase 2 (sequential): The main thread iterates chunks in reverse order,
+/// building IoSlice entries that point directly at the original mmap data.
+/// These are flushed via write_vectored (vmsplice on Linux) in batches.
+///
+/// This eliminates the full-file copy (~100MB for 100MB input) at the cost
+/// of more write_vectored calls. The positions Vec uses ~10MB for 100MB input
+/// (2.5M separators × 4 bytes) vs 100MB for the copy approach.
 fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let boundaries = split_into_chunks(data, sep);
     let n_chunks = boundaries.len() - 1;
@@ -92,75 +93,71 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
         return out.write_all(data);
     }
 
-    // Each thread scans its chunk backward with memrchr_iter, copying records
-    // in reverse into a contiguous output buffer. No positions Vec needed.
-    let results: Vec<Vec<u8>> = std::thread::scope(|s| {
+    // Phase 1: Each thread scans its chunk backward, collecting separator
+    // positions (absolute offsets into data). No data copy — just u32 positions.
+    let chunk_seps: Vec<Vec<u32>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..n_chunks)
             .map(|i| {
                 let start = boundaries[i];
                 let end = boundaries[i + 1];
                 s.spawn(move || {
                     let chunk = &data[start..end];
-                    let chunk_len = chunk.len();
-
-                    // Allocate contiguous output buffer with MADV_HUGEPAGE
-                    let mut buf: Vec<u8> = Vec::with_capacity(chunk_len);
-                    #[cfg(target_os = "linux")]
-                    if chunk_len >= 2 * 1024 * 1024 {
-                        unsafe {
-                            libc::madvise(
-                                buf.as_mut_ptr() as *mut libc::c_void,
-                                chunk_len,
-                                libc::MADV_HUGEPAGE,
-                            );
-                        }
-                    }
-
-                    // Scan backward with memrchr_iter, copy records in reverse
-                    let mut write_pos = 0usize;
-                    let mut rec_end = chunk_len;
+                    let est = chunk.len() / 40 + 64;
+                    let mut seps = Vec::with_capacity(est);
+                    // memrchr_iter returns positions in reverse order (end→start)
                     for pos in memchr::memrchr_iter(sep, chunk) {
-                        let rec_start = pos + 1;
-                        let rec_len = rec_end - rec_start;
-                        if rec_len > 0 {
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(
-                                    chunk.as_ptr().add(rec_start),
-                                    buf.as_mut_ptr().add(write_pos),
-                                    rec_len,
-                                );
-                            }
-                            write_pos += rec_len;
-                        }
-                        rec_end = rec_start;
+                        seps.push((start + pos) as u32);
                     }
-                    // Content before first separator in this chunk
-                    if rec_end > 0 {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                chunk.as_ptr(),
-                                buf.as_mut_ptr().add(write_pos),
-                                rec_end,
-                            );
-                        }
-                        write_pos += rec_end;
-                    }
-
-                    unsafe { buf.set_len(write_pos) };
-                    buf
+                    seps
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    // Single writev of N iovecs in reverse chunk order
-    let slices: Vec<IoSlice<'_>> = results.iter().rev().map(|r| IoSlice::new(r)).collect();
-    write_all_vectored(out, &slices)?;
+    // Phase 2: Build IoSlice entries pointing at mmap data, chunks in reverse order.
+    // Each IoSlice references the original data — zero copy.
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+
+    for i in (0..n_chunks).rev() {
+        let chunk_start = boundaries[i];
+        let chunk_end = boundaries[i + 1];
+        let seps = &chunk_seps[i];
+
+        // seps are in reverse order (from memrchr_iter). For after-separator mode:
+        // record = data[sep_pos+1 .. rec_end], where rec_end starts at chunk_end.
+        let mut rec_end = chunk_end;
+        for &sep_pos in seps.iter() {
+            let rec_start = sep_pos as usize + 1;
+            if rec_start < rec_end {
+                slices.push(IoSlice::new(&data[rec_start..rec_end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
+                }
+            }
+            rec_end = rec_start;
+        }
+        // Content before first separator in this chunk
+        if rec_end > chunk_start {
+            slices.push(IoSlice::new(&data[chunk_start..rec_end]));
+            if slices.len() >= BATCH {
+                write_all_vectored(out, &slices)?;
+                slices.clear();
+            }
+        }
+    }
+
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
+    }
     Ok(())
 }
 
-/// Parallel before-separator mode: contiguous per-thread output buffers.
+/// Parallel before-separator mode: zero-copy scatter-gather from mmap pages.
+/// Same approach as tac_bytes_after_parallel but records include the separator
+/// at their start rather than after.
 fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let boundaries = split_into_chunks(data, sep);
     let n_chunks = boundaries.len() - 1;
@@ -168,65 +165,60 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
         return out.write_all(data);
     }
 
-    // Each thread scans backward, copying records (separator-first) in reverse
-    let results: Vec<Vec<u8>> = std::thread::scope(|s| {
+    // Phase 1: Each thread scans backward, collecting separator positions.
+    let chunk_seps: Vec<Vec<u32>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..n_chunks)
             .map(|i| {
                 let start = boundaries[i];
                 let end = boundaries[i + 1];
                 s.spawn(move || {
                     let chunk = &data[start..end];
-                    let chunk_len = chunk.len();
-
-                    let mut buf: Vec<u8> = Vec::with_capacity(chunk_len);
-                    #[cfg(target_os = "linux")]
-                    if chunk_len >= 2 * 1024 * 1024 {
-                        unsafe {
-                            libc::madvise(
-                                buf.as_mut_ptr() as *mut libc::c_void,
-                                chunk_len,
-                                libc::MADV_HUGEPAGE,
-                            );
-                        }
-                    }
-
-                    let mut write_pos = 0usize;
-                    let mut rec_end = chunk_len;
+                    let est = chunk.len() / 40 + 64;
+                    let mut seps = Vec::with_capacity(est);
                     for pos in memchr::memrchr_iter(sep, chunk) {
-                        let rec_len = rec_end - pos;
-                        if rec_len > 0 {
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(
-                                    chunk.as_ptr().add(pos),
-                                    buf.as_mut_ptr().add(write_pos),
-                                    rec_len,
-                                );
-                            }
-                            write_pos += rec_len;
-                        }
-                        rec_end = pos;
+                        seps.push((start + pos) as u32);
                     }
-                    if rec_end > 0 {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                chunk.as_ptr(),
-                                buf.as_mut_ptr().add(write_pos),
-                                rec_end,
-                            );
-                        }
-                        write_pos += rec_end;
-                    }
-
-                    unsafe { buf.set_len(write_pos) };
-                    buf
+                    seps
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    let slices: Vec<IoSlice<'_>> = results.iter().rev().map(|r| IoSlice::new(r)).collect();
-    write_all_vectored(out, &slices)?;
+    // Phase 2: Build IoSlice entries, chunks in reverse order.
+    // Before mode: record = data[sep_pos .. rec_end]
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+
+    for i in (0..n_chunks).rev() {
+        let chunk_start = boundaries[i];
+        let chunk_end = boundaries[i + 1];
+        let seps = &chunk_seps[i];
+
+        let mut rec_end = chunk_end;
+        for &sep_pos in seps.iter() {
+            let pos = sep_pos as usize;
+            if pos < rec_end {
+                slices.push(IoSlice::new(&data[pos..rec_end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
+                }
+            }
+            rec_end = pos;
+        }
+        if rec_end > chunk_start {
+            slices.push(IoSlice::new(&data[chunk_start..rec_end]));
+            if slices.len() >= BATCH {
+                write_all_vectored(out, &slices)?;
+                slices.clear();
+            }
+        }
+    }
+
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
+    }
     Ok(())
 }
 
