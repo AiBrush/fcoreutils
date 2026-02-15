@@ -4,6 +4,8 @@ use std::ops::Deref;
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
+use std::os::unix::io::FromRawFd;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use memmap2::{Mmap, MmapOptions};
@@ -284,6 +286,82 @@ fn read_stdin_generic() -> io::Result<Vec<u8>> {
     }
 
     Ok(buf)
+}
+
+/// Splice piped stdin into an mmap via memfd for zero-copy access on Linux.
+///
+/// When stdin is a pipe, this avoids the kernel→userspace copy that read() requires:
+///   1. memfd_create() → anonymous in-memory file descriptor
+///   2. splice() loops data from pipe fd 0 → memfd (kernel-to-kernel, no userspace copy)
+///   3. mmap() the memfd → zero-copy userspace access to the pipe data
+///
+/// Returns None if stdin is not a pipe or if the pipe is empty.
+/// Callers should fall back to read_stdin() on None.
+#[cfg(target_os = "linux")]
+pub fn splice_stdin_to_mmap() -> Option<Mmap> {
+    // Check if stdin is a pipe
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(0, &mut stat) } != 0 {
+        return None;
+    }
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO {
+        return None;
+    }
+
+    // Create memfd — anonymous in-memory file, no filesystem overhead
+    let name = b"fio\0";
+    let memfd = unsafe { libc::memfd_create(name.as_ptr() as *const libc::c_char, 0) };
+    if memfd < 0 {
+        return None;
+    }
+
+    // splice() all data from pipe (fd 0) → memfd (kernel-to-kernel copy)
+    const SPLICE_CHUNK: usize = 16 * 1024 * 1024;
+    let mut total: usize = 0;
+    loop {
+        let n = unsafe {
+            libc::splice(
+                0,
+                std::ptr::null_mut(),
+                memfd,
+                std::ptr::null_mut(),
+                SPLICE_CHUNK,
+                0,
+            )
+        };
+        if n > 0 {
+            total += n as usize;
+        } else if n == 0 {
+            break; // EOF
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            unsafe { libc::close(memfd) };
+            return None;
+        }
+    }
+
+    if total == 0 {
+        unsafe { libc::close(memfd) };
+        return None;
+    }
+
+    // mmap the memfd for zero-copy access
+    let file = unsafe { File::from_raw_fd(memfd) };
+    let mmap = unsafe { MmapOptions::new().populate().map(&file) }.ok()?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = mmap.advise(memmap2::Advice::Sequential);
+        let _ = mmap.advise(memmap2::Advice::WillNeed);
+        if total >= 2 * 1024 * 1024 {
+            let _ = mmap.advise(memmap2::Advice::HugePage);
+        }
+    }
+
+    Some(mmap)
 }
 
 /// Read as many bytes as possible into buf, retrying on partial reads.

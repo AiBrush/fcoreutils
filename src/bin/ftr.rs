@@ -459,13 +459,17 @@ fn main() {
                 }
             }
         } else {
-            // Piped stdin: streaming path with raw write (not vmsplice).
-            // vmsplice puts page references into the pipe buffer. The streaming
-            // path reuses the same buffer across iterations, so vmsplice'd pages
-            // get overwritten before the pipe reader consumes them.
+            // Piped stdin: try splice+memfd for zero-copy, fall back to streaming.
+            // splice() moves data from pipe → memfd in the kernel (no userspace copy),
+            // then mmap gives zero-copy access + enables VmspliceWriter output.
             #[cfg(target_os = "linux")]
             {
-                tr::translate(&set1, &set2, &mut RawStdin, &mut *raw)
+                if let Some(mm) = coreutils_rs::common::io::splice_stdin_to_mmap() {
+                    let mut writer = VmspliceWriter::new();
+                    tr::translate_mmap_readonly(&set1, &set2, &mm, &mut writer)
+                } else {
+                    tr::translate(&set1, &set2, &mut RawStdin, &mut *raw)
+                }
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -517,11 +521,17 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: streaming path with raw write (not vmsplice — buffer reuse
-        // conflicts with vmsplice's zero-copy page references).
-        #[cfg(unix)]
+        // Piped stdin: try splice+memfd for zero-copy mmap, fall back to streaming.
+        #[cfg(target_os = "linux")]
+        let result = if let Some(mm) = coreutils_rs::common::io::splice_stdin_to_mmap() {
+            let data = FileData::Mmap(mm);
+            let mut writer = VmspliceWriter::new();
+            run_mmap_mode(&cli, set1_str, &data, &mut writer)
+        } else {
+            run_streaming_mode(&cli, set1_str, &mut *raw)
+        };
+        #[cfg(all(unix, not(target_os = "linux")))]
         let result = run_streaming_mode(&cli, set1_str, &mut *raw);
-        // Note: RawStdin is handled inside run_streaming_mode (Linux-only)
         #[cfg(not(unix))]
         let result = {
             let stdout = io::stdout();

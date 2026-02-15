@@ -463,24 +463,35 @@ fn main() {
         }
     };
 
-    // Pre-read all stdin data for piped input (avoids chunked reader overhead).
-    // Uses read_stdin() on Linux for raw libc::read() with 64MB pre-alloc,
-    // bypassing BufReader/read_to_end Vec growth pattern.
+    // Pre-read all stdin data for piped input.
+    // On Linux: try splice+memfd for zero-copy (pipe→memfd in kernel, then mmap).
+    // Falls back to raw read_stdin() if splice unavailable.
+    #[cfg(target_os = "linux")]
+    let stdin_splice_mmap: Option<memmap2::Mmap> =
+        if stdin_mmap.is_none() && files.iter().any(|f| f == "-") {
+            coreutils_rs::common::io::splice_stdin_to_mmap()
+        } else {
+            None
+        };
+    #[cfg(not(target_os = "linux"))]
+    let stdin_splice_mmap: Option<memmap2::Mmap> = None;
+
     #[cfg(unix)]
-    let stdin_buf: Option<Vec<u8>> = if stdin_mmap.is_none() && files.iter().any(|f| f == "-") {
-        match coreutils_rs::common::io::read_stdin() {
-            Ok(buf) => Some(buf),
-            Err(e) => {
-                if e.kind() != io::ErrorKind::BrokenPipe {
-                    eprintln!("cut: {}", io_error_msg(&e));
-                    process::exit(1);
+    let stdin_buf: Option<Vec<u8>> =
+        if stdin_mmap.is_none() && stdin_splice_mmap.is_none() && files.iter().any(|f| f == "-") {
+            match coreutils_rs::common::io::read_stdin() {
+                Ok(buf) => Some(buf),
+                Err(e) => {
+                    if e.kind() != io::ErrorKind::BrokenPipe {
+                        eprintln!("cut: {}", io_error_msg(&e));
+                        process::exit(1);
+                    }
+                    Some(Vec::new())
                 }
-                Some(Vec::new())
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     #[cfg(not(unix))]
     let stdin_buf: Option<Vec<u8>> = if files.iter().any(|f| f == "-") {
         match coreutils_rs::common::io::read_stdin() {
@@ -503,6 +514,8 @@ fn main() {
             {
                 if let Some(ref data) = stdin_mmap {
                     cut::process_cut_data(data, &cfg, &mut out)
+                } else if let Some(ref data) = stdin_splice_mmap {
+                    cut::process_cut_data(data.as_ref(), &cfg, &mut out)
                 } else if let Some(ref data) = stdin_buf {
                     cut::process_cut_data(data, &cfg, &mut out)
                 } else {
