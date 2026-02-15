@@ -348,17 +348,26 @@ fn read_all_input(
         })?;
         let metadata = file.metadata()?;
         if metadata.len() > 0 {
-            let mmap = unsafe { memmap2::MmapOptions::new().populate().map(&file)? };
-            // Advise kernel for optimal page handling.
-            // Sequential: aggressive readahead for the forward memchr line scan.
-            // HugePage: reduces TLB misses for large files.
-            // WillNeed: async readahead even with MAP_POPULATE.
+            // No MAP_POPULATE: let MADV_HUGEPAGE take effect before page faults.
+            // MAP_POPULATE faults all pages with 4KB BEFORE HUGEPAGE can take effect,
+            // causing ~25,600 minor faults for 100MB (~12.5ms). POPULATE_READ after
+            // HUGEPAGE uses 2MB pages (~50 faults = ~0.1ms).
+            let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
             #[cfg(target_os = "linux")]
             {
-                let _ = mmap.advise(memmap2::Advice::Sequential);
-                let _ = mmap.advise(memmap2::Advice::WillNeed);
+                // HUGEPAGE first: must be set before any page faults.
                 if metadata.len() >= 2 * 1024 * 1024 {
                     let _ = mmap.advise(memmap2::Advice::HugePage);
+                }
+                // Sequential: aggressive readahead for forward memchr line scan.
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                // POPULATE_READ (5.14+): prefault with huge pages. Fall back to WillNeed.
+                if metadata.len() >= 4 * 1024 * 1024 {
+                    if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                        let _ = mmap.advise(memmap2::Advice::WillNeed);
+                    }
+                } else {
+                    let _ = mmap.advise(memmap2::Advice::WillNeed);
                 }
             }
             FileData::Mmap(mmap)

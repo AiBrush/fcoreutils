@@ -140,16 +140,11 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
         return None;
     }
 
-    let file_size = stat.st_size as usize;
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    // Use MAP_POPULATE for files >= 4MB to prefault all pages during mmap() call.
-    // This avoids ~25,600 minor page faults (4KB pages) during the backward scan.
-    // For smaller files, lazy faulting is fast enough and avoids wasting memory.
-    let mmap = if file_size >= 4 * 1024 * 1024 {
-        unsafe { MmapOptions::new().populate().map(&file) }.ok()
-    } else {
-        unsafe { MmapOptions::new().map(&file) }.ok()
-    };
+    // No MAP_POPULATE: let MADV_HUGEPAGE take effect before page faults.
+    // MAP_POPULATE faults all pages with 4KB BEFORE HUGEPAGE, causing ~25,600
+    // minor faults for 100MB. POPULATE_READ after HUGEPAGE uses 2MB pages (~50 faults).
+    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
     std::mem::forget(file); // Don't close stdin
     #[cfg(target_os = "linux")]
     if let Some(ref m) = mmap {
@@ -161,9 +156,16 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
             if len >= 2 * 1024 * 1024 {
                 libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
             }
-            // WILLNEED after: async readahead will use 2MB huge pages.
+            // POPULATE_READ (Linux 5.14+): synchronously prefault pages using
+            // huge pages. Falls back to WILLNEED on older kernels.
             // Don't use SEQUENTIAL since tac accesses data in reverse order.
-            libc::madvise(ptr, len, libc::MADV_WILLNEED);
+            if len >= 4 * 1024 * 1024 {
+                if libc::madvise(ptr, len, 22 /* MADV_POPULATE_READ */) != 0 {
+                    libc::madvise(ptr, len, libc::MADV_WILLNEED);
+                }
+            } else {
+                libc::madvise(ptr, len, libc::MADV_WILLNEED);
+            }
         }
     }
     mmap
