@@ -34,6 +34,24 @@ const PARALLEL_WRAPPED_THRESHOLD: usize = 2 * 1024 * 1024;
 /// Lower threshold lets parallel decode kick in earlier for medium files.
 const PARALLEL_DECODE_THRESHOLD: usize = 2 * 1024 * 1024;
 
+/// Pre-fault an output buffer with HUGEPAGE + POPULATE_WRITE on Linux.
+/// MADV_HUGEPAGE must come first: tells kernel to use 2MB pages.
+/// MADV_POPULATE_WRITE (Linux 5.14+) then pre-faults all pages in one batch,
+/// eliminating demand-faulting overhead during parallel writes.
+/// This prevents VMA lock contention when multiple threads fault pages concurrently.
+#[cfg(target_os = "linux")]
+fn prefault_buffer(buf: &mut Vec<u8>) {
+    if buf.capacity() >= 2 * 1024 * 1024 {
+        unsafe {
+            let ptr = buf.as_mut_ptr() as *mut libc::c_void;
+            let len = buf.capacity();
+            libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
+            // MADV_POPULATE_WRITE = 23 (Linux 5.14+). Falls back silently on older kernels.
+            libc::madvise(ptr, len, 23);
+        }
+    }
+}
+
 /// Encode data and write to output with line wrapping.
 /// Uses SIMD encoding with fused encode+wrap for maximum throughput.
 pub fn encode_to_writer(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Result<()> {
@@ -99,15 +117,7 @@ fn encode_no_wrap_parallel(data: &[u8], out: &mut impl Write) -> io::Result<()> 
         output.set_len(total_out);
     }
     #[cfg(target_os = "linux")]
-    if total_out >= 2 * 1024 * 1024 {
-        unsafe {
-            libc::madvise(
-                output.as_mut_ptr() as *mut libc::c_void,
-                total_out,
-                libc::MADV_HUGEPAGE,
-            );
-        }
-    }
+    prefault_buffer(&mut output);
 
     // Parallel encode: each thread writes into its pre-assigned region
     let output_base = output.as_mut_ptr() as usize;
@@ -203,15 +213,7 @@ fn encode_wrapped_scatter(
         buf.set_len(out_len);
     }
     #[cfg(target_os = "linux")]
-    if out_len >= 2 * 1024 * 1024 {
-        unsafe {
-            libc::madvise(
-                buf.as_mut_ptr() as *mut libc::c_void,
-                out_len,
-                libc::MADV_HUGEPAGE,
-            );
-        }
-    }
+    prefault_buffer(&mut buf);
 
     // L1-cached temp buffer for encoding groups of lines.
     // 256 lines × 76 chars = 19,456 bytes — fits comfortably in L1 (32-64KB).
@@ -603,15 +605,7 @@ fn encode_wrapped_parallel(
         output.set_len(total_out);
     }
     #[cfg(target_os = "linux")]
-    if total_out >= 2 * 1024 * 1024 {
-        unsafe {
-            libc::madvise(
-                output.as_mut_ptr() as *mut libc::c_void,
-                total_out,
-                libc::MADV_HUGEPAGE,
-            );
-        }
-    }
+    prefault_buffer(&mut output);
 
     // Parallel encode: each thread writes into its pre-assigned region
     let output_base = output.as_mut_ptr() as usize;
