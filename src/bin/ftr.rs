@@ -374,7 +374,6 @@ fn main() {
     let set1_str = &cli.sets[0];
 
     #[cfg(unix)]
-    #[allow(unused_mut, unused_variables)]
     let mut raw = raw_stdout();
 
     // Pure translate mode: bypass BufWriter entirely.
@@ -535,17 +534,16 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: try splice+memfd for zero-copy, fallback to read_stdin.
+        // Piped stdin: try splice+memfd for zero-copy read, fallback to read_stdin.
+        // IMPORTANT: use raw write (not vmsplice) for non-translate modes because
+        // delete/squeeze/etc. allocate temporary output buffers that are freed before
+        // the pipe reader consumes vmsplice'd page references (use-after-free).
         #[cfg(target_os = "linux")]
         let result = if let Ok(Some(mmap)) = coreutils_rs::common::io::splice_stdin_to_mmap() {
-            let mut writer = VmspliceWriter::new();
-            run_mmap_mode(&cli, set1_str, &mmap, &mut writer)
+            run_mmap_mode(&cli, set1_str, &mmap, &mut *raw)
         } else {
             match coreutils_rs::common::io::read_stdin() {
-                Ok(data) => {
-                    let mut writer = VmspliceWriter::new();
-                    run_mmap_mode(&cli, set1_str, &data, &mut writer)
-                }
+                Ok(data) => run_mmap_mode(&cli, set1_str, &data, &mut *raw),
                 Err(e) => Err(e),
             }
         };
