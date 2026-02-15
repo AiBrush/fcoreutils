@@ -98,15 +98,12 @@ fn encode_no_wrap_parallel(data: &[u8], out: &mut impl Write) -> io::Result<()> 
                     unsafe {
                         buf.set_len(enc_len);
                     }
-                    // HUGEPAGE on per-thread buffer reduces page faults
                     #[cfg(target_os = "linux")]
                     if enc_len >= 2 * 1024 * 1024 {
                         unsafe {
-                            libc::madvise(
-                                buf.as_mut_ptr() as *mut libc::c_void,
-                                enc_len,
-                                libc::MADV_HUGEPAGE,
-                            );
+                            let ptr = buf.as_mut_ptr() as *mut libc::c_void;
+                            libc::madvise(ptr, enc_len, libc::MADV_HUGEPAGE);
+                            libc::madvise(ptr, enc_len, libc::MADV_POPULATE_WRITE);
                         }
                     }
                     let _ = BASE64_ENGINE.encode(chunk, buf[..enc_len].as_out());
@@ -228,11 +225,11 @@ fn encode_wrapped_scatter(
     #[cfg(target_os = "linux")]
     if out_size >= 2 * 1024 * 1024 {
         unsafe {
-            libc::madvise(
-                buf.as_mut_ptr() as *mut libc::c_void,
-                out_size,
-                libc::MADV_HUGEPAGE,
-            );
+            let ptr = buf.as_mut_ptr() as *mut libc::c_void;
+            libc::madvise(ptr, out_size, libc::MADV_HUGEPAGE);
+            // Prefault pages for writing to avoid demand-paging during scatter loop.
+            // With HUGEPAGE, this faults ~5 pages for 10MB instead of ~2500.
+            libc::madvise(ptr, out_size, libc::MADV_POPULATE_WRITE);
         }
     }
 
@@ -496,11 +493,9 @@ fn encode_wrapped_parallel(
                     #[cfg(target_os = "linux")]
                     if buf_size >= 2 * 1024 * 1024 {
                         unsafe {
-                            libc::madvise(
-                                buf.as_mut_ptr() as *mut libc::c_void,
-                                buf_size,
-                                libc::MADV_HUGEPAGE,
-                            );
+                            let ptr = buf.as_mut_ptr() as *mut libc::c_void;
+                            libc::madvise(ptr, buf_size, libc::MADV_HUGEPAGE);
+                            libc::madvise(ptr, buf_size, libc::MADV_POPULATE_WRITE);
                         }
                     }
 
