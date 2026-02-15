@@ -277,6 +277,13 @@ fn enlarge_pipes() {
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
+    // Pre-warm rayon's global thread pool in background.
+    // Overlaps pool creation (~200-500µs) with arg parsing and file I/O.
+    // For small files where rayon isn't needed, the thread exits harmlessly.
+    std::thread::spawn(|| {
+        let _ = rayon::ThreadPoolBuilder::new().build_global();
+    });
+
     #[cfg(target_os = "linux")]
     enlarge_pipes();
 

@@ -2570,11 +2570,14 @@ fn process_bytes_from_start(
     line_delim: u8,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    // Fast path: if all lines fit within max_bytes, output = input.
-    // Single memchr scan with early exit on first oversized line.
-    // For `-b1-100` on CSV where average line is < 100 bytes, this
-    // skips all per-line processing and outputs the data directly.
-    if max_bytes > 0 && max_bytes < usize::MAX {
+    // For small data (< PARALLEL_THRESHOLD): check if all lines fit for zero-copy passthrough.
+    // The sequential scan + write_all is competitive with per-line processing for small data.
+    //
+    // For large data (>= PARALLEL_THRESHOLD): skip the all_fit scan entirely.
+    // The scan is sequential (~1.7ms for 10MB at memchr speed) while parallel per-line
+    // processing is much faster (~0.5ms for 10MB with 4 threads). Even when all lines fit,
+    // the parallel copy + write is faster than sequential scan + zero-copy write.
+    if data.len() < PARALLEL_THRESHOLD && max_bytes > 0 && max_bytes < usize::MAX {
         let mut start = 0;
         let mut all_fit = true;
         for pos in memchr_iter(line_delim, data) {
@@ -2607,8 +2610,9 @@ fn process_bytes_from_start(
         rayon::scope(|s| {
             for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
                 s.spawn(move |_| {
-                    let est_out = (chunk.len() / 4).max(max_bytes + 2);
-                    result.reserve(est_out.min(chunk.len()));
+                    // Output can be up to input size (when all lines fit).
+                    // Reserve full chunk size to avoid reallocation.
+                    result.reserve(chunk.len());
                     bytes_from_start_chunk(chunk, max_bytes, line_delim, result);
                 });
             }
