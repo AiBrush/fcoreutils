@@ -19,11 +19,11 @@ fn num_cpus() -> usize {
 /// keeping peak buffer allocation reasonable (~10.7MB for the output).
 const NOWRAP_CHUNK: usize = 8 * 1024 * 1024 - (8 * 1024 * 1024 % 3);
 
-/// Minimum data size for parallel no-wrap encoding (1MB).
-/// No-wrap parallel has minimal overhead: split at 3-byte boundaries,
-/// encode each chunk independently. Per-thread buffers page-fault
-/// concurrently, and writev combines output in one syscall.
-const PARALLEL_NOWRAP_THRESHOLD: usize = 1024 * 1024;
+/// Minimum data size for parallel no-wrap encoding (4MB).
+/// For 1-2MB input, thread creation (~200µs for 4 threads) + per-thread
+/// buffer allocation page faults (~0.3ms) exceed the parallel encoding
+/// benefit. At 4MB+, the ~2x parallel speedup amortizes overhead.
+const PARALLEL_NOWRAP_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Minimum data size for parallel wrapped encoding (2MB).
 /// Wrapped parallel uses N threads for SIMD encoding, providing ~Nx
