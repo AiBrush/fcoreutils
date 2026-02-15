@@ -1774,8 +1774,6 @@ fn decode_borrowed_clean_parallel(out: &mut impl Write, data: &[u8]) -> io::Resu
                 let offset = offsets[i];
                 let expected_size = offsets[i + 1] - offset;
                 s.spawn(move || -> Result<(), io::Error> {
-            let offset = offsets[i];
-            let expected_size = offsets[i + 1] - offset;
                     // SAFETY: each thread writes to non-overlapping region
                     let out_slice = unsafe {
                         std::slice::from_raw_parts_mut(
