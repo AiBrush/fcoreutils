@@ -202,28 +202,22 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
     Ok(())
 }
 
-/// After-separator mode: zero-copy writev from source data.
-/// Single-pass memchr scan to find all separator positions, then output in reverse.
-/// For files under PARALLEL_THRESHOLD (4MB), a single memchr scan is faster
-/// than the chunked approach since page fault cost for the positions Vec is low
-/// (4MB / 40 bytes/line = 100K lines = 800KB positions = ~200 pages).
+/// After-separator mode: zero-allocation backward scan with writev output.
+///
+/// Uses memrchr_iter to scan from end to start, finding separators in reverse
+/// order. This eliminates the positions Vec entirely — no allocation, no page
+/// faults. memrchr uses the same SIMD (SSE2/AVX2) as memchr, just scanning
+/// backwards. Records are output via writev batching as they're discovered.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
-    }
-
-    // Single memchr scan — SIMD-accelerated, one pass over the data
-    let estimated = data.len() / 16 + 64;
-    let mut positions: Vec<usize> = Vec::with_capacity(estimated);
-    for p in memchr::memchr_iter(sep, data) {
-        positions.push(p);
     }
 
     const BATCH: usize = 1024;
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
 
-    for &pos in positions.iter().rev() {
+    for pos in memchr::memrchr_iter(sep, data) {
         let rec_start = pos + 1;
         if rec_start < end {
             slices.push(IoSlice::new(&data[rec_start..end]));
@@ -245,23 +239,17 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
     Ok(())
 }
 
-/// Before-separator mode: single-pass memchr + zero-copy writev.
+/// Before-separator mode: zero-allocation backward scan with writev output.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
-    }
-
-    let estimated = data.len() / 16 + 64;
-    let mut positions: Vec<usize> = Vec::with_capacity(estimated);
-    for p in memchr::memchr_iter(sep, data) {
-        positions.push(p);
     }
 
     const BATCH: usize = 1024;
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
 
-    for &pos in positions.iter().rev() {
+    for pos in memchr::memrchr_iter(sep, data) {
         if pos < end {
             slices.push(IoSlice::new(&data[pos..end]));
             if slices.len() >= BATCH {
