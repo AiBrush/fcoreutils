@@ -275,8 +275,13 @@ pub fn splice_stdin_to_mmap() -> io::Result<Option<memmap2::MmapMut>> {
         return Ok(None);
     }
 
-    // Create memfd for receiving spliced data
-    let memfd = unsafe { libc::memfd_create(c"stdin_splice".as_ptr(), 0) };
+    // Create memfd for receiving spliced data.
+    // Use raw syscall to avoid glibc version dependency (memfd_create added in glibc 2.27,
+    // but the syscall works on any kernel >= 3.17). This fixes cross-compilation to
+    // aarch64-unknown-linux-gnu with older sysroots.
+    let memfd = unsafe {
+        libc::syscall(libc::SYS_memfd_create, c"stdin_splice".as_ptr(), 0u32) as i32
+    };
     if memfd < 0 {
         return Ok(None); // memfd_create not supported, fallback
     }
