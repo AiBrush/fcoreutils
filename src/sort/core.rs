@@ -716,6 +716,26 @@ fn prefetch_read(ptr: *const u8) {
     let _ = ptr;
 }
 
+/// Software prefetch a cache line for writing.
+/// Uses PREFETCHW on x86_64 (sets Modified state, avoids later RFO miss)
+/// and store prefetch on aarch64.
+#[inline(always)]
+fn prefetch_write(ptr: *const u8) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        // _MM_HINT_ET0 = write-intent prefetch to L1 (PREFETCHW instruction).
+        // Brings cache line into Modified state, avoiding Read-For-Ownership miss
+        // when the scatter write happens.
+        std::arch::x86_64::_mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_ET0);
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        std::arch::asm!("prfm pstl1keep, [{x}]", x = in(reg) ptr, options(nostack, preserves_flags));
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = ptr;
+}
+
 /// Big-endian byte order ensures u64 comparison matches lexicographic order.
 #[inline]
 fn line_prefix(data: &[u8], start: usize, end: usize) -> u64 {
@@ -1102,14 +1122,23 @@ fn radix_sort_numeric_entries(
             sum += old;
         }
 
-        // Scatter into dst
+        // Scatter into dst with software prefetch
         let dst_ptr = dst.as_mut_ptr();
-        for &ent in &src {
+        let src_ptr = src.as_ptr();
+        let pfx_dist = 8usize;
+        for idx in 0..n {
+            let ent = unsafe { *src_ptr.add(idx) };
             let b = ((ent.0 >> shift) & 0xFFFF) as usize;
             unsafe {
                 *dst_ptr.add(cnts[b] as usize) = ent;
             }
             cnts[b] += 1;
+            if idx + pfx_dist < n {
+                prefetch_read(unsafe { src_ptr.add(idx + pfx_dist) as *const u8 });
+                let future = unsafe { *src_ptr.add(idx + pfx_dist) };
+                let fb = ((future.0 >> shift) & 0xFFFF) as usize;
+                prefetch_write(unsafe { dst_ptr.add(cnts[fb] as usize) as *const u8 });
+            }
         }
 
         // Swap src and dst for next pass
@@ -1219,7 +1248,11 @@ fn radix_sort_lex_entries(
             sum += old;
         }
 
-        // Scatter into dst with software prefetch
+        // Scatter into dst with two-level software prefetch:
+        // - Prefetch future source entry (read) at distance pfx_dist
+        // - Prefetch future destination slot (write-intent) using pre-loaded source
+        // Write-intent prefetch (PREFETCHW) sets the cache line to Modified state,
+        // avoiding a Read-For-Ownership miss when the scatter write happens.
         let dst_ptr = dst.as_mut_ptr();
         let src_ptr = src.as_ptr();
         let pfx_dist = 8usize;
@@ -1230,11 +1263,13 @@ fn radix_sort_lex_entries(
                 *dst_ptr.add(cnts[b] as usize) = ent;
             }
             cnts[b] += 1;
-            // Prefetch future write destination
             if idx + pfx_dist < n {
+                // Prefetch future source entry for read
+                prefetch_read(unsafe { src_ptr.add(idx + pfx_dist) as *const u8 });
+                // Prefetch future write destination with write intent
                 let future = unsafe { *src_ptr.add(idx + pfx_dist) };
                 let fb = ((future.0 >> shift) & 0xFFFF) as usize;
-                prefetch_read(unsafe { dst_ptr.add(cnts[fb] as usize) as *const u8 });
+                prefetch_write(unsafe { dst_ptr.add(cnts[fb] as usize) as *const u8 });
             }
         }
 
@@ -1414,7 +1449,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         && !gopts.ignore_case
         && !gopts.ignore_nonprinting;
 
-    if num_lines > 1 && !is_numeric_only_precheck {
+    // Skip the generic sorted check for plain lex mode with >256 lines.
+    // The lex fast path (below) has its own sorted detection using prefix entries,
+    // which is more efficient (integrates with the entry building step).
+    // Running both checks wastes an O(n) pass for random data.
+    let skip_generic_sorted_check = is_plain_lex_for_check && num_lines > 256;
+
+    if num_lines > 1 && !is_numeric_only_precheck && !skip_generic_sorted_check {
         // Check both ascending and descending order simultaneously.
         // If ascending: data is already sorted -> output as-is.
         // If descending: data is reverse-sorted -> reverse and output (O(n) vs O(n log n)).
