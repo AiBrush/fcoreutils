@@ -2160,7 +2160,10 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
             if !found_delim {
                 // No delimiter on this line — output entire line including newline
                 unsafe {
-                    buf_extend(buf, std::slice::from_raw_parts(base.add(line_start), pos + 1 - line_start));
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(line_start), pos + 1 - line_start),
+                    );
                 }
             } else {
                 // Delimiter was found earlier — just add the line terminator
@@ -2171,7 +2174,10 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
         } else if !found_delim {
             // First delimiter on this line — output field 1
             unsafe {
-                buf_extend(buf, std::slice::from_raw_parts(base.add(line_start), pos - line_start));
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(line_start), pos - line_start),
+                );
             }
             found_delim = true;
         }
@@ -2181,7 +2187,10 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
     if line_start < data.len() {
         if !found_delim {
             unsafe {
-                buf_extend(buf, std::slice::from_raw_parts(base.add(line_start), data.len() - line_start));
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(line_start), data.len() - line_start),
+                );
             }
         }
     }

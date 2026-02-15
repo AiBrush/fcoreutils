@@ -127,9 +127,8 @@ fn encode_no_wrap_parallel(data: &[u8], out: &mut impl Write) -> io::Result<()> 
             let enc_len = BASE64_ENGINE.encoded_length(chunk.len());
             let base = output_base;
             s.spawn(move || {
-                let dest = unsafe {
-                    std::slice::from_raw_parts_mut((base + out_off) as *mut u8, enc_len)
-                };
+                let dest =
+                    unsafe { std::slice::from_raw_parts_mut((base + out_off) as *mut u8, enc_len) };
                 let _ = BASE64_ENGINE.encode(chunk, dest.as_out());
             });
         }
@@ -634,7 +633,12 @@ fn encode_wrapped_parallel(
 /// Encode a chunk using L1-scatter, writing into a pre-allocated output slice.
 /// Encodes groups of 256 lines into L1-cached temp buffer, scatter-copy to output with newlines.
 /// The output slice must be large enough to hold the encoded+wrapped output.
-fn encode_chunk_l1_scatter_into(data: &[u8], output: &mut [u8], wrap_col: usize, bytes_per_line: usize) {
+fn encode_chunk_l1_scatter_into(
+    data: &[u8],
+    output: &mut [u8],
+    wrap_col: usize,
+    bytes_per_line: usize,
+) {
     const GROUP_LINES: usize = 256;
     let group_input = GROUP_LINES * bytes_per_line;
     let temp_size = GROUP_LINES * wrap_col;
