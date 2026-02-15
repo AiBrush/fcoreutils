@@ -259,7 +259,7 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     mmap
 }
 
-fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
+fn run(cli: &Cli, files: &[String], out: &mut impl Write, use_scatter: bool) -> bool {
     let mut had_error = false;
 
     for filename in files {
@@ -308,6 +308,11 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
         } else if let FileData::Owned(ref mut owned) = data {
             // In-place reversal: no output buffer needed.
             tac::tac_bytes_owned(owned, b'\n', cli.before, out)
+        } else if use_scatter {
+            // Non-pipe: scatter-gather avoids 100MB memcpy by pointing
+            // IoSlice directly at mmap data for writev output.
+            let bytes: &[u8] = &data;
+            tac::tac_bytes_scatter(bytes, b'\n', cli.before, out)
         } else {
             let bytes: &[u8] = &data;
             tac::tac_bytes(bytes, b'\n', cli.before, out)
@@ -357,27 +362,38 @@ fn main() {
     // On Linux: VmspliceWriter for zero-copy pipe output via vmsplice(2).
     // write_vectored maps to vmsplice with scatter-gather iovecs,
     // referencing mmap pages directly in the pipe (no kernel memcpy).
+    // On Linux: VmspliceWriter for zero-copy pipe output via vmsplice(2).
+    // For non-pipe output (files, /dev/null), use scatter-gather path
+    // which avoids 100MB memcpy by pointing IoSlice at mmap data.
     #[cfg(target_os = "linux")]
     let had_error = {
         if is_byte_sep {
             let mut vwriter = VmspliceWriter::new();
-            run(&cli, &files, &mut vwriter)
+            let scatter = !vwriter.is_pipe;
+            run(&cli, &files, &mut vwriter, scatter)
         } else {
             let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, VmspliceWriter::new());
-            let err = run(&cli, &files, &mut writer);
+            let err = run(&cli, &files, &mut writer, false);
             let _ = writer.flush();
             err
         }
     };
     // On other Unix: raw fd stdout for zero-copy writev.
+    // Always use scatter-gather (no vmsplice pipe detection needed).
     #[cfg(all(unix, not(target_os = "linux")))]
     let had_error = {
         let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
         if is_byte_sep {
-            run(&cli, &files, &mut &*raw)
+            // Non-Linux: detect pipe via fstat
+            let use_scatter = unsafe {
+                let mut stat: libc::stat = std::mem::zeroed();
+                libc::fstat(1, &mut stat) == 0
+                    && (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO
+            };
+            run(&cli, &files, &mut &*raw, use_scatter)
         } else {
             let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, &*raw);
-            let err = run(&cli, &files, &mut writer);
+            let err = run(&cli, &files, &mut writer, false);
             let _ = writer.flush();
             err
         }
@@ -388,10 +404,10 @@ fn main() {
         let lock = stdout.lock();
         if is_byte_sep {
             let mut writer = lock;
-            run(&cli, &files, &mut writer)
+            run(&cli, &files, &mut writer, false)
         } else {
             let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, lock);
-            let err = run(&cli, &files, &mut writer);
+            let err = run(&cli, &files, &mut writer, false);
             let _ = writer.flush();
             err
         }

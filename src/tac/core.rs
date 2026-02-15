@@ -230,6 +230,140 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
     Ok(())
 }
 
+/// Zero-copy scatter-gather tac: parallel scan to collect positions,
+/// then sequential writev output pointing directly at mmap data.
+/// Eliminates the 100MB memcpy of the parallel copy path.
+/// Best for non-pipe output (files, /dev/null) where writev is fast.
+pub fn tac_bytes_scatter(data: &[u8], separator: u8, before: bool, out: &mut impl Write) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    if data.len() >= PARALLEL_THRESHOLD {
+        if !before {
+            tac_bytes_after_scatter(data, separator, out)
+        } else {
+            tac_bytes_before_scatter(data, separator, out)
+        }
+    } else if !before {
+        tac_bytes_after(data, separator, out)
+    } else {
+        tac_bytes_before(data, separator, out)
+    }
+}
+
+/// Parallel scatter-gather after-separator mode.
+/// Phase 1: Parallel memrchr backward scan → collect positions per chunk.
+/// Phase 2: Sequential writev from mmap data in reverse order.
+fn tac_bytes_after_scatter(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
+    let boundaries = split_into_chunks(data, sep);
+    let n_chunks = boundaries.len() - 1;
+    if n_chunks == 0 {
+        return out.write_all(data);
+    }
+
+    // Phase 1: Parallel backward scan to collect absolute positions per chunk.
+    // Positions within each chunk are in reverse order (as memrchr_iter yields them).
+    let chunk_positions: Vec<Vec<usize>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..n_chunks)
+            .map(|i| {
+                let start = boundaries[i];
+                let end = boundaries[i + 1];
+                s.spawn(move || {
+                    let chunk = &data[start..end];
+                    let estimated = chunk.len() / 40 + 64;
+                    let mut positions: Vec<usize> = Vec::with_capacity(estimated);
+                    for pos in memchr::memrchr_iter(sep, chunk) {
+                        positions.push(start + pos);
+                    }
+                    positions
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // Phase 2: Sequential scatter-gather output.
+    // Process chunks in reverse order; positions within each are already reversed.
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut end = data.len();
+
+    for chunk_pos in chunk_positions.iter().rev() {
+        for &pos in chunk_pos.iter() {
+            let rec_start = pos + 1;
+            if rec_start < end {
+                slices.push(IoSlice::new(&data[rec_start..end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
+                }
+            }
+            end = rec_start;
+        }
+    }
+
+    if end > 0 {
+        slices.push(IoSlice::new(&data[..end]));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
+    }
+    Ok(())
+}
+
+/// Parallel scatter-gather before-separator mode.
+fn tac_bytes_before_scatter(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
+    let boundaries = split_into_chunks(data, sep);
+    let n_chunks = boundaries.len() - 1;
+    if n_chunks == 0 {
+        return out.write_all(data);
+    }
+
+    let chunk_positions: Vec<Vec<usize>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..n_chunks)
+            .map(|i| {
+                let start = boundaries[i];
+                let end = boundaries[i + 1];
+                s.spawn(move || {
+                    let chunk = &data[start..end];
+                    let estimated = chunk.len() / 40 + 64;
+                    let mut positions: Vec<usize> = Vec::with_capacity(estimated);
+                    for pos in memchr::memrchr_iter(sep, chunk) {
+                        positions.push(start + pos);
+                    }
+                    positions
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut end = data.len();
+
+    for chunk_pos in chunk_positions.iter().rev() {
+        for &pos in chunk_pos.iter() {
+            if pos < end {
+                slices.push(IoSlice::new(&data[pos..end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
+                }
+            }
+            end = pos;
+        }
+    }
+
+    if end > 0 {
+        slices.push(IoSlice::new(&data[..end]));
+    }
+    if !slices.is_empty() {
+        write_all_vectored(out, &slices)?;
+    }
+    Ok(())
+}
+
 /// After-separator mode: zero-allocation backward scan with writev output.
 ///
 /// Uses memrchr_iter to scan from end to start, finding separators in reverse
