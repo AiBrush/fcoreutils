@@ -129,122 +129,91 @@ fn parse_args() -> Cli {
                     cli.check = Some(eq_val.unwrap_or("diagnose").to_string());
                 }
                 "key" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!(
-                                        "sort: option '--key' requires an argument"
-                                    );
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("sort: option '--key' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     cli.keys.push(val);
                 }
                 "field-separator" => {
-                    cli.field_separator = Some(
-                        eq_val
-                            .map(|v| v.to_string())
-                            .unwrap_or_else(|| {
-                                args.next()
-                                    .unwrap_or_else(|| {
-                                        eprintln!(
-                                            "sort: option '--field-separator' requires an argument"
-                                        );
-                                        process::exit(2);
-                                    })
-                                    .to_string_lossy()
-                                    .into_owned()
-                            }),
-                    );
-                }
-                "output" => {
-                    cli.output = Some(
-                        eq_val
-                            .map(|v| v.to_string())
-                            .unwrap_or_else(|| {
-                                args.next()
-                                    .unwrap_or_else(|| {
-                                        eprintln!(
-                                            "sort: option '--output' requires an argument"
-                                        );
-                                        process::exit(2);
-                                    })
-                                    .to_string_lossy()
-                                    .into_owned()
-                            }),
-                    );
-                }
-                "temporary-directory" => {
-                    cli.temp_dir = Some(
-                        eq_val
-                            .map(|v| v.to_string())
-                            .unwrap_or_else(|| {
-                                args.next()
-                                    .unwrap_or_else(|| {
-                                        eprintln!(
-                                            "sort: option '--temporary-directory' requires an argument"
-                                        );
-                                        process::exit(2);
-                                    })
-                                    .to_string_lossy()
-                                    .into_owned()
-                            }),
-                    );
-                }
-                "parallel" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
+                    cli.field_separator =
+                        Some(eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
                             args.next()
                                 .unwrap_or_else(|| {
                                     eprintln!(
-                                        "sort: option '--parallel' requires an argument"
+                                        "sort: option '--field-separator' requires an argument"
                                     );
                                     process::exit(2);
                                 })
                                 .to_string_lossy()
                                 .into_owned()
-                        });
+                        }));
+                }
+                "output" => {
+                    cli.output = Some(eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("sort: option '--output' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    }));
+                }
+                "temporary-directory" => {
+                    cli.temp_dir = Some(eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!(
+                                    "sort: option '--temporary-directory' requires an argument"
+                                );
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    }));
+                }
+                "parallel" => {
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("sort: option '--parallel' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     cli.parallel = Some(val.parse().unwrap_or_else(|_| {
                         eprintln!("sort: invalid number of parallel jobs: '{}'", val);
                         process::exit(2);
                     }));
                 }
                 "buffer-size" => {
-                    cli.buffer_size = Some(
-                        eq_val
-                            .map(|v| v.to_string())
+                    cli.buffer_size = Some(eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
                             .unwrap_or_else(|| {
-                                args.next()
-                                    .unwrap_or_else(|| {
-                                        eprintln!(
-                                            "sort: option '--buffer-size' requires an argument"
-                                        );
-                                        process::exit(2);
-                                    })
-                                    .to_string_lossy()
-                                    .into_owned()
-                            }),
-                    );
+                                eprintln!("sort: option '--buffer-size' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    }));
                 }
                 "sort" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!(
-                                        "sort: option '--sort' requires an argument"
-                                    );
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("sort: option '--sort' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     match val.as_str() {
                         "general-numeric" => cli.general_numeric = true,
                         "human-numeric" => cli.human_numeric = true,
