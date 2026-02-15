@@ -296,17 +296,18 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             }
         };
 
-        // Override MADV_SEQUENTIAL from read_file: the contiguous buffer
-        // parallel approach scans forward in chunks (memchr) then copies records
-        // to the output buffer. WILLNEED pre-faults all pages so the parallel
-        // threads don't stall on page faults. Don't use SEQUENTIAL since
-        // multiple threads access different regions concurrently.
+        // Override MADV_SEQUENTIAL from read_file: tac reads forward (memchr scan)
+        // then outputs in reverse. SEQUENTIAL tells the kernel to drop pages behind
+        // the scan cursor, but we need those pages for the reverse output phase.
+        // MADV_NORMAL resets to default (no drop-behind), and WILLNEED pre-faults
+        // all pages so parallel threads don't stall on page faults.
         #[cfg(target_os = "linux")]
         {
             let ptr = data.as_ptr() as *mut libc::c_void;
             let len = data.len();
             if len > 0 {
                 unsafe {
+                    libc::madvise(ptr, len, libc::MADV_NORMAL);
                     libc::madvise(ptr, len, libc::MADV_WILLNEED);
                 }
             }
