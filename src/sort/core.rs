@@ -342,9 +342,13 @@ fn read_all_input(
         let metadata = file.metadata()?;
         if metadata.len() > 0 {
             let mmap = unsafe { memmap2::MmapOptions::new().populate().map(&file)? };
-            // Advise kernel for optimal page handling
+            // Advise kernel for optimal page handling.
+            // Sequential: aggressive readahead for the forward memchr line scan.
+            // HugePage: reduces TLB misses for large files.
+            // WillNeed: async readahead even with MAP_POPULATE.
             #[cfg(target_os = "linux")]
             {
+                let _ = mmap.advise(memmap2::Advice::Sequential);
                 let _ = mmap.advise(memmap2::Advice::WillNeed);
                 if metadata.len() >= 2 * 1024 * 1024 {
                     let _ = mmap.advise(memmap2::Advice::HugePage);
@@ -1632,7 +1636,8 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         // If data is already sorted, skip the entire radix sort.
         // Also detects reverse-sorted input (for sort -r optimization).
         // Works with -u (unique) by applying linear dedup on sorted data.
-        if num_lines > 1 && !config.zero_terminated && memchr::memchr(b'\r', data).is_none() {
+        // Line offsets exclude \r for CRLF input, so comparisons are CRLF-safe.
+        if num_lines > 1 && !config.zero_terminated {
             let dp = data.as_ptr();
             let mut is_sorted_fwd = true;
             let mut is_sorted_rev = true;
@@ -1683,12 +1688,12 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             if (!reverse && is_sorted_fwd) || (reverse && is_sorted_rev) {
                 // Already in desired order: output directly (O(n) vs O(n log n))
                 if config.unique {
-                    // Linear dedup on already-sorted data — contiguous buffer
+                    // Linear dedup on already-sorted data — zero-copy writev
                     let term_byte = terminator[0];
-                    let buf_cap = data.len() + entries.len() + 1;
-                    let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
-                    let bptr = buf.as_mut_ptr();
-                    let mut pos = 0usize;
+                    const BATCH: usize = 1024;
+                    let data_len = data.len();
+                    let term_sl: &[u8] = &[term_byte];
+                    let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH);
                     let mut prev_pfx = u64::MAX;
                     let mut prev_s = u32::MAX;
                     let mut prev_l = 0u32;
@@ -1704,25 +1709,26 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                                     )
                             };
                         if emit {
-                            let lu = l as usize;
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(
-                                    dp.add(s as usize),
-                                    bptr.add(pos),
-                                    lu,
-                                );
-                                *bptr.add(pos + lu) = term_byte;
+                            let su = s as usize;
+                            let end = su + l as usize;
+                            if end < data_len && data[end] == term_byte {
+                                slices.push(io::IoSlice::new(&data[su..end + 1]));
+                            } else {
+                                slices.push(io::IoSlice::new(&data[su..end]));
+                                slices.push(io::IoSlice::new(term_sl));
                             }
-                            pos += lu + 1;
+                            if slices.len() >= BATCH {
+                                write_all_vectored_sort(&mut writer, &slices)?;
+                                slices.clear();
+                            }
                             prev_pfx = pfx;
                             prev_s = s;
                             prev_l = l;
                         }
                     }
-                    unsafe {
-                        buf.set_len(pos);
+                    if !slices.is_empty() {
+                        write_all_vectored_sort(&mut writer, &slices)?;
                     }
-                    writer.write_all_direct(&buf)?;
                 } else if data.last() == Some(&b'\n') {
                     writer.write_all_direct(data)?;
                 } else if !data.is_empty() {
