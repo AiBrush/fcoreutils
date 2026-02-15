@@ -26,6 +26,15 @@ fn run_head_bytes_from_end(input: &[u8], n: u64) -> Vec<u8> {
     out
 }
 
+/// Get the path to a built binary. Works in both lib tests and integration tests.
+fn bin_path(name: &str) -> std::path::PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop(); // remove test binary name
+    path.pop(); // remove 'deps'
+    path.push(name);
+    path
+}
+
 // ---- Empty/minimal input ----
 
 #[test]
@@ -212,6 +221,8 @@ fn test_binary_data_bytes() {
 
 #[test]
 fn test_binary_data_lines() {
+    // Byte 10 (0x0A) is a newline, so first "line" in a 0-255 byte range
+    // ends at position 10 (inclusive). head -n 1 returns bytes 0..=10.
     let mut input = Vec::new();
     for i in 0..=255u8 {
         input.push(i);
@@ -219,7 +230,7 @@ fn test_binary_data_lines() {
     input.push(b'\n');
     input.extend_from_slice(b"second\n");
     let result = run_head_lines(&input, 1);
-    assert_eq!(result.len(), 257); // 256 bytes + newline
+    assert_eq!(result.len(), 11); // bytes 0..=10 (newline at position 10)
 }
 
 // ---- Large input ----
@@ -252,7 +263,7 @@ fn test_binary_basic() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "line 1\nline 2\nline 3\nline 4\nline 5\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let output = std::process::Command::new(bin_path("fhead"))
         .arg("-n")
         .arg("3")
         .arg(file_path.to_str().unwrap())
@@ -272,7 +283,7 @@ fn test_binary_bytes() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "hello world").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let output = std::process::Command::new(bin_path("fhead"))
         .arg("-c")
         .arg("5")
         .arg(file_path.to_str().unwrap())
@@ -291,7 +302,7 @@ fn test_binary_multiple_files() {
     std::fs::write(&file1, "aaa\n").unwrap();
     std::fs::write(&file2, "bbb\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let output = std::process::Command::new(bin_path("fhead"))
         .arg("-n")
         .arg("1")
         .arg(file1.to_str().unwrap())
@@ -314,7 +325,7 @@ fn test_binary_quiet_mode() {
     std::fs::write(&file1, "aaa\n").unwrap();
     std::fs::write(&file2, "bbb\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let output = std::process::Command::new(bin_path("fhead"))
         .arg("-q")
         .arg("-n")
         .arg("1")
@@ -329,7 +340,7 @@ fn test_binary_quiet_mode() {
 
 #[test]
 fn test_binary_nonexistent_file() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let output = std::process::Command::new(bin_path("fhead"))
         .arg("/nonexistent/file")
         .output()
         .unwrap();
@@ -342,7 +353,7 @@ fn test_binary_nonexistent_file() {
 
 #[test]
 fn test_binary_version() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let output = std::process::Command::new(bin_path("fhead"))
         .arg("--version")
         .output()
         .unwrap();
@@ -357,7 +368,7 @@ fn test_binary_negative_lines() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "1\n2\n3\n4\n5\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let output = std::process::Command::new(bin_path("fhead"))
         .arg("-n")
         .arg("-2")
         .arg(file_path.to_str().unwrap())
@@ -374,7 +385,7 @@ fn test_binary_negative_bytes() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "hello world").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let output = std::process::Command::new(bin_path("fhead"))
         .arg("-c")
         .arg("-6")
         .arg(file_path.to_str().unwrap())
@@ -397,7 +408,7 @@ fn test_gnu_compat_default() {
     }
     std::fs::write(&file_path, &content).unwrap();
 
-    let our_output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let our_output = std::process::Command::new(bin_path("fhead"))
         .arg(file_path.to_str().unwrap())
         .output()
         .unwrap();
@@ -416,7 +427,7 @@ fn test_gnu_compat_bytes_suffix() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "a".repeat(2048)).unwrap();
 
-    let our_output = std::process::Command::new(env!("CARGO_BIN_EXE_fhead"))
+    let our_output = std::process::Command::new(bin_path("fhead"))
         .arg("-c")
         .arg("1K")
         .arg(file_path.to_str().unwrap())

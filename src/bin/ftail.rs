@@ -51,8 +51,7 @@ fn parse_args() -> Cli {
                     eprintln!("tail: invalid number: '{}'", val);
                     process::exit(1);
                 });
-            } else if s.starts_with("--follow=") {
-                let val = &s["--follow=".len()..];
+            } else if let Some(val) = s.strip_prefix("--follow=") {
                 match val {
                     "name" => cli.config.follow = FollowMode::Name,
                     "descriptor" => cli.config.follow = FollowMode::Descriptor,
@@ -347,7 +346,7 @@ fn main() {
             } else {
                 filename.as_str()
             };
-            let _ = write!(out, "==> {} <==\n", display_name);
+            let _ = writeln!(out, "==> {} <==", display_name);
         }
         first = false;
 

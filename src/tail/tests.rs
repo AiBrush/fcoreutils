@@ -26,6 +26,14 @@ fn run_tail_bytes_from(input: &[u8], n: u64) -> Vec<u8> {
     out
 }
 
+fn bin_path(name: &str) -> std::path::PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    path.pop();
+    path.push(name);
+    path
+}
+
 // ---- Empty/minimal input ----
 
 #[test]
@@ -208,7 +216,7 @@ fn test_binary_basic() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "line 1\nline 2\nline 3\nline 4\nline 5\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let output = std::process::Command::new(bin_path("ftail"))
         .arg("-n")
         .arg("3")
         .arg(file_path.to_str().unwrap())
@@ -228,7 +236,7 @@ fn test_binary_bytes() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "hello world").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let output = std::process::Command::new(bin_path("ftail"))
         .arg("-c")
         .arg("5")
         .arg(file_path.to_str().unwrap())
@@ -245,7 +253,7 @@ fn test_binary_plus_lines() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "1\n2\n3\n4\n5\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let output = std::process::Command::new(bin_path("ftail"))
         .arg("-n")
         .arg("+3")
         .arg(file_path.to_str().unwrap())
@@ -262,7 +270,7 @@ fn test_binary_plus_bytes() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "hello world").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let output = std::process::Command::new(bin_path("ftail"))
         .arg("-c")
         .arg("+7")
         .arg(file_path.to_str().unwrap())
@@ -281,7 +289,7 @@ fn test_binary_multiple_files() {
     std::fs::write(&file1, "aaa\n").unwrap();
     std::fs::write(&file2, "bbb\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let output = std::process::Command::new(bin_path("ftail"))
         .arg("-n")
         .arg("1")
         .arg(file1.to_str().unwrap())
@@ -304,7 +312,7 @@ fn test_binary_quiet_mode() {
     std::fs::write(&file1, "aaa\n").unwrap();
     std::fs::write(&file2, "bbb\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let output = std::process::Command::new(bin_path("ftail"))
         .arg("-q")
         .arg("-n")
         .arg("1")
@@ -319,7 +327,7 @@ fn test_binary_quiet_mode() {
 
 #[test]
 fn test_binary_nonexistent_file() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let output = std::process::Command::new(bin_path("ftail"))
         .arg("/nonexistent/file")
         .output()
         .unwrap();
@@ -332,7 +340,7 @@ fn test_binary_nonexistent_file() {
 
 #[test]
 fn test_binary_version() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let output = std::process::Command::new(bin_path("ftail"))
         .arg("--version")
         .output()
         .unwrap();
@@ -353,7 +361,7 @@ fn test_gnu_compat_default() {
     }
     std::fs::write(&file_path, &content).unwrap();
 
-    let our_output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let our_output = std::process::Command::new(bin_path("ftail"))
         .arg(file_path.to_str().unwrap())
         .output()
         .unwrap();
@@ -376,7 +384,7 @@ fn test_gnu_compat_plus_n() {
     }
     std::fs::write(&file_path, &content).unwrap();
 
-    let our_output = std::process::Command::new(env!("CARGO_BIN_EXE_ftail"))
+    let our_output = std::process::Command::new(bin_path("ftail"))
         .arg("-n")
         .arg("+5")
         .arg(file_path.to_str().unwrap())

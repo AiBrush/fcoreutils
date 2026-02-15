@@ -254,7 +254,7 @@ fn main() {
             } else {
                 filename.as_str()
             };
-            let _ = write!(out, "==> {} <==\n", display_name);
+            let _ = writeln!(out, "==> {} <==", display_name);
         }
         first = false;
 

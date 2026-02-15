@@ -55,6 +55,14 @@ fn squeeze_blank_config() -> CatConfig {
     }
 }
 
+fn bin_path(name: &str) -> std::path::PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    path.pop();
+    path.push(name);
+    path
+}
+
 // ---- Empty/minimal input ----
 
 #[test]
@@ -292,7 +300,7 @@ fn test_binary_basic() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "hello world\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg(file_path.to_str().unwrap())
         .output()
         .unwrap();
@@ -307,7 +315,7 @@ fn test_binary_number() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "one\ntwo\nthree\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg("-n")
         .arg(file_path.to_str().unwrap())
         .output()
@@ -326,7 +334,7 @@ fn test_binary_show_ends() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "one\ntwo\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg("-E")
         .arg(file_path.to_str().unwrap())
         .output()
@@ -342,7 +350,7 @@ fn test_binary_show_tabs() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "a\tb\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg("-T")
         .arg(file_path.to_str().unwrap())
         .output()
@@ -358,7 +366,7 @@ fn test_binary_squeeze() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "one\n\n\n\ntwo\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg("-s")
         .arg(file_path.to_str().unwrap())
         .output()
@@ -376,7 +384,7 @@ fn test_binary_multiple_files() {
     std::fs::write(&file1, "aaa\n").unwrap();
     std::fs::write(&file2, "bbb\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg(file1.to_str().unwrap())
         .arg(file2.to_str().unwrap())
         .output()
@@ -388,7 +396,7 @@ fn test_binary_multiple_files() {
 
 #[test]
 fn test_binary_nonexistent_file() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg("/nonexistent/file")
         .output()
         .unwrap();
@@ -403,7 +411,7 @@ fn test_binary_nonexistent_file() {
 fn test_binary_directory() {
     let dir = tempfile::tempdir().unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg(dir.path().to_str().unwrap())
         .output()
         .unwrap();
@@ -415,7 +423,7 @@ fn test_binary_directory() {
 
 #[test]
 fn test_binary_version() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg("--version")
         .output()
         .unwrap();
@@ -430,7 +438,7 @@ fn test_binary_show_all() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "a\t\x01\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let output = std::process::Command::new(bin_path("fcat"))
         .arg("-A")
         .arg(file_path.to_str().unwrap())
         .output()
@@ -448,7 +456,7 @@ fn test_gnu_compat_plain() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "hello\nworld\n").unwrap();
 
-    let our_output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let our_output = std::process::Command::new(bin_path("fcat"))
         .arg(file_path.to_str().unwrap())
         .output()
         .unwrap();
@@ -467,7 +475,7 @@ fn test_gnu_compat_number() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "one\n\nthree\n").unwrap();
 
-    let our_output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let our_output = std::process::Command::new(bin_path("fcat"))
         .arg("-n")
         .arg(file_path.to_str().unwrap())
         .output()
@@ -488,7 +496,7 @@ fn test_gnu_compat_number_nonblank() {
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "one\n\nthree\n").unwrap();
 
-    let our_output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let our_output = std::process::Command::new(bin_path("fcat"))
         .arg("-b")
         .arg(file_path.to_str().unwrap())
         .output()
@@ -511,7 +519,7 @@ fn test_gnu_compat_show_nonprinting() {
     let data: Vec<u8> = (0..=255).collect();
     std::fs::write(&file_path, &data).unwrap();
 
-    let our_output = std::process::Command::new(env!("CARGO_BIN_EXE_fcat"))
+    let our_output = std::process::Command::new(bin_path("fcat"))
         .arg("-v")
         .arg(file_path.to_str().unwrap())
         .output()

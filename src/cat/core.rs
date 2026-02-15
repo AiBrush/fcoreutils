@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::common::io::{read_file, read_stdin};
 
 /// Configuration for cat
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CatConfig {
     pub number: bool,
     pub number_nonblank: bool,
@@ -12,19 +12,6 @@ pub struct CatConfig {
     pub show_tabs: bool,
     pub show_nonprinting: bool,
     pub squeeze_blank: bool,
-}
-
-impl Default for CatConfig {
-    fn default() -> Self {
-        Self {
-            number: false,
-            number_nonblank: false,
-            show_ends: false,
-            show_tabs: false,
-            show_nonprinting: false,
-            squeeze_blank: false,
-        }
-    }
 }
 
 impl CatConfig {

@@ -100,7 +100,7 @@ pub fn tail_lines_from(
     }
 
     // Skip first (n-1) lines
-    let skip = (n - 1) as u64;
+    let skip = n - 1;
     let mut count = 0u64;
 
     for pos in memchr_iter(delimiter, data) {
@@ -212,18 +212,16 @@ pub fn tail_file(
                 use std::os::unix::io::AsRawFd;
                 let stdout = io::stdout();
                 let out_fd = stdout.as_raw_fd();
-                match sendfile_tail_bytes(Path::new(filename), *n, out_fd) {
-                    Ok(true) => return Ok(true),
-                    _ => {}
+                if let Ok(true) = sendfile_tail_bytes(Path::new(filename), *n, out_fd) {
+                    return Ok(true);
                 }
             }
             TailMode::BytesFrom(n) => {
                 use std::os::unix::io::AsRawFd;
                 let stdout = io::stdout();
                 let out_fd = stdout.as_raw_fd();
-                match sendfile_tail_bytes_from(Path::new(filename), *n, out_fd) {
-                    Ok(true) => return Ok(true),
-                    _ => {}
+                if let Ok(true) = sendfile_tail_bytes_from(Path::new(filename), *n, out_fd) {
+                    return Ok(true);
                 }
             }
             _ => {}
