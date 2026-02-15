@@ -280,7 +280,27 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
                         #[cfg(target_os = "linux")]
                         {
                             match coreutils_rs::common::io::splice_stdin_to_mmap() {
-                                Ok(Some(mmap)) => FileData::Owned(mmap.to_vec()),
+                                Ok(Some(mmap)) => {
+                                    // Convert MAP_SHARED MmapMut to read-only Mmap.
+                                    // Avoids 10MB+ copy that mmap.to_vec() would incur.
+                                    match mmap.make_read_only() {
+                                        Ok(ro) => FileData::Mmap(ro),
+                                        Err(_) => {
+                                            // make_read_only failed — fall through to read_stdin
+                                            match read_stdin() {
+                                                Ok(d) => FileData::Owned(d),
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "tac: standard input: {}",
+                                                        io_error_msg(&e)
+                                                    );
+                                                    had_error = true;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 _ => match read_stdin() {
                                     Ok(d) => FileData::Owned(d),
                                     Err(e) => {
@@ -322,6 +342,19 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
                 }
             }
         };
+
+        // Override MADV_SEQUENTIAL with MADV_RANDOM for tac's backward access.
+        // read_file_mmap sets SEQUENTIAL which causes the kernel to readahead
+        // in the wrong direction and evict recently-used pages. For backward
+        // memrchr scanning, RANDOM prevents harmful readahead.
+        #[cfg(target_os = "linux")]
+        if let FileData::Mmap(ref m) = data {
+            if m.len() >= 4096 {
+                unsafe {
+                    libc::madvise(m.as_ptr() as *mut libc::c_void, m.len(), libc::MADV_RANDOM);
+                }
+            }
+        }
 
         let result = if cli.regex {
             let bytes: &[u8] = &data;
