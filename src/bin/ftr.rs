@@ -420,22 +420,18 @@ fn main() {
                 tr::translate_mmap_readonly(&set1, &set2, &mm, &mut lock)
             }
         } else {
-            // Piped stdin: try splice+mmap for zero-copy, then translate in-place.
+            // Piped stdin: streaming translate for pipeline parallelism.
+            // Read chunks, translate in-place with SIMD, write immediately.
+            // This overlaps I/O with compute: while ftr translates chunk N,
+            // upstream cat writes chunk N+1 to the pipe.
+            // MUST use raw write (not vmsplice) since the streaming buffer is reused.
             #[cfg(target_os = "linux")]
             {
-                if let Ok(Some(mut mmap)) = coreutils_rs::common::io::splice_stdin_to_mmap() {
-                    let mut writer = VmspliceWriter::new();
-                    tr::translate_owned(&set1, &set2, &mut mmap, &mut writer)
-                } else {
-                    match coreutils_rs::common::io::read_stdin() {
-                        Ok(mut data) => {
-                            let mut raw_out =
-                                unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                            tr::translate_owned(&set1, &set2, &mut data, &mut *raw_out)
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
+                let stdin = io::stdin();
+                let mut reader = stdin.lock();
+                let mut raw_out =
+                    unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
