@@ -419,13 +419,15 @@ fn main() {
                         tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut lock)
                     }
                 } else {
-                    // Fallback: read all stdin, translate in-place, write with vmsplice.
+                    // Fallback: read all stdin, translate in-place, write.
+                    // Vec heap pages are NOT safe for vmsplice — use raw write(2).
                     #[cfg(target_os = "linux")]
                     {
                         match coreutils_rs::common::io::read_stdin() {
                             Ok(mut data) => {
-                                let mut writer = VmspliceWriter::new();
-                                tr::translate_owned(&set1, &set2, &mut data, &mut writer)
+                                let mut raw_out =
+                                    unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                                tr::translate_owned(&set1, &set2, &mut data, &mut *raw_out)
                             }
                             Err(e) => Err(e),
                         }
@@ -459,12 +461,13 @@ fn main() {
                     let mut writer = VmspliceWriter::new();
                     tr::translate_owned(&set1, &set2, &mut mmap, &mut writer)
                 } else {
-                    // Fallback: read all stdin, translate in-place, vmsplice output.
-                    // Still better than streaming because vmsplice avoids the write copy.
+                    // Fallback: read all stdin, translate in-place, raw write output.
+                    // Vec heap pages are NOT safe for vmsplice — use raw write(2).
                     match coreutils_rs::common::io::read_stdin() {
                         Ok(mut data) => {
-                            let mut writer = VmspliceWriter::new();
-                            tr::translate_owned(&set1, &set2, &mut data, &mut writer)
+                            let mut raw_out =
+                                unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                            tr::translate_owned(&set1, &set2, &mut data, &mut *raw_out)
                         }
                         Err(e) => Err(e),
                     }
@@ -520,24 +523,24 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: try splice+mmap for zero-copy, fall back to read_stdin batch,
-        // then fall back to streaming. Batch mode with mmap_mode dispatch enables
-        // the optimized mmap paths (parallel SIMD, writev, etc.) for piped input.
+        // Piped stdin: try splice+mmap for zero-copy, fall back to read_stdin batch.
+        // IMPORTANT: Use raw write(2), NOT VmspliceWriter, for non-translate modes.
+        // The mmap functions (delete_mmap, squeeze_mmap, translate_squeeze_mmap) may
+        // allocate temporary output buffers. vmsplice maps those heap pages into the
+        // pipe, but the allocator frees them before the pipe reader drains the data,
+        // causing garbage output. Raw write(2) copies data into the kernel pipe buffer.
         #[cfg(target_os = "linux")]
-        let result = if let Ok(Some(splice_mmap)) =
-            coreutils_rs::common::io::splice_stdin_to_mmap()
-        {
-            let data = FileData::Owned(splice_mmap.to_vec());
-            let mut writer = VmspliceWriter::new();
-            run_mmap_mode(&cli, set1_str, &data, &mut writer)
-        } else {
-            match coreutils_rs::common::io::read_stdin() {
-                Ok(data) => {
-                    let data = FileData::Owned(data);
-                    let mut writer = VmspliceWriter::new();
-                    run_mmap_mode(&cli, set1_str, &data, &mut writer)
+        let result = {
+            let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+            if let Ok(Some(splice_mmap)) =
+                coreutils_rs::common::io::splice_stdin_to_mmap()
+            {
+                run_mmap_mode(&cli, set1_str, &splice_mmap, &mut *raw_out)
+            } else {
+                match coreutils_rs::common::io::read_stdin() {
+                    Ok(data) => run_mmap_mode(&cli, set1_str, &data, &mut *raw_out),
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
             }
         };
         #[cfg(all(unix, not(target_os = "linux")))]
