@@ -546,7 +546,7 @@ fn main() {
         } else {
             None
         };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     let stdin_splice_mmap: Option<memmap2::Mmap> = None;
 
     #[cfg(unix)]

@@ -462,11 +462,13 @@ fn main() {
             // Piped stdin: try splice+memfd for zero-copy, fall back to streaming.
             // splice() moves data from pipe → memfd in the kernel (no userspace copy),
             // then mmap_mut enables in-place translate (no separate output buffer).
+            // Note: use raw write (not VmspliceWriter) because translate output goes
+            // through temporary buffers that are freed on exit — vmsplice's page
+            // references would become invalid before the pipe reader consumes them.
             #[cfg(target_os = "linux")]
             {
                 if let Some(mut mm) = coreutils_rs::common::io::splice_stdin_to_mmap_mut() {
-                    let mut writer = VmspliceWriter::new();
-                    tr::translate_mmap_inplace_shared(&set1, &set2, &mut mm, &mut writer)
+                    tr::translate_mmap_inplace_shared(&set1, &set2, &mut mm, &mut *raw)
                 } else {
                     tr::translate(&set1, &set2, &mut RawStdin, &mut *raw)
                 }
@@ -522,11 +524,13 @@ fn main() {
         }
     } else {
         // Piped stdin: try splice+memfd for zero-copy mmap, fall back to streaming.
+        // Use raw write (not VmspliceWriter) — operations like delete/squeeze
+        // produce temporary buffers that are freed on exit. VmspliceWriter's page
+        // references would become invalid before the pipe reader consumes them.
         #[cfg(target_os = "linux")]
         let result = if let Some(mm) = coreutils_rs::common::io::splice_stdin_to_mmap() {
             let data = FileData::Mmap(mm);
-            let mut writer = VmspliceWriter::new();
-            run_mmap_mode(&cli, set1_str, &data, &mut writer)
+            run_mmap_mode(&cli, set1_str, &data, &mut *raw)
         } else {
             run_streaming_mode(&cli, set1_str, &mut *raw)
         };
