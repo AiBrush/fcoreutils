@@ -234,7 +234,12 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
 /// then sequential writev output pointing directly at mmap data.
 /// Eliminates the 100MB memcpy of the parallel copy path.
 /// Best for non-pipe output (files, /dev/null) where writev is fast.
-pub fn tac_bytes_scatter(data: &[u8], separator: u8, before: bool, out: &mut impl Write) -> io::Result<()> {
+pub fn tac_bytes_scatter(
+    data: &[u8],
+    separator: u8,
+    before: bool,
+    out: &mut impl Write,
+) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }

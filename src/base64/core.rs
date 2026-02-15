@@ -540,10 +540,8 @@ fn encode_wrapped_parallel(
                     while line_idx + group_lines <= t_full_lines {
                         let i_off = line_idx * bytes_per_line;
                         unsafe {
-                            let s = std::slice::from_raw_parts_mut(
-                                temp.as_mut_ptr(),
-                                group_encoded,
-                            );
+                            let s =
+                                std::slice::from_raw_parts_mut(temp.as_mut_ptr(), group_encoded);
                             let _ = BASE64_ENGINE
                                 .encode(&input[i_off..i_off + group_input], s.as_out());
                         }
@@ -557,10 +555,9 @@ fn encode_wrapped_parallel(
                         let r_input = rem_lines * bytes_per_line;
                         let r_encoded = rem_lines * wrap_col;
                         unsafe {
-                            let s =
-                                std::slice::from_raw_parts_mut(temp.as_mut_ptr(), r_encoded);
-                            let _ = BASE64_ENGINE
-                                .encode(&input[i_off..i_off + r_input], s.as_out());
+                            let s = std::slice::from_raw_parts_mut(temp.as_mut_ptr(), r_encoded);
+                            let _ =
+                                BASE64_ENGINE.encode(&input[i_off..i_off + r_input], s.as_out());
                         }
                         scatter_lines(&temp, buf, line_idx, rem_lines, wrap_col, line_out);
                     }
@@ -571,10 +568,7 @@ fn encode_wrapped_parallel(
                     let enc_len = BASE64_ENGINE.encoded_length(t_rem);
                     let woff = t_full_lines * line_out;
                     unsafe {
-                        let s = std::slice::from_raw_parts_mut(
-                            buf.as_mut_ptr().add(woff),
-                            enc_len,
-                        );
+                        let s = std::slice::from_raw_parts_mut(buf.as_mut_ptr().add(woff), enc_len);
                         let _ = BASE64_ENGINE.encode(line_input, s.as_out());
                         *buf.as_mut_ptr().add(woff + enc_len) = b'\n';
                     }
@@ -1112,9 +1106,7 @@ fn try_decode_uniform_lines(data: &[u8], out: &mut impl Write) -> Option<io::Res
                     };
                     BASE64_ENGINE
                         .decode(&local_buf[..sub_clean], out_slice.as_out())
-                        .map_err(|_| {
-                            io::Error::new(io::ErrorKind::InvalidData, "invalid input")
-                        })?;
+                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid input"))?;
 
                     sub_start += sub_count;
                 }
@@ -1409,10 +1401,7 @@ fn try_line_decode(data: &[u8], out: &mut impl Write) -> Option<io::Result<()>> 
                     let in_base = i * line_stride;
                     let ob = i * decoded_per_line;
                     unsafe {
-                        let s0 = std::slice::from_raw_parts_mut(
-                            out_ptr.add(ob),
-                            decoded_per_line,
-                        );
+                        let s0 = std::slice::from_raw_parts_mut(out_ptr.add(ob), decoded_per_line);
                         if BASE64_ENGINE
                             .decode(&data[in_base..in_base + line_len], s0.as_out())
                             .is_err()
@@ -1428,8 +1417,7 @@ fn try_line_decode(data: &[u8], out: &mut impl Write) -> Option<io::Result<()>> 
                         );
                         if BASE64_ENGINE
                             .decode(
-                                &data[in_base + line_stride
-                                    ..in_base + line_stride + line_len],
+                                &data[in_base + line_stride..in_base + line_stride + line_len],
                                 s1.as_out(),
                             )
                             .is_err()
@@ -1481,19 +1469,13 @@ fn try_line_decode(data: &[u8], out: &mut impl Write) -> Option<io::Result<()>> 
                     let in_start = i * line_stride;
                     let out_off = i * decoded_per_line;
                     let out_slice = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            out_ptr.add(out_off),
-                            decoded_per_line,
-                        )
+                        std::slice::from_raw_parts_mut(out_ptr.add(out_off), decoded_per_line)
                     };
                     if BASE64_ENGINE
                         .decode(&data[in_start..in_start + line_len], out_slice.as_out())
                         .is_err()
                     {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "invalid input",
-                        ));
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input"));
                     }
                     i += 1;
                 }
@@ -1689,10 +1671,7 @@ fn decode_borrowed_clean_parallel(out: &mut impl Write, data: &[u8]) -> io::Resu
             let expected_size = offsets[i + 1] - offset;
             // SAFETY: each thread writes to non-overlapping region
             let out_slice = unsafe {
-                std::slice::from_raw_parts_mut(
-                    (out_addr as *mut u8).add(offset),
-                    expected_size,
-                )
+                std::slice::from_raw_parts_mut((out_addr as *mut u8).add(offset), expected_size)
             };
             let decoded = BASE64_ENGINE
                 .decode(chunk, out_slice.as_out())

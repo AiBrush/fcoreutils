@@ -387,8 +387,7 @@ fn main() {
             // Non-Linux: detect pipe via fstat
             let use_scatter = unsafe {
                 let mut stat: libc::stat = std::mem::zeroed();
-                libc::fstat(1, &mut stat) == 0
-                    && (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO
+                libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO
             };
             run(&cli, &files, &mut &*raw, use_scatter)
         } else {

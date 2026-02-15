@@ -304,12 +304,16 @@ fn multi_select_chunk(
         let mut start = 0;
         for end_pos in memchr_iter(line_delim, data) {
             let line = unsafe { std::slice::from_raw_parts(base.add(start), end_pos - start) };
-            multi_select_line(line, delim, line_delim, ranges, max_field, suppress, buf, field_mask);
+            multi_select_line(
+                line, delim, line_delim, ranges, max_field, suppress, buf, field_mask,
+            );
             start = end_pos + 1;
         }
         if start < data.len() {
             let line = unsafe { std::slice::from_raw_parts(base.add(start), data.len() - start) };
-            multi_select_line(line, delim, line_delim, ranges, max_field, suppress, buf, field_mask);
+            multi_select_line(
+                line, delim, line_delim, ranges, max_field, suppress, buf, field_mask,
+            );
         }
         return;
     }
