@@ -141,13 +141,17 @@ pub fn read_file_vec(path: &Path) -> io::Result<Vec<u8>> {
 ///   - No memcpy from page cache to userspace (zero-copy)
 ///   - vmsplice can reference mmap pages directly in the pipe
 ///   - mmap setup cost for small files (~25 pages) is comparable to read()
+///
+/// No MAP_POPULATE: for warm page cache (hyperfine warmup), populate()
+/// synchronously faults all pages (~5ms for 100MB). MADV_WILLNEED triggers
+/// async readahead which overlaps with scanning.
 pub fn read_file_mmap(path: &Path) -> io::Result<FileData> {
     let file = open_noatime(path)?;
     let metadata = file.metadata()?;
     let len = metadata.len();
 
     if len > 0 && metadata.file_type().is_file() {
-        match unsafe { MmapOptions::new().populate().map(&file) } {
+        match unsafe { MmapOptions::new().map(&file) } {
             Ok(mmap) => {
                 #[cfg(target_os = "linux")]
                 {
