@@ -464,12 +464,26 @@ fn main() {
                 }
             }
         } else {
-            // Piped stdin: use streaming translate for pipelining with upstream cat.
-            // RawStdin reads chunks as they arrive; ftr processes chunk N while cat writes N+1.
-            // This is critical for `cat file | ftr` benchmarks — batch mode kills pipelining.
+            // Piped stdin: try splice+mmap for zero-copy read, fallback to read_stdin batch.
+            // splice avoids kernel→user memcpy (~0.5ms for 10MB).
+            // In-place translate on owned memfd data avoids separate output buffer.
             #[cfg(target_os = "linux")]
             {
-                tr::translate(&set1, &set2, &mut RawStdin, &mut *raw)
+                if let Some(mut mm) =
+                    coreutils_rs::common::io::splice_stdin_to_mmap().unwrap_or(None)
+                {
+                    // splice succeeded: translate in-place on the mmap'd memfd.
+                    // No COW overhead since we own the memfd.
+                    tr::translate_owned(&set1, &set2, &mut mm, &mut *raw)
+                } else {
+                    // splice failed: read all stdin into owned Vec, translate in-place.
+                    match coreutils_rs::common::io::read_stdin() {
+                        Ok(mut data) => {
+                            tr::translate_owned(&set1, &set2, &mut data, &mut *raw)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -521,13 +535,16 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: use streaming mode for pipelining with upstream cat.
-        // Streaming processes chunks as they arrive from the pipe, enabling
-        // ftr to process chunk N while cat writes chunk N+1.
-        // Using raw write (not vmsplice) because delete/squeeze allocate temporary
-        // output buffers — vmsplice would cause use-after-free.
+        // Piped stdin: try splice+mmap for zero-copy read, fallback to streaming.
+        // splice avoids kernel→user memcpy. For delete/squeeze, uses batch mmap path.
         #[cfg(target_os = "linux")]
-        let result = run_streaming_mode(&cli, set1_str, &mut *raw);
+        let result = if let Some(mm) =
+            coreutils_rs::common::io::splice_stdin_to_mmap().unwrap_or(None)
+        {
+            run_mmap_mode(&cli, set1_str, &mm, &mut *raw)
+        } else {
+            run_streaming_mode(&cli, set1_str, &mut *raw)
+        };
         #[cfg(all(unix, not(target_os = "linux")))]
         let result = run_streaming_mode(&cli, set1_str, &mut *raw);
         #[cfg(not(unix))]
