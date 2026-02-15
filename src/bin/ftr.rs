@@ -501,12 +501,16 @@ fn main() {
     let mmap = try_mmap_stdin();
 
     if let Some(m) = mmap {
-        // File-redirected stdin: use batch path with mmap data + VmspliceWriter
+        // File-redirected stdin: use batch path with mmap data.
+        // Use raw write (not vmsplice) because delete/squeeze functions create
+        // intermediate heap buffers. With vmsplice, freed heap pages can be reused
+        // by the allocator before the pipe reader reads them, causing data corruption.
         let data = FileData::Mmap(m);
         #[cfg(target_os = "linux")]
         let result = {
-            let mut writer = VmspliceWriter::new();
-            run_mmap_mode(&cli, set1_str, &data, &mut writer)
+            let mut raw_out =
+                unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+            run_mmap_mode(&cli, set1_str, &data, &mut *raw_out)
         };
         #[cfg(all(unix, not(target_os = "linux")))]
         let result = run_mmap_mode(&cli, set1_str, &data, &mut *raw);

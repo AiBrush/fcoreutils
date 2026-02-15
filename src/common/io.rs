@@ -325,6 +325,14 @@ pub fn splice_stdin_to_mmap() -> io::Result<Option<memmap2::MmapMut>> {
         return Ok(None);
     }
 
+    // Truncate memfd to exact data size. splice() may leave the memfd larger than
+    // `total` (page-aligned), and mmap would map the full file including zero padding.
+    // Without ftruncate, callers get a mmap with garbage/zero bytes beyond `total`.
+    if unsafe { libc::ftruncate(memfd, total as libc::off_t) } != 0 {
+        unsafe { libc::close(memfd) };
+        return Ok(None);
+    }
+
     // Wrap memfd in a File for memmap2 API, then mmap it.
     // MAP_SHARED allows in-place modification; populate prefaults pages.
     let file = unsafe { File::from_raw_fd(memfd) };
