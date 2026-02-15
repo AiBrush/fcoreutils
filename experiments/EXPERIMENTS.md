@@ -82,9 +82,21 @@ Check what has been tried, what worked, and what REGRESSED performance.
 - **Result (v0.5.4)**: tr 2.7x → **7.3x** (+170%), base64 7.2x → 7.6x (+5.6%), cut 6.4x → 6.8x (+6.3%), wc 30.7x → 33.4x, sort 17.5x → 18.8x, uniq 15.2x → 15.8x. tac regressed 4.8x → 3.8x.
 - **Conclusion**: Streaming tr + high parallel threshold fixed the massive tr regression. Rayon revert fixed cut/base64. available_parallelism() avoids premature pool init.
 
+### EXP-007: In-place MAP_PRIVATE decode for base64 + read_full for tr (PR #218) — FAILED
+- **Idea**: Use MAP_PRIVATE mmap for in-place newline stripping in base64 decode; use read_full() with 8MB RawStdin buffer for tr
+- **Implementation**: Modified base64 decode to strip whitespace in-place on MAP_PRIVATE pages, added parallel in-place decode. Changed tr to fill buffers completely before processing.
+- **Result (v0.5.5)**: base64 **7.6x → 3.0x** (-60% CATASTROPHIC), tr **7.3x → 5.6x** (-23%). Plus 3 base64 compatibility FAILURES (roundtrip broken).
+- **Conclusion**: In-place MAP_PRIVATE modification CORRUPTS base64 output. read_full() adds unnecessary latency for tr. REVERT IMMEDIATELY.
+
+### EXP-008: Contiguous buffer tac + two-level scan cut (PR #217) — FAILED
+- **Idea**: Use contiguous output buffer for tac (avoiding IoSlice), two-level scan (memchr newline, then delimiter) for cut single-field extraction
+- **Implementation**: Pre-allocate data_len buffer, copy reversed lines. Skip in-place path for single-field cut.
+- **Result (v0.5.5)**: cut **6.8x → 6.5x** (-4%), tac 3.8x → 3.9x (neutral). Plus 1 tac compatibility FAILURE (1MB file).
+- **Conclusion**: Two-level scan is NOT faster than memchr2_iter for cut. Contiguous buffer tac approach neutral. REVERT.
+
 ---
 
-## Current Status (v0.5.4)
+## Current Status (v0.5.4 — after revert of v0.5.5 regressions)
 
 | Tool | Speedup vs GNU | Target | Status |
 |------|---------------:|-------:|--------|
@@ -117,3 +129,7 @@ Check what has been tried, what worked, and what REGRESSED performance.
 - Do NOT use std::thread::scope instead of Rayon
 - Do NOT add MADV_POPULATE_WRITE for small-file paths
 - Do NOT reduce streaming buffer sizes without benchmarking (4MB→16MB was fine)
+- Do NOT modify mmap'd data in-place with MAP_PRIVATE for base64 decode — it CORRUPTS output
+- Do NOT use read_full() buffer-filling for tr — adds latency, hurts performance
+- Do NOT replace memchr2_iter with "two-level scan" for cut — not actually faster
+- Do NOT skip the in-place single-field path for cut — it's already optimized

@@ -985,12 +985,28 @@ fn process_single_field(
     const FIELD_PARALLEL_MIN: usize = 2 * 1024 * 1024;
 
     if delim != line_delim {
-        // Two-level approach for ALL fields (including field 1):
-        // outer memchr_iter(newline) scan + inner memchr(delim) per line.
-        // For field 1: inner memchr exits at the FIRST delimiter, skipping all
-        // subsequent delimiters on the line. This is faster than memchr2_iter
-        // single-pass which processes ALL delimiter hits (significant for CSV
-        // with many columns: 5-20 extra hits per line × ~4ns = 20-80ns wasted).
+        // Field 1 fast path: memchr2 single-pass scan.
+        // For field 1, the first delimiter IS the field boundary. Lines without
+        // delimiter are passed through unchanged.
+        if target_idx == 0 && !suppress {
+            if data.len() >= FIELD_PARALLEL_MIN {
+                return single_field1_parallel(data, delim, line_delim, out);
+            }
+            // Sequential: scan with memchr2 into buffer, single write_all.
+            // Faster than writev/IoSlice for moderate data because it produces
+            // one contiguous buffer → one write syscall, and avoids IoSlice
+            // allocation overhead for high-delimiter-density data.
+            let mut buf = Vec::with_capacity(data.len());
+            single_field1_to_buf(data, delim, line_delim, &mut buf);
+            if !buf.is_empty() {
+                out.write_all(&buf)?;
+            }
+            return Ok(());
+        }
+
+        // Two-level approach for field N: outer newline scan + inner delim scan
+        // with early exit at target_idx. Faster than memchr2 single-pass because
+        // we only scan delimiters up to target_idx per line (not all of them).
         if data.len() >= FIELD_PARALLEL_MIN {
             let chunks = split_for_scope(data, line_delim);
             let n = chunks.len();
@@ -2178,6 +2194,95 @@ fn fields_mid_range_line(
     } else {
         // Not enough fields even for start_field — output empty line
         unsafe { buf_push(buf, line_delim) };
+    }
+}
+
+/// Zero-copy field-1 extraction using writev: builds IoSlice entries pointing
+/// directly into the source data, flushing in MAX_IOV-sized batches.
+/// For each line: if delimiter exists, output field1 + newline; otherwise pass through.
+///
+/// Uses a two-level scan: outer memchr(newline) for line boundaries, inner memchr(delim)
+/// Parallel field-1 extraction for large data using memchr2 single-pass.
+/// Splits data into per-thread chunks, each chunk extracts field 1 using
+/// memchr2(delim, newline) which finds the first special byte in one scan.
+/// For field 1: first special byte is either the delimiter (field end) or
+/// newline (no delimiter, output line unchanged). 4 threads cut scan time ~4x.
+fn single_field1_parallel(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let chunks = split_for_scope(data, line_delim);
+    let n = chunks.len();
+    let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+    rayon::scope(|s| {
+        for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+            s.spawn(move |_| {
+                result.reserve(chunk.len());
+                single_field1_to_buf(chunk, delim, line_delim, result);
+            });
+        }
+    });
+    let slices: Vec<IoSlice> = results
+        .iter()
+        .filter(|r| !r.is_empty())
+        .map(|r| IoSlice::new(r))
+        .collect();
+    write_ioslices(out, &slices)
+}
+
+/// Extract field 1 from a chunk using memchr2_iter single-pass SIMD scanning.
+/// Uses a single memchr2_iter pass over the entire chunk to find both delimiters
+/// and newlines. This eliminates the per-line memchr function call overhead
+/// (~5-10ns per call × 2 calls per line) that dominates for short-field data.
+/// For 100MB with 1M lines: saves ~10-20ms of function call setup overhead.
+#[inline]
+fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8>) {
+    buf.reserve(data.len());
+    let base = data.as_ptr();
+    let mut line_start: usize = 0;
+    let mut found_delim = false;
+
+    for pos in memchr::memchr2_iter(delim, line_delim, data) {
+        let byte = unsafe { *base.add(pos) };
+        if byte == line_delim {
+            if !found_delim {
+                // No delimiter on this line — output entire line including newline
+                unsafe {
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(line_start), pos + 1 - line_start),
+                    );
+                }
+            } else {
+                // Delimiter was found earlier — just add the line terminator
+                unsafe { buf_push(buf, line_delim) };
+            }
+            line_start = pos + 1;
+            found_delim = false;
+        } else if !found_delim {
+            // First delimiter on this line — output field 1
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(line_start), pos - line_start),
+                );
+            }
+            found_delim = true;
+        }
+        // Subsequent delimiters on same line: ignore
+    }
+    // Handle trailing data without final line_delim
+    if line_start < data.len() {
+        if !found_delim {
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(line_start), data.len() - line_start),
+                );
+            }
+        }
     }
 }
 
@@ -3446,14 +3551,6 @@ pub fn process_cut_data_mut(data: &mut [u8], cfg: &CutConfig) -> Option<usize> {
                 return None;
             }
             if cfg.delim == cfg.line_delim {
-                return None;
-            }
-            // Skip in-place for single field extraction — the non-in-place path
-            // (process_cut_data → process_single_field) uses a faster two-level
-            // scan approach: outer memchr(newline) + inner memchr(delim) with
-            // early exit. The in-place path uses per-line memchr2+memchr which
-            // is slower due to per-call function overhead (~250K calls for 10MB).
-            if cfg.ranges.len() == 1 && cfg.ranges[0].start == cfg.ranges[0].end {
                 return None;
             }
             Some(cut_fields_inplace_general(
