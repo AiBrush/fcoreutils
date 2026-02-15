@@ -1209,12 +1209,16 @@ fn try_decode_uniform_lines(data: &[u8], out: &mut impl Write) -> Option<io::Res
         unsafe {
             output.set_len(total_decoded);
         }
+        #[cfg(target_os = "linux")]
+        prefault_buffer(&mut output);
 
         let out_ptr = output.as_mut_ptr() as usize;
         let src_ptr = data.as_ptr() as usize;
         let num_threads = num_cpus().max(1);
         let lines_per_thread = (full_lines + num_threads - 1) / num_threads;
-        let lines_per_sub = (256 * 1024 / line_len).max(1);
+        // 512KB sub-chunks: larger chunks give SIMD decode more contiguous data,
+        // reducing per-call overhead. 512KB fits in L2 cache (256KB-1MB typical).
+        let lines_per_sub = (512 * 1024 / line_len).max(1);
 
         let result: Result<(), io::Error> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..num_threads)
@@ -1839,6 +1843,8 @@ fn decode_borrowed_clean_parallel(out: &mut impl Write, data: &[u8]) -> io::Resu
     unsafe {
         output_buf.set_len(total_decoded);
     }
+    #[cfg(target_os = "linux")]
+    prefault_buffer(&mut output_buf);
 
     // Parallel decode: each thread decodes directly into its exact final position.
     // SAFETY: each thread writes to a non-overlapping region of the output buffer.

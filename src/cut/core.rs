@@ -1985,6 +1985,8 @@ fn process_fields_mid_range(
 }
 
 /// Process a chunk for contiguous mid-range field extraction.
+/// Single-pass memchr2 scan over the entire chunk, tracking delimiter count
+/// per line. Avoids the double-scan (outer newline + inner delimiter).
 fn fields_mid_range_chunk(
     data: &[u8],
     delim: u8,
@@ -1994,31 +1996,128 @@ fn fields_mid_range_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
-    buf.reserve(data.len());
-    let mut start = 0;
-    for end_pos in memchr_iter(line_delim, data) {
-        let line = &data[start..end_pos];
-        fields_mid_range_line(
-            line,
-            delim,
-            line_delim,
-            start_field,
-            end_field,
-            suppress,
-            buf,
-        );
-        start = end_pos + 1;
+    // When delim == line_delim, fall back to per-line approach
+    if delim == line_delim {
+        buf.reserve(data.len());
+        let mut start = 0;
+        for end_pos in memchr_iter(line_delim, data) {
+            let line = &data[start..end_pos];
+            fields_mid_range_line(
+                line,
+                delim,
+                line_delim,
+                start_field,
+                end_field,
+                suppress,
+                buf,
+            );
+            start = end_pos + 1;
+        }
+        if start < data.len() {
+            fields_mid_range_line(
+                &data[start..],
+                delim,
+                line_delim,
+                start_field,
+                end_field,
+                suppress,
+                buf,
+            );
+        }
+        return;
     }
-    if start < data.len() {
-        fields_mid_range_line(
-            &data[start..],
-            delim,
-            line_delim,
-            start_field,
-            end_field,
-            suppress,
-            buf,
-        );
+
+    buf.reserve(data.len());
+    let base = data.as_ptr();
+    let skip_before = start_field - 1; // delimiters to skip before range
+    let target_end_delim = skip_before + (end_field - start_field) + 1;
+
+    let mut line_start: usize = 0;
+    let mut delim_count: usize = 0;
+    let mut range_start: usize = 0;
+    let mut has_delim = false;
+    let mut found_end = false; // true when we found all target fields, skip to newline
+
+    for pos in memchr::memchr2_iter(delim, line_delim, data) {
+        let byte = unsafe { *base.add(pos) };
+        if byte == line_delim {
+            // End of line
+            if found_end {
+                // Already output this line's range
+            } else if !has_delim {
+                // No delimiter on this line
+                if !suppress {
+                    unsafe {
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(line_start), pos + 1 - line_start),
+                        );
+                    }
+                }
+            } else if delim_count >= skip_before {
+                // Have enough fields for start_field; output from range_start to EOL
+                if skip_before == 0 {
+                    range_start = line_start;
+                }
+                unsafe {
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(range_start), pos - range_start),
+                    );
+                    buf_push(buf, line_delim);
+                }
+            } else {
+                // Not enough fields for start_field — output empty line
+                unsafe { buf_push(buf, line_delim) };
+            }
+            line_start = pos + 1;
+            delim_count = 0;
+            has_delim = false;
+            found_end = false;
+        } else if !found_end {
+            // Delimiter
+            has_delim = true;
+            delim_count += 1;
+            if delim_count == skip_before {
+                range_start = pos + 1;
+            }
+            if delim_count == target_end_delim {
+                if skip_before == 0 {
+                    range_start = line_start;
+                }
+                unsafe {
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(range_start), pos - range_start),
+                    );
+                    buf_push(buf, line_delim);
+                }
+                found_end = true;
+            }
+        }
+    }
+    // Handle trailing data without final newline
+    if line_start < data.len() && !found_end {
+        if !has_delim {
+            if !suppress {
+                unsafe {
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(line_start), data.len() - line_start),
+                    );
+                }
+            }
+        } else if delim_count >= skip_before {
+            if skip_before == 0 {
+                range_start = line_start;
+            }
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(range_start), data.len() - range_start),
+                );
+            }
+        }
     }
 }
 
