@@ -272,8 +272,7 @@ pub fn splice_stdin_to_mmap() -> io::Result<Option<memmap2::MmapMut>> {
     }
 
     // Create memfd for receiving spliced data
-    let memfd =
-        unsafe { libc::memfd_create(c"stdin_splice".as_ptr(), 0) };
+    let memfd = unsafe { libc::memfd_create(c"stdin_splice".as_ptr(), 0) };
     if memfd < 0 {
         return Ok(None); // memfd_create not supported, fallback
     }

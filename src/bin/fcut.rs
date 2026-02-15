@@ -478,6 +478,7 @@ fn main() {
     #[cfg(not(target_os = "linux"))]
     let splice_mmap: Option<memmap2::MmapMut> = None;
 
+    #[allow(unused_variables)]
     let has_splice = splice_mmap.is_some();
 
     #[cfg(unix)]
@@ -531,8 +532,7 @@ fn main() {
                 if stdin_field1_done {
                     if let Some(ref data) = stdin_buf {
                         // Write pre-processed data directly, bypassing BufWriter
-                        out.flush()
-                            .and_then(|()| out.get_mut().write_all(data))
+                        out.flush().and_then(|()| out.get_mut().write_all(data))
                     } else {
                         Ok(())
                     }
