@@ -109,6 +109,7 @@ impl Write for VmspliceWriter {
 /// Each read returns immediately with whatever data is available in the pipe,
 /// enabling pipelining with upstream cat: ftr processes chunk N while cat writes N+1.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 struct RawStdin;
 
 #[cfg(target_os = "linux")]
@@ -436,11 +437,16 @@ fn main() {
                         tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut lock)
                     }
                 } else {
-                    // Fallback: streaming path (no vmsplice — buffer reuse conflicts
-                    // with vmsplice's zero-copy page references)
+                    // Fallback: read all stdin, translate in-place, write with vmsplice.
                     #[cfg(target_os = "linux")]
                     {
-                        tr::translate(&set1, &set2, &mut RawStdin, &mut *raw)
+                        match coreutils_rs::common::io::read_stdin() {
+                            Ok(mut data) => {
+                                let mut writer = VmspliceWriter::new();
+                                tr::translate_owned(&set1, &set2, &mut data, &mut writer)
+                            }
+                            Err(e) => Err(e),
+                        }
                     }
                     #[cfg(all(unix, not(target_os = "linux")))]
                     {
@@ -459,13 +465,24 @@ fn main() {
                 }
             }
         } else {
-            // Piped stdin: streaming path with raw write (not vmsplice).
-            // vmsplice puts page references into the pipe buffer. The streaming
-            // path reuses the same buffer across iterations, so vmsplice'd pages
-            // get overwritten before the pipe reader consumes them.
+            // Piped stdin: try splice+memfd for zero-copy read, fallback to read_stdin.
+            // splice() moves pipe pages directly into memfd's page cache (no userspace copy).
+            // Then translate in-place on the mmap'd data and write with vmsplice.
             #[cfg(target_os = "linux")]
             {
-                tr::translate(&set1, &set2, &mut RawStdin, &mut *raw)
+                if let Ok(Some(mut mmap)) = coreutils_rs::common::io::splice_stdin_to_mmap() {
+                    // splice+memfd uses MAP_SHARED (no COW), so in-place translate is optimal
+                    let mut writer = VmspliceWriter::new();
+                    tr::translate_owned(&set1, &set2, &mut mmap, &mut writer)
+                } else {
+                    match coreutils_rs::common::io::read_stdin() {
+                        Ok(mut data) => {
+                            let mut writer = VmspliceWriter::new();
+                            tr::translate_owned(&set1, &set2, &mut data, &mut writer)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -517,11 +534,21 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: streaming path with raw write (not vmsplice — buffer reuse
-        // conflicts with vmsplice's zero-copy page references).
-        #[cfg(unix)]
+        // Piped stdin: try splice+memfd for zero-copy read, fallback to read_stdin.
+        // IMPORTANT: use raw write (not vmsplice) for non-translate modes because
+        // delete/squeeze/etc. allocate temporary output buffers that are freed before
+        // the pipe reader consumes vmsplice'd page references (use-after-free).
+        #[cfg(target_os = "linux")]
+        let result = if let Ok(Some(mmap)) = coreutils_rs::common::io::splice_stdin_to_mmap() {
+            run_mmap_mode(&cli, set1_str, &mmap, &mut *raw)
+        } else {
+            match coreutils_rs::common::io::read_stdin() {
+                Ok(data) => run_mmap_mode(&cli, set1_str, &data, &mut *raw),
+                Err(e) => Err(e),
+            }
+        };
+        #[cfg(all(unix, not(target_os = "linux")))]
         let result = run_streaming_mode(&cli, set1_str, &mut *raw);
-        // Note: RawStdin is handled inside run_streaming_mode (Linux-only)
         #[cfg(not(unix))]
         let result = {
             let stdout = io::stdout();
@@ -541,6 +568,7 @@ fn main() {
 /// incrementally for pipelining with upstream cat/pipe. RawStdin on Linux
 /// bypasses StdinLock overhead; streaming processes each chunk as it arrives
 /// instead of waiting for EOF like the batch path.
+#[allow(dead_code)]
 fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io::Result<()> {
     if cli.delete && cli.squeeze {
         if cli.sets.len() < 2 {

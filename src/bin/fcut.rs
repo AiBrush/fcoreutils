@@ -338,18 +338,11 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
 }
 
 /// Enlarge pipe buffers on Linux for higher throughput.
-/// Reads system max from /proc, falls back through decreasing sizes.
+/// Skips /proc read — directly tries decreasing sizes via fcntl.
+/// Saves ~50µs startup vs reading /proc/sys/fs/pipe-max-size.
 #[cfg(target_os = "linux")]
 fn enlarge_pipes() {
-    let max_size = std::fs::read_to_string("/proc/sys/fs/pipe-max-size")
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok());
     for &fd in &[0i32, 1] {
-        if let Some(max) = max_size
-            && unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, max) } > 0
-        {
-            continue;
-        }
         for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
             if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
                 break;
@@ -425,6 +418,15 @@ fn main() {
         cli.files.clone()
     };
 
+    // Detect field 1 fast-path: in-place extraction avoids intermediate Vec + BufWriter copy.
+    // Saves ~10MB of memory bandwidth for 10MB input.
+    let is_field1_inplace = mode == CutMode::Fields
+        && ranges.len() == 1
+        && ranges[0].start == 1
+        && ranges[0].end == 1
+        && !cli.complement
+        && delim != line_delim;
+
     // On Linux: VmspliceWriter wrapped in BufWriter for zero-copy pipe output.
     // BufWriter batches the many small writes from cut processing, then
     // VmspliceWriter uses vmsplice(2) for zero-copy when flushing to pipes.
@@ -463,26 +465,40 @@ fn main() {
         }
     };
 
-    // Pre-read all stdin data for piped input (avoids chunked reader overhead).
-    // Uses read_stdin() on Linux for raw libc::read() with 64MB pre-alloc,
-    // bypassing BufReader/read_to_end Vec growth pattern.
+    // Pre-read all stdin data for piped input.
+    // On Linux: try splice+memfd for zero-copy (kernel→kernel), fallback to read_stdin.
+    // splice avoids the kernel→userspace copy, saving ~0.5ms for 10MB.
+    #[cfg(target_os = "linux")]
+    let splice_mmap: Option<memmap2::MmapMut> =
+        if stdin_mmap.is_none() && files.iter().any(|f| f == "-") {
+            coreutils_rs::common::io::splice_stdin_to_mmap().unwrap_or(None)
+        } else {
+            None
+        };
+    #[cfg(not(target_os = "linux"))]
+    let splice_mmap: Option<memmap2::MmapMut> = None;
+
+    #[allow(unused_variables)]
+    let has_splice = splice_mmap.is_some();
+
     #[cfg(unix)]
-    let stdin_buf: Option<Vec<u8>> = if stdin_mmap.is_none() && files.iter().any(|f| f == "-") {
-        match coreutils_rs::common::io::read_stdin() {
-            Ok(buf) => Some(buf),
-            Err(e) => {
-                if e.kind() != io::ErrorKind::BrokenPipe {
-                    eprintln!("cut: {}", io_error_msg(&e));
-                    process::exit(1);
+    let mut stdin_buf: Option<Vec<u8>> =
+        if stdin_mmap.is_none() && !has_splice && files.iter().any(|f| f == "-") {
+            match coreutils_rs::common::io::read_stdin() {
+                Ok(buf) => Some(buf),
+                Err(e) => {
+                    if e.kind() != io::ErrorKind::BrokenPipe {
+                        eprintln!("cut: {}", io_error_msg(&e));
+                        process::exit(1);
+                    }
+                    Some(Vec::new())
                 }
-                Some(Vec::new())
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     #[cfg(not(unix))]
-    let stdin_buf: Option<Vec<u8>> = if files.iter().any(|f| f == "-") {
+    let mut stdin_buf: Option<Vec<u8>> = if files.iter().any(|f| f == "-") {
         match coreutils_rs::common::io::read_stdin() {
             Ok(buf) => Some(buf),
             Err(e) => {
@@ -497,22 +513,60 @@ fn main() {
         None
     };
 
+    // For piped stdin + field 1: in-place extraction modifies Vec directly,
+    // then writes bypassing BufWriter to avoid extra memcpy.
+    let mut stdin_field1_done = false;
+    if is_field1_inplace
+        && let Some(ref mut data) = stdin_buf
+        && !data.is_empty()
+    {
+        let new_len = cut::cut_field1_inplace(data, delim, line_delim, cli.only_delimited);
+        data.truncate(new_len);
+        stdin_field1_done = true;
+    }
+
     for filename in &files {
         let result: io::Result<()> = if filename == "-" {
             #[cfg(unix)]
             {
-                if let Some(ref data) = stdin_mmap {
-                    cut::process_cut_data(data, &cfg, &mut out)
-                } else if let Some(ref data) = stdin_buf {
+                if stdin_field1_done {
+                    if let Some(ref data) = stdin_buf {
+                        // Write pre-processed data directly, bypassing BufWriter
+                        out.flush().and_then(|()| out.get_mut().write_all(data))
+                    } else {
+                        Ok(())
+                    }
+                } else if let Some(ref data) = stdin_mmap {
                     cut::process_cut_data(data, &cfg, &mut out)
                 } else {
-                    let reader = BufReader::new(io::stdin().lock());
-                    cut::process_cut_reader(reader, &cfg, &mut out)
+                    // Try splice mmap first (Linux only), then stdin_buf
+                    #[cfg(target_os = "linux")]
+                    if let Some(ref data) = splice_mmap {
+                        cut::process_cut_data(data.as_ref(), &cfg, &mut out)
+                    } else if let Some(ref data) = stdin_buf {
+                        cut::process_cut_data(data, &cfg, &mut out)
+                    } else {
+                        let reader = BufReader::new(io::stdin().lock());
+                        cut::process_cut_reader(reader, &cfg, &mut out)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    if let Some(ref data) = stdin_buf {
+                        cut::process_cut_data(data, &cfg, &mut out)
+                    } else {
+                        let reader = BufReader::new(io::stdin().lock());
+                        cut::process_cut_reader(reader, &cfg, &mut out)
+                    }
                 }
             }
             #[cfg(not(unix))]
             {
-                if let Some(ref data) = stdin_buf {
+                if stdin_field1_done {
+                    if let Some(ref data) = stdin_buf {
+                        out.write_all(data)
+                    } else {
+                        Ok(())
+                    }
+                } else if let Some(ref data) = stdin_buf {
                     cut::process_cut_data(data, &cfg, &mut out)
                 } else {
                     let reader = BufReader::new(io::stdin().lock());

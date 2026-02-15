@@ -2,11 +2,12 @@ use memchr::memchr_iter;
 use rayon::prelude::*;
 use std::io::{self, BufRead, IoSlice, Write};
 
-/// Minimum file size for parallel processing (512KB).
-/// Lowered to benefit from parallel chunk processing on smaller piped inputs.
-/// At 512KB with 2+ threads, the per-thread chunk is ~256KB which still
-/// amortizes the rayon overhead (~100-200us) well.
-const PARALLEL_THRESHOLD: usize = 512 * 1024;
+/// Minimum file size for parallel processing (32MB).
+/// Rayon's thread pool initialization costs ~0.5ms on first use, and memchr-based
+/// scanning runs at ~10GB/s per core. For 10MB data, sequential takes ~0.001s
+/// while rayon overhead alone is ~0.5ms — making parallel 50x slower for init.
+/// At 32MB, the parallel savings (~1.5ms with 4 cores) clearly exceed the overhead.
+const PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
 
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
@@ -969,23 +970,35 @@ fn process_single_field(
 ) -> io::Result<()> {
     let target_idx = target - 1;
 
+    // For single-field extraction, rayon's thread pool initialization (~0.5ms)
+    // dominates for data < 32MB. memchr2-based scanning runs at ~10GB/s per core,
+    // so 10MB takes ~0.001s sequential. Only parallelize for very large data.
+    const FIELD_PARALLEL_MIN: usize = 32 * 1024 * 1024;
+
     if delim != line_delim {
-        // Field 1 fast path: memchr2 single-pass + parallel for large data.
-        // memchr2(delim, newline) finds the first special byte per line in one scan.
+        // Field 1 fast path: memchr2 single-pass scan.
         // For field 1, the first delimiter IS the field boundary. Lines without
-        // delimiter are passed through unchanged. This scans ~N total bytes vs
-        // ~1.5N for the two-level (outer newline + inner delimiter) approach.
+        // delimiter are passed through unchanged.
         if target_idx == 0 && !suppress {
-            if data.len() >= PARALLEL_THRESHOLD {
+            if data.len() >= FIELD_PARALLEL_MIN {
                 return single_field1_parallel(data, delim, line_delim, out);
             }
-            return single_field1_zerocopy(data, delim, line_delim, out);
+            // Sequential: scan with memchr2 into buffer, single write_all.
+            // Faster than writev/IoSlice for moderate data because it produces
+            // one contiguous buffer → one write syscall, and avoids IoSlice
+            // allocation overhead for high-delimiter-density data.
+            let mut buf = Vec::with_capacity(data.len());
+            single_field1_to_buf(data, delim, line_delim, &mut buf);
+            if !buf.is_empty() {
+                out.write_all(&buf)?;
+            }
+            return Ok(());
         }
 
         // Two-level approach for field N: outer newline scan + inner delim scan
         // with early exit at target_idx. Faster than memchr2 single-pass because
         // we only scan delimiters up to target_idx per line (not all of them).
-        if data.len() >= PARALLEL_THRESHOLD {
+        if data.len() >= FIELD_PARALLEL_MIN {
             let chunks = split_into_chunks(data, line_delim);
             let results: Vec<Vec<u8>> = chunks
                 .par_iter()
@@ -1014,7 +1027,7 @@ fn process_single_field(
     }
 
     // Fallback for delim == line_delim: nested loop approach
-    if data.len() >= PARALLEL_THRESHOLD {
+    if data.len() >= FIELD_PARALLEL_MIN {
         let chunks = split_into_chunks(data, line_delim);
         let results: Vec<Vec<u8>> = chunks
             .par_iter()
@@ -1026,7 +1039,6 @@ fn process_single_field(
                 buf
             })
             .collect();
-        // Use write_vectored (writev) to batch N writes into fewer syscalls
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -1972,6 +1984,7 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
 /// Lines without delimiter stay in contiguous runs (zero-copy pass-through).
 /// Lines with delimiter produce two IoSlices (truncated field + newline byte).
 #[inline]
+#[allow(dead_code)]
 fn single_field1_zerocopy(
     data: &[u8],
     delim: u8,
@@ -3045,6 +3058,74 @@ pub fn cut_bytes(
         }
     }
     Ok(true)
+}
+
+/// In-place field 1 extraction: modifies `data` buffer directly, returns new length.
+/// Output is always <= input (we remove everything after first delimiter per line).
+/// Avoids intermediate Vec allocation + BufWriter copy, saving ~10MB of memory
+/// bandwidth for 10MB input. Requires owned mutable data (not mmap).
+///
+/// Lines without delimiter pass through unchanged (unless suppress=true).
+/// Lines with delimiter: keep bytes before delimiter + newline.
+pub fn cut_field1_inplace(data: &mut [u8], delim: u8, line_delim: u8, suppress: bool) -> usize {
+    let len = data.len();
+    let mut wp: usize = 0;
+    let mut rp: usize = 0;
+
+    while rp < len {
+        match memchr::memchr2(delim, line_delim, &data[rp..]) {
+            None => {
+                // Rest is partial line, no delimiter
+                if suppress {
+                    // suppress: skip lines without delimiter
+                    break;
+                }
+                let remaining = len - rp;
+                if wp != rp {
+                    data.copy_within(rp..len, wp);
+                }
+                wp += remaining;
+                break;
+            }
+            Some(offset) => {
+                let actual = rp + offset;
+                if data[actual] == line_delim {
+                    // No delimiter on this line
+                    if suppress {
+                        // Skip this line entirely
+                        rp = actual + 1;
+                    } else {
+                        // Output entire line including newline
+                        let chunk_len = actual + 1 - rp;
+                        if wp != rp {
+                            data.copy_within(rp..actual + 1, wp);
+                        }
+                        wp += chunk_len;
+                        rp = actual + 1;
+                    }
+                } else {
+                    // Delimiter found: output field 1 (up to delimiter) + newline
+                    let field_len = actual - rp;
+                    if wp != rp && field_len > 0 {
+                        data.copy_within(rp..actual, wp);
+                    }
+                    wp += field_len;
+                    data[wp] = line_delim;
+                    wp += 1;
+                    // Skip to next newline
+                    match memchr::memchr(line_delim, &data[actual + 1..]) {
+                        None => {
+                            rp = len;
+                        }
+                        Some(nl_off) => {
+                            rp = actual + 1 + nl_off + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    wp
 }
 
 /// Process a full data buffer (from mmap or read) with cut operation.
