@@ -137,14 +137,10 @@ pub fn read_file_vec(path: &Path) -> io::Result<Vec<u8>> {
 }
 
 /// Read a file always using mmap, with MADV_HUGEPAGE + WILLNEED.
-/// Used by tac for large files (>= 16MB) that benefit from zero-copy
-/// vmsplice output and parallel scanning. Callers should use read_file_vec()
-/// for smaller files to avoid mmap page fault overhead.
-///
-/// No MAP_POPULATE: it synchronously faults all pages with 4KB BEFORE
-/// MADV_HUGEPAGE can take effect, causing ~25,600 minor faults for 100MB
-/// (~25ms). Without it, HUGEPAGE is set first, then WILLNEED triggers
-/// async readahead using 2MB pages (~50 faults = ~0.1ms).
+/// Used by tac which needs zero-copy data for vmsplice output.
+/// With HUGEPAGE-first ordering, mmap is faster than read() for all sizes
+/// >= 2MB: only ~5 huge page faults for 10MB vs ~2560 4KB faults with read().
+/// Small files (<2MB) use 4KB pages but have few pages anyway.
 pub fn read_file_mmap(path: &Path) -> io::Result<FileData> {
     let file = open_noatime(path)?;
     let metadata = file.metadata()?;
