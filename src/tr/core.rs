@@ -2718,11 +2718,6 @@ fn passthrough_stream(reader: &mut impl Read, writer: &mut impl Write) -> io::Re
     Ok(())
 }
 
-/// Single-read for pipelining: process data immediately after first read()
-/// instead of blocking to fill the entire buffer. This enables cat|ftr
-/// pipelining: while ftr processes the first chunk, cat continues writing
-/// to the pipe. For 10MB piped input with 8MB pipe buffer, this saves
-/// ~0.5-1ms by overlapping cat's final writes with ftr's processing.
 /// Read as much data as possible from the reader, filling the buffer.
 /// Loops until either the buffer is full or EOF is reached.
 /// Returns the total number of bytes read.
