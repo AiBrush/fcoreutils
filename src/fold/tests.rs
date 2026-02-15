@@ -93,7 +93,8 @@ fn test_bytes_tab() {
 
 #[test]
 fn test_spaces_break() {
-    assert_eq!(fold_s("hello world test\n", 10), "hello \nworld \ntest\n");
+    // "world test" is exactly 10 chars, fits in width=10
+    assert_eq!(fold_s("hello world test\n", 10), "hello \nworld test\n");
 }
 
 #[test]
@@ -111,7 +112,8 @@ fn test_spaces_exact_fit() {
 
 #[test]
 fn test_bytes_spaces() {
-    assert_eq!(fold_bs("hello world test\n", 10), "hello \nworld \ntest\n");
+    // "world test" is exactly 10 bytes, fits in width=10
+    assert_eq!(fold_bs("hello world test\n", 10), "hello \nworld test\n");
 }
 
 // ===== Tab handling (column mode) =====
@@ -142,8 +144,20 @@ fn test_single_char_lines() {
 mod integration {
     use std::process::Command;
 
+    fn bin_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("target");
+        if cfg!(debug_assertions) {
+            path.push("debug");
+        } else {
+            path.push("release");
+        }
+        path.push(name);
+        path
+    }
+
     fn run_ffold(input: &[u8], args: &[&str]) -> (Vec<u8>, i32) {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ffold"));
+        let mut cmd = Command::new(bin_path("ffold"));
         cmd.args(args);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
@@ -183,7 +197,7 @@ mod integration {
     fn test_fold_spaces_flag() {
         let (out, code) = run_ffold(b"hello world test\n", &["-s", "-w", "10"]);
         assert_eq!(code, 0);
-        assert_eq!(out, b"hello \nworld \ntest\n");
+        assert_eq!(out, b"hello \nworld test\n");
     }
 
     #[test]

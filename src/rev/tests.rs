@@ -118,8 +118,21 @@ fn test_gnu_compat_numbers() {
 mod integration {
     use std::process::Command;
 
+    fn bin_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("target");
+        // Detect if running in release or debug mode
+        if cfg!(debug_assertions) {
+            path.push("debug");
+        } else {
+            path.push("release");
+        }
+        path.push(name);
+        path
+    }
+
     fn run_frev(input: &[u8], args: &[&str]) -> (Vec<u8>, i32) {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_frev"));
+        let mut cmd = Command::new(bin_path("frev"));
         cmd.args(args);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
