@@ -2605,7 +2605,16 @@ pub fn translate(
         if n == 0 {
             break;
         }
-        translate_inplace(&mut buf[..n], &table);
+        if n >= PARALLEL_THRESHOLD {
+            // Parallel in-place translate for large chunks (~4x faster on 4+ cores).
+            let nt = rayon::current_num_threads().max(1);
+            let cs = (n / nt).max(32 * 1024);
+            buf[..n].par_chunks_mut(cs).for_each(|chunk| {
+                translate_inplace(chunk, &table);
+            });
+        } else {
+            translate_inplace(&mut buf[..n], &table);
+        }
         writer.write_all(&buf[..n])?;
     }
     Ok(())
@@ -2613,6 +2622,7 @@ pub fn translate(
 
 /// Streaming SIMD range translation — single buffer, in-place transform.
 /// Uses 16MB uninit buffer for fewer syscalls (translate is compute-light).
+/// For chunks >= PARALLEL_THRESHOLD, uses rayon par_chunks_mut for multi-core.
 fn translate_range_stream(
     lo: u8,
     hi: u8,
@@ -2626,7 +2636,15 @@ fn translate_range_stream(
         if n == 0 {
             break;
         }
-        translate_range_simd_inplace(&mut buf[..n], lo, hi, offset);
+        if n >= PARALLEL_THRESHOLD {
+            let nt = rayon::current_num_threads().max(1);
+            let cs = (n / nt).max(32 * 1024);
+            buf[..n].par_chunks_mut(cs).for_each(|chunk| {
+                translate_range_simd_inplace(chunk, lo, hi, offset);
+            });
+        } else {
+            translate_range_simd_inplace(&mut buf[..n], lo, hi, offset);
+        }
         writer.write_all(&buf[..n])?;
     }
     Ok(())
@@ -2634,6 +2652,7 @@ fn translate_range_stream(
 
 /// Streaming SIMD range-to-constant translation — single buffer, in-place transform.
 /// Uses blendv instead of nibble decomposition for ~10x fewer SIMD ops per vector.
+/// For chunks >= PARALLEL_THRESHOLD, uses rayon par_chunks_mut for multi-core.
 fn translate_range_to_constant_stream(
     lo: u8,
     hi: u8,
@@ -2647,7 +2666,15 @@ fn translate_range_to_constant_stream(
         if n == 0 {
             break;
         }
-        translate_range_to_constant_simd_inplace(&mut buf[..n], lo, hi, replacement);
+        if n >= PARALLEL_THRESHOLD {
+            let nt = rayon::current_num_threads().max(1);
+            let cs = (n / nt).max(32 * 1024);
+            buf[..n].par_chunks_mut(cs).for_each(|chunk| {
+                translate_range_to_constant_simd_inplace(chunk, lo, hi, replacement);
+            });
+        } else {
+            translate_range_to_constant_simd_inplace(&mut buf[..n], lo, hi, replacement);
+        }
         writer.write_all(&buf[..n])?;
     }
     Ok(())
