@@ -76,22 +76,44 @@ Check what has been tried, what worked, and what REGRESSED performance.
 - **Result**: uniq 15.2x (up from 13.7x)
 - **Conclusion**: Works well for sorted data with many duplicates.
 
+### EXP-006: Revert regressions + available_parallelism fix (PR #211, #212) — SUCCESS
+- **Idea**: Revert std::thread::scope → Rayon for cut/base64, raise parallel threshold to 64MB for tr, use streaming mode for piped tr, fix rayon::current_num_threads() → std::thread::available_parallelism()
+- **Implementation**: PR #211 (tac+tr): streaming tr, raised threshold, removed dead VmspliceWriter. PR #212 (base64+cut): reverted to rayon::scope, fixed num_cpus()
+- **Result (v0.5.4)**: tr 2.7x → **7.3x** (+170%), base64 7.2x → 7.6x (+5.6%), cut 6.4x → 6.8x (+6.3%), wc 30.7x → 33.4x, sort 17.5x → 18.8x, uniq 15.2x → 15.8x. tac regressed 4.8x → 3.8x.
+- **Conclusion**: Streaming tr + high parallel threshold fixed the massive tr regression. Rayon revert fixed cut/base64. available_parallelism() avoids premature pool init.
+
 ---
+
+## Current Status (v0.5.4)
+
+| Tool | Speedup vs GNU | Target | Status |
+|------|---------------:|-------:|--------|
+| wc | 33.4x | 10x | DONE |
+| sort | 18.8x | 10x | DONE |
+| uniq | 15.8x | 10x | DONE |
+| base64 | 7.6x | 10x | NEEDS WORK |
+| tr | 7.3x | 10x | NEEDS WORK |
+| cut | 6.8x | 10x | NEEDS WORK |
+| tac | 3.8x | 10x | NEEDS WORK |
+| md5sum | 1.5x | 10x | NEEDS WORK |
+| sha256sum | 1.4x | 10x | NEEDS WORK |
+| b2sum | 1.3x | 10x | NEEDS WORK |
 
 ## What To Try Next
 
-### Priority 1: Revert regressions
-- Revert std::thread::scope → back to Rayon for cut
-- Remove MADV_POPULATE_WRITE for small files in base64
-- Revert parallel tr → back to simple sequential translate
+### Priority 1: Tools closest to 10x (base64, tr, cut)
+- **base64 (7.6x)**: Try SIMD-accelerated decode (base64-simd crate), fused whitespace strip+decode, larger streaming chunks
+- **tr (7.3x)**: Try AVX2 256-bit lookup table for translate, SIMD delete with byte-level compaction
+- **cut (6.8x)**: Try SIMD delimiter scanning, writev batching for output, reduce per-line overhead
 
-### Priority 2: Targeted optimizations
-- **base64**: Focus on decode path (7.2x headline). Try larger decode chunks, fused whitespace strip+decode.
-- **cut**: After revert, optimize the sequential path: larger output buffer, writev batching
-- **tac**: Push vmsplice harder, try direct iovec from mmap (no contiguous copy)
-- **tr**: After revert, try SIMD vectorization of the lookup table (SSE2 pshufb)
+### Priority 2: tac (3.8x)
+- **tac**: Regressed from 4.8x. Investigate — may need to restore contiguous buffer approach, try direct iovec from mmap (avoid copy), optimize small file path
 
-### Priority 3: What NOT to try
+### Priority 3: Hash tools (1.3-1.5x)
+- **md5sum/sha256sum/b2sum**: These are limited by the underlying hash algorithm speed. Try: I/O pipelining (read next block while hashing current), larger mmap advisory (MADV_SEQUENTIAL), SIMD hash implementations. Hard to beat GNU since they also use hardware-accelerated hash.
+
+### What NOT to try
 - Do NOT parallelize anything for <50MB without benchmarking first
 - Do NOT use std::thread::scope instead of Rayon
 - Do NOT add MADV_POPULATE_WRITE for small-file paths
+- Do NOT reduce streaming buffer sizes without benchmarking (4MB→16MB was fine)
