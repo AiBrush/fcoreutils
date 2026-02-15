@@ -1,12 +1,10 @@
 use memchr::memchr_iter;
-use rayon::prelude::*;
 use std::io::{self, BufRead, IoSlice, Write};
 
 /// Minimum file size for parallel processing (2MB).
-/// Rayon's thread pool initialization costs ~0.5ms on first use, but for data >= 2MB
-/// with 4 cores, the parallel savings (~3ms) far exceed the overhead. The 10MB
-/// benchmark regressed from ~7x to ~5.3x when this was set to 32MB because it
-/// no longer got parallelized.
+/// std::thread::scope spawns OS threads directly, avoiding Rayon's thread pool
+/// initialization overhead (~0.5ms). For data >= 2MB with 4 cores, the parallel
+/// savings (~3ms) far exceed the overhead.
 const PARALLEL_THRESHOLD: usize = 2 * 1024 * 1024;
 
 /// Max iovec entries per writev call (Linux default).
@@ -247,38 +245,6 @@ fn split_for_scope<'a>(data: &'a [u8], line_delim: u8) -> Vec<&'a [u8]> {
     chunks
 }
 
-/// Split data into chunks aligned to line boundaries for parallel processing.
-fn split_into_chunks<'a>(data: &'a [u8], line_delim: u8) -> Vec<&'a [u8]> {
-    let num_threads = rayon::current_num_threads().max(1);
-    if data.len() < PARALLEL_THRESHOLD || num_threads <= 1 {
-        return vec![data];
-    }
-
-    let chunk_size = data.len() / num_threads;
-    let mut chunks = Vec::with_capacity(num_threads);
-    let mut pos = 0;
-
-    for _ in 0..num_threads - 1 {
-        let target = pos + chunk_size;
-        if target >= data.len() {
-            break;
-        }
-        let boundary = memchr::memchr(line_delim, &data[target..])
-            .map(|p| target + p + 1)
-            .unwrap_or(data.len());
-        if boundary > pos {
-            chunks.push(&data[pos..boundary]);
-        }
-        pos = boundary;
-    }
-
-    if pos < data.len() {
-        chunks.push(&data[pos..]);
-    }
-
-    chunks
-}
-
 // ── Fast path: multi-field non-contiguous extraction ─────────────────────
 
 /// Multi-field non-contiguous extraction (e.g., `cut -d, -f1,3,5`).
@@ -296,18 +262,19 @@ fn process_fields_multi_select(
     let max_field = ranges.last().map_or(0, |r| r.end);
 
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                // Output is always <= input for field selection; use 3/4 as safe estimate
-                let mut buf = Vec::with_capacity(chunk.len() * 3 / 4);
-                multi_select_chunk(
-                    chunk, delim, line_delim, ranges, max_field, suppress, &mut buf,
-                );
-                buf
-            })
-            .collect();
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len() * 3 / 4);
+                    multi_select_chunk(
+                        chunk, delim, line_delim, ranges, max_field, suppress, result,
+                    );
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -732,27 +699,28 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
     let field_mask = compute_field_mask(ranges, complement);
 
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
-                process_fields_chunk(
-                    chunk,
-                    delim,
-                    ranges,
-                    output_delim,
-                    suppress,
-                    max_field,
-                    field_mask,
-                    line_delim,
-                    complement,
-                    &mut buf,
-                );
-                buf
-            })
-            .collect();
-        // Use write_vectored (writev) to batch N writes into fewer syscalls
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len());
+                    process_fields_chunk(
+                        chunk,
+                        delim,
+                        ranges,
+                        output_delim,
+                        suppress,
+                        max_field,
+                        field_mask,
+                        line_delim,
+                        complement,
+                        result,
+                    );
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -1118,17 +1086,19 @@ fn process_complement_range(
     out: &mut impl Write,
 ) -> io::Result<()> {
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
-                complement_range_chunk(
-                    chunk, delim, skip_start, skip_end, line_delim, suppress, &mut buf,
-                );
-                buf
-            })
-            .collect();
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len());
+                    complement_range_chunk(
+                        chunk, delim, skip_start, skip_end, line_delim, suppress, result,
+                    );
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -1304,18 +1274,19 @@ fn process_complement_single_field(
     let skip_idx = skip_field - 1;
 
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
-                complement_single_field_chunk(
-                    chunk, delim, skip_idx, line_delim, suppress, &mut buf,
-                );
-                buf
-            })
-            .collect();
-        // Use write_vectored (writev) to batch N writes into fewer syscalls
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len());
+                    complement_single_field_chunk(
+                        chunk, delim, skip_idx, line_delim, suppress, result,
+                    );
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -1650,16 +1621,17 @@ fn process_fields_prefix(
     out: &mut impl Write,
 ) -> io::Result<()> {
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
-                fields_prefix_chunk(chunk, delim, line_delim, last_field, suppress, &mut buf);
-                buf
-            })
-            .collect();
-        // Use write_vectored (writev) to batch N writes into fewer syscalls
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len());
+                    fields_prefix_chunk(chunk, delim, line_delim, last_field, suppress, result);
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -1847,16 +1819,17 @@ fn process_fields_suffix(
     out: &mut impl Write,
 ) -> io::Result<()> {
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
-                fields_suffix_chunk(chunk, delim, line_delim, start_field, suppress, &mut buf);
-                buf
-            })
-            .collect();
-        // Use write_vectored (writev) to batch N writes into fewer syscalls
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len());
+                    fields_suffix_chunk(chunk, delim, line_delim, start_field, suppress, result);
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -1968,23 +1941,25 @@ fn process_fields_mid_range(
     out: &mut impl Write,
 ) -> io::Result<()> {
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
-                fields_mid_range_chunk(
-                    chunk,
-                    delim,
-                    line_delim,
-                    start_field,
-                    end_field,
-                    suppress,
-                    &mut buf,
-                );
-                buf
-            })
-            .collect();
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len());
+                    fields_mid_range_chunk(
+                        chunk,
+                        delim,
+                        line_delim,
+                        start_field,
+                        end_field,
+                        suppress,
+                        result,
+                    );
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -2807,15 +2782,17 @@ fn process_bytes_mid_range(
     let skip = start_byte.saturating_sub(1);
 
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
-                bytes_mid_range_chunk(chunk, skip, end_byte, line_delim, &mut buf);
-                buf
-            })
-            .collect();
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len());
+                    bytes_mid_range_chunk(chunk, skip, end_byte, line_delim, result);
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -2894,15 +2871,17 @@ fn process_bytes_complement_mid(
 ) -> io::Result<()> {
     let prefix_bytes = skip_start - 1; // bytes before the skip region
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
-                bytes_complement_mid_chunk(chunk, prefix_bytes, skip_end, line_delim, &mut buf);
-                buf
-            })
-            .collect();
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len());
+                    bytes_complement_mid_chunk(chunk, prefix_bytes, skip_end, line_delim, result);
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
@@ -3057,23 +3036,24 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
     }
 
     if data.len() >= PARALLEL_THRESHOLD {
-        let chunks = split_into_chunks(data, line_delim);
-        let results: Vec<Vec<u8>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let mut buf = Vec::with_capacity(chunk.len());
-                process_bytes_chunk(
-                    chunk,
-                    ranges,
-                    complement,
-                    output_delim,
-                    line_delim,
-                    &mut buf,
-                );
-                buf
-            })
-            .collect();
-        // Use write_vectored (writev) to batch N writes into fewer syscalls
+        let chunks = split_for_scope(data, line_delim);
+        let n = chunks.len();
+        let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
+        std::thread::scope(|s| {
+            for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
+                s.spawn(move || {
+                    result.reserve(chunk.len());
+                    process_bytes_chunk(
+                        chunk,
+                        ranges,
+                        complement,
+                        output_delim,
+                        line_delim,
+                        result,
+                    );
+                });
+            }
+        });
         let slices: Vec<IoSlice> = results
             .iter()
             .filter(|r| !r.is_empty())
