@@ -67,6 +67,22 @@ path = "src/bin/ftac.rs"
 name = "fmd5sum"
 path = "src/bin/fmd5sum.rs"
 
+[[bin]]
+name = "frev"
+path = "src/bin/frev.rs"
+
+[[bin]]
+name = "fexpand"
+path = "src/bin/fexpand.rs"
+
+[[bin]]
+name = "funexpand"
+path = "src/bin/funexpand.rs"
+
+[[bin]]
+name = "ffold"
+path = "src/bin/ffold.rs"
+
 [dependencies]
 # CLI argument parsing
 clap = { version = "4", features = ["derive", "cargo"] }
