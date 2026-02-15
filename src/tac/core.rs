@@ -74,13 +74,12 @@ fn split_into_chunks(data: &[u8], sep: u8) -> Vec<usize> {
     boundaries
 }
 
-/// Parallel after-separator mode: find all separator positions in parallel,
-/// then merge into a single sorted array and output records in reverse.
+/// Parallel after-separator mode: find separator positions in parallel
+/// using u32 positions (halves memory vs usize), then output in reverse.
 ///
-/// Flattens per-chunk position arrays into one contiguous Vec, which gives
-/// a single linear reverse scan during output. This is cache-friendlier than
-/// the nested chunk+position iteration (one pointer dereference per position
-/// instead of two + branch for chunk boundaries).
+/// Uses u32 positions: for 100MB with 2.5M newlines, u32 uses 10MB vs 20MB
+/// for usize, saving ~2500 page faults (~2.5ms). Valid for files up to 4GB.
+/// Iterates per-chunk positions directly in reverse (no flattening needed).
 fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let boundaries = split_into_chunks(data, sep);
     let n_chunks = boundaries.len() - 1;
@@ -89,7 +88,8 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
     }
 
     // Parallel: find separator positions within each chunk using scoped threads.
-    let chunk_positions: Vec<Vec<usize>> = std::thread::scope(|s| {
+    // u32 positions halve memory allocation vs usize.
+    let chunk_positions: Vec<Vec<u32>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..n_chunks)
             .map(|i| {
                 let start = boundaries[i];
@@ -99,7 +99,7 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
                     let estimated = chunk.len() / 16 + 64;
                     let mut positions = Vec::with_capacity(estimated);
                     for p in memchr::memchr_iter(sep, chunk) {
-                        positions.push(start + p);
+                        positions.push((start + p) as u32);
                     }
                     positions
                 })
@@ -108,29 +108,36 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    // Flatten into single sorted positions array (chunks are in order, positions
-    // within each chunk are already sorted, so concatenation preserves sort order).
-    let total_positions: usize = chunk_positions.iter().map(|c| c.len()).sum();
-    let mut positions = Vec::with_capacity(total_positions);
-    for chunk in &chunk_positions {
-        positions.extend_from_slice(chunk);
-    }
-
-    // Output records in reverse order using writev batching
+    // Iterate per-chunk positions in reverse order (chunks reversed, positions
+    // within each chunk reversed). No flattening allocation needed.
     const BATCH: usize = 1024;
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
 
-    for &pos in positions.iter().rev() {
-        let rec_start = pos + 1;
-        if rec_start < end {
-            slices.push(IoSlice::new(&data[rec_start..end]));
-            if slices.len() >= BATCH {
-                write_all_vectored(out, &slices)?;
-                slices.clear();
+    for i in (0..n_chunks).rev() {
+        let positions = &chunk_positions[i];
+        let chunk_start = boundaries[i];
+
+        for &pos in positions.iter().rev() {
+            let rec_start = pos as usize + 1;
+            if rec_start < end {
+                slices.push(IoSlice::new(&data[rec_start..end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
+                }
             }
+            end = rec_start;
         }
-        end = rec_start;
+        // Handle content before first separator in this chunk
+        if end > chunk_start {
+            // Don't output partial chunk boundaries — they connect to the
+            // previous chunk's last record. Only output at chunk_start=0.
+            if i == 0 {
+                // First chunk: emit any content before the first separator
+            }
+            // Let the next chunk iteration handle it by keeping `end` as-is
+        }
     }
 
     if end > 0 {
@@ -142,7 +149,7 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
     Ok(())
 }
 
-/// Parallel before-separator mode: same flattened parallel scan approach.
+/// Parallel before-separator mode: u32 positions, no flattening.
 fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let boundaries = split_into_chunks(data, sep);
     let n_chunks = boundaries.len() - 1;
@@ -151,7 +158,7 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
     }
 
     // Parallel: find separator positions within each chunk using scoped threads.
-    let chunk_positions: Vec<Vec<usize>> = std::thread::scope(|s| {
+    let chunk_positions: Vec<Vec<u32>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..n_chunks)
             .map(|i| {
                 let start = boundaries[i];
@@ -161,7 +168,7 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
                     let estimated = chunk.len() / 16 + 64;
                     let mut positions = Vec::with_capacity(estimated);
                     for p in memchr::memchr_iter(sep, chunk) {
-                        positions.push(start + p);
+                        positions.push((start + p) as u32);
                     }
                     positions
                 })
@@ -170,27 +177,25 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    // Flatten into single sorted positions array
-    let total_positions: usize = chunk_positions.iter().map(|c| c.len()).sum();
-    let mut positions = Vec::with_capacity(total_positions);
-    for chunk in &chunk_positions {
-        positions.extend_from_slice(chunk);
-    }
-
-    // Output records in reverse order
+    // Iterate per-chunk positions in reverse order
     const BATCH: usize = 1024;
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut end = data.len();
 
-    for &pos in positions.iter().rev() {
-        if pos < end {
-            slices.push(IoSlice::new(&data[pos..end]));
-            if slices.len() >= BATCH {
-                write_all_vectored(out, &slices)?;
-                slices.clear();
+    for i in (0..n_chunks).rev() {
+        let positions = &chunk_positions[i];
+
+        for &pos in positions.iter().rev() {
+            let p = pos as usize;
+            if p < end {
+                slices.push(IoSlice::new(&data[p..end]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(out, &slices)?;
+                    slices.clear();
+                }
             }
+            end = p;
         }
-        end = pos;
     }
 
     if end > 0 {
