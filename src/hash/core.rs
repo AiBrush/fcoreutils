@@ -167,6 +167,154 @@ pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> String {
     }
 }
 
+/// Hash data and write hex result directly into an output buffer.
+/// Returns the number of hex bytes written. Avoids String allocation
+/// on the critical single-file fast path.
+/// `out` must be at least 128 bytes for BLAKE2b (64 * 2), 64 for SHA256, 32 for MD5.
+#[cfg(target_os = "linux")]
+pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> usize {
+    match algo {
+        HashAlgorithm::Md5 => {
+            use digest::Digest;
+            let digest = md5::Md5::digest(data);
+            hex_encode_to_slice(&digest, out);
+            32
+        }
+        HashAlgorithm::Sha256 => {
+            use digest::Digest;
+            let digest = sha2::Sha256::digest(data);
+            hex_encode_to_slice(&digest, out);
+            64
+        }
+        HashAlgorithm::Blake2b => {
+            let hash = blake2b_simd::blake2b(data);
+            let bytes = hash.as_bytes();
+            hex_encode_to_slice(bytes, out);
+            bytes.len() * 2
+        }
+    }
+}
+
+/// Hash a single file using raw syscalls and write hex directly to output buffer.
+/// Returns number of hex bytes written.
+/// This is the absolute minimum-overhead path for single-file hashing:
+/// raw open + fstat + read + hash + hex encode, with zero String allocation.
+#[cfg(target_os = "linux")]
+pub fn hash_file_raw_to_buf(algo: HashAlgorithm, path: &Path, out: &mut [u8]) -> io::Result<usize> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_bytes = path.as_os_str().as_bytes();
+    let c_path = std::ffi::CString::new(path_bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
+
+    let mut flags = libc::O_RDONLY | libc::O_CLOEXEC;
+    if NOATIME_SUPPORTED.load(Ordering::Relaxed) {
+        flags |= libc::O_NOATIME;
+    }
+
+    let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
+    if fd < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EPERM) && flags & libc::O_NOATIME != 0 {
+            NOATIME_SUPPORTED.store(false, Ordering::Relaxed);
+            let fd2 = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd2 < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return hash_from_raw_fd_to_buf(algo, fd2, out);
+        }
+        return Err(err);
+    }
+    hash_from_raw_fd_to_buf(algo, fd, out)
+}
+
+/// Hash from raw fd and write hex directly to output buffer.
+/// For tiny files (<8KB), the entire path is raw syscalls + stack buffer — zero heap.
+/// For larger files, falls back to hash_file_raw() which allocates a String.
+#[cfg(target_os = "linux")]
+fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::Result<usize> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        let err = io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(err);
+    }
+    let size = stat.st_size as u64;
+    let is_regular = (stat.st_mode & libc::S_IFMT) == libc::S_IFREG;
+
+    // Empty regular file
+    if is_regular && size == 0 {
+        unsafe {
+            libc::close(fd);
+        }
+        return Ok(hash_bytes_to_buf(algo, &[], out));
+    }
+
+    // Tiny files (<8KB): fully raw path — zero heap allocation
+    if is_regular && size < TINY_FILE_LIMIT {
+        let mut buf = [0u8; 8192];
+        let mut total = 0usize;
+        while total < size as usize {
+            let n = unsafe {
+                libc::read(
+                    fd,
+                    buf[total..].as_mut_ptr() as *mut libc::c_void,
+                    (size as usize) - total,
+                )
+            };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(err);
+            }
+            if n == 0 {
+                break;
+            }
+            total += n as usize;
+        }
+        unsafe {
+            libc::close(fd);
+        }
+        return Ok(hash_bytes_to_buf(algo, &buf[..total], out));
+    }
+
+    // Larger files: fall back to hash_from_raw_fd which returns a String,
+    // then copy the hex into out.
+    use std::os::unix::io::FromRawFd;
+    let file = unsafe { File::from_raw_fd(fd) };
+    let hash_str = if is_regular && size > 0 {
+        if size >= SMALL_FILE_LIMIT {
+            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
+            if let Ok(mmap) = mmap_result {
+                if size >= 2 * 1024 * 1024 {
+                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                }
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                    let _ = mmap.advise(memmap2::Advice::WillNeed);
+                }
+                hash_bytes(algo, &mmap)
+            } else {
+                hash_file_small(algo, file, size as usize)?
+            }
+        } else {
+            hash_file_small(algo, file, size as usize)?
+        }
+    } else {
+        hash_reader(algo, file)?
+    };
+    let hex_bytes = hash_str.as_bytes();
+    out[..hex_bytes.len()].copy_from_slice(hex_bytes);
+    Ok(hex_bytes.len())
+}
+
 // ── MD5 ─────────────────────────────────────────────────────────────
 
 /// Single-shot MD5 using OpenSSL's optimized assembly (Linux).
@@ -449,6 +597,11 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
                         let _ = mmap.advise(memmap2::Advice::HugePage);
                     }
                     let _ = mmap.advise(memmap2::Advice::Sequential);
+                    // Prefault pages using huge pages (kernel 5.14+).
+                    // Falls back to WillNeed for older kernels.
+                    if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                        let _ = mmap.advise(memmap2::Advice::WillNeed);
+                    }
                 }
                 return Ok(hash_bytes(algo, &mmap));
             }
@@ -647,7 +800,9 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
                         let _ = mmap.advise(memmap2::Advice::HugePage);
                     }
                     let _ = mmap.advise(memmap2::Advice::Sequential);
-                    let _ = mmap.advise(memmap2::Advice::WillNeed);
+                    if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                        let _ = mmap.advise(memmap2::Advice::WillNeed);
+                    }
                 }
                 return Ok(blake2b_hash_data(&mmap, output_bytes));
             }
@@ -773,7 +928,7 @@ fn open_file_content(path: &Path) -> io::Result<FileContent> {
             buf.truncate(total);
             return Ok(FileContent::Buf(buf));
         }
-        // No MAP_POPULATE — HUGEPAGE first, then WILLNEED (same as hash_file)
+        // HUGEPAGE + PopulateRead for optimal page faulting
         let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
         if let Ok(mmap) = mmap_result {
             #[cfg(target_os = "linux")]
@@ -782,7 +937,9 @@ fn open_file_content(path: &Path) -> io::Result<FileContent> {
                     let _ = mmap.advise(memmap2::Advice::HugePage);
                 }
                 let _ = mmap.advise(memmap2::Advice::Sequential);
-                let _ = mmap.advise(memmap2::Advice::WillNeed);
+                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                    let _ = mmap.advise(memmap2::Advice::WillNeed);
+                }
             }
             return Ok(FileContent::Mmap(mmap));
         }
@@ -808,10 +965,20 @@ fn open_file_content(path: &Path) -> io::Result<FileContent> {
     Ok(FileContent::Buf(buf))
 }
 
+/// Read remaining file content from an already-open fd into a Vec.
+/// Used when the initial stack buffer is exhausted and we need to read
+/// the rest without re-opening the file.
+fn read_remaining_to_vec(prefix: &[u8], mut file: File) -> io::Result<FileContent> {
+    let mut buf = Vec::with_capacity(prefix.len() + 65536);
+    buf.extend_from_slice(prefix);
+    file.read_to_end(&mut buf)?;
+    Ok(FileContent::Buf(buf))
+}
+
 /// Open a file and read all content without fstat — just open+read+close.
 /// For many-file workloads (100+ files), skipping fstat saves ~5µs/file
 /// (~0.5ms for 100 files). Uses a small initial buffer for tiny files (< 4KB),
-/// then falls back to larger buffer or mmap for bigger files.
+/// then falls back to larger buffer or read_to_end for bigger files.
 fn open_file_content_fast(path: &Path) -> io::Result<FileContent> {
     let mut file = open_noatime(path)?;
     // Try small buffer first — optimal for benchmark's ~55 byte files.
@@ -834,7 +1001,8 @@ fn open_file_content_fast(path: &Path) -> io::Result<FileContent> {
                     Ok(n) => {
                         total += n;
                         if total >= buf.len() {
-                            return open_file_content(path);
+                            // File > 64KB: read rest from existing fd
+                            return read_remaining_to_vec(&buf[..total], file);
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -851,7 +1019,8 @@ fn open_file_content_fast(path: &Path) -> io::Result<FileContent> {
                     Ok(n) => {
                         total += n;
                         if total >= buf.len() {
-                            return open_file_content(path);
+                            // File > 64KB: read rest from existing fd
+                            return read_remaining_to_vec(&buf[..total], file);
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -1074,8 +1243,7 @@ pub fn hash_files_parallel_fast(paths: &[&Path], algo: HashAlgorithm) -> Vec<io:
                 s.spawn(move || {
                     let mut local_results = Vec::new();
                     loop {
-                        let idx =
-                            work_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let idx = work_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if idx >= n {
                             break;
                         }
@@ -1212,6 +1380,106 @@ pub fn hash_files_batch(paths: &[&Path], algo: HashAlgorithm) -> Vec<io::Result<
     })
 }
 
+/// Stream-hash a file that already has a prefix read into memory.
+/// Feeds `prefix` into the hasher first, then streams the rest from `file`.
+/// Avoids re-opening and re-reading the file when the initial buffer is exhausted.
+fn hash_stream_with_prefix(
+    algo: HashAlgorithm,
+    prefix: &[u8],
+    mut file: File,
+) -> io::Result<String> {
+    match algo {
+        HashAlgorithm::Sha256 => {
+            #[cfg(target_os = "linux")]
+            {
+                let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::sha256())
+                    .map_err(|e| io::Error::other(e))?;
+                hasher.update(prefix).map_err(|e| io::Error::other(e))?;
+                STREAM_BUF.with(|cell| {
+                    let mut buf = cell.borrow_mut();
+                    ensure_stream_buf(&mut buf);
+                    loop {
+                        let n = read_full(&mut file, &mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        hasher.update(&buf[..n]).map_err(|e| io::Error::other(e))?;
+                    }
+                    let digest = hasher.finish().map_err(|e| io::Error::other(e))?;
+                    Ok(hex_encode(&digest))
+                })
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                hash_stream_with_prefix_digest::<sha2::Sha256>(prefix, file)
+            }
+        }
+        HashAlgorithm::Md5 => {
+            #[cfg(target_os = "linux")]
+            {
+                let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::md5())
+                    .map_err(|e| io::Error::other(e))?;
+                hasher.update(prefix).map_err(|e| io::Error::other(e))?;
+                STREAM_BUF.with(|cell| {
+                    let mut buf = cell.borrow_mut();
+                    ensure_stream_buf(&mut buf);
+                    loop {
+                        let n = read_full(&mut file, &mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        hasher.update(&buf[..n]).map_err(|e| io::Error::other(e))?;
+                    }
+                    let digest = hasher.finish().map_err(|e| io::Error::other(e))?;
+                    Ok(hex_encode(&digest))
+                })
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                hash_stream_with_prefix_digest::<md5::Md5>(prefix, file)
+            }
+        }
+        HashAlgorithm::Blake2b => {
+            let mut state = blake2b_simd::Params::new().to_state();
+            state.update(prefix);
+            STREAM_BUF.with(|cell| {
+                let mut buf = cell.borrow_mut();
+                ensure_stream_buf(&mut buf);
+                loop {
+                    let n = read_full(&mut file, &mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    state.update(&buf[..n]);
+                }
+                Ok(hex_encode(state.finalize().as_bytes()))
+            })
+        }
+    }
+}
+
+/// Generic stream-hash with prefix for non-Linux platforms using Digest trait.
+#[cfg(not(target_os = "linux"))]
+fn hash_stream_with_prefix_digest<D: digest::Digest>(
+    prefix: &[u8],
+    mut file: File,
+) -> io::Result<String> {
+    STREAM_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        ensure_stream_buf(&mut buf);
+        let mut hasher = D::new();
+        hasher.update(prefix);
+        loop {
+            let n = read_full(&mut file, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(hex_encode(&hasher.finalize()))
+    })
+}
+
 /// Hash a file without fstat — just open, read until EOF, hash.
 /// For many-file workloads (100+ tiny files), skipping fstat saves ~5µs/file.
 /// Uses a two-tier buffer strategy: small stack buffer (4KB) for the initial read,
@@ -1240,7 +1508,9 @@ pub fn hash_file_nostat(algo: HashAlgorithm, path: &Path) -> io::Result<String> 
                     Ok(n) => {
                         total += n;
                         if total >= buf.len() {
-                            return hash_file(algo, path);
+                            // File > 64KB: stream-hash from existing fd instead of
+                            // re-opening. Feed already-read prefix, continue streaming.
+                            return hash_stream_with_prefix(algo, &buf[..total], file);
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -1258,7 +1528,8 @@ pub fn hash_file_nostat(algo: HashAlgorithm, path: &Path) -> io::Result<String> 
                     Ok(n) => {
                         total += n;
                         if total >= buf.len() {
-                            return hash_file(algo, path);
+                            // File > 64KB: stream-hash from existing fd
+                            return hash_stream_with_prefix(algo, &buf[..total], file);
                         }
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -1268,6 +1539,133 @@ pub fn hash_file_nostat(algo: HashAlgorithm, path: &Path) -> io::Result<String> 
         }
         Err(e) => return Err(e),
     }
+}
+
+/// Hash a single file using raw Linux syscalls for minimum overhead.
+/// Bypasses Rust's File abstraction entirely: raw open/fstat/read/close.
+/// For the single-file fast path, this eliminates OpenOptions builder,
+/// CString heap allocation, File wrapper overhead, and Read trait dispatch.
+///
+/// Size-based dispatch:
+/// - Tiny (<8KB): stack buffer + raw read + hash_bytes (3 syscalls total)
+/// - Small (8KB-16MB): wraps fd in File, reads into thread-local buffer
+/// - Large (>=16MB): wraps fd in File, mmaps with HugePage + PopulateRead
+/// - Non-regular: wraps fd in File, streaming hash_reader
+#[cfg(target_os = "linux")]
+pub fn hash_file_raw(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_bytes = path.as_os_str().as_bytes();
+    let c_path = std::ffi::CString::new(path_bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
+
+    // Raw open with O_RDONLY | O_CLOEXEC, optionally O_NOATIME
+    let mut flags = libc::O_RDONLY | libc::O_CLOEXEC;
+    if NOATIME_SUPPORTED.load(Ordering::Relaxed) {
+        flags |= libc::O_NOATIME;
+    }
+
+    let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
+    if fd < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EPERM) && flags & libc::O_NOATIME != 0 {
+            NOATIME_SUPPORTED.store(false, Ordering::Relaxed);
+            let fd2 = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd2 < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return hash_from_raw_fd(algo, fd2);
+        }
+        return Err(err);
+    }
+    hash_from_raw_fd(algo, fd)
+}
+
+/// Hash from a raw fd — dispatches by file size for optimal I/O strategy.
+/// Handles tiny (stack buffer), small (thread-local buffer), large (mmap), and
+/// non-regular (streaming) files.
+#[cfg(target_os = "linux")]
+fn hash_from_raw_fd(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
+    // Raw fstat to determine size and type
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        let err = io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(err);
+    }
+    let size = stat.st_size as u64;
+    let is_regular = (stat.st_mode & libc::S_IFMT) == libc::S_IFREG;
+
+    // Empty regular file
+    if is_regular && size == 0 {
+        unsafe {
+            libc::close(fd);
+        }
+        return Ok(hash_bytes(algo, &[]));
+    }
+
+    // Tiny files (<8KB): raw read into stack buffer, no File wrapper needed.
+    // Entire I/O in 3 raw syscalls: open + read + close.
+    if is_regular && size < TINY_FILE_LIMIT {
+        let mut buf = [0u8; 8192];
+        let mut total = 0usize;
+        while total < size as usize {
+            let n = unsafe {
+                libc::read(
+                    fd,
+                    buf[total..].as_mut_ptr() as *mut libc::c_void,
+                    (size as usize) - total,
+                )
+            };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(err);
+            }
+            if n == 0 {
+                break;
+            }
+            total += n as usize;
+        }
+        unsafe {
+            libc::close(fd);
+        }
+        return Ok(hash_bytes(algo, &buf[..total]));
+    }
+
+    // For larger files, wrap fd in File for RAII close and existing optimized paths.
+    use std::os::unix::io::FromRawFd;
+    let file = unsafe { File::from_raw_fd(fd) };
+
+    if is_regular && size > 0 {
+        // Large files (>=16MB): mmap with HugePage + PopulateRead
+        if size >= SMALL_FILE_LIMIT {
+            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
+            if let Ok(mmap) = mmap_result {
+                if size >= 2 * 1024 * 1024 {
+                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                }
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                // Prefault pages using huge pages (kernel 5.14+)
+                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                    let _ = mmap.advise(memmap2::Advice::WillNeed);
+                }
+                return Ok(hash_bytes(algo, &mmap));
+            }
+        }
+        // Small files (8KB-16MB): single-read into thread-local buffer
+        return hash_file_small(algo, file, size as usize);
+    }
+
+    // Non-regular files: streaming hash
+    hash_reader(algo, file)
 }
 
 /// Issue readahead hints for ALL file paths (no size threshold).
