@@ -6,10 +6,10 @@ use rayon::prelude::*;
 /// Linux UIO_MAXIOV is 1024; we use that as our batch limit.
 const MAX_IOV: usize = 1024;
 
-/// Stream buffer: 16MB — with read accumulation, larger buffers mean fewer
-/// write syscalls and better SIMD/rayon utilization. For piped I/O, multiple
-/// small pipe reads (64KB-1MB) accumulate before a single process+write.
-/// For 100MB input: ~6 writes instead of ~100+ with smaller buffers.
+/// Stream buffer: 16MB — sized to accept the largest single pipe read
+/// (typically 8MB with F_SETPIPE_SZ). Each read chunk is processed and
+/// written immediately for pipelining: while ftr processes chunk N,
+/// upstream cat writes chunk N+1 to the pipe.
 const STREAM_BUF: usize = 16 * 1024 * 1024;
 
 /// Minimum data size to engage rayon parallel processing for mmap paths.
@@ -2388,28 +2388,15 @@ fn delete_range_streaming(
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    // Accumulate multiple pipe reads before processing+writing.
-    // In-place delete compacts kept bytes at the front of the buffer.
     let mut buf = alloc_uninit_vec(STREAM_BUF);
-    let mut total = 0;
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp = delete_range_inplace(&mut buf, total, lo, hi);
-                if wp > 0 {
-                    writer.write_all(&buf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = delete_range_inplace(&mut buf, total, lo, hi);
-            if wp > 0 {
-                writer.write_all(&buf[..wp])?;
-            }
-            total = 0;
+        let wp = delete_range_inplace(&mut buf, n, lo, hi);
+        if wp > 0 {
+            writer.write_all(&buf[..wp])?;
         }
     }
     Ok(())
@@ -2602,24 +2589,16 @@ pub fn translate(
     }
 
     // General case: IN-PLACE translation on a SINGLE buffer.
-    // Accumulates multiple pipe reads before processing+writing to reduce
-    // write syscalls. Translate in-place halves memory bandwidth vs separate buffers.
+    // Process each read chunk immediately for pipelining: while ftr translates
+    // and writes chunk N, cat writes chunk N+1 to the pipe.
     // SAFETY: all bytes are written by read_once before being translated.
     let mut buf = alloc_uninit_vec(STREAM_BUF);
-    let mut total = 0;
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                translate_and_write_table(&mut buf, total, &table, writer)?;
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            translate_and_write_table(&mut buf, total, &table, writer)?;
-            total = 0;
-        }
+        translate_and_write_table(&mut buf, n, &table, writer)?;
     }
     Ok(())
 }
@@ -2644,8 +2623,8 @@ fn translate_and_write_table(
 }
 
 /// Streaming SIMD range translation — single buffer, in-place transform.
-/// Accumulates multiple pipe reads before processing+writing to reduce
-/// write syscalls (e.g., 100MB with 64KB pipe: 12 writes instead of 1500).
+/// Processes each read chunk immediately for pipelining: while ftr translates
+/// and writes chunk N, upstream cat writes chunk N+1 to the pipe.
 /// For chunks >= PARALLEL_THRESHOLD, uses rayon par_chunks_mut for multi-core.
 fn translate_range_stream(
     lo: u8,
@@ -2655,20 +2634,12 @@ fn translate_range_stream(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let mut buf = alloc_uninit_vec(STREAM_BUF);
-    let mut total = 0;
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                translate_and_write_range(&mut buf, total, lo, hi, offset, writer)?;
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            translate_and_write_range(&mut buf, total, lo, hi, offset, writer)?;
-            total = 0;
-        }
+        translate_and_write_range(&mut buf, n, lo, hi, offset, writer)?;
     }
     Ok(())
 }
@@ -2695,7 +2666,7 @@ fn translate_and_write_range(
 }
 
 /// Streaming SIMD range-to-constant translation — single buffer, in-place transform.
-/// Accumulates reads before processing+writing to reduce write syscalls.
+/// Processes each read chunk immediately for pipelining with upstream cat.
 /// Uses blendv instead of nibble decomposition for ~10x fewer SIMD ops per vector.
 fn translate_range_to_constant_stream(
     lo: u8,
@@ -2705,20 +2676,12 @@ fn translate_range_to_constant_stream(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let mut buf = alloc_uninit_vec(STREAM_BUF);
-    let mut total = 0;
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                translate_and_write_range_const(&mut buf, total, lo, hi, replacement, writer)?;
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            translate_and_write_range_const(&mut buf, total, lo, hi, replacement, writer)?;
-            total = 0;
-        }
+        translate_and_write_range_const(&mut buf, n, lo, hi, replacement, writer)?;
     }
     Ok(())
 }
@@ -2802,42 +2765,23 @@ pub fn translate_squeeze(
 
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     let mut last_squeezed: u16 = 256;
-    let mut total = 0;
 
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp = translate_squeeze_process(
-                    &mut buf,
-                    total,
-                    &table,
-                    &squeeze_set,
-                    range_info,
-                    range_const_info,
-                    &mut last_squeezed,
-                );
-                if wp > 0 {
-                    writer.write_all(&buf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = translate_squeeze_process(
-                &mut buf,
-                total,
-                &table,
-                &squeeze_set,
-                range_info,
-                range_const_info,
-                &mut last_squeezed,
-            );
-            if wp > 0 {
-                writer.write_all(&buf[..wp])?;
-            }
-            total = 0;
+        let wp = translate_squeeze_process(
+            &mut buf,
+            n,
+            &table,
+            &squeeze_set,
+            range_info,
+            range_const_info,
+            &mut last_squeezed,
+        );
+        if wp > 0 {
+            writer.write_all(&buf[..wp])?;
         }
     }
     Ok(())
@@ -2933,44 +2877,24 @@ fn translate_squeeze_single_ch(
     let finder = memchr::memmem::Finder::new(&pair);
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     let mut was_squeeze_char = false;
-    let mut total = 0;
 
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp = translate_squeeze_single_process(
-                    &mut buf,
-                    total,
-                    table,
-                    squeeze_ch,
-                    &finder,
-                    range_info,
-                    range_const_info,
-                    &mut was_squeeze_char,
-                );
-                if wp > 0 {
-                    writer.write_all(&buf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = translate_squeeze_single_process(
-                &mut buf,
-                total,
-                table,
-                squeeze_ch,
-                &finder,
-                range_info,
-                range_const_info,
-                &mut was_squeeze_char,
-            );
-            if wp > 0 {
-                writer.write_all(&buf[..wp])?;
-            }
-            total = 0;
+        let wp = translate_squeeze_single_process(
+            &mut buf,
+            n,
+            table,
+            squeeze_ch,
+            &finder,
+            range_info,
+            range_const_info,
+            &mut was_squeeze_char,
+        );
+        if wp > 0 {
+            writer.write_all(&buf[..wp])?;
         }
     }
     Ok(())
@@ -3076,26 +3000,15 @@ pub fn delete(
     // Separate output buffer for SIMD compaction — keeps source data intact
     // while compact_8bytes_simd writes to a different location.
     let mut outbuf = alloc_uninit_vec(STREAM_BUF);
-    let mut total = 0;
 
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp = delete_bitset_dispatch(&buf[..total], &mut outbuf, &member);
-                if wp > 0 {
-                    writer.write_all(&outbuf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = delete_bitset_dispatch(&buf[..total], &mut outbuf, &member);
-            if wp > 0 {
-                writer.write_all(&outbuf[..wp])?;
-            }
-            total = 0;
+        let wp = delete_bitset_dispatch(&buf[..n], &mut outbuf, &member);
+        if wp > 0 {
+            writer.write_all(&outbuf[..wp])?;
         }
     }
     Ok(())
@@ -3282,28 +3195,15 @@ fn delete_single_streaming(
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    // Single-buffer in-place delete: accumulate reads, then memchr finds
-    // delete positions, gap-copy backward in the same buffer.
     let mut buf = alloc_uninit_vec(STREAM_BUF);
-    let mut total = 0;
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp = delete_single_inplace(&mut buf, total, ch);
-                if wp > 0 {
-                    writer.write_all(&buf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = delete_single_inplace(&mut buf, total, ch);
-            if wp > 0 {
-                writer.write_all(&buf[..wp])?;
-            }
-            total = 0;
+        let wp = delete_single_inplace(&mut buf, n, ch);
+        if wp > 0 {
+            writer.write_all(&buf[..wp])?;
         }
     }
     Ok(())
@@ -3349,28 +3249,15 @@ fn delete_multi_streaming(
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    // Accumulate reads, then memchr2/memchr3 finds delete positions,
-    // gap-copy backward in the same buffer.
     let mut buf = alloc_uninit_vec(STREAM_BUF);
-    let mut total = 0;
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp = delete_multi_inplace(&mut buf, total, chars);
-                if wp > 0 {
-                    writer.write_all(&buf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = delete_multi_inplace(&mut buf, total, chars);
-            if wp > 0 {
-                writer.write_all(&buf[..wp])?;
-            }
-            total = 0;
+        let wp = delete_multi_inplace(&mut buf, n, chars);
+        if wp > 0 {
+            writer.write_all(&buf[..wp])?;
         }
     }
     Ok(())
@@ -3426,38 +3313,15 @@ pub fn delete_squeeze(
     let squeeze_set = build_member_set(squeeze_chars);
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     let mut last_squeezed: u16 = 256;
-    let mut total = 0;
 
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp = delete_squeeze_inplace(
-                    &mut buf,
-                    total,
-                    &delete_set,
-                    &squeeze_set,
-                    &mut last_squeezed,
-                );
-                if wp > 0 {
-                    writer.write_all(&buf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = delete_squeeze_inplace(
-                &mut buf,
-                total,
-                &delete_set,
-                &squeeze_set,
-                &mut last_squeezed,
-            );
-            if wp > 0 {
-                writer.write_all(&buf[..wp])?;
-            }
-            total = 0;
+        let wp = delete_squeeze_inplace(&mut buf, n, &delete_set, &squeeze_set, &mut last_squeezed);
+        if wp > 0 {
+            writer.write_all(&buf[..wp])?;
         }
     }
     Ok(())
@@ -3543,26 +3407,15 @@ pub fn squeeze(
     let member = build_member_set(squeeze_chars);
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     let mut last_squeezed: u16 = 256;
-    let mut total = 0;
 
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp = squeeze_inplace_bitset(&mut buf, total, &member, &mut last_squeezed);
-                if wp > 0 {
-                    writer.write_all(&buf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = squeeze_inplace_bitset(&mut buf, total, &member, &mut last_squeezed);
-            if wp > 0 {
-                writer.write_all(&buf[..wp])?;
-            }
-            total = 0;
+        let wp = squeeze_inplace_bitset(&mut buf, n, &member, &mut last_squeezed);
+        if wp > 0 {
+            writer.write_all(&buf[..wp])?;
         }
     }
     Ok(())
@@ -3613,26 +3466,15 @@ fn squeeze_multi_stream(
 
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     let mut last_squeezed: u16 = 256;
-    let mut total = 0;
 
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp = squeeze_multi_compact(&mut buf, total, c0, c1, c2, &mut last_squeezed);
-                if wp > 0 {
-                    writer.write_all(&buf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = squeeze_multi_compact(&mut buf, total, c0, c1, c2, &mut last_squeezed);
-            if wp > 0 {
-                writer.write_all(&buf[..wp])?;
-            }
-            total = 0;
+        let wp = squeeze_multi_compact(&mut buf, n, c0, c1, c2, &mut last_squeezed);
+        if wp > 0 {
+            writer.write_all(&buf[..wp])?;
         }
     }
     Ok(())
@@ -3708,34 +3550,19 @@ fn squeeze_single_stream(
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    // In-place compaction: memmem finds consecutive pairs, then gap-copy
-    // in the same buffer to remove duplicates. Single write_all per chunk
-    // eliminates writev overhead (saves ~5-10 syscalls for 10MB input).
     let pair = [ch, ch];
     let finder = memchr::memmem::Finder::new(&pair);
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     let mut was_squeeze_char = false;
-    let mut total = 0;
 
     loop {
-        let n = read_once(reader, &mut buf[total..])?;
+        let n = read_once(reader, &mut buf)?;
         if n == 0 {
-            if total > 0 {
-                let wp =
-                    squeeze_single_compact(&mut buf, total, ch, &finder, &mut was_squeeze_char);
-                if wp > 0 {
-                    writer.write_all(&buf[..wp])?;
-                }
-            }
             break;
         }
-        total += n;
-        if buf.len() - total < 256 * 1024 {
-            let wp = squeeze_single_compact(&mut buf, total, ch, &finder, &mut was_squeeze_char);
-            if wp > 0 {
-                writer.write_all(&buf[..wp])?;
-            }
-            total = 0;
+        let wp = squeeze_single_compact(&mut buf, n, ch, &finder, &mut was_squeeze_char);
+        if wp > 0 {
+            writer.write_all(&buf[..wp])?;
         }
     }
     Ok(())
