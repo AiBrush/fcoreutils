@@ -890,7 +890,7 @@ fn write_sorted_output(
         let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH);
         for j in 0..n {
             let (s, e) = offsets[sorted_indices[j]];
-            if e < data_len {
+            if e < data_len && data[e] == term_byte {
                 slices.push(io::IoSlice::new(&data[s..e + 1]));
             } else {
                 slices.push(io::IoSlice::new(&data[s..e]));
@@ -959,7 +959,7 @@ fn write_sorted_entries(
         let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH);
         for j in 0..n {
             let (s, e) = offsets[entries[j].1];
-            if e < data_len {
+            if e < data_len && data[e] == term_byte {
                 slices.push(io::IoSlice::new(&data[s..e + 1]));
             } else {
                 slices.push(io::IoSlice::new(&data[s..e]));
@@ -1766,7 +1766,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                     let su = s as usize;
                     let end = su + l as usize;
-                    if end < data_len {
+                    if end < data_len && data[end] == term_byte {
                         slices.push(io::IoSlice::new(&data[su..end + 1]));
                     } else {
                         slices.push(io::IoSlice::new(&data[su..end]));
@@ -1872,7 +1872,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 };
                 if emit {
                     let end = su + lu;
-                    if end < data_len {
+                    if end < data_len && data[end] == term_byte {
                         slices.push(io::IoSlice::new(&data[su..end + 1]));
                     } else {
                         slices.push(io::IoSlice::new(&data[su..end]));
@@ -1905,7 +1905,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 let su = s as usize;
                 let lu = l as usize;
                 let end = su + lu;
-                if end < data_len {
+                if end < data_len && data[end] == term_byte {
                     // Include terminator from original data (zero-copy)
                     slices.push(io::IoSlice::new(&data[su..end + 1]));
                 } else {
