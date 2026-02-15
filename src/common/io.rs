@@ -251,6 +251,95 @@ fn read_stdin_raw() -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Splice piped stdin to a memfd, then mmap for zero-copy access.
+/// Uses splice(2) to move data from the stdin pipe directly into a memfd's
+/// page cache (kernel→kernel, no userspace copy). Returns a mutable mmap.
+/// Returns None if stdin is not a pipe or splice fails.
+///
+/// For translate operations: caller can modify the mmap'd data in-place.
+/// For filter operations (delete, cut): caller reads from the mmap.
+#[cfg(target_os = "linux")]
+pub fn splice_stdin_to_mmap() -> io::Result<Option<memmap2::MmapMut>> {
+    use std::os::unix::io::FromRawFd;
+
+    // Check if stdin is a pipe
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(0, &mut stat) } != 0 {
+        return Ok(None);
+    }
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO {
+        return Ok(None);
+    }
+
+    // Create memfd for receiving spliced data
+    let memfd =
+        unsafe { libc::memfd_create(b"stdin_splice\0".as_ptr() as *const libc::c_char, 0) };
+    if memfd < 0 {
+        return Ok(None); // memfd_create not supported, fallback
+    }
+
+    // Splice all data from stdin pipe to memfd (zero-copy: kernel moves pipe pages)
+    let mut total: usize = 0;
+    loop {
+        let n = unsafe {
+            libc::splice(
+                0,
+                std::ptr::null_mut(),
+                memfd,
+                std::ptr::null_mut(),
+                // Splice up to 1GB at a time (kernel will limit to actual pipe data)
+                1024 * 1024 * 1024,
+                libc::SPLICE_F_MOVE,
+            )
+        };
+        if n > 0 {
+            total += n as usize;
+        } else if n == 0 {
+            break; // EOF
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            unsafe { libc::close(memfd) };
+            return Ok(None); // splice failed, fallback to read
+        }
+    }
+
+    if total == 0 {
+        unsafe { libc::close(memfd) };
+        return Ok(None);
+    }
+
+    // Wrap memfd in a File for memmap2 API, then mmap it.
+    // MAP_SHARED allows in-place modification; populate prefaults pages.
+    let file = unsafe { File::from_raw_fd(memfd) };
+    let mmap = unsafe { MmapOptions::new().populate().map_mut(&file) };
+    drop(file); // Close memfd fd (mmap stays valid, kernel holds reference)
+
+    match mmap {
+        Ok(mut mm) => {
+            // Advise kernel for sequential access + hugepages
+            unsafe {
+                libc::madvise(
+                    mm.as_mut_ptr() as *mut libc::c_void,
+                    total,
+                    libc::MADV_SEQUENTIAL,
+                );
+                if total >= 2 * 1024 * 1024 {
+                    libc::madvise(
+                        mm.as_mut_ptr() as *mut libc::c_void,
+                        total,
+                        libc::MADV_HUGEPAGE,
+                    );
+                }
+            }
+            Ok(Some(mm))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// Generic read_stdin for non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
 fn read_stdin_generic() -> io::Result<Vec<u8>> {

@@ -465,25 +465,37 @@ fn main() {
         }
     };
 
-    // Pre-read all stdin data for piped input (avoids chunked reader overhead).
-    // Uses read_stdin() on Linux for raw libc::read() with 64MB pre-alloc,
-    // bypassing BufReader/read_to_end Vec growth pattern.
+    // Pre-read all stdin data for piped input.
+    // On Linux: try splice+memfd for zero-copy (kernel→kernel), fallback to read_stdin.
+    // splice avoids the kernel→userspace copy, saving ~0.5ms for 10MB.
+    #[cfg(target_os = "linux")]
+    let splice_mmap: Option<memmap2::MmapMut> =
+        if stdin_mmap.is_none() && files.iter().any(|f| f == "-") {
+            coreutils_rs::common::io::splice_stdin_to_mmap().unwrap_or(None)
+        } else {
+            None
+        };
+    #[cfg(not(target_os = "linux"))]
+    let splice_mmap: Option<memmap2::MmapMut> = None;
+
+    let has_splice = splice_mmap.is_some();
+
     #[cfg(unix)]
-    let mut stdin_buf: Option<Vec<u8>> = if stdin_mmap.is_none() && files.iter().any(|f| f == "-")
-    {
-        match coreutils_rs::common::io::read_stdin() {
-            Ok(buf) => Some(buf),
-            Err(e) => {
-                if e.kind() != io::ErrorKind::BrokenPipe {
-                    eprintln!("cut: {}", io_error_msg(&e));
-                    process::exit(1);
+    let mut stdin_buf: Option<Vec<u8>> =
+        if stdin_mmap.is_none() && !has_splice && files.iter().any(|f| f == "-") {
+            match coreutils_rs::common::io::read_stdin() {
+                Ok(buf) => Some(buf),
+                Err(e) => {
+                    if e.kind() != io::ErrorKind::BrokenPipe {
+                        eprintln!("cut: {}", io_error_msg(&e));
+                        process::exit(1);
+                    }
+                    Some(Vec::new())
                 }
-                Some(Vec::new())
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     #[cfg(not(unix))]
     let mut stdin_buf: Option<Vec<u8>> = if files.iter().any(|f| f == "-") {
         match coreutils_rs::common::io::read_stdin() {
@@ -500,7 +512,7 @@ fn main() {
         None
     };
 
-    // For piped stdin + field 1: in-place extraction modifies buffer directly,
+    // For piped stdin + field 1: in-place extraction modifies Vec directly,
     // then writes bypassing BufWriter to avoid extra memcpy.
     let mut stdin_field1_done = false;
     if is_field1_inplace {
@@ -528,11 +540,24 @@ fn main() {
                     }
                 } else if let Some(ref data) = stdin_mmap {
                     cut::process_cut_data(data, &cfg, &mut out)
-                } else if let Some(ref data) = stdin_buf {
-                    cut::process_cut_data(data, &cfg, &mut out)
                 } else {
-                    let reader = BufReader::new(io::stdin().lock());
-                    cut::process_cut_reader(reader, &cfg, &mut out)
+                    // Try splice mmap first (Linux only), then stdin_buf
+                    #[cfg(target_os = "linux")]
+                    if let Some(ref data) = splice_mmap {
+                        cut::process_cut_data(data.as_ref(), &cfg, &mut out)
+                    } else if let Some(ref data) = stdin_buf {
+                        cut::process_cut_data(data, &cfg, &mut out)
+                    } else {
+                        let reader = BufReader::new(io::stdin().lock());
+                        cut::process_cut_reader(reader, &cfg, &mut out)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    if let Some(ref data) = stdin_buf {
+                        cut::process_cut_data(data, &cfg, &mut out)
+                    } else {
+                        let reader = BufReader::new(io::stdin().lock());
+                        cut::process_cut_reader(reader, &cfg, &mut out)
+                    }
                 }
             }
             #[cfg(not(unix))]

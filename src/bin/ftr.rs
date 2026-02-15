@@ -464,18 +464,23 @@ fn main() {
                 }
             }
         } else {
-            // Piped stdin: read ALL data first, then translate in-place + vmsplice.
-            // Reading all data upfront avoids streaming overhead (fewer syscalls,
-            // full SIMD utilization on the entire buffer) AND safely enables vmsplice
-            // (no buffer reuse conflict — we write the entire buffer once).
+            // Piped stdin: try splice+memfd for zero-copy read, fallback to read_stdin.
+            // splice() moves pipe pages directly into memfd's page cache (no userspace copy).
+            // Then translate in-place on the mmap'd data and write with vmsplice.
             #[cfg(target_os = "linux")]
             {
-                match coreutils_rs::common::io::read_stdin() {
-                    Ok(mut data) => {
-                        let mut writer = VmspliceWriter::new();
-                        tr::translate_owned(&set1, &set2, &mut data, &mut writer)
+                if let Ok(Some(mut mmap)) = coreutils_rs::common::io::splice_stdin_to_mmap() {
+                    // splice+memfd uses MAP_SHARED (no COW), so in-place translate is optimal
+                    let mut writer = VmspliceWriter::new();
+                    tr::translate_owned(&set1, &set2, &mut mmap, &mut writer)
+                } else {
+                    match coreutils_rs::common::io::read_stdin() {
+                        Ok(mut data) => {
+                            let mut writer = VmspliceWriter::new();
+                            tr::translate_owned(&set1, &set2, &mut data, &mut writer)
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
                 }
             }
             #[cfg(all(unix, not(target_os = "linux")))]
@@ -528,15 +533,19 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: read ALL data first, then use batch path for lower overhead.
-        // This avoids streaming chunk-by-chunk overhead and enables VmspliceWriter.
+        // Piped stdin: try splice+memfd for zero-copy, fallback to read_stdin.
         #[cfg(target_os = "linux")]
-        let result = match coreutils_rs::common::io::read_stdin() {
-            Ok(data) => {
-                let mut writer = VmspliceWriter::new();
-                run_mmap_mode(&cli, set1_str, &data, &mut writer)
+        let result = if let Ok(Some(mmap)) = coreutils_rs::common::io::splice_stdin_to_mmap() {
+            let mut writer = VmspliceWriter::new();
+            run_mmap_mode(&cli, set1_str, &mmap, &mut writer)
+        } else {
+            match coreutils_rs::common::io::read_stdin() {
+                Ok(data) => {
+                    let mut writer = VmspliceWriter::new();
+                    run_mmap_mode(&cli, set1_str, &data, &mut writer)
+                }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
         };
         #[cfg(all(unix, not(target_os = "linux")))]
         let result = run_streaming_mode(&cli, set1_str, &mut *raw);
