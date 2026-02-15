@@ -3,21 +3,9 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,9 +24,30 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          use_sticky_comment: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
 
+            You are reviewing a PR for fcoreutils — a high-performance GNU coreutils replacement in Rust.
+
+            Key project goals:
+            - 10x+ speedup vs GNU coreutils for each tool
+            - 100% GNU compatibility (byte-identical output, same exit codes, same error messages)
+            - Zero-copy I/O with mmap, SIMD acceleration (AVX2/SSE2), and parallel processing
+
+            Review this PR focusing on:
+            1. **Performance**: Are there missed optimization opportunities? Unnecessary allocations, copies, or syscalls?
+            2. **GNU compatibility**: Could any change break byte-identical output with GNU coreutils?
+            3. **Correctness**: Logic errors, off-by-one, edge cases (empty input, huge files, binary data)?
+            4. **Safety**: Unsafe code usage — is it actually safe? Are invariants documented?
+            5. **Code quality**: Readability, naming, dead code, unnecessary complexity?
+
+            Be concise. Focus on actionable issues. Skip trivial style nits.
+            Use `gh pr comment` for top-level feedback.
+            Use `mcp__github_inline_comment__create_inline_comment` to highlight specific code issues.
+            Only post GitHub comments — don't submit review text as messages.
+
+          claude_args: |
+            --model claude-sonnet-4-5-20250929
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
