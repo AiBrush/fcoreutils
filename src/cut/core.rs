@@ -1105,6 +1105,8 @@ fn complement_range_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
+    // Pre-reserve entire chunk capacity to eliminate per-line reserve overhead.
+    buf.reserve(data.len());
     let mut start = 0;
     for end_pos in memchr_iter(line_delim, data) {
         let line = &data[start..end_pos];
@@ -1143,12 +1145,12 @@ fn complement_range_line(
     let len = line.len();
     if len == 0 {
         if !suppress {
-            buf.push(line_delim);
+            unsafe { buf_push(buf, line_delim) };
         }
         return;
     }
 
-    buf.reserve(len + 1);
+    // Note: no per-line buf.reserve — complement_range_chunk already reserves data.len()
     let base = line.as_ptr();
 
     // 1-based field numbers. To skip fields skip_start..=skip_end:
@@ -1287,6 +1289,9 @@ fn complement_single_field_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
+    // Pre-reserve entire chunk capacity to eliminate per-line reserve overhead.
+    // Complement output is always <= input size (skipping one field).
+    buf.reserve(data.len());
     let mut start = 0;
     for end_pos in memchr_iter(line_delim, data) {
         let line = &data[start..end_pos];
@@ -1314,12 +1319,12 @@ fn complement_single_field_line(
     let len = line.len();
     if len == 0 {
         if !suppress {
-            buf.push(line_delim);
+            unsafe { buf_push(buf, line_delim) };
         }
         return;
     }
 
-    buf.reserve(len + 1);
+    // Note: no per-line buf.reserve — complement_single_field_chunk already reserves data.len()
     let base = line.as_ptr();
 
     // Find the delimiters bounding the skip field:
@@ -1539,6 +1544,7 @@ fn fields_prefix_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
+    buf.reserve(data.len());
     let mut start = 0;
     for end_pos in memchr_iter(line_delim, data) {
         let line = &data[start..end_pos];
@@ -1564,12 +1570,12 @@ fn fields_prefix_line(
     let len = line.len();
     if len == 0 {
         if !suppress {
-            buf.push(line_delim);
+            unsafe { buf_push(buf, line_delim) };
         }
         return;
     }
 
-    buf.reserve(len + 1);
+    // Note: no per-line buf.reserve — fields_prefix_chunk already reserves data.len()
     let base = line.as_ptr();
 
     let mut field_count = 1usize;
@@ -1648,6 +1654,7 @@ fn fields_suffix_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
+    buf.reserve(data.len());
     let mut start = 0;
     for end_pos in memchr_iter(line_delim, data) {
         let line = &data[start..end_pos];
@@ -1680,12 +1687,12 @@ fn fields_suffix_line(
     let len = line.len();
     if len == 0 {
         if !suppress {
-            buf.push(line_delim);
+            unsafe { buf_push(buf, line_delim) };
         }
         return;
     }
 
-    buf.reserve(len + 1);
+    // Note: no per-line buf.reserve — fields_suffix_chunk already reserves data.len()
     let base = line.as_ptr();
 
     let skip_delims = start_field - 1;
@@ -1784,6 +1791,7 @@ fn fields_mid_range_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
+    buf.reserve(data.len());
     let mut start = 0;
     for end_pos in memchr_iter(line_delim, data) {
         let line = &data[start..end_pos];
@@ -1827,12 +1835,12 @@ fn fields_mid_range_line(
     let len = line.len();
     if len == 0 {
         if !suppress {
-            buf.push(line_delim);
+            unsafe { buf_push(buf, line_delim) };
         }
         return;
     }
 
-    buf.reserve(len + 1);
+    // Note: no per-line buf.reserve — fields_mid_range_chunk already reserves data.len()
     let base = line.as_ptr();
 
     // Count delimiters to find start_field and end_field boundaries
@@ -2055,6 +2063,8 @@ fn process_single_field_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
+    // Pre-reserve chunk capacity to eliminate per-line reserve overhead.
+    buf.reserve(data.len());
     let mut start = 0;
     for end_pos in memchr_iter(line_delim, data) {
         let line = &data[start..end_pos];
@@ -2082,14 +2092,12 @@ fn extract_single_field_line(
     let len = line.len();
     if len == 0 {
         if !suppress {
-            buf.push(line_delim);
+            unsafe { buf_push(buf, line_delim) };
         }
         return;
     }
 
-    // Ensure capacity for worst case (full line + newline)
-    buf.reserve(len + 1);
-
+    // Note: no per-line buf.reserve — process_single_field_chunk already reserves data.len()
     let base = line.as_ptr();
 
     // Ultra-fast path for first field: single memchr
