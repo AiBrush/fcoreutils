@@ -94,7 +94,8 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
     }
 
     // Phase 1: Each thread scans its chunk backward, collecting separator
-    // positions (absolute offsets into data). No data copy — just u32 positions.
+    // positions as chunk-relative u32 offsets. No data copy — just positions.
+    // u32 supports chunks up to 4GB each (~16GB total with 4 threads).
     let chunk_seps: Vec<Vec<u32>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..n_chunks)
             .map(|i| {
@@ -105,8 +106,9 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
                     let est = chunk.len() / 40 + 64;
                     let mut seps = Vec::with_capacity(est);
                     // memrchr_iter returns positions in reverse order (end→start)
+                    // Store chunk-relative positions to avoid u32 overflow for large files
                     for pos in memchr::memrchr_iter(sep, chunk) {
-                        seps.push((start + pos) as u32);
+                        seps.push(pos as u32);
                     }
                     seps
                 })
@@ -125,11 +127,12 @@ fn tac_bytes_after_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::R
         let chunk_end = boundaries[i + 1];
         let seps = &chunk_seps[i];
 
-        // seps are in reverse order (from memrchr_iter). For after-separator mode:
-        // record = data[sep_pos+1 .. rec_end], where rec_end starts at chunk_end.
+        // seps are chunk-relative, in reverse order (from memrchr_iter).
+        // For after-separator mode: record = data[sep_pos+1 .. rec_end].
         let mut rec_end = chunk_end;
-        for &sep_pos in seps.iter() {
-            let rec_start = sep_pos as usize + 1;
+        for &rel_pos in seps.iter() {
+            let sep_abs = chunk_start + rel_pos as usize;
+            let rec_start = sep_abs + 1;
             if rec_start < rec_end {
                 slices.push(IoSlice::new(&data[rec_start..rec_end]));
                 if slices.len() >= BATCH {
@@ -165,7 +168,7 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
         return out.write_all(data);
     }
 
-    // Phase 1: Each thread scans backward, collecting separator positions.
+    // Phase 1: Each thread scans backward, collecting chunk-relative separator positions.
     let chunk_seps: Vec<Vec<u32>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..n_chunks)
             .map(|i| {
@@ -176,7 +179,7 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
                     let est = chunk.len() / 40 + 64;
                     let mut seps = Vec::with_capacity(est);
                     for pos in memchr::memrchr_iter(sep, chunk) {
-                        seps.push((start + pos) as u32);
+                        seps.push(pos as u32);
                     }
                     seps
                 })
@@ -196,8 +199,8 @@ fn tac_bytes_before_parallel(data: &[u8], sep: u8, out: &mut impl Write) -> io::
         let seps = &chunk_seps[i];
 
         let mut rec_end = chunk_end;
-        for &sep_pos in seps.iter() {
-            let pos = sep_pos as usize;
+        for &rel_pos in seps.iter() {
+            let pos = chunk_start + rel_pos as usize;
             if pos < rec_end {
                 slices.push(IoSlice::new(&data[pos..rec_end]));
                 if slices.len() >= BATCH {

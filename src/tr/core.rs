@@ -6,10 +6,10 @@ use rayon::prelude::*;
 /// Linux UIO_MAXIOV is 1024; we use that as our batch limit.
 const MAX_IOV: usize = 1024;
 
-/// Stream buffer: 16MB — with read accumulation, larger buffers mean fewer
-/// write syscalls and better SIMD/rayon utilization. For piped I/O, multiple
-/// small pipe reads (64KB-1MB) accumulate before a single process+write.
-/// For 100MB input: ~6 writes instead of ~100+ with smaller buffers.
+/// Stream buffer: 16MB — sized to accept the largest single pipe read
+/// (typically 8MB with F_SETPIPE_SZ). Each read chunk is processed and
+/// written immediately for pipelining: while ftr processes chunk N,
+/// upstream cat writes chunk N+1 to the pipe.
 const STREAM_BUF: usize = 16 * 1024 * 1024;
 
 /// Minimum data size to engage rayon parallel processing for mmap paths.
