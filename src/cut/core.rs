@@ -1984,6 +1984,7 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
 /// Lines without delimiter stay in contiguous runs (zero-copy pass-through).
 /// Lines with delimiter produce two IoSlices (truncated field + newline byte).
 #[inline]
+#[allow(dead_code)]
 fn single_field1_zerocopy(
     data: &[u8],
     delim: u8,
