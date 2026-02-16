@@ -154,7 +154,7 @@ fn test_custom_delimiter_multi_byte() {
     let mut config = default_config();
     config.output_delimiter = Some(b"::".to_vec());
     let result = comm_str("a\nb\n", "a\nc\n", &config);
-    assert_eq!(result, "::::a\n::c\nb\n");
+    assert_eq!(result, "::::a\nb\n::c\n");
 }
 
 #[test]

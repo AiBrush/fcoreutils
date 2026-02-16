@@ -525,7 +525,26 @@ pub fn join(
                         break;
                     }
                     let next_key = extract_field(lines1[i1], config.field1, config.separator);
-                    if compare_keys(next_key, current_key, ci) != Ordering::Equal {
+                    let cmp = compare_keys(next_key, current_key, ci);
+                    if cmp != Ordering::Equal {
+                        // Check order: next_key should be > current_key
+                        if config.order_check != OrderCheck::None
+                            && !warned1
+                            && cmp == Ordering::Less
+                        {
+                            had_order_error = true;
+                            warned1 = true;
+                            eprintln!(
+                                "{}: input:{}: is not sorted: {}",
+                                tool_name,
+                                i1 + 1,
+                                String::from_utf8_lossy(lines1[i1])
+                            );
+                            if config.order_check == OrderCheck::Strict {
+                                out.write_all(&buf)?;
+                                return Ok(true);
+                            }
+                        }
                         break;
                     }
                 }
