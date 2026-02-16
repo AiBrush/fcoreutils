@@ -467,11 +467,8 @@ mod integration {
         std::fs::write(&f2, &data2).unwrap();
         let (out, _, code) = run_fcomm(&["-12", f1.to_str().unwrap(), f2.to_str().unwrap()]);
         assert_eq!(code, 0);
-        let lines: Vec<&str> = String::from_utf8_lossy(&out)
-            .lines()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .collect();
+        let binding = String::from_utf8_lossy(&out);
+        let lines: Vec<&str> = binding.lines().collect();
         // Lines 50000-99999 are common
         assert_eq!(lines.len(), 50_000);
     }
