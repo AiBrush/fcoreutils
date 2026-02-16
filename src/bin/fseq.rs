@@ -707,69 +707,83 @@ mod tests {
         assert!(stdout.contains("fcoreutils"));
     }
 
+    /// Check if system seq is GNU seq (BSD seq on macOS behaves differently)
+    fn is_gnu_seq() -> bool {
+        Command::new("seq")
+            .arg("--version")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("GNU"))
+            .unwrap_or(false)
+    }
+
     #[test]
     fn test_match_gnu_basic() {
-        let gnu = Command::new("seq").arg("10").output();
-        if let Ok(gnu) = gnu {
-            let ours = cmd().arg("10").output().unwrap();
-            assert_eq!(
-                String::from_utf8_lossy(&ours.stdout),
-                String::from_utf8_lossy(&gnu.stdout),
-                "Output mismatch with GNU seq for 'seq 10'"
-            );
+        if !is_gnu_seq() {
+            return;
         }
+        let gnu = Command::new("seq").arg("10").output().unwrap();
+        let ours = cmd().arg("10").output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&ours.stdout),
+            String::from_utf8_lossy(&gnu.stdout),
+            "Output mismatch with GNU seq for 'seq 10'"
+        );
     }
 
     #[test]
     fn test_match_gnu_first_last() {
-        let gnu = Command::new("seq").args(["5", "15"]).output();
-        if let Ok(gnu) = gnu {
-            let ours = cmd().args(["5", "15"]).output().unwrap();
-            assert_eq!(
-                String::from_utf8_lossy(&ours.stdout),
-                String::from_utf8_lossy(&gnu.stdout),
-                "Output mismatch with GNU seq for 'seq 5 15'"
-            );
+        if !is_gnu_seq() {
+            return;
         }
+        let gnu = Command::new("seq").args(["5", "15"]).output().unwrap();
+        let ours = cmd().args(["5", "15"]).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&ours.stdout),
+            String::from_utf8_lossy(&gnu.stdout),
+            "Output mismatch with GNU seq for 'seq 5 15'"
+        );
     }
 
     #[test]
     fn test_match_gnu_increment() {
-        let gnu = Command::new("seq").args(["1", "3", "20"]).output();
-        if let Ok(gnu) = gnu {
-            let ours = cmd().args(["1", "3", "20"]).output().unwrap();
-            assert_eq!(
-                String::from_utf8_lossy(&ours.stdout),
-                String::from_utf8_lossy(&gnu.stdout),
-                "Output mismatch with GNU seq for 'seq 1 3 20'"
-            );
+        if !is_gnu_seq() {
+            return;
         }
+        let gnu = Command::new("seq").args(["1", "3", "20"]).output().unwrap();
+        let ours = cmd().args(["1", "3", "20"]).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&ours.stdout),
+            String::from_utf8_lossy(&gnu.stdout),
+            "Output mismatch with GNU seq for 'seq 1 3 20'"
+        );
     }
 
     #[test]
     fn test_match_gnu_separator() {
-        let gnu = Command::new("seq").args(["-s", ":", "5"]).output();
-        if let Ok(gnu) = gnu {
-            let ours = cmd().args(["-s", ":", "5"]).output().unwrap();
-            assert_eq!(
-                String::from_utf8_lossy(&ours.stdout),
-                String::from_utf8_lossy(&gnu.stdout),
-                "Output mismatch with GNU seq for 'seq -s : 5'"
-            );
+        if !is_gnu_seq() {
+            return;
         }
+        let gnu = Command::new("seq").args(["-s", ":", "5"]).output().unwrap();
+        let ours = cmd().args(["-s", ":", "5"]).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&ours.stdout),
+            String::from_utf8_lossy(&gnu.stdout),
+            "Output mismatch with GNU seq for 'seq -s : 5'"
+        );
     }
 
     #[test]
     fn test_match_gnu_equal_width() {
-        let gnu = Command::new("seq").args(["-w", "1", "100"]).output();
-        if let Ok(gnu) = gnu {
-            let ours = cmd().args(["-w", "1", "100"]).output().unwrap();
-            assert_eq!(
-                String::from_utf8_lossy(&ours.stdout),
-                String::from_utf8_lossy(&gnu.stdout),
-                "Output mismatch with GNU seq for 'seq -w 1 100'"
-            );
+        if !is_gnu_seq() {
+            return;
         }
+        let gnu = Command::new("seq").args(["-w", "1", "100"]).output().unwrap();
+        let ours = cmd().args(["-w", "1", "100"]).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&ours.stdout),
+            String::from_utf8_lossy(&gnu.stdout),
+            "Output mismatch with GNU seq for 'seq -w 1 100'"
+        );
     }
 
     #[test]
