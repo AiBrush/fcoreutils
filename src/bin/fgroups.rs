@@ -135,10 +135,10 @@ fn get_user_groups(user: &str) -> Result<Vec<String>, String> {
             }
         }
         gids.truncate(ngroups as usize);
-        return Ok(gids
+        Ok(gids
             .iter()
             .map(|&gid| gid_to_name(gid as libc::gid_t))
-            .collect());
+            .collect())
     }
 
     #[cfg(not(target_vendor = "apple"))]

@@ -392,8 +392,7 @@ mod tests {
         // On macOS, -s won't resolve /var -> /private/var, so compare path components
         let stdout_trimmed = stdout.trim();
         assert!(
-            stdout_trimmed == abs_link.to_str().unwrap()
-                || stdout_trimmed.ends_with("/sym2.txt"),
+            stdout_trimmed == abs_link.to_str().unwrap() || stdout_trimmed.ends_with("/sym2.txt"),
             "Expected path to sym2.txt, got: {}",
             stdout_trimmed
         );

@@ -107,7 +107,9 @@ fn format_number(fmt: &str, value: f64) -> String {
     // Parse width
     let mut width: usize = 0;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
-        width = width.saturating_mul(10).saturating_add((bytes[i] - b'0') as usize);
+        width = width
+            .saturating_mul(10)
+            .saturating_add((bytes[i] - b'0') as usize);
         i += 1;
     }
 
@@ -117,7 +119,9 @@ fn format_number(fmt: &str, value: f64) -> String {
         i += 1;
         let mut prec: usize = 0;
         while i < bytes.len() && bytes[i].is_ascii_digit() {
-            prec = prec.saturating_mul(10).saturating_add((bytes[i] - b'0') as usize);
+            prec = prec
+                .saturating_mul(10)
+                .saturating_add((bytes[i] - b'0') as usize);
             i += 1;
         }
         precision = Some(prec);
@@ -781,7 +785,10 @@ mod tests {
         if !is_gnu_seq() {
             return;
         }
-        let gnu = Command::new("seq").args(["-w", "1", "100"]).output().unwrap();
+        let gnu = Command::new("seq")
+            .args(["-w", "1", "100"])
+            .output()
+            .unwrap();
         let ours = cmd().args(["-w", "1", "100"]).output().unwrap();
         assert_eq!(
             String::from_utf8_lossy(&ours.stdout),

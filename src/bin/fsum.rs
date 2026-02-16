@@ -166,7 +166,11 @@ fn main() {
         let (checksum, blocks) = match result {
             Ok(v) => v,
             Err(e) => {
-                let name = if filename == "-" { "-" } else { filename.as_str() };
+                let name = if filename == "-" {
+                    "-"
+                } else {
+                    filename.as_str()
+                };
                 eprintln!(
                     "{}: {}: {}",
                     TOOL_NAME,

@@ -9,7 +9,7 @@ use std::process;
 const TOOL_NAME: &str = "uname";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[allow(unused_assignments)]
+#[allow(unused_variables, unused_assignments)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
