@@ -12,6 +12,7 @@
     clippy::implicit_saturating_sub,
     clippy::manual_div_ceil,
     clippy::manual_range_contains,
+    clippy::needless_borrows_for_generic_args,
     clippy::needless_lifetimes,
     clippy::needless_return,
     clippy::too_many_arguments
