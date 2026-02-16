@@ -397,52 +397,65 @@ mod tests {
         assert_eq!(blocks, 1);
     }
 
+    /// Check if system sum is GNU sum (BSD sum on macOS has different output format)
+    fn is_gnu_sum() -> bool {
+        Command::new("sum")
+            .arg("--version")
+            .output()
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                stdout.contains("GNU") || stderr.contains("GNU")
+            })
+            .unwrap_or(false)
+    }
+
     #[test]
     fn test_compare_gnu_bsd() {
-        let gnu = Command::new("sum").output();
-        if let Ok(_gnu_output) = gnu {
-            let dir = tempfile::tempdir().unwrap();
-            let file_path = dir.path().join("test.txt");
-            std::fs::write(&file_path, b"The quick brown fox jumps over the lazy dog\n").unwrap();
+        if !is_gnu_sum() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, b"The quick brown fox jumps over the lazy dog\n").unwrap();
 
-            let gnu_out = Command::new("sum")
-                .arg(file_path.to_str().unwrap())
-                .output();
-            if let Ok(gnu_out) = gnu_out {
-                let ours = cmd().arg(file_path.to_str().unwrap()).output().unwrap();
-                assert_eq!(
-                    String::from_utf8_lossy(&ours.stdout),
-                    String::from_utf8_lossy(&gnu_out.stdout),
-                    "BSD checksum mismatch with GNU sum"
-                );
-            }
+        let gnu_out = Command::new("sum")
+            .arg(file_path.to_str().unwrap())
+            .output();
+        if let Ok(gnu_out) = gnu_out {
+            let ours = cmd().arg(file_path.to_str().unwrap()).output().unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&ours.stdout),
+                String::from_utf8_lossy(&gnu_out.stdout),
+                "BSD checksum mismatch with GNU sum"
+            );
         }
     }
 
     #[test]
     fn test_compare_gnu_sysv() {
-        let gnu = Command::new("sum").arg("-s").output();
-        if let Ok(_gnu_output) = gnu {
-            let dir = tempfile::tempdir().unwrap();
-            let file_path = dir.path().join("test.txt");
-            std::fs::write(&file_path, b"The quick brown fox jumps over the lazy dog\n").unwrap();
+        if !is_gnu_sum() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, b"The quick brown fox jumps over the lazy dog\n").unwrap();
 
-            let gnu_out = Command::new("sum")
+        let gnu_out = Command::new("sum")
+            .arg("-s")
+            .arg(file_path.to_str().unwrap())
+            .output();
+        if let Ok(gnu_out) = gnu_out {
+            let ours = cmd()
                 .arg("-s")
                 .arg(file_path.to_str().unwrap())
-                .output();
-            if let Ok(gnu_out) = gnu_out {
-                let ours = cmd()
-                    .arg("-s")
-                    .arg(file_path.to_str().unwrap())
-                    .output()
-                    .unwrap();
-                assert_eq!(
-                    String::from_utf8_lossy(&ours.stdout),
-                    String::from_utf8_lossy(&gnu_out.stdout),
-                    "SysV checksum mismatch with GNU sum"
-                );
-            }
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&ours.stdout),
+                String::from_utf8_lossy(&gnu_out.stdout),
+                "SysV checksum mismatch with GNU sum"
+            );
         }
     }
 
