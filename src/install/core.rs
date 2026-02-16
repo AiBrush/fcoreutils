@@ -343,9 +343,7 @@ fn optimized_copy(src: &Path, dst: &Path) -> io::Result<u64> {
 
     // Try FICLONE first (instant CoW copy on btrfs/XFS/OCFS2)
     const FICLONE: libc::c_ulong = 0x40049409;
-    let ret = unsafe {
-        libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd())
-    };
+    let ret = unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) };
     if ret == 0 {
         return Ok(file_size);
     }

@@ -138,11 +138,7 @@ fn run(input: &str, source_name: &str) -> i32 {
 
 /// Find a cycle starting from `start` by following edges via DFS.
 /// Uses integer node IDs for efficiency.
-fn find_cycle(
-    start: usize,
-    adj: &[Vec<usize>],
-    removed: &[bool],
-) -> Vec<usize> {
+fn find_cycle(start: usize, adj: &[Vec<usize>], removed: &[bool]) -> Vec<usize> {
     let mut visited: HashMap<usize, usize> = HashMap::new();
     let mut path: Vec<usize> = Vec::new();
 

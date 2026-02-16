@@ -278,7 +278,15 @@ pub fn chown_recursive(
     // For non-verbose mode, use parallel traversal
     if !config.verbose && !config.changes {
         let error_count = std::sync::atomic::AtomicI32::new(0);
-        chown_recursive_parallel(path, uid, gid, config, is_command_line_arg, tool_name, &error_count);
+        chown_recursive_parallel(
+            path,
+            uid,
+            gid,
+            config,
+            is_command_line_arg,
+            tool_name,
+            &error_count,
+        );
         return error_count.load(std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -405,7 +413,15 @@ fn chown_recursive_parallel(
 
         use rayon::prelude::*;
         entries.par_iter().for_each(|entry| {
-            chown_recursive_parallel(&entry.path(), uid, gid, config, false, tool_name, error_count);
+            chown_recursive_parallel(
+                &entry.path(),
+                uid,
+                gid,
+                config,
+                false,
+                tool_name,
+                error_count,
+            );
         });
     }
 }

@@ -235,15 +235,8 @@ fn tail_lines_streaming_file(
         };
         if ptr != libc::MAP_FAILED {
             // Advise sequential read from the end
-            let _ = unsafe {
-                libc::madvise(
-                    ptr,
-                    file_size as libc::size_t,
-                    libc::MADV_SEQUENTIAL,
-                )
-            };
-            let data =
-                unsafe { std::slice::from_raw_parts(ptr as *const u8, file_size as usize) };
+            let _ = unsafe { libc::madvise(ptr, file_size as libc::size_t, libc::MADV_SEQUENTIAL) };
+            let data = unsafe { std::slice::from_raw_parts(ptr as *const u8, file_size as usize) };
             let result = tail_lines(data, n, delimiter, out);
             unsafe {
                 libc::munmap(ptr, file_size as libc::size_t);
