@@ -161,8 +161,7 @@ fn test_chown_verbose() {
         verbose: true,
         ..Default::default()
     };
-    let result =
-        crate::chown::chown_file(tmp.path(), Some(meta.uid()), Some(meta.gid()), &config);
+    let result = crate::chown::chown_file(tmp.path(), Some(meta.uid()), Some(meta.gid()), &config);
     assert!(result.is_ok());
 }
 
@@ -222,14 +221,8 @@ fn test_chown_recursive() {
     };
 
     let target_uid = crate::chown::resolve_user("nobody").unwrap_or(1000);
-    let errors = crate::chown::chown_recursive(
-        dir.path(),
-        Some(target_uid),
-        None,
-        &config,
-        true,
-        "chown",
-    );
+    let errors =
+        crate::chown::chown_recursive(dir.path(), Some(target_uid), None, &config, true, "chown");
     assert_eq!(errors, 0);
 
     let m1 = std::fs::metadata(&file1).unwrap();
@@ -258,14 +251,14 @@ fn test_chown_matches_gnu_errors_missing_operand() {
 #[test]
 #[cfg(unix)]
 fn test_chown_matches_gnu_errors_missing_file() {
-    let output = cmd().arg("root").output().unwrap();
+    #[cfg(target_os = "macos")]
+    let owner = "root";
+    #[cfg(not(target_os = "macos"))]
+    let owner = "root";
+    let output = cmd().arg(owner).output().unwrap();
     assert_ne!(output.status.code(), Some(0));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("missing operand"),
-        "stderr was: {}",
-        stderr
-    );
+    assert!(stderr.contains("missing operand"), "stderr was: {}", stderr);
 }
 
 #[test]
@@ -303,8 +296,12 @@ fn test_chown_version() {
 #[cfg(unix)]
 fn test_chown_preserve_root() {
     // --preserve-root -R / should error
+    #[cfg(target_os = "macos")]
+    let owner_group = "root:wheel";
+    #[cfg(not(target_os = "macos"))]
+    let owner_group = "root:root";
     let output = cmd()
-        .args(["--preserve-root", "-R", "root:root", "/"])
+        .args(["--preserve-root", "-R", owner_group, "/"])
         .output()
         .unwrap();
     assert_ne!(output.status.code(), Some(0));
@@ -319,8 +316,12 @@ fn test_chown_preserve_root() {
 #[test]
 #[cfg(unix)]
 fn test_chown_nonexistent_file() {
+    #[cfg(target_os = "macos")]
+    let owner = "root";
+    #[cfg(not(target_os = "macos"))]
+    let owner = "root";
     let output = cmd()
-        .args(["root", "/nonexistent_file_xyz_99999"])
+        .args([owner, "/nonexistent_file_xyz_99999"])
         .output()
         .unwrap();
     assert_ne!(output.status.code(), Some(0));

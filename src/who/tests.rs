@@ -100,12 +100,8 @@ fn test_who_matches_gnu_format() {
             gnu.status.code()
         );
         // Both should have the same number of output lines (same logged-in users)
-        let gnu_lines = String::from_utf8_lossy(&gnu.stdout)
-            .lines()
-            .count();
-        let our_lines = String::from_utf8_lossy(&ours.stdout)
-            .lines()
-            .count();
+        let gnu_lines = String::from_utf8_lossy(&gnu.stdout).lines().count();
+        let our_lines = String::from_utf8_lossy(&ours.stdout).lines().count();
         assert_eq!(
             our_lines, gnu_lines,
             "Line count mismatch: ours={} gnu={}",
@@ -119,7 +115,10 @@ fn test_who_matches_gnu_format() {
 #[test]
 fn test_format_time_zero() {
     let result = format_time(0);
-    assert!(result.is_empty(), "format_time(0) should return empty string");
+    assert!(
+        result.is_empty(),
+        "format_time(0) should return empty string"
+    );
 }
 
 #[test]

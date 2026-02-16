@@ -219,11 +219,7 @@ fn test_mv_target_directory() {
     fs::create_dir(&dest_dir).unwrap();
 
     let output = cmd()
-        .args([
-            "-t",
-            dest_dir.to_str().unwrap(),
-            src.to_str().unwrap(),
-        ])
+        .args(["-t", dest_dir.to_str().unwrap(), src.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(output.status.success());

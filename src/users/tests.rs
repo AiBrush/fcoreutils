@@ -36,10 +36,7 @@ fn test_users_format() {
     );
     // If there is output, names should be space-separated (no tabs, no commas)
     if let Some(line) = lines.first() {
-        assert!(
-            !line.contains('\t'),
-            "users output should not contain tabs"
-        );
+        assert!(!line.contains('\t'), "users output should not contain tabs");
         assert!(
             !line.contains(','),
             "users output should not contain commas"
@@ -87,7 +84,10 @@ fn test_get_users_returns_vec() {
 fn test_format_users_empty() {
     let users: Vec<String> = Vec::new();
     let result = format_users(&users);
-    assert!(result.is_empty(), "format_users of empty vec should be empty");
+    assert!(
+        result.is_empty(),
+        "format_users of empty vec should be empty"
+    );
 }
 
 #[test]
@@ -99,7 +99,11 @@ fn test_format_users_single() {
 
 #[test]
 fn test_format_users_multiple() {
-    let users = vec!["alice".to_string(), "bob".to_string(), "charlie".to_string()];
+    let users = vec![
+        "alice".to_string(),
+        "bob".to_string(),
+        "charlie".to_string(),
+    ];
     let result = format_users(&users);
     assert_eq!(result, "alice bob charlie");
 }

@@ -399,9 +399,7 @@ fn main() {
                 let stdin = io::stdin();
                 let reader = BufReader::new(stdin.lock());
                 let date = SystemTime::now();
-                if let Err(e) =
-                    pr::pr_file(reader, &mut out, &cli.config, "", Some(date))
-                {
+                if let Err(e) = pr::pr_file(reader, &mut out, &cli.config, "", Some(date)) {
                     if e.kind() == io::ErrorKind::BrokenPipe {
                         let _ = out.flush();
                         process::exit(0);
@@ -414,9 +412,7 @@ fn main() {
                     Ok(f) => {
                         let reader = BufReader::new(f);
                         let date = file_mod_time(filename);
-                        if let Err(e) =
-                            pr::pr_file(reader, &mut out, &cli.config, filename, date)
-                        {
+                        if let Err(e) = pr::pr_file(reader, &mut out, &cli.config, filename, date) {
                             if e.kind() == io::ErrorKind::BrokenPipe {
                                 let _ = out.flush();
                                 process::exit(0);

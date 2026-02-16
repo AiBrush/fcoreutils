@@ -1,6 +1,6 @@
 use std::process;
 
-use coreutils_rs::expr::{evaluate_expr, EXIT_FAILURE, EXIT_SUCCESS};
+use coreutils_rs::expr::{EXIT_FAILURE, EXIT_SUCCESS, evaluate_expr};
 
 fn main() {
     coreutils_rs::common::reset_sigpipe();

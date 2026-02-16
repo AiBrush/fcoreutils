@@ -320,7 +320,11 @@ fn try_parse_iso(s: &str) -> Option<SystemTime> {
     let s = s.replace('T', " ");
     let parts: Vec<&str> = s.splitn(2, ' ').collect();
     let date_part = parts[0];
-    let time_part = if parts.len() > 1 { parts[1] } else { "00:00:00" };
+    let time_part = if parts.len() > 1 {
+        parts[1]
+    } else {
+        "00:00:00"
+    };
 
     let date_fields: Vec<&str> = date_part.split('-').collect();
     if date_fields.len() != 3 {
@@ -344,7 +348,10 @@ fn try_parse_iso(s: &str) -> Option<SystemTime> {
         .next()
         .unwrap_or(time_part);
     let time_fields: Vec<&str> = time_clean.split(':').collect();
-    let hour: u32 = time_fields.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let hour: u32 = time_fields
+        .first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let minute: u32 = time_fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let second: u32 = time_fields
         .get(2)

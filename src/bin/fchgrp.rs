@@ -78,16 +78,13 @@ fn main() {
                         'h' => config.no_dereference = true,
                         'R' => config.recursive = true,
                         'H' => {
-                            config.symlink_follow =
-                                coreutils_rs::chown::SymlinkFollow::CommandLine;
+                            config.symlink_follow = coreutils_rs::chown::SymlinkFollow::CommandLine;
                         }
                         'L' => {
-                            config.symlink_follow =
-                                coreutils_rs::chown::SymlinkFollow::Always;
+                            config.symlink_follow = coreutils_rs::chown::SymlinkFollow::Always;
                         }
                         'P' => {
-                            config.symlink_follow =
-                                coreutils_rs::chown::SymlinkFollow::Never;
+                            config.symlink_follow = coreutils_rs::chown::SymlinkFollow::Never;
                         }
                         _ => {
                             eprintln!("{}: invalid option -- '{}'", TOOL_NAME, ch);
@@ -151,9 +148,7 @@ fn main() {
     for file in files {
         let path = std::path::Path::new(file);
         if config.recursive {
-            errors += coreutils_rs::chgrp::chgrp_recursive(
-                path, gid, &config, true, TOOL_NAME,
-            );
+            errors += coreutils_rs::chgrp::chgrp_recursive(path, gid, &config, true, TOOL_NAME);
         } else {
             match coreutils_rs::chgrp::chgrp_file(path, gid, &config) {
                 Ok(_) => {}

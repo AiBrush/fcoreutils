@@ -33,7 +33,11 @@ fn test_install_file() {
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755, "default install mode should be 0755, got {:o}", mode);
+        assert_eq!(
+            mode, 0o755,
+            "default install mode should be 0755, got {:o}",
+            mode
+        );
     }
 }
 
@@ -266,11 +270,7 @@ fn test_install_target_directory() {
     fs::create_dir(&dest_dir).unwrap();
 
     let output = cmd()
-        .args([
-            "-t",
-            dest_dir.to_str().unwrap(),
-            src.to_str().unwrap(),
-        ])
+        .args(["-t", dest_dir.to_str().unwrap(), src.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(output.status.success());

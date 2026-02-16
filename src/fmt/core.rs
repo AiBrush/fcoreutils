@@ -187,8 +187,7 @@ fn format_paragraph<W: Write>(
     let pfx = prefix_str.unwrap_or("");
 
     // Reflow the words.
-    let result =
-        reflow_paragraph(&all_words, pfx, &first_line_indent, &cont_indent, config);
+    let result = reflow_paragraph(&all_words, pfx, &first_line_indent, &cont_indent, config);
     output.write_all(result.as_bytes())?;
     Ok(())
 }

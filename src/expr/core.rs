@@ -176,8 +176,10 @@ impl<'a> ExprParser<'a> {
     /// COMPARISON: ADDITION ( ('<'|'<='|'='|'!='|'>='|'>') ADDITION )*
     fn parse_comparison(&mut self) -> Result<ExprValue, ExprError> {
         let mut left = self.parse_addition()?;
-        while matches!(self.peek(), Some("<") | Some("<=") | Some("=") | Some("!=") | Some(">=") | Some(">"))
-        {
+        while matches!(
+            self.peek(),
+            Some("<") | Some("<=") | Some("=") | Some("!=") | Some(">=") | Some(">")
+        ) {
             let op = self.consume().unwrap().to_string();
             let right = self.parse_addition()?;
             let result = compare_values(&left, &right, &op);
@@ -193,15 +195,17 @@ impl<'a> ExprParser<'a> {
         while matches!(self.peek(), Some("+") | Some("-")) {
             let op = self.consume().unwrap().to_string();
             let right = self.parse_multiplication()?;
-            let lv = left
-                .as_integer()
-                .ok_or(ExprError::NonIntegerArgument)?;
-            let rv = right
-                .as_integer()
-                .ok_or(ExprError::NonIntegerArgument)?;
+            let lv = left.as_integer().ok_or(ExprError::NonIntegerArgument)?;
+            let rv = right.as_integer().ok_or(ExprError::NonIntegerArgument)?;
             left = match op.as_str() {
-                "+" => ExprValue::Integer(lv.wrapping_add(rv)),
-                "-" => ExprValue::Integer(lv.wrapping_sub(rv)),
+                "+" => ExprValue::Integer(
+                    lv.checked_add(rv)
+                        .ok_or_else(|| ExprError::Syntax("integer result too large".into()))?,
+                ),
+                "-" => ExprValue::Integer(
+                    lv.checked_sub(rv)
+                        .ok_or_else(|| ExprError::Syntax("integer result too large".into()))?,
+                ),
                 _ => unreachable!(),
             };
         }
@@ -215,25 +219,30 @@ impl<'a> ExprParser<'a> {
         while matches!(self.peek(), Some("*") | Some("/") | Some("%")) {
             let op = self.consume().unwrap().to_string();
             let right = self.parse_match()?;
-            let lv = left
-                .as_integer()
-                .ok_or(ExprError::NonIntegerArgument)?;
-            let rv = right
-                .as_integer()
-                .ok_or(ExprError::NonIntegerArgument)?;
+            let lv = left.as_integer().ok_or(ExprError::NonIntegerArgument)?;
+            let rv = right.as_integer().ok_or(ExprError::NonIntegerArgument)?;
             left = match op.as_str() {
-                "*" => ExprValue::Integer(lv.wrapping_mul(rv)),
+                "*" => ExprValue::Integer(
+                    lv.checked_mul(rv)
+                        .ok_or_else(|| ExprError::Syntax("integer result too large".into()))?,
+                ),
                 "/" => {
                     if rv == 0 {
                         return Err(ExprError::DivisionByZero);
                     }
-                    ExprValue::Integer(lv.wrapping_div(rv))
+                    ExprValue::Integer(
+                        lv.checked_div(rv)
+                            .ok_or_else(|| ExprError::Syntax("integer result too large".into()))?,
+                    )
                 }
                 "%" => {
                     if rv == 0 {
                         return Err(ExprError::DivisionByZero);
                     }
-                    ExprValue::Integer(lv.wrapping_rem(rv))
+                    ExprValue::Integer(
+                        lv.checked_rem(rv)
+                            .ok_or_else(|| ExprError::Syntax("integer result too large".into()))?,
+                    )
                 }
                 _ => unreachable!(),
             };
@@ -294,12 +303,8 @@ impl<'a> ExprParser<'a> {
                     ExprValue::Str(s) => s.clone(),
                     ExprValue::Integer(n) => n.to_string(),
                 };
-                let pos = pos_val
-                    .as_integer()
-                    .ok_or(ExprError::NonIntegerArgument)?;
-                let len = len_val
-                    .as_integer()
-                    .ok_or(ExprError::NonIntegerArgument)?;
+                let pos = pos_val.as_integer().ok_or(ExprError::NonIntegerArgument)?;
+                let len = len_val.as_integer().ok_or(ExprError::NonIntegerArgument)?;
                 Ok(do_substr(&string, pos, len))
             }
             Some("index") => {
@@ -339,9 +344,7 @@ impl<'a> ExprParser<'a> {
                             Ok(ExprValue::Str(tok))
                         }
                     }
-                    None => Err(ExprError::Syntax(
-                        "missing argument after '+'".to_string(),
-                    )),
+                    None => Err(ExprError::Syntax("missing argument after '+'".to_string())),
                 }
             }
             _ => {
@@ -564,11 +567,7 @@ fn bre_group_template(pattern: &str) -> Option<Vec<bool>> {
             i += 1;
         }
     }
-    if in_group {
-        Some(template)
-    } else {
-        None
-    }
+    if in_group { Some(template) } else { None }
 }
 
 /// Check whether a BRE pattern contains `\(` ... `\)` groups.
@@ -593,9 +592,8 @@ fn do_match(string: &str, pattern: &str) -> Result<ExprValue, ExprError> {
     let has_groups = bre_has_groups(pattern);
     let rust_pattern = bre_to_rust_regex(pattern);
 
-    let re = Regex::new(&rust_pattern).map_err(|e| {
-        ExprError::RegexError(format!("Invalid regular expression: {}", e))
-    })?;
+    let re = Regex::new(&rust_pattern)
+        .map_err(|e| ExprError::RegexError(format!("Invalid regular expression: {}", e)))?;
 
     match re.captures(string) {
         Some(caps) => {

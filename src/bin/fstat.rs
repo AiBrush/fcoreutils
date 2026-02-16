@@ -85,14 +85,8 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 'c'",
-                                        TOOL_NAME
-                                    );
-                                    eprintln!(
-                                        "Try '{} --help' for more information.",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 'c'", TOOL_NAME);
+                                    eprintln!("Try '{} --help' for more information.", TOOL_NAME);
                                     process::exit(1);
                                 }
                                 format = Some(args[i].clone());
@@ -160,13 +154,9 @@ fn print_help() {
     println!();
     println!("  -L, --dereference     follow links");
     println!("  -f, --file-system     display file system status instead of file status");
-    println!(
-        "  -c, --format=FORMAT   use the specified FORMAT instead of the default;"
-    );
+    println!("  -c, --format=FORMAT   use the specified FORMAT instead of the default;");
     println!("                          output a newline after each use of FORMAT");
-    println!(
-        "      --printf=FORMAT   like --format, but interpret backslash escapes,"
-    );
+    println!("      --printf=FORMAT   like --format, but interpret backslash escapes,");
     println!("                          and do not output a mandatory trailing newline;");
     println!("                          if you want a newline, include \\n in FORMAT");
     println!("  -t, --terse           print the information in terse form");

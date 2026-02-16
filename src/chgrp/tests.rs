@@ -104,8 +104,7 @@ fn test_chgrp_recursive() {
         ..Default::default()
     };
 
-    let errors =
-        crate::chgrp::chgrp_recursive(dir.path(), target_gid, &config, true, "chgrp");
+    let errors = crate::chgrp::chgrp_recursive(dir.path(), target_gid, &config, true, "chgrp");
     assert_eq!(errors, 0);
 
     let m1 = std::fs::metadata(&file1).unwrap();
@@ -133,14 +132,14 @@ fn test_chgrp_matches_gnu_errors_missing_operand() {
 #[test]
 #[cfg(unix)]
 fn test_chgrp_matches_gnu_errors_missing_file() {
-    let output = cmd().arg("root").output().unwrap();
+    #[cfg(target_os = "macos")]
+    let group = "wheel";
+    #[cfg(not(target_os = "macos"))]
+    let group = "root";
+    let output = cmd().arg(group).output().unwrap();
     assert_ne!(output.status.code(), Some(0));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("missing operand"),
-        "stderr was: {}",
-        stderr
-    );
+    assert!(stderr.contains("missing operand"), "stderr was: {}", stderr);
 }
 
 #[test]
@@ -177,8 +176,12 @@ fn test_chgrp_version() {
 #[test]
 #[cfg(unix)]
 fn test_chgrp_preserve_root() {
+    #[cfg(target_os = "macos")]
+    let group = "wheel";
+    #[cfg(not(target_os = "macos"))]
+    let group = "root";
     let output = cmd()
-        .args(["--preserve-root", "-R", "root", "/"])
+        .args(["--preserve-root", "-R", group, "/"])
         .output()
         .unwrap();
     assert_ne!(output.status.code(), Some(0));
@@ -193,8 +196,12 @@ fn test_chgrp_preserve_root() {
 #[test]
 #[cfg(unix)]
 fn test_chgrp_nonexistent_file() {
+    #[cfg(target_os = "macos")]
+    let group = "wheel";
+    #[cfg(not(target_os = "macos"))]
+    let group = "root";
     let output = cmd()
-        .args(["root", "/nonexistent_file_xyz_99999"])
+        .args([group, "/nonexistent_file_xyz_99999"])
         .output()
         .unwrap();
     assert_ne!(output.status.code(), Some(0));

@@ -18,7 +18,12 @@ fn test_ptx_basic() {
 
     // Should have entries for each word: the, quick, brown, fox
     let lines: Vec<&str> = output.lines().collect();
-    assert_eq!(lines.len(), 4, "Expected 4 KWIC entries, got {}", lines.len());
+    assert_eq!(
+        lines.len(),
+        4,
+        "Expected 4 KWIC entries, got {}",
+        lines.len()
+    );
 
     // Entries should be sorted alphabetically by keyword
     // brown, fox, quick, the
@@ -130,7 +135,11 @@ fn test_ptx_ignore_words() {
 fn test_ptx_only_words() {
     let input = "the quick brown fox\n";
     let mut config = default_config();
-    config.only_words = Some(["brown".to_string(), "fox".to_string()].into_iter().collect());
+    config.only_words = Some(
+        ["brown".to_string(), "fox".to_string()]
+            .into_iter()
+            .collect(),
+    );
 
     let output = run_ptx(input, &config);
     let lines: Vec<&str> = output.lines().collect();

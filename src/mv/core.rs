@@ -166,11 +166,7 @@ pub fn mv_file(src: &Path, dst: &Path, config: &MvConfig) -> io::Result<()> {
 /// Strip trailing slashes from a path string, returning the cleaned string.
 pub fn strip_trailing_slashes(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        "/"
-    } else {
-        trimmed
-    }
+    if trimmed.is_empty() { "/" } else { trimmed }
 }
 
 /// Recursively copy a file or directory from `src` to `dst`.

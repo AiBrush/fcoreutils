@@ -135,9 +135,7 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
     }
 
     // Find where the numeric part ends
-    let num_end = s
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(s.len());
+    let num_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
 
     if num_end == 0 {
         return Err(format!("invalid number: '{}'", s));
@@ -356,9 +354,8 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
 
     let mut input_file: Option<File> = None;
     let mut input: Box<dyn Read> = if let Some(ref path) = config.input {
-        let file = File::open(path).map_err(|e| {
-            io::Error::new(e.kind(), format!("failed to open '{}': {}", path, e))
-        })?;
+        let file = File::open(path)
+            .map_err(|e| io::Error::new(e.kind(), format!("failed to open '{}': {}", path, e)))?;
         input_file = Some(file.try_clone()?);
         Box::new(file)
     } else {
@@ -389,9 +386,9 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
             opts.truncate(true);
         }
 
-        let file = opts.open(path).map_err(|e| {
-            io::Error::new(e.kind(), format!("failed to open '{}': {}", path, e))
-        })?;
+        let file = opts
+            .open(path)
+            .map_err(|e| io::Error::new(e.kind(), format!("failed to open '{}': {}", path, e)))?;
         output_file = Some(file.try_clone()?);
         Box::new(file)
     } else {

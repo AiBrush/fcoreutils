@@ -26,29 +26,17 @@ fn print_help() {
     println!();
     println!("  -f, --force           ignore nonexistent files and arguments, never prompt");
     println!("  -i                    prompt before every removal");
-    println!(
-        "  -I                    prompt once before removing more than three files, or"
-    );
+    println!("  -I                    prompt once before removing more than three files, or");
     println!("                          when removing recursively");
-    println!(
-        "      --interactive[=WHEN]  prompt according to WHEN: never, once (-I), or"
-    );
+    println!("      --interactive[=WHEN]  prompt according to WHEN: never, once (-I), or");
     println!("                          always (-i); without WHEN, prompt always");
-    println!(
-        "      --one-file-system  when removing a hierarchy recursively, skip any"
-    );
+    println!("      --one-file-system  when removing a hierarchy recursively, skip any");
     println!("                          directory that is on a file system different from");
     println!("                          that of the corresponding command line argument");
-    println!(
-        "      --no-preserve-root  do not treat '/' specially"
-    );
-    println!(
-        "      --preserve-root[=all]  do not remove '/' (default); with 'all',"
-    );
+    println!("      --no-preserve-root  do not treat '/' specially");
+    println!("      --preserve-root[=all]  do not remove '/' (default); with 'all',");
     println!("                          reject any command line argument on a separate device");
-    println!(
-        "  -r, -R, --recursive   remove directories and their contents recursively"
-    );
+    println!("  -r, -R, --recursive   remove directories and their contents recursively");
     println!("  -d, --dir             remove empty directories");
     println!("  -v, --verbose         explain what is being done");
     println!("      --help            display this help and exit");
@@ -133,10 +121,7 @@ fn main() {
                         'd' => config.dir = true,
                         'v' => config.verbose = true,
                         _ => {
-                            eprintln!(
-                                "{}: invalid option -- '{}'",
-                                TOOL_NAME, ch
-                            );
+                            eprintln!("{}: invalid option -- '{}'", TOOL_NAME, ch);
                             eprintln!("Try '{} --help' for more information.", TOOL_NAME);
                             process::exit(1);
                         }

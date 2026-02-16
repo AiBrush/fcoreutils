@@ -30,11 +30,7 @@ fn test_stty_version() {
 #[test]
 fn test_stty_size_format() {
     // When stdin is a pipe (not a tty), stty size should fail
-    let output = cmd()
-        .arg("size")
-        .stdin(Stdio::piped())
-        .output()
-        .unwrap();
+    let output = cmd().arg("size").stdin(Stdio::piped()).output().unwrap();
     // Should exit with non-zero when not a tty
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -48,11 +44,7 @@ fn test_stty_size_format() {
 #[test]
 fn test_stty_all_format() {
     // When stdin is a pipe, stty -a should fail with not-a-tty error
-    let output = cmd()
-        .arg("-a")
-        .stdin(Stdio::piped())
-        .output()
-        .unwrap();
+    let output = cmd().arg("-a").stdin(Stdio::piped()).output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -65,11 +57,7 @@ fn test_stty_all_format() {
 #[test]
 fn test_stty_speed() {
     // When stdin is a pipe, stty speed should fail
-    let output = cmd()
-        .arg("speed")
-        .stdin(Stdio::piped())
-        .output()
-        .unwrap();
+    let output = cmd().arg("speed").stdin(Stdio::piped()).output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -87,11 +75,7 @@ fn test_stty_matches_gnu_errors() {
         .stdin(Stdio::piped())
         .output();
     if let Ok(gnu) = gnu {
-        let ours = cmd()
-            .arg("size")
-            .stdin(Stdio::piped())
-            .output()
-            .unwrap();
+        let ours = cmd().arg("size").stdin(Stdio::piped()).output().unwrap();
         assert_eq!(
             ours.status.success(),
             gnu.status.success(),
@@ -102,8 +86,8 @@ fn test_stty_matches_gnu_errors() {
 
 // Unit tests for helper functions
 use crate::stty::{
-    apply_flag, apply_settings, baud_to_num, format_cc, num_to_baud,
-    parse_control_char, set_cooked, set_raw, set_sane,
+    apply_flag, apply_settings, baud_to_num, format_cc, num_to_baud, parse_control_char,
+    set_cooked, set_raw, set_sane,
 };
 
 #[test]
@@ -122,7 +106,9 @@ fn test_num_to_baud_known() {
 
 #[test]
 fn test_baud_roundtrip() {
-    for &rate in &[0, 50, 75, 110, 300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200] {
+    for &rate in &[
+        0, 50, 75, 110, 300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200,
+    ] {
         let baud = num_to_baud(rate).unwrap();
         assert_eq!(baud_to_num(baud), rate);
     }

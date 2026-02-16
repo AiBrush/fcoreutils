@@ -197,17 +197,15 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                 "si" => config.si = true,
                 "inode" => config.show_inode = true,
                 "ignore" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!("ls: option '--ignore' requires an argument");
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("ls: option '--ignore' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     config.ignore_patterns.push(val);
                 }
                 "kibibytes" => config.kibibytes = true,
@@ -242,17 +240,15 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                     };
                 }
                 "sort" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!("ls: option '--sort' requires an argument");
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("ls: option '--sort' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     config.sort_by = match val.as_str() {
                         "none" => SortBy::None,
                         "size" => SortBy::Size,
@@ -267,17 +263,15 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                     };
                 }
                 "time" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!("ls: option '--time' requires an argument");
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("ls: option '--time' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     config.time_field = match val.as_str() {
                         "atime" | "access" | "use" => TimeField::Atime,
                         "ctime" | "status" => TimeField::Ctime,
@@ -290,17 +284,15 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                     };
                 }
                 "time-style" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!("ls: option '--time-style' requires an argument");
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("ls: option '--time-style' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     config.time_style = match val.as_str() {
                         "full-iso" => TimeStyle::FullIso,
                         "long-iso" => TimeStyle::LongIso,
@@ -320,31 +312,27 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                     config.time_style = TimeStyle::FullIso;
                 }
                 "tabsize" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!("ls: option '--tabsize' requires an argument");
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("ls: option '--tabsize' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     config.tab_size = val.parse().unwrap_or(8);
                 }
                 "width" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!("ls: option '--width' requires an argument");
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("ls: option '--width' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     config.width = val.parse().unwrap_or(80);
                 }
                 "hyperlink" => {
@@ -360,47 +348,36 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                     };
                 }
                 "indicator-style" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!(
-                                        "ls: option '--indicator-style' requires an argument"
-                                    );
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("ls: option '--indicator-style' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     config.indicator_style = match val.as_str() {
                         "none" => IndicatorStyle::None,
                         "slash" => IndicatorStyle::Slash,
                         "file-type" => IndicatorStyle::FileType,
                         "classify" => IndicatorStyle::Classify,
                         _ => {
-                            eprintln!(
-                                "ls: invalid argument '{}' for '--indicator-style'",
-                                val
-                            );
+                            eprintln!("ls: invalid argument '{}' for '--indicator-style'", val);
                             process::exit(2);
                         }
                     };
                 }
                 "quoting-style" => {
-                    let val = eq_val
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| {
-                            args.next()
-                                .unwrap_or_else(|| {
-                                    eprintln!(
-                                        "ls: option '--quoting-style' requires an argument"
-                                    );
-                                    process::exit(2);
-                                })
-                                .to_string_lossy()
-                                .into_owned()
-                        });
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("ls: option '--quoting-style' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
                     config.quoting_style = match val.as_str() {
                         "literal" => QuotingStyle::Literal,
                         "locale" => QuotingStyle::Locale,

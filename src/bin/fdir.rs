@@ -49,9 +49,7 @@ fn main() {
         cmd_args.push(arg.as_str());
     }
 
-    let err = std::process::Command::new("ls")
-        .args(&cmd_args)
-        .exec();
+    let err = std::process::Command::new("ls").args(&cmd_args).exec();
 
     // If exec returns, it failed
     eprintln!(

@@ -63,7 +63,10 @@ fn parse_args() -> Cli {
                             process::exit(1);
                         });
                         cli.config.digits = val.to_string_lossy().parse().unwrap_or_else(|_| {
-                            eprintln!("csplit: invalid number of digits: '{}'", val.to_string_lossy());
+                            eprintln!(
+                                "csplit: invalid number of digits: '{}'",
+                                val.to_string_lossy()
+                            );
                             process::exit(1);
                         });
                     }
@@ -82,7 +85,9 @@ fn parse_args() -> Cli {
                     }
                 }
             }
-        } else if bytes.len() > 1 && bytes[0] == b'-' && bytes[1] != b'0'
+        } else if bytes.len() > 1
+            && bytes[0] == b'-'
+            && bytes[1] != b'0'
             && !bytes[1..].iter().all(|b| b.is_ascii_digit())
         {
             // Short options

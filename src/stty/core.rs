@@ -131,9 +131,7 @@ const SPECIAL_CHARS: &[(&str, usize)] = &[
 
 /// Linux-only special characters.
 #[cfg(target_os = "linux")]
-const SPECIAL_CHARS_LINUX: &[(&str, usize)] = &[
-    ("swtch", libc::VSWTC as usize),
-];
+const SPECIAL_CHARS_LINUX: &[(&str, usize)] = &[("swtch", libc::VSWTC as usize)];
 
 #[cfg(not(target_os = "linux"))]
 const SPECIAL_CHARS_LINUX: &[(&str, usize)] = &[];
@@ -157,10 +155,8 @@ const INPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
 
 /// Linux-only input flags.
 #[cfg(target_os = "linux")]
-const INPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[
-    ("iuclc", libc::IUCLC),
-    ("iutf8", libc::IUTF8),
-];
+const INPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] =
+    &[("iuclc", libc::IUCLC), ("iutf8", libc::IUTF8)];
 
 #[cfg(not(target_os = "linux"))]
 const INPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
@@ -178,9 +174,7 @@ const OUTPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
 
 /// Linux-only output flags.
 #[cfg(target_os = "linux")]
-const OUTPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[
-    ("olcuc", libc::OLCUC),
-];
+const OUTPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[("olcuc", libc::OLCUC)];
 
 #[cfg(not(target_os = "linux"))]
 const OUTPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
@@ -213,9 +207,7 @@ const LOCAL_FLAGS: &[(&str, libc::tcflag_t)] = &[
 
 /// Linux-only local flags.
 #[cfg(target_os = "linux")]
-const LOCAL_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[
-    ("xcase", libc::XCASE),
-];
+const LOCAL_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[("xcase", libc::XCASE)];
 
 #[cfg(not(target_os = "linux"))]
 const LOCAL_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
@@ -232,7 +224,12 @@ fn csize_str(cflag: libc::tcflag_t) -> &'static str {
 }
 
 /// Helper: iterate all flag entries (portable + linux-specific).
-fn print_flags(parts: &mut Vec<String>, flags: libc::tcflag_t, entries: &[(&str, libc::tcflag_t)], extra: &[(&str, libc::tcflag_t)]) {
+fn print_flags(
+    parts: &mut Vec<String>,
+    flags: libc::tcflag_t,
+    entries: &[(&str, libc::tcflag_t)],
+    extra: &[(&str, libc::tcflag_t)],
+) {
     for &(name, flag) in entries.iter().chain(extra.iter()) {
         if flags & flag != 0 {
             parts.push(name.to_string());
@@ -278,7 +275,12 @@ pub fn print_all(termios: &libc::termios, fd: i32) {
 
     // Output flags
     parts.clear();
-    print_flags(&mut parts, termios.c_oflag, OUTPUT_FLAGS, OUTPUT_FLAGS_LINUX);
+    print_flags(
+        &mut parts,
+        termios.c_oflag,
+        OUTPUT_FLAGS,
+        OUTPUT_FLAGS_LINUX,
+    );
     println!("{}", parts.join(" "));
 
     // Control flags
@@ -319,10 +321,7 @@ pub fn parse_control_char(s: &str) -> Option<libc::cc_t> {
 /// Apply "sane" settings to a termios structure.
 pub fn set_sane(termios: &mut libc::termios) {
     // Input flags
-    termios.c_iflag = libc::BRKINT
-        | libc::ICRNL
-        | libc::IMAXBEL
-        | libc::IXON;
+    termios.c_iflag = libc::BRKINT | libc::ICRNL | libc::IMAXBEL | libc::IXON;
     #[cfg(target_os = "linux")]
     {
         termios.c_iflag |= libc::IUTF8;
@@ -363,17 +362,17 @@ pub fn set_sane(termios: &mut libc::termios) {
         | libc::ECHOKE;
 
     // Special characters
-    termios.c_cc[libc::VINTR] = 0x03;    // ^C
-    termios.c_cc[libc::VQUIT] = 0x1c;    // ^\
-    termios.c_cc[libc::VERASE] = 0x7f;   // ^?
-    termios.c_cc[libc::VKILL] = 0x15;    // ^U
-    termios.c_cc[libc::VEOF] = 0x04;     // ^D
-    termios.c_cc[libc::VSTART] = 0x11;   // ^Q
-    termios.c_cc[libc::VSTOP] = 0x13;    // ^S
-    termios.c_cc[libc::VSUSP] = 0x1a;    // ^Z
+    termios.c_cc[libc::VINTR] = 0x03; // ^C
+    termios.c_cc[libc::VQUIT] = 0x1c; // ^\
+    termios.c_cc[libc::VERASE] = 0x7f; // ^?
+    termios.c_cc[libc::VKILL] = 0x15; // ^U
+    termios.c_cc[libc::VEOF] = 0x04; // ^D
+    termios.c_cc[libc::VSTART] = 0x11; // ^Q
+    termios.c_cc[libc::VSTOP] = 0x13; // ^S
+    termios.c_cc[libc::VSUSP] = 0x1a; // ^Z
     termios.c_cc[libc::VREPRINT] = 0x12; // ^R
-    termios.c_cc[libc::VWERASE] = 0x17;  // ^W
-    termios.c_cc[libc::VLNEXT] = 0x16;   // ^V
+    termios.c_cc[libc::VWERASE] = 0x17; // ^W
+    termios.c_cc[libc::VLNEXT] = 0x16; // ^V
     termios.c_cc[libc::VDISCARD] = 0x0f; // ^O
     termios.c_cc[libc::VMIN] = 1;
     termios.c_cc[libc::VTIME] = 0;
@@ -391,11 +390,7 @@ pub fn set_raw(termios: &mut libc::termios) {
         | libc::ICRNL
         | libc::IXON);
     termios.c_oflag &= !libc::OPOST;
-    termios.c_lflag &= !(libc::ECHO
-        | libc::ECHONL
-        | libc::ICANON
-        | libc::ISIG
-        | libc::IEXTEN);
+    termios.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ICANON | libc::ISIG | libc::IEXTEN);
     termios.c_cflag &= !(libc::CSIZE | libc::PARENB);
     termios.c_cflag |= libc::CS8;
     termios.c_cc[libc::VMIN] = 1;
@@ -412,9 +407,8 @@ pub fn set_cooked(termios: &mut libc::termios) {
 /// Open a device and return its file descriptor.
 pub fn open_device(path: &str) -> io::Result<i32> {
     use std::ffi::CString;
-    let cpath = CString::new(path).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "invalid device path")
-    })?;
+    let cpath = CString::new(path)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid device path"))?;
     let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -582,10 +576,7 @@ pub fn parse_args(args: &[String]) -> Result<SttyConfig, String> {
 
 /// Apply settings from the parsed arguments to a termios structure.
 /// Returns Ok(true) if any changes were made, Ok(false) otherwise.
-pub fn apply_settings(
-    termios: &mut libc::termios,
-    settings: &[String],
-) -> Result<bool, String> {
+pub fn apply_settings(termios: &mut libc::termios, settings: &[String]) -> Result<bool, String> {
     let mut changed = false;
     let mut i = 0;
 
@@ -613,8 +604,7 @@ pub fn apply_settings(
                 let n: u32 = settings[i]
                     .parse()
                     .map_err(|_| format!("invalid integer argument: '{}'", settings[i]))?;
-                let baud = num_to_baud(n)
-                    .ok_or_else(|| format!("invalid speed: '{}'", n))?;
+                let baud = num_to_baud(n).ok_or_else(|| format!("invalid speed: '{}'", n))?;
                 unsafe {
                     libc::cfsetispeed(termios, baud);
                 }
@@ -628,8 +618,7 @@ pub fn apply_settings(
                 let n: u32 = settings[i]
                     .parse()
                     .map_err(|_| format!("invalid integer argument: '{}'", settings[i]))?;
-                let baud = num_to_baud(n)
-                    .ok_or_else(|| format!("invalid speed: '{}'", n))?;
+                let baud = num_to_baud(n).ok_or_else(|| format!("invalid speed: '{}'", n))?;
                 unsafe {
                     libc::cfsetospeed(termios, baud);
                 }
@@ -656,9 +645,7 @@ pub fn apply_settings(
                         return Err(format!("missing argument to '{}'", arg));
                     }
                     let cc = parse_control_char(&settings[i])
-                        .ok_or_else(|| {
-                            format!("invalid integer argument: '{}'", settings[i])
-                        })?;
+                        .ok_or_else(|| format!("invalid integer argument: '{}'", settings[i]))?;
                     termios.c_cc[idx] = cc;
                     changed = true;
                     i += 1;

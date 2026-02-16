@@ -2,7 +2,6 @@
 ///
 /// A simplified version of the finger command that displays information
 /// about currently logged-in users using utmpx records and passwd entries.
-
 use std::ffi::CStr;
 use std::fmt::Write as FmtWrite;
 use std::path::PathBuf;

@@ -11,7 +11,7 @@ use std::process;
 use coreutils_rs::common::reset_sigpipe;
 #[cfg(unix)]
 use coreutils_rs::cp::{
-    apply_preserve, parse_backup_mode, parse_reflink_mode, CpConfig, DerefMode,
+    CpConfig, DerefMode, apply_preserve, parse_backup_mode, parse_reflink_mode,
 };
 
 #[cfg(unix)]

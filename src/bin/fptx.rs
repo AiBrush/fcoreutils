@@ -83,11 +83,10 @@ fn parse_args() -> Cli {
                             eprintln!("ptx: option '--gap-size' requires an argument");
                             process::exit(1);
                         });
-                        cli.config.gap_size =
-                            val.to_string_lossy().parse().unwrap_or_else(|_| {
-                                eprintln!("ptx: invalid gap size: '{}'", val.to_string_lossy());
-                                process::exit(1);
-                            });
+                        cli.config.gap_size = val.to_string_lossy().parse().unwrap_or_else(|_| {
+                            eprintln!("ptx: invalid gap size: '{}'", val.to_string_lossy());
+                            process::exit(1);
+                        });
                     }
                     b"--ignore-file" => {
                         let val = args.next().unwrap_or_else(|| {

@@ -184,10 +184,7 @@ fn main() {
 
     // At least one mode must be specified
     if input_mode.is_none() && output_mode.is_none() && error_mode.is_none() {
-        eprintln!(
-            "{}: you must specify a buffering mode option",
-            TOOL_NAME
-        );
+        eprintln!("{}: you must specify a buffering mode option", TOOL_NAME);
         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(125);
     }

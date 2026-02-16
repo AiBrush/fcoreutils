@@ -2,7 +2,6 @@
 ///
 /// Reads utmpx records and displays information about currently logged-in users,
 /// boot time, dead processes, run level, etc.
-
 use std::ffi::CStr;
 use std::fmt::Write as FmtWrite;
 
@@ -83,18 +82,18 @@ pub struct WhoConfig {
     pub show_dead: bool,
     pub show_heading: bool,
     pub show_login: bool,
-    pub only_current: bool, // -m
-    pub show_init_spawn: bool, // -p
-    pub show_count: bool, // -q
-    pub show_runlevel: bool, // -r
-    pub short_format: bool, // -s (default)
+    pub only_current: bool,      // -m
+    pub show_init_spawn: bool,   // -p
+    pub show_count: bool,        // -q
+    pub show_runlevel: bool,     // -r
+    pub short_format: bool,      // -s (default)
     pub show_clock_change: bool, // -t
-    pub show_mesg: bool, // -T, -w
-    pub show_users: bool, // -u
-    pub show_all: bool, // -a
-    pub show_ips: bool, // --ips
-    pub show_lookup: bool, // --lookup
-    pub am_i: bool, // "who am i"
+    pub show_mesg: bool,         // -T, -w
+    pub show_users: bool,        // -u
+    pub show_all: bool,          // -a
+    pub show_ips: bool,          // --ips
+    pub show_lookup: bool,       // --lookup
+    pub am_i: bool,              // "who am i"
 }
 
 impl WhoConfig {

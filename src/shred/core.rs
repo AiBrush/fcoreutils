@@ -156,10 +156,7 @@ pub fn shred_file(path: &Path, config: &ShredConfig) -> io::Result<()> {
             RemoveMode::Wipe | RemoveMode::WipeSync => {
                 // Try to rename the file to obscure the name before removing
                 if let Some(parent) = path.parent() {
-                    let name_len = path
-                        .file_name()
-                        .map(|n| n.len())
-                        .unwrap_or(1);
+                    let name_len = path.file_name().map(|n| n.len()).unwrap_or(1);
                     // Rename to progressively shorter names
                     let mut current = path.to_path_buf();
                     let mut len = name_len;

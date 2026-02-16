@@ -69,5 +69,12 @@ pub fn chgrp_recursive(
     tool_name: &str,
 ) -> i32 {
     let chown_config = config.to_chown_config();
-    crate::chown::chown_recursive(path, None, Some(gid), &chown_config, is_command_line_arg, tool_name)
+    crate::chown::chown_recursive(
+        path,
+        None,
+        Some(gid),
+        &chown_config,
+        is_command_line_arg,
+        tool_name,
+    )
 }

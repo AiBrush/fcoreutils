@@ -59,10 +59,7 @@ fn test_fmt_custom_width() {
             line
         );
     }
-    assert!(
-        result.lines().count() > 1,
-        "Expected wrapping at width 40"
-    );
+    assert!(result.lines().count() > 1, "Expected wrapping at width 40");
 }
 
 // ===== test_fmt_split_only =====
@@ -154,11 +151,7 @@ fn test_fmt_prefix() {
         "Expected prefix lines to be wrapped"
     );
     for line in &prefix_lines {
-        assert!(
-            line.len() <= 40,
-            "Prefix line exceeds width: {:?}",
-            line
-        );
+        assert!(line.len() <= 40, "Prefix line exceeds width: {:?}", line);
     }
 
     // The non-prefix line should be preserved verbatim.
@@ -206,10 +199,7 @@ fn test_fmt_tagged() {
     let result = run_fmt(input, &config);
 
     let lines: Vec<&str> = result.lines().collect();
-    assert!(
-        !lines.is_empty(),
-        "Expected output for tagged paragraph"
-    );
+    assert!(!lines.is_empty(), "Expected output for tagged paragraph");
 
     // First output line should start with 4-space indent.
     assert!(
@@ -243,10 +233,7 @@ fn test_fmt_already_formatted() {
     // Input already fits within 75 chars and is a single paragraph.
     let input = "This is a short line.\n";
     let result = run_default(input);
-    assert_eq!(
-        result, input,
-        "Already formatted input should not change"
-    );
+    assert_eq!(result, input, "Already formatted input should not change");
 }
 
 #[test]
@@ -285,11 +272,7 @@ fn test_fmt_matches_gnu() {
 
     // No leading or trailing whitespace on lines (default mode, no indent in input).
     for line in result.lines() {
-        assert_eq!(
-            line,
-            line.trim(),
-            "Lines should have no extra whitespace"
-        );
+        assert_eq!(line, line.trim(), "Lines should have no extra whitespace");
     }
 }
 
@@ -456,7 +439,8 @@ mod integration {
         if let Ok(gnu) = gnu_out {
             if gnu.status.success() {
                 assert_eq!(
-                    our_out, gnu.stdout,
+                    our_out,
+                    gnu.stdout,
                     "Output differs from GNU fmt -w 40:\nours: {:?}\ngnu:  {:?}",
                     String::from_utf8_lossy(&our_out),
                     String::from_utf8_lossy(&gnu.stdout)

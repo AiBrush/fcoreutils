@@ -201,18 +201,18 @@ impl Default for ColorDb {
     fn default() -> Self {
         ColorDb {
             map: HashMap::new(),
-            dir: "\x1b[01;34m".to_string(),          // bold blue
-            link: "\x1b[01;36m".to_string(),          // bold cyan
-            exec: "\x1b[01;32m".to_string(),          // bold green
-            pipe: "\x1b[33m".to_string(),             // yellow
-            socket: "\x1b[01;35m".to_string(),        // bold magenta
-            block_dev: "\x1b[01;33m".to_string(),     // bold yellow
-            char_dev: "\x1b[01;33m".to_string(),      // bold yellow
-            orphan: "\x1b[01;31m".to_string(),        // bold red
-            setuid: "\x1b[37;41m".to_string(),        // white on red
-            setgid: "\x1b[30;43m".to_string(),        // black on yellow
-            sticky: "\x1b[37;44m".to_string(),        // white on blue
-            other_writable: "\x1b[34;42m".to_string(),// blue on green
+            dir: "\x1b[01;34m".to_string(),            // bold blue
+            link: "\x1b[01;36m".to_string(),           // bold cyan
+            exec: "\x1b[01;32m".to_string(),           // bold green
+            pipe: "\x1b[33m".to_string(),              // yellow
+            socket: "\x1b[01;35m".to_string(),         // bold magenta
+            block_dev: "\x1b[01;33m".to_string(),      // bold yellow
+            char_dev: "\x1b[01;33m".to_string(),       // bold yellow
+            orphan: "\x1b[01;31m".to_string(),         // bold red
+            setuid: "\x1b[37;41m".to_string(),         // white on red
+            setgid: "\x1b[30;43m".to_string(),         // black on yellow
+            sticky: "\x1b[37;44m".to_string(),         // white on blue
+            other_writable: "\x1b[34;42m".to_string(), // blue on green
             sticky_other_writable: "\x1b[30;42m".to_string(), // black on green
             reset: "\x1b[0m".to_string(),
         }
@@ -484,9 +484,7 @@ impl FileEntry {
                 _ => {
                     if ft == libc::S_IFREG as u32
                         && self.mode
-                            & (libc::S_IXUSR as u32
-                                | libc::S_IXGRP as u32
-                                | libc::S_IXOTH as u32)
+                            & (libc::S_IXUSR as u32 | libc::S_IXGRP as u32 | libc::S_IXOTH as u32)
                             != 0
                     {
                         "*"
@@ -755,11 +753,7 @@ fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering 
         }
     };
 
-    if config.reverse {
-        ord.reverse()
-    } else {
-        ord
-    }
+    if config.reverse { ord.reverse() } else { ord }
 }
 
 // ---------------------------------------------------------------------------
@@ -782,8 +776,16 @@ pub fn format_permissions(mode: u32) -> String {
     });
 
     // User
-    s.push(if mode & (libc::S_IRUSR as u32) != 0 { 'r' } else { '-' });
-    s.push(if mode & (libc::S_IWUSR as u32) != 0 { 'w' } else { '-' });
+    s.push(if mode & (libc::S_IRUSR as u32) != 0 {
+        'r'
+    } else {
+        '-'
+    });
+    s.push(if mode & (libc::S_IWUSR as u32) != 0 {
+        'w'
+    } else {
+        '-'
+    });
     s.push(if mode & (libc::S_ISUID as u32) != 0 {
         if mode & (libc::S_IXUSR as u32) != 0 {
             's'
@@ -797,8 +799,16 @@ pub fn format_permissions(mode: u32) -> String {
     });
 
     // Group
-    s.push(if mode & (libc::S_IRGRP as u32) != 0 { 'r' } else { '-' });
-    s.push(if mode & (libc::S_IWGRP as u32) != 0 { 'w' } else { '-' });
+    s.push(if mode & (libc::S_IRGRP as u32) != 0 {
+        'r'
+    } else {
+        '-'
+    });
+    s.push(if mode & (libc::S_IWGRP as u32) != 0 {
+        'w'
+    } else {
+        '-'
+    });
     s.push(if mode & (libc::S_ISGID as u32) != 0 {
         if mode & (libc::S_IXGRP as u32) != 0 {
             's'
@@ -812,8 +822,16 @@ pub fn format_permissions(mode: u32) -> String {
     });
 
     // Other
-    s.push(if mode & (libc::S_IROTH as u32) != 0 { 'r' } else { '-' });
-    s.push(if mode & (libc::S_IWOTH as u32) != 0 { 'w' } else { '-' });
+    s.push(if mode & (libc::S_IROTH as u32) != 0 {
+        'r'
+    } else {
+        '-'
+    });
+    s.push(if mode & (libc::S_IWOTH as u32) != 0 {
+        'w'
+    } else {
+        '-'
+    });
     s.push(if mode & (libc::S_ISVTX as u32) != 0 {
         if mode & (libc::S_IXOTH as u32) != 0 {
             't'
@@ -902,7 +920,13 @@ pub fn format_time(secs: i64, nsec: i64, style: &TimeStyle) -> String {
         TimeStyle::FullIso => {
             format!(
                 "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09} {}",
-                tm.year, tm.month, tm.day, tm.hour, tm.min, tm.sec, nsec,
+                tm.year,
+                tm.month,
+                tm.day,
+                tm.hour,
+                tm.min,
+                tm.sec,
+                nsec,
                 format_tz_offset(tm.utc_offset_secs)
             )
         }
@@ -921,8 +945,7 @@ pub fn format_time(secs: i64, nsec: i64, style: &TimeStyle) -> String {
         }
         TimeStyle::Locale | TimeStyle::Custom(_) => {
             let month_names = [
-                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
-                "Dec",
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
             ];
             let mon = if tm.month >= 1 && tm.month <= 12 {
                 month_names[(tm.month - 1) as usize]
@@ -1134,7 +1157,11 @@ fn print_long(
     }
 
     // Calculate column widths for alignment
-    let max_nlink = entries.iter().map(|e| count_digits(e.nlink)).max().unwrap_or(1);
+    let max_nlink = entries
+        .iter()
+        .map(|e| count_digits(e.nlink))
+        .max()
+        .unwrap_or(1);
     let max_owner = if config.show_owner {
         entries
             .iter()
@@ -1188,15 +1215,17 @@ fn print_long(
     } else {
         entries
             .iter()
-            .map(|e| {
-                format_size(e.size, config.human_readable, config.si, config.kibibytes).len()
-            })
+            .map(|e| format_size(e.size, config.human_readable, config.si, config.kibibytes).len())
             .max()
             .unwrap_or(1)
     };
 
     let max_inode = if config.show_inode {
-        entries.iter().map(|e| count_digits(e.ino)).max().unwrap_or(1)
+        entries
+            .iter()
+            .map(|e| count_digits(e.ino))
+            .max()
+            .unwrap_or(1)
     } else {
         0
     };
@@ -1205,13 +1234,7 @@ fn print_long(
         entries
             .iter()
             .map(|e| {
-                format_blocks(
-                    e.blocks,
-                    config.human_readable,
-                    config.si,
-                    config.kibibytes,
-                )
-                .len()
+                format_blocks(e.blocks, config.human_readable, config.si, config.kibibytes).len()
             })
             .max()
             .unwrap_or(1)
@@ -1359,7 +1382,11 @@ fn print_columns(
         .collect();
 
     let max_inode_w = if config.show_inode {
-        entries.iter().map(|e| count_digits(e.ino)).max().unwrap_or(1)
+        entries
+            .iter()
+            .map(|e| count_digits(e.ino))
+            .max()
+            .unwrap_or(1)
     } else {
         0
     };
@@ -1367,13 +1394,7 @@ fn print_columns(
         entries
             .iter()
             .map(|e| {
-                format_blocks(
-                    e.blocks,
-                    config.human_readable,
-                    config.si,
-                    config.kibibytes,
-                )
-                .len()
+                format_blocks(e.blocks, config.human_readable, config.si, config.kibibytes).len()
             })
             .max()
             .unwrap_or(1)
@@ -1483,7 +1504,11 @@ fn print_single_column(
     color_db: Option<&ColorDb>,
 ) -> io::Result<()> {
     let max_inode_w = if config.show_inode {
-        entries.iter().map(|e| count_digits(e.ino)).max().unwrap_or(1)
+        entries
+            .iter()
+            .map(|e| count_digits(e.ino))
+            .max()
+            .unwrap_or(1)
     } else {
         0
     };
@@ -1491,13 +1516,7 @@ fn print_single_column(
         entries
             .iter()
             .map(|e| {
-                format_blocks(
-                    e.blocks,
-                    config.human_readable,
-                    config.si,
-                    config.kibibytes,
-                )
-                .len()
+                format_blocks(e.blocks, config.human_readable, config.si, config.kibibytes).len()
             })
             .max()
             .unwrap_or(1)
@@ -1683,11 +1702,7 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
         match meta_result {
             Ok(meta) => {
                 if config.directory || !meta.is_dir() {
-                    match FileEntry::from_path_with_name(
-                        p.to_string(),
-                        &path,
-                        config,
-                    ) {
+                    match FileEntry::from_path_with_name(p.to_string(), &path, config) {
                         Ok(fe) => file_args.push(fe),
                         Err(e) => {
                             eprintln!("ls: cannot access '{}': {}", p, e);
@@ -1731,11 +1746,7 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
         let an = a.to_string_lossy().to_lowercase();
         let bn = b.to_string_lossy().to_lowercase();
         let ord = an.cmp(&bn);
-        if config.reverse {
-            ord.reverse()
-        } else {
-            ord
-        }
+        if config.reverse { ord.reverse() } else { ord }
     });
 
     let show_header = dir_args.len() > 1 || (!file_args.is_empty() && !dir_args.is_empty());

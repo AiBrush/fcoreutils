@@ -342,10 +342,6 @@ fn test_echo_matches_gnu() {
     if let Ok(gnu) = gnu {
         let ours = cmd().args(["hello", "world"]).output().unwrap();
         assert_eq!(ours.stdout, gnu.stdout, "Output mismatch with GNU echo");
-        assert_eq!(
-            ours.status.code(),
-            gnu.status.code(),
-            "Exit code mismatch"
-        );
+        assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
     }
 }

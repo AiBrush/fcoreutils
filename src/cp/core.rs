@@ -364,7 +364,12 @@ pub fn copy_file(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
 // ---- recursive copy ----
 
 /// Recursively copy `src` to `dst`.
-fn copy_recursive(src: &Path, dst: &Path, config: &CpConfig, root_dev: Option<u64>) -> io::Result<()> {
+fn copy_recursive(
+    src: &Path,
+    dst: &Path,
+    config: &CpConfig,
+    root_dev: Option<u64>,
+) -> io::Result<()> {
     let src_meta = std::fs::symlink_metadata(src)?;
 
     #[cfg(unix)]
@@ -436,9 +441,7 @@ pub fn run_cp(
     };
 
     // Multiple sources or target is an existing directory => copy into directory.
-    let copy_into_dir = sources.len() > 1
-        || dest_dir.is_dir()
-        || config.target_directory.is_some();
+    let copy_into_dir = sources.len() > 1 || dest_dir.is_dir() || config.target_directory.is_some();
 
     // When -T is set, never treat destination as a directory.
     let copy_into_dir = copy_into_dir && !config.no_target_directory;

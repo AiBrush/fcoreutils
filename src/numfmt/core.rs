@@ -807,29 +807,32 @@ pub fn process_line(line: &str, config: &NumfmtConfig) -> Result<String, String>
         if should_convert {
             match convert_number(field, config) {
                 Ok(s) => converted.push(s),
-                Err(e) => {
-                    match config.invalid {
-                        InvalidMode::Abort => return Err(e),
-                        InvalidMode::Fail => {
-                            eprintln!("numfmt: {}", e);
-                            converted.push(field.to_string());
-                        }
-                        InvalidMode::Warn => {
-                            eprintln!("numfmt: {}", e);
-                            converted.push(field.to_string());
-                        }
-                        InvalidMode::Ignore => {
-                            converted.push(field.to_string());
-                        }
+                Err(e) => match config.invalid {
+                    InvalidMode::Abort => return Err(e),
+                    InvalidMode::Fail => {
+                        eprintln!("numfmt: {}", e);
+                        converted.push(field.to_string());
                     }
-                }
+                    InvalidMode::Warn => {
+                        eprintln!("numfmt: {}", e);
+                        converted.push(field.to_string());
+                    }
+                    InvalidMode::Ignore => {
+                        converted.push(field.to_string());
+                    }
+                },
             }
         } else {
             converted.push(field.to_string());
         }
     }
 
-    Ok(reassemble_fields(line, &fields, &converted, config.delimiter))
+    Ok(reassemble_fields(
+        line,
+        &fields,
+        &converted,
+        config.delimiter,
+    ))
 }
 
 /// Run the numfmt command with the given configuration and input.
@@ -920,9 +923,7 @@ pub fn run_numfmt<R: std::io::BufRead, W: Write>(
         }
     }
 
-    output
-        .flush()
-        .map_err(|e| format!("flush error: {}", e))?;
+    output.flush().map_err(|e| format!("flush error: {}", e))?;
 
     if had_error {
         Err("conversion errors occurred".to_string())

@@ -114,10 +114,7 @@ fn should_index(word: &str, config: &PtxConfig) -> bool {
 }
 
 /// Generate KWIC entries from input lines.
-fn generate_entries(
-    lines: &[(String, String)],
-    config: &PtxConfig,
-) -> Vec<KwicEntry> {
+fn generate_entries(lines: &[(String, String)], config: &PtxConfig) -> Vec<KwicEntry> {
     let mut entries = Vec::new();
 
     for (reference, line) in lines {
@@ -218,7 +215,10 @@ fn format_plain(entry: &KwicEntry, config: &PtxConfig) -> String {
     let left_half = available - right_half;
 
     // Left context (truncated from the left to fit)
-    let left = truncate_left(&entry.left_context, if left_half > gap { left_half - gap } else { 0 });
+    let left = truncate_left(
+        &entry.left_context,
+        if left_half > gap { left_half - gap } else { 0 },
+    );
 
     // Right side: keyword + right context
     let right_text = if entry.right_context.is_empty() {
@@ -229,7 +229,13 @@ fn format_plain(entry: &KwicEntry, config: &PtxConfig) -> String {
     let right = truncate_right(&right_text, right_half);
 
     if ref_str.is_empty() {
-        format!("{:>left_w$}{}{}", left, " ".repeat(gap), right, left_w = left_half - gap)
+        format!(
+            "{:>left_w$}{}{}",
+            left,
+            " ".repeat(gap),
+            right,
+            left_w = left_half - gap
+        )
     } else if config.right_reference {
         format!(
             "{:>left_w$}{}{}{}{}",
@@ -262,7 +268,10 @@ fn format_roff(entry: &KwicEntry, config: &PtxConfig) -> String {
     };
 
     // Escape backslashes and quotes for roff
-    let left = entry.left_context.replace('\\', "\\\\").replace('"', "\\\"");
+    let left = entry
+        .left_context
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     let keyword = entry.keyword.replace('\\', "\\\\").replace('"', "\\\"");
     let right = entry
         .right_context
@@ -359,5 +368,9 @@ pub fn generate_ptx<R: BufRead, W: Write>(
 /// Read a word list file (one word per line) into a HashSet.
 pub fn read_word_file(path: &str) -> io::Result<HashSet<String>> {
     let content = std::fs::read_to_string(path)?;
-    Ok(content.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+    Ok(content
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
 }

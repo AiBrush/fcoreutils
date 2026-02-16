@@ -2,7 +2,6 @@
 ///
 /// Reads utmpx records and prints a sorted, space-separated list of login names
 /// for all USER_PROCESS entries.
-
 use std::ffi::CStr;
 
 /// Retrieve a sorted list of currently logged-in user names from utmpx.

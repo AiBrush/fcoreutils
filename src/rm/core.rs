@@ -115,10 +115,7 @@ pub fn rm_path(path: &Path, config: &RmConfig) -> Result<bool, io::Error> {
             Ok(ok)
         } else if config.dir {
             if config.interactive == InteractiveMode::Always
-                && !prompt_yes(&format!(
-                    "rm: remove directory '{}'? ",
-                    path.display()
-                ))
+                && !prompt_yes(&format!("rm: remove directory '{}'? ", path.display()))
             {
                 return Ok(false);
             }
@@ -207,10 +204,7 @@ fn rm_recursive(path: &Path, config: &RmConfig, root_dev: u64) -> Result<bool, i
             }
         } else {
             if config.interactive == InteractiveMode::Always
-                && !prompt_yes(&format!(
-                    "rm: remove file '{}'? ",
-                    child_path.display()
-                ))
+                && !prompt_yes(&format!("rm: remove file '{}'? ", child_path.display()))
             {
                 success = false;
                 continue;
@@ -231,10 +225,7 @@ fn rm_recursive(path: &Path, config: &RmConfig, root_dev: u64) -> Result<bool, i
 
     // Now remove the (hopefully empty) directory itself.
     if config.interactive == InteractiveMode::Always
-        && !prompt_yes(&format!(
-            "rm: remove directory '{}'? ",
-            path.display()
-        ))
+        && !prompt_yes(&format!("rm: remove directory '{}'? ", path.display()))
     {
         return Ok(false);
     }

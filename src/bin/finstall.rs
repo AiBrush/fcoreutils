@@ -18,8 +18,7 @@ use std::process;
 
 #[cfg(unix)]
 use coreutils_rs::install::{
-    install_directories, install_file, parse_backup_mode, parse_mode,
-    BackupMode, InstallConfig,
+    BackupMode, InstallConfig, install_directories, install_file, parse_backup_mode, parse_mode,
 };
 
 #[cfg(unix)]
@@ -141,8 +140,7 @@ fn main() {
                 config.owner = Some(arg["--owner=".len()..].to_string());
             }
             _ if arg.starts_with("--target-directory=") => {
-                config.target_directory =
-                    Some(arg["--target-directory=".len()..].to_string());
+                config.target_directory = Some(arg["--target-directory=".len()..].to_string());
             }
             _ if arg.starts_with("--suffix=") => {
                 config.suffix = arg["--suffix=".len()..].to_string();
@@ -191,10 +189,7 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 'm'",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 'm'", TOOL_NAME);
                                     process::exit(1);
                                 }
                                 match parse_mode(&args[i]) {
@@ -220,10 +215,7 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 'g'",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 'g'", TOOL_NAME);
                                     process::exit(1);
                                 }
                                 config.group = Some(args[i].clone());
@@ -237,10 +229,7 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 'o'",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 'o'", TOOL_NAME);
                                     process::exit(1);
                                 }
                                 config.owner = Some(args[i].clone());
@@ -254,10 +243,7 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 't'",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 't'", TOOL_NAME);
                                     process::exit(1);
                                 }
                                 config.target_directory = Some(args[i].clone());
@@ -271,10 +257,7 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 'S'",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 'S'", TOOL_NAME);
                                     process::exit(1);
                                 }
                                 config.suffix = args[i].clone();
@@ -306,11 +289,7 @@ fn main() {
         }
         let dirs: Vec<&Path> = operands.iter().map(|s| Path::new(s.as_str())).collect();
         if let Err(e) = install_directories(&dirs, &config) {
-            eprintln!(
-                "{}: {}",
-                TOOL_NAME,
-                coreutils_rs::common::io_error_msg(&e)
-            );
+            eprintln!("{}: {}", TOOL_NAME, coreutils_rs::common::io_error_msg(&e));
             process::exit(1);
         }
         return;
@@ -468,9 +447,7 @@ fn print_help() {
     println!("  or:  {} [OPTION]... -t DIRECTORY SOURCE...", TOOL_NAME);
     println!("  or:  {} [OPTION]... -d DIRECTORY...", TOOL_NAME);
     println!();
-    println!(
-        "This install program copies files (often just compiled) into destination"
-    );
+    println!("This install program copies files (often just compiled) into destination");
     println!("locations you choose.  If you want to download and install a ready-to-use");
     println!("package on a GNU/Linux system, you should instead be using a package manager");
     println!("like yum(1) or apt-get(1).");
@@ -489,7 +466,9 @@ fn print_help() {
     println!("                               last, or all components of --target-directory,");
     println!("                               then copy SOURCE to DEST");
     println!("  -g, --group=GROUP          set group ownership, instead of process' current group");
-    println!("  -m, --mode=MODE            set permission mode (as in chmod), instead of rwxr-xr-x");
+    println!(
+        "  -m, --mode=MODE            set permission mode (as in chmod), instead of rwxr-xr-x"
+    );
     println!("  -o, --owner=OWNER          set ownership (super-user only)");
     println!("  -p, --preserve-timestamps  apply access/modification times of SOURCE files");
     println!("                               to corresponding destination files");

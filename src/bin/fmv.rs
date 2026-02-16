@@ -16,9 +16,7 @@ use std::path::Path;
 use std::process;
 
 #[cfg(unix)]
-use coreutils_rs::mv::{
-    mv_file, parse_backup_mode, strip_trailing_slashes, BackupMode, MvConfig,
-};
+use coreutils_rs::mv::{BackupMode, MvConfig, mv_file, parse_backup_mode, strip_trailing_slashes};
 
 #[cfg(unix)]
 const TOOL_NAME: &str = "mv";
@@ -95,18 +93,14 @@ fn main() {
                 match parse_backup_mode(val) {
                     Some(mode) => config.backup = Some(mode),
                     None => {
-                        eprintln!(
-                            "{}: invalid backup type '{}'",
-                            TOOL_NAME, val
-                        );
+                        eprintln!("{}: invalid backup type '{}'", TOOL_NAME, val);
                         process::exit(1);
                     }
                 }
             }
             "--backup" => config.backup = Some(BackupMode::Existing),
             _ if arg.starts_with("--target-directory=") => {
-                config.target_directory =
-                    Some(arg["--target-directory=".len()..].to_string());
+                config.target_directory = Some(arg["--target-directory=".len()..].to_string());
             }
             _ if arg.starts_with("--suffix=") => {
                 config.suffix = arg["--suffix=".len()..].to_string();
@@ -147,14 +141,8 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 'S'",
-                                        TOOL_NAME
-                                    );
-                                    eprintln!(
-                                        "Try '{} --help' for more information.",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 'S'", TOOL_NAME);
+                                    eprintln!("Try '{} --help' for more information.", TOOL_NAME);
                                     process::exit(1);
                                 }
                                 config.suffix = args[i].clone();
@@ -168,14 +156,8 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 't'",
-                                        TOOL_NAME
-                                    );
-                                    eprintln!(
-                                        "Try '{} --help' for more information.",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 't'", TOOL_NAME);
+                                    eprintln!("Try '{} --help' for more information.", TOOL_NAME);
                                     process::exit(1);
                                 }
                                 config.target_directory = Some(args[i].clone());
@@ -216,10 +198,7 @@ fn main() {
     if let Some(ref dir) = config.target_directory {
         // -t DIRECTORY SOURCE...
         if !Path::new(dir).is_dir() {
-            eprintln!(
-                "{}: target '{}' is not a directory",
-                TOOL_NAME, dir
-            );
+            eprintln!("{}: target '{}' is not a directory", TOOL_NAME, dir);
             process::exit(1);
         }
         for source in &operands {
@@ -333,10 +312,7 @@ fn main() {
         // Multiple operands: last must be a directory
         let dir = &operands[operands.len() - 1];
         if !Path::new(dir).is_dir() {
-            eprintln!(
-                "{}: target '{}' is not a directory",
-                TOOL_NAME, dir
-            );
+            eprintln!("{}: target '{}' is not a directory", TOOL_NAME, dir);
             process::exit(1);
         }
         for source in &operands[..operands.len() - 1] {
@@ -396,9 +372,7 @@ fn print_help() {
     println!("      --version  output version information and exit");
     println!();
     println!("The backup suffix is '~', unless set with --suffix or SIMPLE_BACKUP_SUFFIX.");
-    println!(
-        "The version control method may be selected via the --backup option or through"
-    );
+    println!("The version control method may be selected via the --backup option or through");
     println!("the VERSION_CONTROL environment variable.  Here are the values:");
     println!();
     println!("  none, off       never make backups (even if --backup is given)");

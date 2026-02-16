@@ -456,11 +456,7 @@ fn test_split_line_bytes() {
 
     // Each chunk should be at most 50 bytes
     for chunk in &chunks {
-        assert!(
-            chunk.len() <= 50,
-            "chunk size {} exceeds 50",
-            chunk.len()
-        );
+        assert!(chunk.len() <= 50, "chunk size {} exceeds 50", chunk.len());
     }
 
     // Roundtrip check
@@ -516,7 +512,11 @@ fn test_split_verbose() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("creating file"),
@@ -672,7 +672,11 @@ fn test_binary_basic_lines() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let chunks = read_chunks(dir.path(), "x");
     assert_eq!(chunks.len(), 3);
@@ -692,7 +696,11 @@ fn test_binary_bytes_mode() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let chunks = read_chunks(dir.path(), "x");
     assert_eq!(chunks.len(), 5); // 5000 / 1024 = 4.88, so 5 files
@@ -714,7 +722,11 @@ fn test_binary_number_mode() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let chunks = read_chunks(dir.path(), "x");
     assert_eq!(chunks.len(), 4);
@@ -737,7 +749,11 @@ fn test_binary_custom_prefix() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(dir.path().join("myprefix_aa").exists());
     assert!(dir.path().join("myprefix_ab").exists());
 }
@@ -757,7 +773,11 @@ fn test_binary_numeric_suffixes() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(dir.path().join("x00").exists());
     assert!(dir.path().join("x01").exists());
     assert!(dir.path().join("x02").exists());
@@ -778,7 +798,11 @@ fn test_binary_hex_suffixes() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(dir.path().join("x00").exists());
     assert!(dir.path().join("x01").exists());
     assert!(dir.path().join("x02").exists());
@@ -866,11 +890,7 @@ fn test_split_matches_gnu() {
     );
 
     for (i, (gnu, ours)) in gnu_chunks.iter().zip(our_chunks.iter()).enumerate() {
-        assert_eq!(
-            gnu, ours,
-            "chunk {} differs between GNU and ours",
-            i
-        );
+        assert_eq!(gnu, ours, "chunk {} differs between GNU and ours", i);
     }
 }
 
@@ -1040,7 +1060,9 @@ fn test_split_many_small_chunks() {
 #[test]
 fn test_split_binary_no_newlines() {
     let dir = tempfile::tempdir().unwrap();
-    let content: Vec<u8> = (0..256).map(|i| if i == 10 { 0 } else { i as u8 }).collect();
+    let content: Vec<u8> = (0..256)
+        .map(|i| if i == 10 { 0 } else { i as u8 })
+        .collect();
     let input_path = create_test_file(dir.path(), "input.bin", &content);
 
     // Split by bytes should work fine with no newlines

@@ -55,22 +55,14 @@ impl Default for OdConfig {
 /// Named characters for -t a format (ASCII named characters).
 /// Index 0..=127 maps to the name for that byte value.
 const NAMED_CHARS: [&str; 128] = [
-    "nul", "soh", "stx", "etx", "eot", "enq", "ack", "bel",
-    " bs", " ht", " nl", " vt", " ff", " cr", " so", " si",
-    "dle", "dc1", "dc2", "dc3", "dc4", "nak", "syn", "etb",
-    "can", " em", "sub", "esc", " fs", " gs", " rs", " us",
-    " sp",   "!",  "\"",   "#",   "$",   "%",   "&",   "'",
-      "(",   ")",   "*",   "+",   ",",   "-",   ".",   "/",
-      "0",   "1",   "2",   "3",   "4",   "5",   "6",   "7",
-      "8",   "9",   ":",   ";",   "<",   "=",   ">",   "?",
-      "@",   "A",   "B",   "C",   "D",   "E",   "F",   "G",
-      "H",   "I",   "J",   "K",   "L",   "M",   "N",   "O",
-      "P",   "Q",   "R",   "S",   "T",   "U",   "V",   "W",
-      "X",   "Y",   "Z",   "[",  "\\",   "]",   "^",   "_",
-      "`",   "a",   "b",   "c",   "d",   "e",   "f",   "g",
-      "h",   "i",   "j",   "k",   "l",   "m",   "n",   "o",
-      "p",   "q",   "r",   "s",   "t",   "u",   "v",   "w",
-      "x",   "y",   "z",   "{",   "|",   "}",   "~", "del",
+    "nul", "soh", "stx", "etx", "eot", "enq", "ack", "bel", " bs", " ht", " nl", " vt", " ff",
+    " cr", " so", " si", "dle", "dc1", "dc2", "dc3", "dc4", "nak", "syn", "etb", "can", " em",
+    "sub", "esc", " fs", " gs", " rs", " us", " sp", "!", "\"", "#", "$", "%", "&", "'", "(", ")",
+    "*", "+", ",", "-", ".", "/", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<",
+    "=", ">", "?", "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
+    "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "\\", "]", "^", "_", "`", "a", "b",
+    "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u",
+    "v", "w", "x", "y", "z", "{", "|", "}", "~", "del",
 ];
 
 /// Format an address according to the radix.
@@ -87,26 +79,26 @@ fn format_address(offset: u64, radix: AddressRadix) -> String {
 /// This matches GNU od's column widths.
 fn field_width(fmt: OutputFormat) -> usize {
     match fmt {
-        OutputFormat::NamedChar => 4,      // 3 chars + leading space => " nul" = 4 wide
-        OutputFormat::PrintableChar => 4,  // 3 chars + leading space => "  \\n" = 4 wide
-        OutputFormat::Octal(1) => 4,       // " 377"
-        OutputFormat::Octal(2) => 7,       // " 177777"
-        OutputFormat::Octal(4) => 12,      // " 37777777777"
-        OutputFormat::Octal(8) => 23,      // " 1777777777777777777777"
-        OutputFormat::Hex(1) => 3,         // " ff"
-        OutputFormat::Hex(2) => 5,         // " ffff"
-        OutputFormat::Hex(4) => 9,         // " ffffffff"
-        OutputFormat::Hex(8) => 17,        // " ffffffffffffffff"
+        OutputFormat::NamedChar => 4, // 3 chars + leading space => " nul" = 4 wide
+        OutputFormat::PrintableChar => 4, // 3 chars + leading space => "  \\n" = 4 wide
+        OutputFormat::Octal(1) => 4,  // " 377"
+        OutputFormat::Octal(2) => 7,  // " 177777"
+        OutputFormat::Octal(4) => 12, // " 37777777777"
+        OutputFormat::Octal(8) => 23, // " 1777777777777777777777"
+        OutputFormat::Hex(1) => 3,    // " ff"
+        OutputFormat::Hex(2) => 5,    // " ffff"
+        OutputFormat::Hex(4) => 9,    // " ffffffff"
+        OutputFormat::Hex(8) => 17,   // " ffffffffffffffff"
         OutputFormat::UnsignedDec(1) => 4, // " 255"
         OutputFormat::UnsignedDec(2) => 6, // " 65535"
-        OutputFormat::UnsignedDec(4) => 11,// " 4294967295"
-        OutputFormat::UnsignedDec(8) => 21,// " 18446744073709551615"
-        OutputFormat::SignedDec(1) => 5,   // " -128"
-        OutputFormat::SignedDec(2) => 7,   // " -32768"
-        OutputFormat::SignedDec(4) => 12,  // " -2147483648"
-        OutputFormat::SignedDec(8) => 21,  // " -9223372036854775808"
-        OutputFormat::Float(4) => 15,      // " -x.xxxxxxxe+xx"
-        OutputFormat::Float(8) => 25,      // " -x.xxxxxxxxxxxxxxe+xxx"
+        OutputFormat::UnsignedDec(4) => 11, // " 4294967295"
+        OutputFormat::UnsignedDec(8) => 21, // " 18446744073709551615"
+        OutputFormat::SignedDec(1) => 5, // " -128"
+        OutputFormat::SignedDec(2) => 7, // " -32768"
+        OutputFormat::SignedDec(4) => 12, // " -2147483648"
+        OutputFormat::SignedDec(8) => 21, // " -9223372036854775808"
+        OutputFormat::Float(4) => 15, // " -x.xxxxxxxe+xx"
+        OutputFormat::Float(8) => 25, // " -x.xxxxxxxxxxxxxxe+xxx"
         _ => 4,
     }
 }
@@ -150,91 +142,81 @@ fn format_value(bytes: &[u8], fmt: OutputFormat, width: usize) -> String {
             };
             format!("{:>w$}", s, w = width)
         }
-        OutputFormat::Octal(size) => {
-            match size {
-                1 => format!("{:>w$}", format!("{:03o}", bytes[0]), w = width),
-                2 => {
-                    let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-                    format!("{:>w$}", format!("{:06o}", v), w = width)
-                }
-                4 => {
-                    let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-                    format!("{:>w$}", format!("{:011o}", v), w = width)
-                }
-                8 => {
-                    let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                    format!("{:>w$}", format!("{:022o}", v), w = width)
-                }
-                _ => String::new(),
+        OutputFormat::Octal(size) => match size {
+            1 => format!("{:>w$}", format!("{:03o}", bytes[0]), w = width),
+            2 => {
+                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
+                format!("{:>w$}", format!("{:06o}", v), w = width)
             }
-        }
-        OutputFormat::Hex(size) => {
-            match size {
-                1 => format!("{:>w$}", format!("{:02x}", bytes[0]), w = width),
-                2 => {
-                    let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-                    format!("{:>w$}", format!("{:04x}", v), w = width)
-                }
-                4 => {
-                    let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-                    format!("{:>w$}", format!("{:08x}", v), w = width)
-                }
-                8 => {
-                    let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                    format!("{:>w$}", format!("{:016x}", v), w = width)
-                }
-                _ => String::new(),
+            4 => {
+                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+                format!("{:>w$}", format!("{:011o}", v), w = width)
             }
-        }
-        OutputFormat::UnsignedDec(size) => {
-            match size {
-                1 => format!("{:>w$}", bytes[0], w = width),
-                2 => {
-                    let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-                    format!("{:>w$}", v, w = width)
-                }
-                4 => {
-                    let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-                    format!("{:>w$}", v, w = width)
-                }
-                8 => {
-                    let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                    format!("{:>w$}", v, w = width)
-                }
-                _ => String::new(),
+            8 => {
+                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                format!("{:>w$}", format!("{:022o}", v), w = width)
             }
-        }
-        OutputFormat::SignedDec(size) => {
-            match size {
-                1 => format!("{:>w$}", bytes[0] as i8, w = width),
-                2 => {
-                    let v = i16::from_le_bytes(bytes[..2].try_into().unwrap());
-                    format!("{:>w$}", v, w = width)
-                }
-                4 => {
-                    let v = i32::from_le_bytes(bytes[..4].try_into().unwrap());
-                    format!("{:>w$}", v, w = width)
-                }
-                8 => {
-                    let v = i64::from_le_bytes(bytes[..8].try_into().unwrap());
-                    format!("{:>w$}", v, w = width)
-                }
-                _ => String::new(),
+            _ => String::new(),
+        },
+        OutputFormat::Hex(size) => match size {
+            1 => format!("{:>w$}", format!("{:02x}", bytes[0]), w = width),
+            2 => {
+                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
+                format!("{:>w$}", format!("{:04x}", v), w = width)
             }
-        }
-        OutputFormat::Float(size) => {
-            match size {
-                4 => {
-                    let v = f32::from_le_bytes(bytes[..4].try_into().unwrap());
-                    format!("{:>w$}", format_float_f32(v), w = width)
-                }
-                8 => {
-                    let v = f64::from_le_bytes(bytes[..8].try_into().unwrap());
-                    format!("{:>w$}", format_float_f64(v), w = width)
-                }
-                _ => String::new(),
+            4 => {
+                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+                format!("{:>w$}", format!("{:08x}", v), w = width)
             }
-        }
+            8 => {
+                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                format!("{:>w$}", format!("{:016x}", v), w = width)
+            }
+            _ => String::new(),
+        },
+        OutputFormat::UnsignedDec(size) => match size {
+            1 => format!("{:>w$}", bytes[0], w = width),
+            2 => {
+                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
+                format!("{:>w$}", v, w = width)
+            }
+            4 => {
+                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+                format!("{:>w$}", v, w = width)
+            }
+            8 => {
+                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                format!("{:>w$}", v, w = width)
+            }
+            _ => String::new(),
+        },
+        OutputFormat::SignedDec(size) => match size {
+            1 => format!("{:>w$}", bytes[0] as i8, w = width),
+            2 => {
+                let v = i16::from_le_bytes(bytes[..2].try_into().unwrap());
+                format!("{:>w$}", v, w = width)
+            }
+            4 => {
+                let v = i32::from_le_bytes(bytes[..4].try_into().unwrap());
+                format!("{:>w$}", v, w = width)
+            }
+            8 => {
+                let v = i64::from_le_bytes(bytes[..8].try_into().unwrap());
+                format!("{:>w$}", v, w = width)
+            }
+            _ => String::new(),
+        },
+        OutputFormat::Float(size) => match size {
+            4 => {
+                let v = f32::from_le_bytes(bytes[..4].try_into().unwrap());
+                format!("{:>w$}", format_float_f32(v), w = width)
+            }
+            8 => {
+                let v = f64::from_le_bytes(bytes[..8].try_into().unwrap());
+                format!("{:>w$}", format_float_f64(v), w = width)
+            }
+            _ => String::new(),
+        },
     }
 }
 
@@ -247,7 +229,11 @@ fn format_float_f32(v: f32) -> String {
         return "NaN".to_string();
     }
     if v.is_infinite() {
-        return if v.is_sign_negative() { "-Inf".to_string() } else { "Inf".to_string() };
+        return if v.is_sign_negative() {
+            "-Inf".to_string()
+        } else {
+            "Inf".to_string()
+        };
     }
     // GNU od uses printf %e style for floats
     format!("{:e}", v)
@@ -262,13 +248,24 @@ fn format_float_f64(v: f64) -> String {
         return "NaN".to_string();
     }
     if v.is_infinite() {
-        return if v.is_sign_negative() { "-Inf".to_string() } else { "Inf".to_string() };
+        return if v.is_sign_negative() {
+            "-Inf".to_string()
+        } else {
+            "Inf".to_string()
+        };
     }
     format!("{:e}", v)
 }
 
 /// Format one line of output for a given format type.
-fn format_line(chunk: &[u8], fmt: OutputFormat, line_width: usize, is_first_format: bool, radix: AddressRadix, offset: u64) -> String {
+fn format_line(
+    chunk: &[u8],
+    fmt: OutputFormat,
+    line_width: usize,
+    is_first_format: bool,
+    radix: AddressRadix,
+    offset: u64,
+) -> String {
     let mut line = String::new();
 
     // Address prefix
@@ -328,31 +325,41 @@ pub fn parse_format_type(s: &str) -> Result<OutputFormat, String> {
         'a' => Ok(OutputFormat::NamedChar),
         'c' => Ok(OutputFormat::PrintableChar),
         'd' => {
-            let size = if size_str.is_empty() { 4 } else {
+            let size = if size_str.is_empty() {
+                4
+            } else {
                 parse_size_spec(&size_str, "d")?
             };
             Ok(OutputFormat::SignedDec(size))
         }
         'f' => {
-            let size = if size_str.is_empty() { 4 } else {
+            let size = if size_str.is_empty() {
+                4
+            } else {
                 parse_float_size(&size_str)?
             };
             Ok(OutputFormat::Float(size))
         }
         'o' => {
-            let size = if size_str.is_empty() { 2 } else {
+            let size = if size_str.is_empty() {
+                2
+            } else {
                 parse_size_spec(&size_str, "o")?
             };
             Ok(OutputFormat::Octal(size))
         }
         'u' => {
-            let size = if size_str.is_empty() { 4 } else {
+            let size = if size_str.is_empty() {
+                4
+            } else {
                 parse_size_spec(&size_str, "u")?
             };
             Ok(OutputFormat::UnsignedDec(size))
         }
         'x' => {
-            let size = if size_str.is_empty() { 2 } else {
+            let size = if size_str.is_empty() {
+                2
+            } else {
                 parse_size_spec(&size_str, "x")?
             };
             Ok(OutputFormat::Hex(size))
@@ -369,10 +376,15 @@ fn parse_size_spec(s: &str, type_name: &str) -> Result<usize, String> {
         "I" => Ok(4),
         "L" => Ok(8),
         _ => {
-            let n: usize = s.parse().map_err(|_| format!("invalid type string '{}{}': invalid size", type_name, s))?;
+            let n: usize = s
+                .parse()
+                .map_err(|_| format!("invalid type string '{}{}': invalid size", type_name, s))?;
             match n {
                 1 | 2 | 4 | 8 => Ok(n),
-                _ => Err(format!("invalid type string '{}{}': invalid size", type_name, s)),
+                _ => Err(format!(
+                    "invalid type string '{}{}': invalid size",
+                    type_name, s
+                )),
             }
         }
     }
@@ -384,7 +396,9 @@ fn parse_float_size(s: &str) -> Result<usize, String> {
         "D" | "8" => Ok(8),
         "L" | "16" => Err("16-byte float not supported".to_string()),
         _ => {
-            let n: usize = s.parse().map_err(|_| format!("invalid float size '{}'", s))?;
+            let n: usize = s
+                .parse()
+                .map_err(|_| format!("invalid float size '{}'", s))?;
             match n {
                 4 | 8 => Ok(n),
                 _ => Err(format!("invalid float size '{}'", s)),
@@ -469,7 +483,11 @@ pub fn od_process<R: Read, W: Write>(
     if config.address_radix != AddressRadix::None {
         // The final offset is skip_bytes + actual data length
         let final_offset = config.skip_bytes + data.len() as u64;
-        writeln!(output, "{}", format_address(final_offset, config.address_radix))?;
+        writeln!(
+            output,
+            "{}",
+            format_address(final_offset, config.address_radix)
+        )?;
     }
 
     Ok(())

@@ -15,10 +15,7 @@ fn cmd() -> Command {
 
 #[test]
 fn test_stdbuf_runs_command() {
-    let output = cmd()
-        .args(["-o", "L", "echo", "hello"])
-        .output()
-        .unwrap();
+    let output = cmd().args(["-o", "L", "echo", "hello"]).output().unwrap();
     assert!(
         output.status.success(),
         "fstdbuf should exit with code 0, stderr: {}",
@@ -30,10 +27,7 @@ fn test_stdbuf_runs_command() {
 
 #[test]
 fn test_stdbuf_exit_code() {
-    let output = cmd()
-        .args(["-o", "0", "false"])
-        .output()
-        .unwrap();
+    let output = cmd().args(["-o", "0", "false"]).output().unwrap();
     assert_eq!(
         output.status.code(),
         Some(1),
@@ -55,10 +49,7 @@ fn test_stdbuf_help() {
     let output = cmd().arg("--help").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("stdbuf"),
-        "Help should mention stdbuf"
-    );
+    assert!(stdout.contains("stdbuf"), "Help should mention stdbuf");
 }
 
 #[test]

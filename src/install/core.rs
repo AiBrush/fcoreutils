@@ -212,11 +212,7 @@ fn files_are_identical(a: &Path, b: &Path) -> io::Result<bool> {
 
 /// Set ownership on a file using chown(2).
 #[cfg(unix)]
-fn set_ownership(
-    path: &Path,
-    owner: &Option<String>,
-    group: &Option<String>,
-) -> io::Result<()> {
+fn set_ownership(path: &Path, owner: &Option<String>, group: &Option<String>) -> io::Result<()> {
     use std::ffi::CString;
 
     let uid = if let Some(name) = owner {
@@ -295,10 +291,8 @@ fn preserve_times(src: &Path, dst: &Path) -> io::Result<()> {
             tv_nsec: meta.mtime_nsec(),
         };
         let times = [atime, mtime];
-        let c_path =
-            std::ffi::CString::new(dst.as_os_str().as_encoded_bytes()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte")
-            })?;
+        let c_path = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
         let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
         if ret != 0 {
             return Err(io::Error::last_os_error());

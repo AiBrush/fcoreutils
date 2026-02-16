@@ -32,10 +32,7 @@ fn test_shred_removes() {
     let file = dir.path().join("remove.txt");
     std::fs::write(&file, "secret data").unwrap();
 
-    let output = cmd()
-        .args(["-u", file.to_str().unwrap()])
-        .output()
-        .unwrap();
+    let output = cmd().args(["-u", file.to_str().unwrap()]).output().unwrap();
     assert!(output.status.success(), "shred -u failed: {:?}", output);
 
     // File should be removed
@@ -48,10 +45,7 @@ fn test_shred_zero_pass() {
     let file = dir.path().join("zero.txt");
     std::fs::write(&file, "secret data!").unwrap();
 
-    let output = cmd()
-        .args(["-z", file.to_str().unwrap()])
-        .output()
-        .unwrap();
+    let output = cmd().args(["-z", file.to_str().unwrap()]).output().unwrap();
     assert!(output.status.success(), "shred -z failed: {:?}", output);
 
     // File should still exist
@@ -77,11 +71,7 @@ fn test_shred_iterations() {
         .args(["-n", "5", file.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "shred -n 5 failed: {:?}",
-        output
-    );
+    assert!(output.status.success(), "shred -n 5 failed: {:?}", output);
     assert!(file.exists());
 }
 
@@ -95,11 +85,7 @@ fn test_shred_verbose() {
         .args(["-v", "-n", "2", file.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "shred -v failed: {:?}",
-        output
-    );
+    assert!(output.status.success(), "shred -v failed: {:?}", output);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -144,10 +130,7 @@ fn test_shred_file_removed() {
     std::fs::write(&file, "will be removed").unwrap();
     assert!(file.exists());
 
-    let output = cmd()
-        .args(["-u", file.to_str().unwrap()])
-        .output()
-        .unwrap();
+    let output = cmd().args(["-u", file.to_str().unwrap()]).output().unwrap();
     assert!(output.status.success());
     assert!(!file.exists(), "File should have been removed with -u");
 }
@@ -166,10 +149,7 @@ fn test_shred_force() {
         std::fs::set_permissions(&file, perms).unwrap();
     }
 
-    let output = cmd()
-        .args(["-f", file.to_str().unwrap()])
-        .output()
-        .unwrap();
+    let output = cmd().args(["-f", file.to_str().unwrap()]).output().unwrap();
     assert!(
         output.status.success(),
         "shred -f failed on read-only file: {:?}",
@@ -240,7 +220,7 @@ fn test_shred_exact() {
 }
 
 // Unit tests for parse functions
-use crate::shred::{parse_remove_mode, parse_size, RemoveMode, ShredConfig};
+use crate::shred::{RemoveMode, ShredConfig, parse_remove_mode, parse_size};
 
 #[test]
 fn test_parse_size_plain() {

@@ -168,7 +168,10 @@ fn test_df_runs() {
         "Should have 'Mounted on' header"
     );
     // Should have at least one filesystem line beyond the header.
-    assert!(stdout.lines().count() >= 2, "Should have at least header + 1 line");
+    assert!(
+        stdout.lines().count() >= 2,
+        "Should have at least header + 1 line"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -186,7 +189,10 @@ fn test_df_human() {
         || stdout.contains('M')
         || stdout.contains('G')
         || stdout.contains('T');
-    assert!(has_suffix, "Human-readable output should contain size suffixes");
+    assert!(
+        has_suffix,
+        "Human-readable output should contain size suffixes"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -258,10 +264,7 @@ fn test_df_print_type() {
     let output = cmd().arg("-T").output().unwrap();
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Type"),
-        "Should have 'Type' column header"
-    );
+    assert!(stdout.contains("Type"), "Should have 'Type' column header");
 }
 
 #[cfg(target_os = "linux")]

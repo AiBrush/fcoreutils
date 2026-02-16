@@ -56,7 +56,10 @@ fn test_pr_columns() {
     // With 2 columns and no header, lines should be arranged in columns
     // Default (down): col0 = a,b,c; col1 = d,e,f
     let lines: Vec<&str> = result.lines().collect();
-    assert!(lines.len() >= 3, "Expected at least 3 rows for 2 columns with 6 lines");
+    assert!(
+        lines.len() >= 3,
+        "Expected at least 3 rows for 2 columns with 6 lines"
+    );
     // First line should contain 'a' in column 1
     assert!(lines[0].contains('a'));
 }
@@ -109,7 +112,11 @@ fn test_pr_double_space() {
     // With double spacing, there should be blank lines between content lines
     let lines: Vec<&str> = result.lines().collect();
     // line1, blank, line2, blank, line3
-    assert!(lines.len() >= 5, "Expected at least 5 lines with double spacing, got {}", lines.len());
+    assert!(
+        lines.len() >= 5,
+        "Expected at least 5 lines with double spacing, got {}",
+        lines.len()
+    );
     assert_eq!(lines[0].trim(), "line1");
     assert_eq!(lines[1].trim(), "");
     assert_eq!(lines[2].trim(), "line2");
@@ -128,9 +135,17 @@ fn test_pr_number_lines() {
 
     let lines: Vec<&str> = result.lines().collect();
     // Lines should be numbered starting from 1
-    assert!(lines[0].contains('1'), "First line should contain number 1: '{}'", lines[0]);
+    assert!(
+        lines[0].contains('1'),
+        "First line should contain number 1: '{}'",
+        lines[0]
+    );
     assert!(lines[0].contains("aaa"));
-    assert!(lines[1].contains('2'), "Second line should contain number 2: '{}'", lines[1]);
+    assert!(
+        lines[1].contains('2'),
+        "Second line should contain number 2: '{}'",
+        lines[1]
+    );
     assert!(lines[1].contains("bbb"));
 }
 

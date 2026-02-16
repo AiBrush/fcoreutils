@@ -24,8 +24,8 @@ fn extract_fsid(fsid: &libc::fsid_t) -> u64 {
 
 /// Perform a libc stat/lstat call and return the raw `libc::stat` structure.
 fn raw_stat(path: &str, dereference: bool) -> Result<libc::stat, io::Error> {
-    let c_path =
-        CString::new(path).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
+    let c_path = CString::new(path)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
     unsafe {
         let mut st: libc::stat = std::mem::zeroed();
         let rc = if dereference {
@@ -43,8 +43,8 @@ fn raw_stat(path: &str, dereference: bool) -> Result<libc::stat, io::Error> {
 
 /// Perform a libc statfs call and return the raw `libc::statfs` structure.
 fn raw_statfs(path: &str) -> Result<libc::statfs, io::Error> {
-    let c_path =
-        CString::new(path).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
+    let c_path = CString::new(path)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
     unsafe {
         let mut sfs: libc::statfs = std::mem::zeroed();
         let rc = libc::statfs(c_path.as_ptr(), &mut sfs);
@@ -365,11 +365,7 @@ fn format_file_specifiers(
                     if meta.file_type().is_symlink() {
                         match std::fs::read_link(path) {
                             Ok(target) => {
-                                result.push_str(&format!(
-                                    "'{}' -> '{}'",
-                                    path,
-                                    target.display()
-                                ));
+                                result.push_str(&format!("'{}' -> '{}'", path, target.display()));
                             }
                             Err(_) => {
                                 result.push_str(&format!("'{}'", path));

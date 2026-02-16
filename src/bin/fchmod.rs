@@ -227,24 +227,17 @@ fn main() {
 fn print_help() {
     println!("Usage: {} [OPTION]... MODE[,MODE]... FILE...", TOOL_NAME);
     println!("  or:  {} [OPTION]... OCTAL-MODE FILE...", TOOL_NAME);
-    println!(
-        "  or:  {} [OPTION]... --reference=RFILE FILE...",
-        TOOL_NAME
-    );
+    println!("  or:  {} [OPTION]... --reference=RFILE FILE...", TOOL_NAME);
     println!();
     println!("Change the mode of each FILE to MODE.");
     println!("With --reference, change the mode of each FILE to that of RFILE.");
     println!();
     println!("  -c, --changes          like verbose but report only when a change is made");
     println!("  -f, --silent, --quiet   suppress most error messages");
-    println!(
-        "  -v, --verbose          output a diagnostic for every file processed"
-    );
+    println!("  -v, --verbose          output a diagnostic for every file processed");
     println!("      --no-preserve-root  do not treat '/' specially (the default)");
     println!("      --preserve-root    fail to operate recursively on '/'");
-    println!(
-        "      --reference=RFILE  use RFILE's mode instead of MODE values"
-    );
+    println!("      --reference=RFILE  use RFILE's mode instead of MODE values");
     println!("  -R, --recursive        change files and directories recursively");
     println!("      --help     display this help and exit");
     println!("      --version  output version information and exit");

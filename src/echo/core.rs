@@ -33,7 +33,9 @@ pub fn parse_echo_args(args: &[String]) -> (EchoConfig, &[String]) {
             break;
         }
         // Every character after '-' must be n, e, or E
-        let all_flags = bytes[1..].iter().all(|&b| b == b'n' || b == b'e' || b == b'E');
+        let all_flags = bytes[1..]
+            .iter()
+            .all(|&b| b == b'n' || b == b'e' || b == b'E');
         if !all_flags {
             break;
         }

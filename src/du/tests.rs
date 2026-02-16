@@ -53,7 +53,10 @@ fn bin_path(name: &str) -> std::path::PathBuf {
 
 /// Helper: collect entry paths relative to the root from `du_path` output.
 fn entry_paths(entries: &[DuEntry]) -> Vec<String> {
-    entries.iter().map(|e| e.path.display().to_string()).collect()
+    entries
+        .iter()
+        .map(|e| e.path.display().to_string())
+        .collect()
 }
 
 // ---------- Tests ----------
@@ -81,19 +84,56 @@ fn test_du_summary() {
     };
     let entries = du_path(tmp.path(), &config).unwrap();
     // With --summarize, only one entry: the root.
-    assert_eq!(entries.len(), 1, "summarize should produce exactly one entry");
+    assert_eq!(
+        entries.len(),
+        1,
+        "summarize should produce exactly one entry"
+    );
     assert_eq!(entries[0].path, tmp.path());
 }
 
 #[test]
 fn test_du_human() {
     // Human-readable formatting (powers of 1024).
-    assert_eq!(format_size(0, &DuConfig { human_readable: true, ..default_config() }), "0");
-    assert_eq!(format_size(512, &DuConfig { human_readable: true, ..default_config() }), "512");
-    assert_eq!(format_size(1024, &DuConfig { human_readable: true, ..default_config() }), "1K");
+    assert_eq!(
+        format_size(
+            0,
+            &DuConfig {
+                human_readable: true,
+                ..default_config()
+            }
+        ),
+        "0"
+    );
+    assert_eq!(
+        format_size(
+            512,
+            &DuConfig {
+                human_readable: true,
+                ..default_config()
+            }
+        ),
+        "512"
+    );
+    assert_eq!(
+        format_size(
+            1024,
+            &DuConfig {
+                human_readable: true,
+                ..default_config()
+            }
+        ),
+        "1K"
+    );
 
     let large = 1024 * 1024 * 5;
-    let s = format_size(large, &DuConfig { human_readable: true, ..default_config() });
+    let s = format_size(
+        large,
+        &DuConfig {
+            human_readable: true,
+            ..default_config()
+        },
+    );
     assert_eq!(s, "5M");
 }
 
@@ -112,7 +152,11 @@ fn test_du_bytes() {
     let root = entries.last().unwrap();
     // Total apparent size = 100 + 200 + 50 + 75 = 425 bytes of file data,
     // plus directory entries' apparent size.
-    assert!(root.size >= 425, "apparent total should be >= 425 bytes, got {}", root.size);
+    assert!(
+        root.size >= 425,
+        "apparent total should be >= 425 bytes, got {}",
+        root.size
+    );
 
     // Verify format_size with block_size=1 produces raw number.
     let formatted = format_size(425, &config);
@@ -234,7 +278,10 @@ fn test_du_one_filesystem() {
         ..default_config()
     };
     let entries = du_path(tmp.path(), &config).unwrap();
-    assert!(!entries.is_empty(), "du -x should still produce entries on same fs");
+    assert!(
+        !entries.is_empty(),
+        "du -x should still produce entries on same fs"
+    );
     let root = entries.last().unwrap();
     assert!(root.size > 0);
 }
@@ -280,7 +327,10 @@ fn test_du_matches_gnu() {
     let fdu = bin_path("fdu");
     if !fdu.exists() {
         // Binary not built yet; skip this integration test.
-        eprintln!("fdu binary not found at {:?}, skipping integration test", fdu);
+        eprintln!(
+            "fdu binary not found at {:?}, skipping integration test",
+            fdu
+        );
         return;
     }
 
@@ -294,7 +344,12 @@ fn test_du_matches_gnu() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Should produce exactly one line (summarize mode).
     let lines: Vec<&str> = stdout.trim().lines().collect();
-    assert_eq!(lines.len(), 1, "fdu -s should produce one line, got: {:?}", lines);
+    assert_eq!(
+        lines.len(),
+        1,
+        "fdu -s should produce one line, got: {:?}",
+        lines
+    );
     // The line should contain a number followed by a tab and the path.
     assert!(
         lines[0].contains('\t'),
@@ -303,7 +358,10 @@ fn test_du_matches_gnu() {
     );
     let parts: Vec<&str> = lines[0].splitn(2, '\t').collect();
     assert_eq!(parts.len(), 2);
-    let _size: u64 = parts[0].trim().parse().expect("first column should be a number");
+    let _size: u64 = parts[0]
+        .trim()
+        .parse()
+        .expect("first column should be a number");
     assert!(
         parts[1].trim() == tmp.path().display().to_string(),
         "path should match: {} vs {}",

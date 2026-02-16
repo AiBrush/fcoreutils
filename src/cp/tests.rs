@@ -286,7 +286,11 @@ fn test_cp_binary_basic() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(std::fs::read_to_string(&dst).unwrap(), "hello from fcp\n");
 }
 
@@ -309,7 +313,11 @@ fn test_cp_binary_recursive() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         std::fs::read_to_string(dst_dir.join("a.txt")).unwrap(),
         "aaa\n"

@@ -161,9 +161,15 @@ fn test_ls_recursive() {
 
     let output = render_dir(dir.path(), &config).unwrap();
     // Should contain the nested file
-    assert!(output.contains("nested.txt"), "Recursive should show nested files");
+    assert!(
+        output.contains("nested.txt"),
+        "Recursive should show nested files"
+    );
     // Should contain the subdir header
-    assert!(output.contains("subdir:"), "Recursive should show subdir header");
+    assert!(
+        output.contains("subdir:"),
+        "Recursive should show subdir header"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -320,8 +326,7 @@ fn test_ls_directory() {
 
     // When -d is set, ls_main treats the path as a file entry
     let path_str = dir.path().to_string_lossy().to_string();
-    let entry =
-        FileEntry::from_path_with_name(path_str.clone(), dir.path(), &config).unwrap();
+    let entry = FileEntry::from_path_with_name(path_str.clone(), dir.path(), &config).unwrap();
     assert!(entry.is_dir, "Directory entry should be a directory");
     assert_eq!(entry.name, path_str);
 }
@@ -597,7 +602,11 @@ fn test_ls_comma_format() {
     let mut buf = Vec::new();
     print_comma(&mut buf, &entries, &config, None).unwrap();
     let output = String::from_utf8(buf).unwrap();
-    assert!(output.contains(", "), "Comma format should have ', ': {}", output);
+    assert!(
+        output.contains(", "),
+        "Comma format should have ', ': {}",
+        output
+    );
     assert!(output.ends_with('\n'));
 }
 
@@ -878,7 +887,11 @@ fn test_ls_time_styles() {
     // full-iso
     let s = format_time(now_secs, 123456789, &TimeStyle::FullIso);
     assert!(s.contains('.'), "full-iso should have nanoseconds: {}", s);
-    assert!(s.contains('+') || s.contains('-'), "full-iso should have tz offset: {}", s);
+    assert!(
+        s.contains('+') || s.contains('-'),
+        "full-iso should have tz offset: {}",
+        s
+    );
 
     // long-iso
     let s = format_time(now_secs, 0, &TimeStyle::LongIso);
@@ -899,7 +912,11 @@ fn test_ls_time_styles() {
 
     // locale (old)
     let s = format_time(old, 0, &TimeStyle::Locale);
-    assert!(!s.contains(':'), "locale for old file should show year: {}", s);
+    assert!(
+        !s.contains(':'),
+        "locale for old file should show year: {}",
+        s
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -909,9 +926,18 @@ fn test_ls_time_styles() {
 #[test]
 fn test_ls_color_db_default() {
     let db = ColorDb::default();
-    assert!(db.dir.contains("[01;34m"), "Default dir should be bold blue");
-    assert!(db.link.contains("[01;36m"), "Default link should be bold cyan");
-    assert!(db.exec.contains("[01;32m"), "Default exec should be bold green");
+    assert!(
+        db.dir.contains("[01;34m"),
+        "Default dir should be bold blue"
+    );
+    assert!(
+        db.link.contains("[01;36m"),
+        "Default link should be bold cyan"
+    );
+    assert!(
+        db.exec.contains("[01;32m"),
+        "Default exec should be bold green"
+    );
 }
 
 // ---------------------------------------------------------------------------

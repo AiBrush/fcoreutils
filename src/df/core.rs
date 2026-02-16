@@ -72,8 +72,19 @@ pub struct FsInfo {
 
 // Remote filesystem types that should be excluded with --local.
 const REMOTE_FS_TYPES: &[&str] = &[
-    "nfs", "nfs4", "cifs", "smbfs", "ncpfs", "afs", "coda", "ftpfs", "mfs",
-    "sshfs", "fuse.sshfs", "ncp", "9p",
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smbfs",
+    "ncpfs",
+    "afs",
+    "coda",
+    "ftpfs",
+    "mfs",
+    "sshfs",
+    "fuse.sshfs",
+    "ncp",
+    "9p",
 ];
 
 // Pseudo filesystem types filtered out unless --all is given.
@@ -280,10 +291,7 @@ pub fn get_filesystems(config: &DfConfig) -> Vec<FsInfo> {
                     }
                 }
                 None => {
-                    eprintln!(
-                        "df: {}: No such file or directory",
-                        file
-                    );
+                    eprintln!("df: {}: No such file or directory", file);
                 }
             }
         }
@@ -316,10 +324,7 @@ pub fn get_filesystems(config: &DfConfig) -> Vec<FsInfo> {
 
         // Skip duplicate sources unless --all (keep last mount for a given device).
         if !config.all {
-            if mount.source == "none"
-                || mount.source == "tmpfs"
-                || mount.source == "devtmpfs"
-            {
+            if mount.source == "none" || mount.source == "tmpfs" || mount.source == "devtmpfs" {
                 // Allow these through; filter by fstype instead of source.
             } else if !seen_sources.insert(mount.source.clone()) {
                 continue;
@@ -415,7 +420,11 @@ pub fn parse_block_size(s: &str) -> Result<u64, String> {
     // Check for leading apostrophe (thousands grouping) - just strip it.
     let s = s.strip_prefix('\'').unwrap_or(s);
 
-    let (num_str, suffix) = if s.as_bytes().last().map_or(false, |b| b.is_ascii_alphabetic()) {
+    let (num_str, suffix) = if s
+        .as_bytes()
+        .last()
+        .map_or(false, |b| b.is_ascii_alphabetic())
+    {
         let last = s.len() - 1;
         (&s[..last], &s[last..])
     } else {
@@ -563,11 +572,7 @@ fn size_header(config: &DfConfig) -> String {
 }
 
 /// Print a single filesystem info line.
-pub fn print_fs_line(
-    info: &FsInfo,
-    config: &DfConfig,
-    out: &mut impl Write,
-) -> io::Result<()> {
+pub fn print_fs_line(info: &FsInfo, config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
     if let Some(ref fields) = config.output_fields {
         let values: Vec<String> = fields
             .iter()

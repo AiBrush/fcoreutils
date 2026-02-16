@@ -181,34 +181,29 @@ fn parse_args() -> (NumfmtConfig, Vec<String>) {
                             config.delimiter = val.chars().next();
                         }
                         None => {
-                            eprintln!(
-                                "{}: option requires an argument -- 'd'",
-                                TOOL_NAME
-                            );
+                            eprintln!("{}: option requires an argument -- 'd'", TOOL_NAME);
                             process::exit(1);
                         }
                     }
                 } else if let Some(val) = arg.strip_prefix("--delimiter=") {
                     if val.len() != 1 {
-                        eprintln!(
-                            "{}: the delimiter must be a single character",
-                            TOOL_NAME
-                        );
+                        eprintln!("{}: the delimiter must be a single character", TOOL_NAME);
                         process::exit(1);
                     }
                     config.delimiter = val.chars().next();
                 } else if let Some(val) = arg.strip_prefix("-d") {
                     if val.len() != 1 {
-                        eprintln!(
-                            "{}: the delimiter must be a single character",
-                            TOOL_NAME
-                        );
+                        eprintln!("{}: the delimiter must be a single character", TOOL_NAME);
                         process::exit(1);
                     }
                     config.delimiter = val.chars().next();
                 } else if arg.starts_with('-') && arg.len() > 1 {
                     // Could be a negative number.
-                    if arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit() || c == '.') {
+                    if arg
+                        .chars()
+                        .nth(1)
+                        .is_some_and(|c| c.is_ascii_digit() || c == '.')
+                    {
                         positional.push(arg);
                     } else {
                         eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
@@ -253,26 +248,24 @@ fn main() {
                 Ok(result) => {
                     let _ = write!(writer, "{}{}", result, terminator);
                 }
-                Err(e) => {
-                    match config.invalid {
-                        InvalidMode::Abort => {
-                            eprintln!("{}: {}", TOOL_NAME, e);
-                            process::exit(2);
-                        }
-                        InvalidMode::Fail => {
-                            eprintln!("{}: {}", TOOL_NAME, e);
-                            let _ = write!(writer, "{}{}", number, terminator);
-                            had_error = true;
-                        }
-                        InvalidMode::Warn => {
-                            eprintln!("{}: {}", TOOL_NAME, e);
-                            let _ = write!(writer, "{}{}", number, terminator);
-                        }
-                        InvalidMode::Ignore => {
-                            let _ = write!(writer, "{}{}", number, terminator);
-                        }
+                Err(e) => match config.invalid {
+                    InvalidMode::Abort => {
+                        eprintln!("{}: {}", TOOL_NAME, e);
+                        process::exit(2);
                     }
-                }
+                    InvalidMode::Fail => {
+                        eprintln!("{}: {}", TOOL_NAME, e);
+                        let _ = write!(writer, "{}{}", number, terminator);
+                        had_error = true;
+                    }
+                    InvalidMode::Warn => {
+                        eprintln!("{}: {}", TOOL_NAME, e);
+                        let _ = write!(writer, "{}{}", number, terminator);
+                    }
+                    InvalidMode::Ignore => {
+                        let _ = write!(writer, "{}{}", number, terminator);
+                    }
+                },
             }
         }
 

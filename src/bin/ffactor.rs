@@ -38,7 +38,10 @@ fn process_number(token: &str, out: &mut impl Write) -> bool {
             true
         }
         Err(_) => {
-            eprintln!("{}: \u{2018}{}\u{2019} is not a valid positive integer", TOOL_NAME, token);
+            eprintln!(
+                "{}: \u{2018}{}\u{2019} is not a valid positive integer",
+                TOOL_NAME, token
+            );
             false
         }
     }
@@ -72,10 +75,7 @@ fn main() {
             }
             _ => {
                 if arg.starts_with("--") {
-                    eprintln!(
-                        "{}: unrecognized option \u{2018}{}\u{2019}",
-                        TOOL_NAME, arg
-                    );
+                    eprintln!("{}: unrecognized option \u{2018}{}\u{2019}", TOOL_NAME, arg);
                     process::exit(1);
                 }
                 numbers.push(arg.clone());

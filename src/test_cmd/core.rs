@@ -84,7 +84,9 @@ fn eval_unary(op: &str, arg: &str) -> Result<bool, String> {
         "-z" => Ok(arg.is_empty()),
         "-n" => Ok(!arg.is_empty()),
         "-t" => {
-            let fd: i32 = arg.parse().map_err(|_| format!("test: {}: integer expression expected", arg))?;
+            let fd: i32 = arg
+                .parse()
+                .map_err(|_| format!("test: {}: integer expression expected", arg))?;
             Ok(is_terminal(fd))
         }
         _ => Err(format!("test: {}: unary operator expected", op)),
@@ -371,7 +373,17 @@ fn is_unary_op(s: &str) -> bool {
 fn is_binary_op(s: &str) -> bool {
     matches!(
         s,
-        "=" | "==" | "!=" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt"
+        "=" | "=="
+            | "!="
+            | "<"
+            | ">"
+            | "-eq"
+            | "-ne"
+            | "-lt"
+            | "-le"
+            | "-gt"
+            | "-ge"
+            | "-nt"
             | "-ot"
             | "-ef"
     )

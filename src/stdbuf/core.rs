@@ -4,7 +4,6 @@
 /// the desired buffering modes to the child process. A full implementation would
 /// use LD_PRELOAD with a shared library that reads these variables and calls
 /// setvbuf(). This implementation sets the environment and execs the command.
-
 use std::io;
 use std::process;
 
@@ -55,23 +54,24 @@ pub fn parse_buffer_mode(s: &str) -> Result<BufferMode, String> {
     }
 
     // Parse size with optional suffix
-    let (num_str, multiplier) = if let Some(prefix) = s.strip_suffix('K').or_else(|| s.strip_suffix('k')) {
-        (prefix, 1024_usize)
-    } else if let Some(prefix) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
-        (prefix, 1024 * 1024)
-    } else if let Some(prefix) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
-        (prefix, 1024 * 1024 * 1024)
-    } else if let Some(prefix) = s.strip_suffix('T').or_else(|| s.strip_suffix('t')) {
-        (prefix, 1024_usize.wrapping_mul(1024 * 1024 * 1024))
-    } else if let Some(prefix) = s.strip_suffix("KB").or_else(|| s.strip_suffix("kB")) {
-        (prefix, 1000)
-    } else if let Some(prefix) = s.strip_suffix("MB") {
-        (prefix, 1_000_000)
-    } else if let Some(prefix) = s.strip_suffix("GB") {
-        (prefix, 1_000_000_000)
-    } else {
-        (s, 1)
-    };
+    let (num_str, multiplier) =
+        if let Some(prefix) = s.strip_suffix('K').or_else(|| s.strip_suffix('k')) {
+            (prefix, 1024_usize)
+        } else if let Some(prefix) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
+            (prefix, 1024 * 1024)
+        } else if let Some(prefix) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
+            (prefix, 1024 * 1024 * 1024)
+        } else if let Some(prefix) = s.strip_suffix('T').or_else(|| s.strip_suffix('t')) {
+            (prefix, 1024_usize.wrapping_mul(1024 * 1024 * 1024))
+        } else if let Some(prefix) = s.strip_suffix("KB").or_else(|| s.strip_suffix("kB")) {
+            (prefix, 1000)
+        } else if let Some(prefix) = s.strip_suffix("MB") {
+            (prefix, 1_000_000)
+        } else if let Some(prefix) = s.strip_suffix("GB") {
+            (prefix, 1_000_000_000)
+        } else {
+            (s, 1)
+        };
 
     let n: usize = num_str
         .parse()
@@ -81,7 +81,8 @@ pub fn parse_buffer_mode(s: &str) -> Result<BufferMode, String> {
         return Ok(BufferMode::Unbuffered);
     }
 
-    let size = n.checked_mul(multiplier)
+    let size = n
+        .checked_mul(multiplier)
         .ok_or_else(|| format!("mode size too large: '{}'", s))?;
 
     if size == 0 {

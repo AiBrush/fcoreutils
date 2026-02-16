@@ -150,9 +150,7 @@ fn test_test_matches_gnu() {
         );
     }
 
-    let gnu = Command::new("test")
-        .args(["hello", "=", "hello"])
-        .status();
+    let gnu = Command::new("test").args(["hello", "=", "hello"]).status();
     if let Ok(gnu_status) = gnu {
         let our = cmd().args(["hello", "=", "hello"]).status().unwrap();
         assert_eq!(
@@ -209,10 +207,7 @@ fn test_string_ordering() {
 // Parenthesized grouping
 #[test]
 fn test_parentheses() {
-    assert_eq!(
-        evaluate(&args(&["(", "-d", "/tmp", ")"])),
-        Ok(true)
-    );
+    assert_eq!(evaluate(&args(&["(", "-d", "/tmp", ")"])), Ok(true));
     assert_eq!(
         evaluate(&args(&["!", "(", "-e", "/nonexistent_xyz", ")"])),
         Ok(true)
@@ -232,10 +227,7 @@ fn test_binary_exit_codes() {
     let status = cmd().args(["-d", "/tmp"]).status().unwrap();
     assert_eq!(status.code(), Some(0));
 
-    let status = cmd()
-        .args(["-e", "/nonexistent_xyz_123"])
-        .status()
-        .unwrap();
+    let status = cmd().args(["-e", "/nonexistent_xyz_123"]).status().unwrap();
     assert_eq!(status.code(), Some(1));
 
     // No args => exit 1

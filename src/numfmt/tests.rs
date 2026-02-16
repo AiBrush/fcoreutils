@@ -552,10 +552,7 @@ fn test_numfmt_matches_gnu() {
     // Large values
     let mut config = default_config();
     config.to = ScaleUnit::Si;
-    assert_eq!(
-        process_line("1000000000", &config).unwrap(),
-        "1.0G"
-    );
+    assert_eq!(process_line("1000000000", &config).unwrap(), "1.0G");
 
     // Passthrough when no conversion needed
     let config = default_config();
@@ -589,10 +586,7 @@ fn test_numfmt_large_si() {
     config.to = ScaleUnit::None;
 
     assert_eq!(process_line("1P", &config).unwrap(), "1000000000000000");
-    assert_eq!(
-        process_line("1E", &config).unwrap(),
-        "1000000000000000000"
-    );
+    assert_eq!(process_line("1E", &config).unwrap(), "1000000000000000000");
 }
 
 #[test]

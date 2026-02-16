@@ -12,7 +12,10 @@ fn test_date_runs() {
     // Verify that format_date doesn't panic with basic inputs.
     let now = SystemTime::now();
     let result = format_date(&now, default_format(), false);
-    assert!(!result.is_empty(), "Default format should produce non-empty output");
+    assert!(
+        !result.is_empty(),
+        "Default format should produce non-empty output"
+    );
 }
 
 #[test]
@@ -94,10 +97,7 @@ fn test_date_reference() {
 
     let mod_time = result.unwrap();
     // The mod time should be after the Unix epoch
-    assert!(
-        mod_time > UNIX_EPOCH,
-        "Mod time should be after epoch"
-    );
+    assert!(mod_time > UNIX_EPOCH, "Mod time should be after epoch");
 }
 
 #[test]
@@ -167,12 +167,7 @@ fn test_parse_date_string_relative() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
-        .abs_diff(
-            expected
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
+        .abs_diff(expected.duration_since(UNIX_EPOCH).unwrap().as_secs());
     assert!(diff <= 2, "yesterday should be ~24h ago, diff: {}", diff);
 
     let tomorrow = parse_date_string("tomorrow").unwrap();
@@ -181,13 +176,12 @@ fn test_parse_date_string_relative() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
-        .abs_diff(
-            expected
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
-    assert!(diff <= 2, "tomorrow should be ~24h from now, diff: {}", diff);
+        .abs_diff(expected.duration_since(UNIX_EPOCH).unwrap().as_secs());
+    assert!(
+        diff <= 2,
+        "tomorrow should be ~24h from now, diff: {}",
+        diff
+    );
 }
 
 #[test]

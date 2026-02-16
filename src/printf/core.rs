@@ -49,12 +49,7 @@ pub fn process_format_string(format: &str, args: &[&str]) -> Vec<u8> {
 
 /// Run one pass of the format string. Returns `true` if output should stop (`\c`).
 /// `arg_idx` is advanced as arguments are consumed.
-fn format_one_pass(
-    fmt: &[u8],
-    args: &[&str],
-    arg_idx: &mut usize,
-    output: &mut Vec<u8>,
-) -> bool {
+fn format_one_pass(fmt: &[u8], args: &[&str], arg_idx: &mut usize, output: &mut Vec<u8>) -> bool {
     let mut i = 0;
     while i < fmt.len() {
         match fmt[i] {
@@ -151,8 +146,7 @@ fn process_conversion(
             if let Some(ch) = arg.chars().next() {
                 let mut buf = [0u8; 4];
                 let encoded = ch.encode_utf8(&mut buf);
-                let formatted =
-                    apply_string_format(encoded, &flags, width, precision);
+                let formatted = apply_string_format(encoded, &flags, width, precision);
                 output.extend_from_slice(&formatted);
             } else {
                 // empty arg: output a NUL byte (GNU compat)
@@ -487,7 +481,9 @@ fn hex_digit_value(ch: u8) -> u8 {
 fn parse_decimal(data: &[u8], i: &mut usize) -> usize {
     let mut val: usize = 0;
     while *i < data.len() && data[*i].is_ascii_digit() {
-        val = val.saturating_mul(10).saturating_add((data[*i] - b'0') as usize);
+        val = val
+            .saturating_mul(10)
+            .saturating_add((data[*i] - b'0') as usize);
         *i += 1;
     }
     val
@@ -515,7 +511,10 @@ fn parse_integer(s: &str) -> i64 {
         (false, s)
     };
 
-    let magnitude = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+    let magnitude = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
         u64::from_str_radix(hex, 16).unwrap_or(0)
     } else if let Some(oct) = digits.strip_prefix('0') {
         if oct.is_empty() {
@@ -555,7 +554,10 @@ fn parse_unsigned(s: &str) -> u64 {
         (false, s)
     };
 
-    let magnitude = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+    let magnitude = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
         u64::from_str_radix(hex, 16).unwrap_or(0)
     } else if let Some(oct) = digits.strip_prefix('0') {
         if oct.is_empty() {
@@ -605,7 +607,12 @@ struct FormatFlags {
 }
 
 /// Apply string formatting with width and precision (for %s, %b, %c).
-fn apply_string_format(s: &str, flags: &FormatFlags, width: usize, precision: Option<usize>) -> Vec<u8> {
+fn apply_string_format(
+    s: &str,
+    flags: &FormatFlags,
+    width: usize,
+    precision: Option<usize>,
+) -> Vec<u8> {
     let truncated: &str;
     let owned: String;
     if let Some(prec) = precision {
@@ -624,13 +631,14 @@ fn apply_string_format(s: &str, flags: &FormatFlags, width: usize, precision: Op
 }
 
 /// Apply string formatting for raw bytes.
-fn apply_string_format_bytes(s: &[u8], flags: &FormatFlags, width: usize, precision: Option<usize>) -> Vec<u8> {
+fn apply_string_format_bytes(
+    s: &[u8],
+    flags: &FormatFlags,
+    width: usize,
+    precision: Option<usize>,
+) -> Vec<u8> {
     let data = if let Some(prec) = precision {
-        if s.len() > prec {
-            &s[..prec]
-        } else {
-            s
-        }
+        if s.len() > prec { &s[..prec] } else { s }
     } else {
         s
     };

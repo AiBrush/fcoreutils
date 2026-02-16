@@ -6,16 +6,10 @@ use std::io;
 #[derive(Clone, Debug)]
 pub enum Pattern {
     /// Split before the first line matching the regex, with optional offset.
-    Regex {
-        regex: String,
-        offset: i64,
-    },
+    Regex { regex: String, offset: i64 },
     /// Skip to (but don't include) a line matching the regex, with optional offset.
     /// Lines skipped are not written to any output file.
-    SkipTo {
-        regex: String,
-        offset: i64,
-    },
+    SkipTo { regex: String, offset: i64 },
     /// Split at a specific line number.
     LineNumber(usize),
     /// Repeat the previous pattern N times.
@@ -80,8 +74,7 @@ pub fn parse_pattern(s: &str) -> Result<Pattern, String> {
                     .map_err(|_| format!("invalid offset: '{}'", after))?
             };
             // Validate regex
-            Regex::new(regex_str)
-                .map_err(|e| format!("invalid regex '{}': {}", regex_str, e))?;
+            Regex::new(regex_str).map_err(|e| format!("invalid regex '{}': {}", regex_str, e))?;
             return Ok(Pattern::Regex {
                 regex: regex_str.to_string(),
                 offset,
@@ -104,8 +97,7 @@ pub fn parse_pattern(s: &str) -> Result<Pattern, String> {
                     .map_err(|_| format!("invalid offset: '{}'", after))?
             };
             // Validate regex
-            Regex::new(regex_str)
-                .map_err(|e| format!("invalid regex '{}': {}", regex_str, e))?;
+            Regex::new(regex_str).map_err(|e| format!("invalid regex '{}': {}", regex_str, e))?;
             return Ok(Pattern::SkipTo {
                 regex: regex_str.to_string(),
                 offset,
@@ -115,9 +107,7 @@ pub fn parse_pattern(s: &str) -> Result<Pattern, String> {
     }
 
     // LINE_NUMBER - split at line number
-    let n: usize = s
-        .parse()
-        .map_err(|_| format!("invalid pattern: '{}'", s))?;
+    let n: usize = s.parse().map_err(|_| format!("invalid pattern: '{}'", s))?;
     if n == 0 {
         return Err("line number must be positive".to_string());
     }
@@ -189,11 +179,7 @@ pub fn format_suffix(fmt: &str, value: usize) -> String {
 }
 
 /// Write lines to a file, returning the number of bytes written.
-fn write_chunk(
-    lines: &[String],
-    filename: &str,
-    config: &CsplitConfig,
-) -> Result<u64, String> {
+fn write_chunk(lines: &[String], filename: &str, config: &CsplitConfig) -> Result<u64, String> {
     if config.elide_empty && lines.is_empty() {
         return Ok(0);
     }
@@ -318,10 +304,9 @@ pub fn csplit_file(
                     let chunk_lines = &lines[current_line..split_at];
                     let filename = output_filename(config, file_index);
 
-                    let bytes =
-                        write_chunk(chunk_lines, &filename, config).inspect_err(|_| {
-                            do_cleanup(&created_files, config);
-                        })?;
+                    let bytes = write_chunk(chunk_lines, &filename, config).inspect_err(|_| {
+                        do_cleanup(&created_files, config);
+                    })?;
 
                     if !(config.elide_empty && chunk_lines.is_empty()) {
                         created_files.push(filename);

@@ -297,8 +297,7 @@ pub fn pr_file<R: BufRead, W: Write>(
 
         let page_end = (line_idx + lines_consumed_per_page).min(total_lines);
 
-        if page_num >= config.first_page
-            && (config.last_page == 0 || page_num <= config.last_page)
+        if page_num >= config.first_page && (config.last_page == 0 || page_num <= config.last_page)
         {
             // Write header
             if !config.omit_header && !config.omit_pagination {
@@ -380,7 +379,10 @@ pub fn pr_merge<W: Write>(
     let num_files = inputs.len();
     let col_sep = get_column_separator(config);
     let col_width = if num_files > 1 {
-        (config.page_width.saturating_sub(col_sep.len() * (num_files - 1))) / num_files
+        (config
+            .page_width
+            .saturating_sub(col_sep.len() * (num_files - 1)))
+            / num_files
     } else {
         config.page_width
     };
@@ -393,8 +395,7 @@ pub fn pr_merge<W: Write>(
     while line_idx < max_lines {
         let page_end = (line_idx + input_lines_per_page).min(max_lines);
 
-        if page_num >= config.first_page
-            && (config.last_page == 0 || page_num <= config.last_page)
+        if page_num >= config.first_page && (config.last_page == 0 || page_num <= config.last_page)
         {
             if !config.omit_header && !config.omit_pagination {
                 write_header(output, &date_str, header_str, page_num, config)?;
@@ -471,11 +472,7 @@ fn write_header<W: Write>(
     let page_str = format!("Page {}", page_num);
     // GNU pr format: date is left, header is centered, page is right
     // Simplified: "{date}  {header}  {page}"
-    writeln!(
-        output,
-        "{}{} {} {}",
-        indent_str, date_str, header, page_str
-    )?;
+    writeln!(output, "{}{} {} {}", indent_str, date_str, header, page_str)?;
 
     // 2 blank lines
     writeln!(output)?;
@@ -571,7 +568,10 @@ fn write_multicolumn_body<W: Write>(
 ) -> io::Result<()> {
     let col_sep = get_column_separator(config);
     let col_width = if columns > 1 {
-        (config.page_width.saturating_sub(col_sep.len() * (columns - 1))) / columns
+        (config
+            .page_width
+            .saturating_sub(col_sep.len() * (columns - 1)))
+            / columns
     } else {
         config.page_width
     };

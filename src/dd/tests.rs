@@ -329,6 +329,7 @@ fn test_dd_roundtrip() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_dd_matches_gnu() {
     // Only run if GNU dd is available
     let gnu_result = Command::new("dd")

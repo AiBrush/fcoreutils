@@ -134,7 +134,11 @@ fn du_recursive(
         let read_dir = match std::fs::read_dir(path) {
             Ok(rd) => rd,
             Err(e) => {
-                eprintln!("du: cannot read directory '{}': {}", path.display(), format_io_error(&e));
+                eprintln!(
+                    "du: cannot read directory '{}': {}",
+                    path.display(),
+                    format_io_error(&e)
+                );
                 // Still report what we can for this directory.
                 if should_report_dir(config, depth) {
                     entries.push(DuEntry {
@@ -151,7 +155,11 @@ fn du_recursive(
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("du: cannot access entry in '{}': {}", path.display(), format_io_error(&e));
+                    eprintln!(
+                        "du: cannot access entry in '{}': {}",
+                        path.display(),
+                        format_io_error(&e)
+                    );
                     continue;
                 }
             };
@@ -160,7 +168,11 @@ fn du_recursive(
             // Check exclude patterns against the file name.
             if let Some(name) = child_path.file_name() {
                 let name_str = name.to_string_lossy();
-                if config.exclude_patterns.iter().any(|pat| glob_match(pat, &name_str)) {
+                if config
+                    .exclude_patterns
+                    .iter()
+                    .any(|pat| glob_match(pat, &name_str))
+                {
                     continue;
                 }
             }
@@ -293,8 +305,7 @@ fn human_readable(bytes: u64, base: u64) -> String {
         // Show one decimal place for values < 10.
         let formatted = format!("{:.1}{}", value, suffixes[idx]);
         // Remove trailing ".0" like GNU does.
-        formatted.replace(".0", "")
-            .replacen(".0", "", 1) // only first occurrence
+        formatted.replace(".0", "").replacen(".0", "", 1) // only first occurrence
     }
 }
 
@@ -302,8 +313,7 @@ fn human_readable(bytes: u64, base: u64) -> String {
 pub fn format_time(epoch_secs: i64, style: &str) -> String {
     // Convert epoch seconds to a broken-down time.
     let secs = epoch_secs;
-    let st = match SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs as u64))
-    {
+    let st = match SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs as u64)) {
         Some(t) => t,
         None => return String::from("?"),
     };
@@ -338,11 +348,7 @@ pub fn format_time(epoch_secs: i64, style: &str) -> String {
 }
 
 /// Print a single DuEntry.
-pub fn print_entry<W: Write>(
-    out: &mut W,
-    entry: &DuEntry,
-    config: &DuConfig,
-) -> io::Result<()> {
+pub fn print_entry<W: Write>(out: &mut W, entry: &DuEntry, config: &DuConfig) -> io::Result<()> {
     // Apply threshold filtering.
     if let Some(thresh) = config.threshold {
         let size_signed = entry.size as i64;
@@ -428,11 +434,7 @@ pub fn parse_threshold(s: &str) -> Result<i64, String> {
     };
 
     let val = parse_block_size(rest)? as i64;
-    if negative {
-        Ok(-val)
-    } else {
-        Ok(val)
-    }
+    if negative { Ok(-val) } else { Ok(val) }
 }
 
 /// Read exclude patterns from a file (one per line).

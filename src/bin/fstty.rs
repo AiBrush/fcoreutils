@@ -14,8 +14,14 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(unix)]
 fn print_help() {
-    println!("Usage: {} [-F DEVICE | --file=DEVICE] [SETTING]...", TOOL_NAME);
-    println!("  or:  {} [-F DEVICE | --file=DEVICE] [-a|--all]", TOOL_NAME);
+    println!(
+        "Usage: {} [-F DEVICE | --file=DEVICE] [SETTING]...",
+        TOOL_NAME
+    );
+    println!(
+        "  or:  {} [-F DEVICE | --file=DEVICE] [-a|--all]",
+        TOOL_NAME
+    );
     println!("Print or change terminal line settings.");
     println!();
     println!("  -a, --all          print all current settings in human-readable form");
@@ -165,8 +171,7 @@ fn main() {
             match coreutils_rs::stty::apply_settings(&mut termios, &config.settings) {
                 Ok(changed) => {
                     if changed && let Err(e) = coreutils_rs::stty::set_termios(fd, &termios) {
-                        let src =
-                            config.device.as_deref().unwrap_or("standard input");
+                        let src = config.device.as_deref().unwrap_or("standard input");
                         eprintln!(
                             "{}: {}: {}",
                             TOOL_NAME,

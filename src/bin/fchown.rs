@@ -77,8 +77,7 @@ fn main() {
                         'h' => config.no_dereference = true,
                         'R' => config.recursive = true,
                         'H' => {
-                            config.symlink_follow =
-                                coreutils_rs::chown::SymlinkFollow::CommandLine;
+                            config.symlink_follow = coreutils_rs::chown::SymlinkFollow::CommandLine;
                         }
                         'L' => {
                             config.symlink_follow = coreutils_rs::chown::SymlinkFollow::Always;
@@ -162,9 +161,8 @@ fn main() {
     for file in files {
         let path = std::path::Path::new(file);
         if config.recursive {
-            errors += coreutils_rs::chown::chown_recursive(
-                path, uid, gid, &config, true, TOOL_NAME,
-            );
+            errors +=
+                coreutils_rs::chown::chown_recursive(path, uid, gid, &config, true, TOOL_NAME);
         } else {
             match coreutils_rs::chown::chown_file(path, uid, gid, &config) {
                 Ok(_) => {}

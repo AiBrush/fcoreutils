@@ -73,7 +73,10 @@ fn parse_args() -> DfConfig {
                     let v = val.map(|s| s.to_string()).unwrap_or_else(|| {
                         args.next()
                             .unwrap_or_else(|| {
-                                eprintln!("{}: option '--block-size' requires an argument", TOOL_NAME);
+                                eprintln!(
+                                    "{}: option '--block-size' requires an argument",
+                                    TOOL_NAME
+                                );
                                 process::exit(1);
                             })
                             .to_string_lossy()
@@ -191,10 +194,7 @@ fn parse_args() -> DfConfig {
                         break;
                     }
                     _ => {
-                        eprintln!(
-                            "{}: invalid option -- '{}'",
-                            TOOL_NAME, bytes[i] as char
-                        );
+                        eprintln!("{}: invalid option -- '{}'", TOOL_NAME, bytes[i] as char);
                         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
                         process::exit(1);
                     }

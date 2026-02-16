@@ -11,8 +11,7 @@ use std::process;
 
 #[cfg(unix)]
 use coreutils_rs::du::{
-    DuConfig, DuEntry, du_path, parse_block_size, parse_threshold, print_entry,
-    read_exclude_file,
+    DuConfig, DuEntry, du_path, parse_block_size, parse_threshold, print_entry, read_exclude_file,
 };
 
 #[cfg(unix)]
@@ -203,10 +202,7 @@ fn parse_args() -> (DuConfig, Vec<String>) {
                         match val_str.parse::<usize>() {
                             Ok(d) => config.max_depth = Some(d),
                             Err(_) => {
-                                eprintln!(
-                                    "{}: invalid maximum depth '{}'",
-                                    TOOL_NAME, val_str
-                                );
+                                eprintln!("{}: invalid maximum depth '{}'", TOOL_NAME, val_str);
                                 process::exit(1);
                             }
                         }

@@ -234,9 +234,10 @@ impl ChunkWriter for FilterChunkWriter {
         self.child.stdin.take();
         let status = self.child.wait()?;
         if !status.success() {
-            return Err(io::Error::other(
-                format!("filter command exited with status {}", status),
-            ));
+            return Err(io::Error::other(format!(
+                "filter command exited with status {}",
+                status
+            )));
         }
         Ok(())
     }
@@ -277,9 +278,7 @@ fn split_by_lines(
 
         if writer.is_none() {
             if chunk_index >= limit {
-                return Err(io::Error::other(
-                    "output file suffixes exhausted",
-                ));
+                return Err(io::Error::other("output file suffixes exhausted"));
             }
             writer = Some(create_writer(config, chunk_index)?);
         }
@@ -357,9 +356,7 @@ fn split_by_bytes(
         while offset < bytes_read {
             if writer.is_none() {
                 if chunk_index >= limit {
-                    return Err(io::Error::other(
-                        "output file suffixes exhausted",
-                    ));
+                    return Err(io::Error::other("output file suffixes exhausted"));
                 }
                 writer = Some(create_writer(config, chunk_index)?);
                 bytes_in_chunk = 0;
@@ -369,7 +366,10 @@ fn split_by_bytes(
             let remaining_in_buf = bytes_read - offset;
             let to_write = remaining_in_chunk.min(remaining_in_buf);
 
-            writer.as_mut().unwrap().write_all(&read_buf[offset..offset + to_write])?;
+            writer
+                .as_mut()
+                .unwrap()
+                .write_all(&read_buf[offset..offset + to_write])?;
             bytes_in_chunk += to_write as u64;
             offset += to_write;
 
@@ -431,9 +431,7 @@ fn split_by_line_bytes(
 
         if writer.is_none() {
             if chunk_index >= limit {
-                return Err(io::Error::other(
-                    "output file suffixes exhausted",
-                ));
+                return Err(io::Error::other("output file suffixes exhausted"));
             }
             writer = Some(create_writer(config, chunk_index)?);
             bytes_in_chunk = 0;
@@ -463,16 +461,10 @@ fn split_by_line_bytes(
 
 /// Split input into exactly N chunks by byte count.
 /// Reads the whole file to determine size, then distributes bytes evenly.
-fn split_by_number(
-    input_path: &str,
-    config: &SplitConfig,
-    n_chunks: u64,
-) -> io::Result<()> {
+fn split_by_number(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io::Result<()> {
     let limit = max_chunks(&config.suffix_type, config.suffix_length);
     if n_chunks > limit {
-        return Err(io::Error::other(
-            "output file suffixes exhausted",
-        ));
+        return Err(io::Error::other("output file suffixes exhausted"));
     }
     if n_chunks == 0 {
         return Err(io::Error::new(
@@ -532,7 +524,10 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
         if !path.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("cannot open '{}' for reading: No such file or directory", input_path),
+                format!(
+                    "cannot open '{}' for reading: No such file or directory",
+                    input_path
+                ),
             ));
         }
         Box::new(File::open(path)?)

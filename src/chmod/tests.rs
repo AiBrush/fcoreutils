@@ -149,11 +149,17 @@ fn test_chmod_capital_x() {
     // X adds execute only if the file is a directory or already has execute
     // For a regular file with no execute bit, X should not add execute
     let new_mode = parse_mode("a+X", 0o644).unwrap();
-    assert_eq!(new_mode, 0o644, "X should not add execute to non-exec regular file");
+    assert_eq!(
+        new_mode, 0o644,
+        "X should not add execute to non-exec regular file"
+    );
 
     // For a regular file that already has an execute bit, X should add execute
     let new_mode = parse_mode("a+X", 0o744).unwrap();
-    assert_eq!(new_mode, 0o755, "X should add execute when file already has execute");
+    assert_eq!(
+        new_mode, 0o755,
+        "X should add execute when file already has execute"
+    );
 
     // For a directory (mode includes S_IFDIR bit 0o40000)
     let dir_mode = 0o040644; // directory with mode 644
@@ -173,7 +179,11 @@ fn test_chmod_capital_x_on_directory() {
     let current_mode = meta.mode();
     let new_mode = parse_mode("a+X", current_mode).unwrap();
     chmod_file(&subdir, new_mode, &default_config()).unwrap();
-    assert_eq!(get_mode(&subdir), 0o755, "X should add execute for directory");
+    assert_eq!(
+        get_mode(&subdir),
+        0o755,
+        "X should add execute for directory"
+    );
 }
 
 // ──────────────────────────────────────────────────
@@ -412,8 +422,16 @@ fn test_chmod_matches_gnu_symbolic() {
     ];
 
     for (mode_str, initial_mode) in test_cases {
-        let gnu_file = create_file_with_mode(&dir, &format!("gnu_{}.txt", mode_str.replace(',', "_")), initial_mode);
-        let our_file = create_file_with_mode(&dir, &format!("our_{}.txt", mode_str.replace(',', "_")), initial_mode);
+        let gnu_file = create_file_with_mode(
+            &dir,
+            &format!("gnu_{}.txt", mode_str.replace(',', "_")),
+            initial_mode,
+        );
+        let our_file = create_file_with_mode(
+            &dir,
+            &format!("our_{}.txt", mode_str.replace(',', "_")),
+            initial_mode,
+        );
 
         let gnu = Command::new("chmod")
             .args([mode_str, gnu_file.to_str().unwrap()])

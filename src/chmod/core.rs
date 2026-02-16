@@ -353,8 +353,7 @@ fn process_entry(path: &Path, mode_str: &str, config: &ChmodConfig) -> Result<()
     }
 
     let current_mode = metadata.mode();
-    let new_mode = parse_mode(mode_str, current_mode)
-        .map_err(|e| io::Error::other(e))?;
+    let new_mode = parse_mode(mode_str, current_mode).map_err(|e| io::Error::other(e))?;
     chmod_file(path, new_mode, config)?;
     Ok(())
 }
@@ -365,11 +364,7 @@ fn walk_dir(dir: &Path, mode_str: &str, config: &ChmodConfig, had_error: &mut bo
         Ok(entries) => entries,
         Err(e) => {
             if !config.quiet {
-                eprintln!(
-                    "chmod: cannot open directory '{}': {}",
-                    dir.display(),
-                    e
-                );
+                eprintln!("chmod: cannot open directory '{}': {}", dir.display(), e);
             }
             *had_error = true;
             return;

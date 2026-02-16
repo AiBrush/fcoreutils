@@ -115,8 +115,7 @@ pub fn parse_owner_spec(spec: &str) -> Result<(Option<u32>, Option<u32>), String
         '.'
     } else {
         // No separator -- just a user
-        let uid = resolve_user(spec)
-            .ok_or_else(|| format!("invalid user: '{}'", spec))?;
+        let uid = resolve_user(spec).ok_or_else(|| format!("invalid user: '{}'", spec))?;
         return Ok((Some(uid), None));
     };
 
@@ -127,10 +126,7 @@ pub fn parse_owner_spec(spec: &str) -> Result<(Option<u32>, Option<u32>), String
     let uid = if user_part.is_empty() {
         None
     } else {
-        Some(
-            resolve_user(user_part)
-                .ok_or_else(|| format!("invalid user: '{}'", user_part))?,
-        )
+        Some(resolve_user(user_part).ok_or_else(|| format!("invalid user: '{}'", user_part))?)
     };
 
     let gid = if group_part.is_empty() {
@@ -140,20 +136,14 @@ pub fn parse_owner_spec(spec: &str) -> Result<(Option<u32>, Option<u32>), String
             if pw.is_null() {
                 // For numeric UIDs that don't map to a user, we can't resolve
                 // their login group -- GNU chown errors out here
-                return Err(format!(
-                    "failed to get login group for uid '{}'",
-                    u
-                ));
+                return Err(format!("failed to get login group for uid '{}'", u));
             }
             Some(unsafe { (*pw).pw_gid })
         } else {
             None
         }
     } else {
-        Some(
-            resolve_group(group_part)
-                .ok_or_else(|| format!("invalid group: '{}'", group_part))?,
-        )
+        Some(resolve_group(group_part).ok_or_else(|| format!("invalid group: '{}'", group_part))?)
     };
 
     Ok((uid, gid))
@@ -254,12 +244,7 @@ fn print_verbose(path: &Path, uid: Option<u32>, gid: Option<u32>, changed: bool)
             );
         }
         (None, Some(g)) => {
-            eprintln!(
-                "group of '{}' {} to {}",
-                display,
-                action,
-                gid_to_name(g)
-            );
+            eprintln!("group of '{}' {} to {}", display, action, gid_to_name(g));
         }
         (None, None) => {
             eprintln!("ownership of '{}' {}", display, action);
@@ -338,14 +323,7 @@ pub fn chown_recursive(
         for entry in entries {
             match entry {
                 Ok(entry) => {
-                    errors += chown_recursive(
-                        &entry.path(),
-                        uid,
-                        gid,
-                        config,
-                        false,
-                        tool_name,
-                    );
+                    errors += chown_recursive(&entry.path(), uid, gid, config, false, tool_name);
                 }
                 Err(e) => {
                     if !config.silent {

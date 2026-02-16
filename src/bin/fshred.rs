@@ -5,10 +5,7 @@ const TOOL_NAME: &str = "shred";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn print_help() {
-    println!(
-        "Usage: {} [OPTION]... FILE...",
-        TOOL_NAME
-    );
+    println!("Usage: {} [OPTION]... FILE...", TOOL_NAME);
     println!("Overwrite the specified FILE(s) repeatedly, in order to make it harder");
     println!("for even very expensive hardware probing to recover the data.");
     println!();
@@ -96,10 +93,7 @@ fn main() {
                 config.iterations = match args[i].parse() {
                     Ok(n) => n,
                     Err(_) => {
-                        eprintln!(
-                            "{}: invalid number of passes: '{}'",
-                            TOOL_NAME, args[i]
-                        );
+                        eprintln!("{}: invalid number of passes: '{}'", TOOL_NAME, args[i]);
                         process::exit(1);
                     }
                 };
@@ -124,10 +118,7 @@ fn main() {
                 config.iterations = match val.parse() {
                     Ok(n) => n,
                     Err(_) => {
-                        eprintln!(
-                            "{}: invalid number of passes: '{}'",
-                            TOOL_NAME, val
-                        );
+                        eprintln!("{}: invalid number of passes: '{}'", TOOL_NAME, val);
                         process::exit(1);
                     }
                 };
@@ -142,15 +133,13 @@ fn main() {
                     }
                 };
             }
-            _ if arg.starts_with("--remove") => {
-                match coreutils_rs::shred::parse_remove_mode(arg) {
-                    Ok(mode) => config.remove = Some(mode),
-                    Err(e) => {
-                        eprintln!("{}: {}", TOOL_NAME, e);
-                        process::exit(1);
-                    }
+            _ if arg.starts_with("--remove") => match coreutils_rs::shred::parse_remove_mode(arg) {
+                Ok(mode) => config.remove = Some(mode),
+                Err(e) => {
+                    eprintln!("{}: {}", TOOL_NAME, e);
+                    process::exit(1);
                 }
-            }
+            },
             _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
                 // Parse combined short flags like -vfz
                 let chars: Vec<char> = arg[1..].chars().collect();
@@ -162,8 +151,7 @@ fn main() {
                         'x' => config.exact = true,
                         'z' => config.zero_pass = true,
                         'u' => {
-                            config.remove =
-                                Some(coreutils_rs::shred::RemoveMode::WipeSync);
+                            config.remove = Some(coreutils_rs::shred::RemoveMode::WipeSync);
                         }
                         'n' => {
                             // Rest of this arg or next arg is the count
@@ -171,10 +159,7 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 'n'",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 'n'", TOOL_NAME);
                                     process::exit(1);
                                 }
                                 config.iterations = match args[i].parse() {
@@ -206,41 +191,30 @@ fn main() {
                             if rest.is_empty() {
                                 i += 1;
                                 if i >= args.len() {
-                                    eprintln!(
-                                        "{}: option requires an argument -- 's'",
-                                        TOOL_NAME
-                                    );
+                                    eprintln!("{}: option requires an argument -- 's'", TOOL_NAME);
                                     process::exit(1);
                                 }
-                                config.size =
-                                    match coreutils_rs::shred::parse_size(&args[i]) {
-                                        Ok(n) => Some(n),
-                                        Err(e) => {
-                                            eprintln!("{}: {}", TOOL_NAME, e);
-                                            process::exit(1);
-                                        }
-                                    };
+                                config.size = match coreutils_rs::shred::parse_size(&args[i]) {
+                                    Ok(n) => Some(n),
+                                    Err(e) => {
+                                        eprintln!("{}: {}", TOOL_NAME, e);
+                                        process::exit(1);
+                                    }
+                                };
                             } else {
-                                config.size =
-                                    match coreutils_rs::shred::parse_size(&rest) {
-                                        Ok(n) => Some(n),
-                                        Err(e) => {
-                                            eprintln!("{}: {}", TOOL_NAME, e);
-                                            process::exit(1);
-                                        }
-                                    };
+                                config.size = match coreutils_rs::shred::parse_size(&rest) {
+                                    Ok(n) => Some(n),
+                                    Err(e) => {
+                                        eprintln!("{}: {}", TOOL_NAME, e);
+                                        process::exit(1);
+                                    }
+                                };
                             }
                             break;
                         }
                         _ => {
-                            eprintln!(
-                                "{}: invalid option -- '{}'",
-                                TOOL_NAME, chars[j]
-                            );
-                            eprintln!(
-                                "Try '{} --help' for more information.",
-                                TOOL_NAME
-                            );
+                            eprintln!("{}: invalid option -- '{}'", TOOL_NAME, chars[j]);
+                            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
                             process::exit(1);
                         }
                     }
