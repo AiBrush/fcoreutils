@@ -35,6 +35,8 @@ pub mod fold;
 pub mod hash;
 pub mod head;
 pub mod join;
+pub mod nl;
+pub mod paste;
 pub mod rev;
 pub mod sort;
 pub mod tac;
