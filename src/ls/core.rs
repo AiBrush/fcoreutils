@@ -257,10 +257,10 @@ impl ColorDb {
     /// Look up the colour escape for a file entry.
     fn color_for(&self, entry: &FileEntry) -> &str {
         let mode = entry.mode;
-        let ft = mode & libc::S_IFMT;
+        let ft = mode & (libc::S_IFMT as u32);
 
         // Symlink
-        if ft == libc::S_IFLNK {
+        if ft == libc::S_IFLNK as u32 {
             if entry.link_target_ok {
                 return &self.link;
             } else {
@@ -269,9 +269,9 @@ impl ColorDb {
         }
 
         // Directory with special bits
-        if ft == libc::S_IFDIR {
-            let sticky = mode & libc::S_ISVTX != 0;
-            let ow = mode & libc::S_IWOTH != 0;
+        if ft == libc::S_IFDIR as u32 {
+            let sticky = mode & (libc::S_ISVTX as u32) != 0;
+            let ow = mode & (libc::S_IWOTH as u32) != 0;
             if sticky && ow {
                 return &self.sticky_other_writable;
             }
@@ -285,24 +285,24 @@ impl ColorDb {
         }
 
         // Special files
-        if ft == libc::S_IFIFO {
+        if ft == libc::S_IFIFO as u32 {
             return &self.pipe;
         }
-        if ft == libc::S_IFSOCK {
+        if ft == libc::S_IFSOCK as u32 {
             return &self.socket;
         }
-        if ft == libc::S_IFBLK {
+        if ft == libc::S_IFBLK as u32 {
             return &self.block_dev;
         }
-        if ft == libc::S_IFCHR {
+        if ft == libc::S_IFCHR as u32 {
             return &self.char_dev;
         }
 
         // Setuid / setgid
-        if mode & libc::S_ISUID != 0 {
+        if mode & (libc::S_ISUID as u32) != 0 {
             return &self.setuid;
         }
-        if mode & libc::S_ISGID != 0 {
+        if mode & (libc::S_ISGID as u32) != 0 {
             return &self.setgid;
         }
 
@@ -315,7 +315,9 @@ impl ColorDb {
         }
 
         // Executable
-        if ft == libc::S_IFREG && mode & (libc::S_IXUSR | libc::S_IXGRP | libc::S_IXOTH) != 0 {
+        if ft == libc::S_IFREG as u32
+            && mode & (libc::S_IXUSR as u32 | libc::S_IXGRP as u32 | libc::S_IXOTH as u32) != 0
+        {
             return &self.exec;
         }
 
@@ -457,31 +459,35 @@ impl FileEntry {
 
     /// Indicator character for classify.
     fn indicator(&self, style: IndicatorStyle) -> &'static str {
-        let ft = self.mode & libc::S_IFMT;
+        let ft = self.mode & (libc::S_IFMT as u32);
         match style {
             IndicatorStyle::None => "",
             IndicatorStyle::Slash => {
-                if ft == libc::S_IFDIR {
+                if ft == libc::S_IFDIR as u32 {
                     "/"
                 } else {
                     ""
                 }
             }
             IndicatorStyle::FileType => match ft {
-                x if x == libc::S_IFDIR => "/",
-                x if x == libc::S_IFLNK => "@",
-                x if x == libc::S_IFIFO => "|",
-                x if x == libc::S_IFSOCK => "=",
+                x if x == libc::S_IFDIR as u32 => "/",
+                x if x == libc::S_IFLNK as u32 => "@",
+                x if x == libc::S_IFIFO as u32 => "|",
+                x if x == libc::S_IFSOCK as u32 => "=",
                 _ => "",
             },
             IndicatorStyle::Classify => match ft {
-                x if x == libc::S_IFDIR => "/",
-                x if x == libc::S_IFLNK => "@",
-                x if x == libc::S_IFIFO => "|",
-                x if x == libc::S_IFSOCK => "=",
+                x if x == libc::S_IFDIR as u32 => "/",
+                x if x == libc::S_IFLNK as u32 => "@",
+                x if x == libc::S_IFIFO as u32 => "|",
+                x if x == libc::S_IFSOCK as u32 => "=",
                 _ => {
-                    if ft == libc::S_IFREG
-                        && self.mode & (libc::S_IXUSR | libc::S_IXGRP | libc::S_IXOTH) != 0
+                    if ft == libc::S_IFREG as u32
+                        && self.mode
+                            & (libc::S_IXUSR as u32
+                                | libc::S_IXGRP as u32
+                                | libc::S_IXOTH as u32)
+                            != 0
                     {
                         "*"
                     } else {
@@ -765,56 +771,56 @@ pub fn format_permissions(mode: u32) -> String {
     let mut s = String::with_capacity(10);
 
     // File type character
-    s.push(match mode & libc::S_IFMT {
-        x if x == libc::S_IFDIR => 'd',
-        x if x == libc::S_IFLNK => 'l',
-        x if x == libc::S_IFBLK => 'b',
-        x if x == libc::S_IFCHR => 'c',
-        x if x == libc::S_IFIFO => 'p',
-        x if x == libc::S_IFSOCK => 's',
+    s.push(match mode & (libc::S_IFMT as u32) {
+        x if x == libc::S_IFDIR as u32 => 'd',
+        x if x == libc::S_IFLNK as u32 => 'l',
+        x if x == libc::S_IFBLK as u32 => 'b',
+        x if x == libc::S_IFCHR as u32 => 'c',
+        x if x == libc::S_IFIFO as u32 => 'p',
+        x if x == libc::S_IFSOCK as u32 => 's',
         _ => '-',
     });
 
     // User
-    s.push(if mode & libc::S_IRUSR != 0 { 'r' } else { '-' });
-    s.push(if mode & libc::S_IWUSR != 0 { 'w' } else { '-' });
-    s.push(if mode & libc::S_ISUID != 0 {
-        if mode & libc::S_IXUSR != 0 {
+    s.push(if mode & (libc::S_IRUSR as u32) != 0 { 'r' } else { '-' });
+    s.push(if mode & (libc::S_IWUSR as u32) != 0 { 'w' } else { '-' });
+    s.push(if mode & (libc::S_ISUID as u32) != 0 {
+        if mode & (libc::S_IXUSR as u32) != 0 {
             's'
         } else {
             'S'
         }
-    } else if mode & libc::S_IXUSR != 0 {
+    } else if mode & (libc::S_IXUSR as u32) != 0 {
         'x'
     } else {
         '-'
     });
 
     // Group
-    s.push(if mode & libc::S_IRGRP != 0 { 'r' } else { '-' });
-    s.push(if mode & libc::S_IWGRP != 0 { 'w' } else { '-' });
-    s.push(if mode & libc::S_ISGID != 0 {
-        if mode & libc::S_IXGRP != 0 {
+    s.push(if mode & (libc::S_IRGRP as u32) != 0 { 'r' } else { '-' });
+    s.push(if mode & (libc::S_IWGRP as u32) != 0 { 'w' } else { '-' });
+    s.push(if mode & (libc::S_ISGID as u32) != 0 {
+        if mode & (libc::S_IXGRP as u32) != 0 {
             's'
         } else {
             'S'
         }
-    } else if mode & libc::S_IXGRP != 0 {
+    } else if mode & (libc::S_IXGRP as u32) != 0 {
         'x'
     } else {
         '-'
     });
 
     // Other
-    s.push(if mode & libc::S_IROTH != 0 { 'r' } else { '-' });
-    s.push(if mode & libc::S_IWOTH != 0 { 'w' } else { '-' });
-    s.push(if mode & libc::S_ISVTX != 0 {
-        if mode & libc::S_IXOTH != 0 {
+    s.push(if mode & (libc::S_IROTH as u32) != 0 { 'r' } else { '-' });
+    s.push(if mode & (libc::S_IWOTH as u32) != 0 { 'w' } else { '-' });
+    s.push(if mode & (libc::S_ISVTX as u32) != 0 {
+        if mode & (libc::S_IXOTH as u32) != 0 {
             't'
         } else {
             'T'
         }
-    } else if mode & libc::S_IXOTH != 0 {
+    } else if mode & (libc::S_IXOTH as u32) != 0 {
         'x'
     } else {
         '-'
@@ -1162,16 +1168,16 @@ fn print_long(
 
     // Size width: use the formatted size for human-readable, else raw digits
     let has_device = entries.iter().any(|e| {
-        let ft = e.mode & libc::S_IFMT;
-        ft == libc::S_IFBLK || ft == libc::S_IFCHR
+        let ft = e.mode & (libc::S_IFMT as u32);
+        ft == libc::S_IFBLK as u32 || ft == libc::S_IFCHR as u32
     });
     let max_size = if has_device {
         // For device files, need room for "major, minor"
         entries
             .iter()
             .map(|e| {
-                let ft = e.mode & libc::S_IFMT;
-                if ft == libc::S_IFBLK || ft == libc::S_IFCHR {
+                let ft = e.mode & (libc::S_IFMT as u32);
+                if ft == libc::S_IFBLK as u32 || ft == libc::S_IFCHR as u32 {
                     format!("{}, {}", e.rdev_major, e.rdev_minor).len()
                 } else {
                     format_size(e.size, config.human_readable, config.si, config.kibibytes).len()
@@ -1257,8 +1263,8 @@ fn print_long(
         }
 
         // Size or device numbers
-        let ft = entry.mode & libc::S_IFMT;
-        if ft == libc::S_IFBLK || ft == libc::S_IFCHR {
+        let ft = entry.mode & (libc::S_IFMT as u32);
+        if ft == libc::S_IFBLK as u32 || ft == libc::S_IFCHR as u32 {
             let dev = format!("{}, {}", entry.rdev_major, entry.rdev_minor);
             write!(out, "{:>width$} ", dev, width = max_size)?;
         } else {
@@ -1627,7 +1633,7 @@ pub fn ls_dir(
                 e.is_directory()
                     && e.name != "."
                     && e.name != ".."
-                    && (e.mode & libc::S_IFMT) != libc::S_IFLNK
+                    && (e.mode & (libc::S_IFMT as u32)) != libc::S_IFLNK as u32
             })
             .map(|e| e.path.clone())
             .collect();

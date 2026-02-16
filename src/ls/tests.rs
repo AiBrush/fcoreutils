@@ -367,51 +367,51 @@ fn test_ls_numeric() {
 #[test]
 fn test_ls_permission_format() {
     // Regular file: -rw-r--r--
-    let perm = format_permissions(libc::S_IFREG | 0o644);
+    let perm = format_permissions(libc::S_IFREG as u32 | 0o644);
     assert_eq!(perm, "-rw-r--r--");
 
     // Directory: drwxr-xr-x
-    let perm = format_permissions(libc::S_IFDIR | 0o755);
+    let perm = format_permissions(libc::S_IFDIR as u32 | 0o755);
     assert_eq!(perm, "drwxr-xr-x");
 
     // Symlink: lrwxrwxrwx
-    let perm = format_permissions(libc::S_IFLNK | 0o777);
+    let perm = format_permissions(libc::S_IFLNK as u32 | 0o777);
     assert_eq!(perm, "lrwxrwxrwx");
 
     // Setuid: -rwsr-xr-x
-    let perm = format_permissions(libc::S_IFREG | 0o4755);
+    let perm = format_permissions(libc::S_IFREG as u32 | 0o4755);
     assert_eq!(perm, "-rwsr-xr-x");
 
     // Setgid: -rwxr-sr-x
-    let perm = format_permissions(libc::S_IFREG | 0o2755);
+    let perm = format_permissions(libc::S_IFREG as u32 | 0o2755);
     assert_eq!(perm, "-rwxr-sr-x");
 
     // Sticky: drwxrwxrwt
-    let perm = format_permissions(libc::S_IFDIR | 0o1777);
+    let perm = format_permissions(libc::S_IFDIR as u32 | 0o1777);
     assert_eq!(perm, "drwxrwxrwt");
 
     // Setuid without exec: -rwSr--r--
-    let perm = format_permissions(libc::S_IFREG | 0o4644);
+    let perm = format_permissions(libc::S_IFREG as u32 | 0o4644);
     assert_eq!(perm, "-rwSr--r--");
 
     // Sticky without other-exec: drwxrwxrwT
-    let perm = format_permissions(libc::S_IFDIR | 0o1776);
+    let perm = format_permissions(libc::S_IFDIR as u32 | 0o1776);
     assert_eq!(perm, "drwxrwxrwT");
 
     // Pipe: prw-r--r--
-    let perm = format_permissions(libc::S_IFIFO | 0o644);
+    let perm = format_permissions(libc::S_IFIFO as u32 | 0o644);
     assert_eq!(perm, "prw-r--r--");
 
     // Socket: srwxrwxrwx
-    let perm = format_permissions(libc::S_IFSOCK | 0o777);
+    let perm = format_permissions(libc::S_IFSOCK as u32 | 0o777);
     assert_eq!(perm, "srwxrwxrwx");
 
     // Block device
-    let perm = format_permissions(libc::S_IFBLK | 0o660);
+    let perm = format_permissions(libc::S_IFBLK as u32 | 0o660);
     assert_eq!(perm, "brw-rw----");
 
     // Char device
-    let perm = format_permissions(libc::S_IFCHR | 0o666);
+    let perm = format_permissions(libc::S_IFCHR as u32 | 0o666);
     assert_eq!(perm, "crw-rw-rw-");
 }
 
