@@ -335,6 +335,7 @@ fn test_binary_nonexistent_file() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("tail:"));
+    #[cfg(unix)]
     assert!(stderr.contains("No such file or directory"));
 }
 
@@ -349,9 +350,10 @@ fn test_binary_version() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("tail (fcoreutils)"));
 }
 
-// ---- GNU compatibility ----
+// ---- GNU compatibility (Linux only — macOS/Windows have BSD utilities) ----
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_gnu_compat_default() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
@@ -375,6 +377,7 @@ fn test_gnu_compat_default() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_gnu_compat_plus_n() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test.txt");

@@ -401,6 +401,7 @@ fn test_binary_nonexistent_file() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("cat:"));
+    #[cfg(unix)]
     assert!(stderr.contains("No such file or directory"));
 }
 
@@ -445,9 +446,10 @@ fn test_binary_show_all() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "a^I^A$\n");
 }
 
-// ---- GNU compatibility ----
+// ---- GNU compatibility (Linux only — macOS/Windows have BSD utilities) ----
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_gnu_compat_plain() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
@@ -467,6 +469,7 @@ fn test_gnu_compat_plain() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_gnu_compat_number() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
@@ -488,6 +491,7 @@ fn test_gnu_compat_number() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_gnu_compat_number_nonblank() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
@@ -509,6 +513,7 @@ fn test_gnu_compat_number_nonblank() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn test_gnu_compat_show_nonprinting() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test.bin");
