@@ -13,6 +13,28 @@ use std::os::unix::process::CommandExt;
 #[cfg(unix)]
 use std::process;
 
+/// Clear errno to 0 (portable across Unix platforms)
+#[cfg(unix)]
+fn clear_errno() {
+    unsafe { *errno_ptr() = 0; }
+}
+
+/// Get current errno value (portable across Unix platforms)
+#[cfg(unix)]
+fn get_errno() -> i32 {
+    unsafe { *errno_ptr() }
+}
+
+#[cfg(unix)]
+unsafe fn errno_ptr() -> *mut i32 {
+    #[cfg(target_os = "linux")]
+    { unsafe { libc::__errno_location() } }
+    #[cfg(target_os = "macos")]
+    { unsafe { libc::__error() } }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { unsafe { libc::__errno_location() } }
+}
+
 #[cfg(unix)]
 const TOOL_NAME: &str = "nice";
 #[cfg(unix)]
@@ -108,9 +130,9 @@ fn main() {
     if command_start.is_none() || command_start.unwrap() >= args.len() {
         // No command — print current niceness + adjustment
         // SAFETY: getpriority with PRIO_PROCESS and 0 (current process) is always valid
-        unsafe { *libc::__errno_location() = 0; }
+        clear_errno();
         let current = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
-        if unsafe { *libc::__errno_location() } != 0 {
+        if std::io::Error::last_os_error().raw_os_error() != Some(0) && get_errno() != 0 {
             eprintln!("{}: cannot get niceness", TOOL_NAME);
             process::exit(125);
         }
@@ -125,7 +147,7 @@ fn main() {
     // Apply niceness adjustment
     // SAFETY: nice() is safe to call with any integer
     let ret = unsafe { libc::nice(adjustment) };
-    if ret == -1 && unsafe { *libc::__errno_location() } != 0 {
+    if ret == -1 && get_errno() != 0 {
         eprintln!(
             "{}: cannot set niceness: {}",
             TOOL_NAME,
