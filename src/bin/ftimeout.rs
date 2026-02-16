@@ -483,7 +483,7 @@ fn parse_signal(name: &str) -> Option<libc::c_int> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

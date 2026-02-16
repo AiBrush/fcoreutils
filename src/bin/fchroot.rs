@@ -269,7 +269,7 @@ fn resolve_group(spec: &str) -> Option<libc::gid_t> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

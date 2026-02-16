@@ -121,7 +121,7 @@ fn get_nprocs_conf() -> usize {
         .unwrap_or(1)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

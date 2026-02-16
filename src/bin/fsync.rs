@@ -146,7 +146,7 @@ fn sync_file(path: &str, data_only: bool, file_system: bool) -> std::io::Result<
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::process::Command;

@@ -47,7 +47,7 @@ fn main() {
     println!("{:08x}", id as u32);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

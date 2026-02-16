@@ -312,7 +312,7 @@ fn get_current_groups() -> Vec<libc::gid_t> {
     gids
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

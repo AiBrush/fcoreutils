@@ -103,7 +103,7 @@ fn logical_pwd() -> Option<PathBuf> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

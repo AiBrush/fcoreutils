@@ -285,7 +285,7 @@ fn handle_write_error(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};

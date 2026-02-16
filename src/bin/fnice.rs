@@ -186,7 +186,7 @@ fn main() {
     process::exit(code);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

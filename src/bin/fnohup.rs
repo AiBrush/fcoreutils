@@ -145,7 +145,7 @@ fn open_nohup_out() -> Option<File> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

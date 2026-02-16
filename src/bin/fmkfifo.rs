@@ -126,7 +126,7 @@ fn parse_octal_mode(s: &str) -> libc::mode_t {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

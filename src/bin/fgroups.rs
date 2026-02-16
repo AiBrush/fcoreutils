@@ -179,7 +179,7 @@ fn gid_to_name(gid: libc::gid_t) -> String {
     name.to_string_lossy().into_owned()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 
@@ -217,6 +217,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_groups_matches_gnu() {
         let gnu = Command::new("groups").output();
         if let Ok(gnu) = gnu {
