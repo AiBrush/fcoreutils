@@ -9,22 +9,22 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/AiBrush/coreutils-rs)](https://github.com/AiBrush/coreutils-rs/releases)
 
-High-performance GNU coreutils replacement in Rust — 71 tools and counting. SIMD-accelerated, drop-in compatible, cross-platform.
+High-performance GNU coreutils replacement in Rust — 89 tools and counting. SIMD-accelerated, drop-in compatible, cross-platform.
 
-## Performance ([independent benchmarks](https://github.com/AiBrush/coreutils-rs-independent-test) v0.7.0, Linux, hyperfine)
+## Performance ([independent benchmarks](https://github.com/AiBrush/coreutils-rs-independent-test) v0.7.1, Linux, hyperfine)
 
 | Tool | Speedup vs GNU | Speedup vs uutils |
 |------|---------------:|-------------------:|
-| wc | **33.0x** | 18.1x |
-| sort | **18.8x** | 16.1x |
-| uniq | **16.7x** | 6.5x |
-| base64 | **7.5x** | 7.2x |
-| tr | **7.0x** | 6.9x |
-| cut | **6.9x** | 3.2x |
+| wc | **34.2x** | 18.8x |
+| sort | **16.7x** | 15.4x |
+| uniq | **15.8x** | 6.5x |
+| base64 | **7.5x** | 6.9x |
+| tr | **7.4x** | 7.3x |
+| cut | **6.7x** | 3.7x |
 | tac | **3.9x** | 1.9x |
 | md5sum | **1.4x** | 1.3x |
-| b2sum | **1.3x** | 1.3x |
-| sha256sum | **1.0x** | 4.0x |
+| b2sum | **1.3x** | 1.1x |
+| sha256sum | **1.0x** | 3.9x |
 
 ## Tools
 
