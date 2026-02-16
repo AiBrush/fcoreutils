@@ -357,8 +357,7 @@ fn split_by_bytes(
         while offset < bytes_read {
             if writer.is_none() {
                 if chunk_index >= limit {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
+                    return Err(io::Error::other(
                         "output file suffixes exhausted",
                     ));
                 }

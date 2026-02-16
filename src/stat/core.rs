@@ -483,14 +483,14 @@ fn format_fs_specifiers(fmt: &str, path: &str, sfs: &libc::statfs) -> String {
 
 /// Convert a Unix file mode to a human-readable permission string like `-rwxr-xr-x`.
 pub fn mode_to_human(mode: u32) -> String {
-    let file_char = match mode & libc::S_IFMT as u32 {
-        m if m == libc::S_IFREG as u32 => '-',
-        m if m == libc::S_IFDIR as u32 => 'd',
-        m if m == libc::S_IFLNK as u32 => 'l',
-        m if m == libc::S_IFBLK as u32 => 'b',
-        m if m == libc::S_IFCHR as u32 => 'c',
-        m if m == libc::S_IFIFO as u32 => 'p',
-        m if m == libc::S_IFSOCK as u32 => 's',
+    let file_char = match mode & libc::S_IFMT {
+        m if m == libc::S_IFREG => '-',
+        m if m == libc::S_IFDIR => 'd',
+        m if m == libc::S_IFLNK => 'l',
+        m if m == libc::S_IFBLK => 'b',
+        m if m == libc::S_IFCHR => 'c',
+        m if m == libc::S_IFIFO => 'p',
+        m if m == libc::S_IFSOCK => 's',
         _ => '?',
     };
 
@@ -500,7 +500,7 @@ pub fn mode_to_human(mode: u32) -> String {
     // Owner
     s.push(if mode & 0o400 != 0 { 'r' } else { '-' });
     s.push(if mode & 0o200 != 0 { 'w' } else { '-' });
-    s.push(if mode & libc::S_ISUID as u32 != 0 {
+    s.push(if mode & libc::S_ISUID != 0 {
         if mode & 0o100 != 0 { 's' } else { 'S' }
     } else if mode & 0o100 != 0 {
         'x'
@@ -511,7 +511,7 @@ pub fn mode_to_human(mode: u32) -> String {
     // Group
     s.push(if mode & 0o040 != 0 { 'r' } else { '-' });
     s.push(if mode & 0o020 != 0 { 'w' } else { '-' });
-    s.push(if mode & libc::S_ISGID as u32 != 0 {
+    s.push(if mode & libc::S_ISGID != 0 {
         if mode & 0o010 != 0 { 's' } else { 'S' }
     } else if mode & 0o010 != 0 {
         'x'
@@ -522,7 +522,7 @@ pub fn mode_to_human(mode: u32) -> String {
     // Others
     s.push(if mode & 0o004 != 0 { 'r' } else { '-' });
     s.push(if mode & 0o002 != 0 { 'w' } else { '-' });
-    s.push(if mode & libc::S_ISVTX as u32 != 0 {
+    s.push(if mode & libc::S_ISVTX != 0 {
         if mode & 0o001 != 0 { 't' } else { 'T' }
     } else if mode & 0o001 != 0 {
         'x'
@@ -535,14 +535,14 @@ pub fn mode_to_human(mode: u32) -> String {
 
 /// Return a human-readable label for the file type portion of a mode value.
 pub fn file_type_label(mode: u32) -> &'static str {
-    match mode & libc::S_IFMT as u32 {
-        m if m == libc::S_IFREG as u32 => "regular file",
-        m if m == libc::S_IFDIR as u32 => "directory",
-        m if m == libc::S_IFLNK as u32 => "symbolic link",
-        m if m == libc::S_IFBLK as u32 => "block special file",
-        m if m == libc::S_IFCHR as u32 => "character special file",
-        m if m == libc::S_IFIFO as u32 => "fifo",
-        m if m == libc::S_IFSOCK as u32 => "socket",
+    match mode & libc::S_IFMT {
+        m if m == libc::S_IFREG => "regular file",
+        m if m == libc::S_IFDIR => "directory",
+        m if m == libc::S_IFLNK => "symbolic link",
+        m if m == libc::S_IFBLK => "block special file",
+        m if m == libc::S_IFCHR => "character special file",
+        m if m == libc::S_IFIFO => "fifo",
+        m if m == libc::S_IFSOCK => "socket",
         _ => "unknown",
     }
 }
@@ -558,7 +558,7 @@ fn format_timestamp(secs: i64, nsec: i64) -> String {
 
     let offset_secs = tm.tm_gmtoff;
     let offset_sign = if offset_secs >= 0 { '+' } else { '-' };
-    let offset_abs = offset_secs.unsigned_abs() as u64;
+    let offset_abs = offset_secs.unsigned_abs();
     let offset_hours = offset_abs / 3600;
     let offset_mins = (offset_abs % 3600) / 60;
 

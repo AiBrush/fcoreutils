@@ -1,11 +1,21 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("ls: only available on Unix");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 use coreutils_rs::common::reset_sigpipe;
+#[cfg(unix)]
 use coreutils_rs::ls::{
     ClassifyMode, ColorMode, HyperlinkMode, IndicatorStyle, LsConfig, OutputFormat, QuotingStyle,
     SortBy, TimeField, TimeStyle, atty_stdout, ls_main,
 };
 
+#[cfg(unix)]
 fn print_help() {
     print!(
         "Usage: ls [OPTION]... [FILE]...\n\

@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs::{self, DirEntry, Metadata};
 use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::MetadataExt;
@@ -366,20 +365,6 @@ impl FileEntry {
         };
 
         Self::from_metadata(name, path, &meta, config)
-    }
-
-    /// Create from a path directly.
-    fn from_path(path: &Path, config: &LsConfig) -> io::Result<Self> {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string_lossy().into_owned());
-        let meta = if config.dereference {
-            fs::metadata(path).or_else(|_| fs::symlink_metadata(path))?
-        } else {
-            fs::symlink_metadata(path)?
-        };
-        Self::from_metadata(name, path.to_path_buf(), &meta, config)
     }
 
     /// Create from a path using the full path as the display name (for -d with

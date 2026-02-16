@@ -1,7 +1,6 @@
 use super::*;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
 use tempfile::TempDir;
 
 /// Helper: create a default config for testing.
