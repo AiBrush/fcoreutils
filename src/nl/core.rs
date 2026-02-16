@@ -265,11 +265,11 @@ pub fn nl_to_vec(data: &[u8], config: &NlConfig) -> Vec<u8> {
             output.extend_from_slice(line);
             line_number = line_number.wrapping_add(config.line_increment);
         } else {
-            // Non-numbered lines: GNU nl outputs spaces (width) + separator + content
-            for _ in 0..config.number_width {
+            // Non-numbered lines: GNU nl outputs width + separator_len total spaces, then content
+            let total_pad = config.number_width + config.number_separator.len();
+            for _ in 0..total_pad {
                 output.push(b' ');
             }
-            output.extend_from_slice(&config.number_separator);
             output.extend_from_slice(line);
         }
 

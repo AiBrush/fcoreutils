@@ -237,7 +237,8 @@ fn test_regex_style() {
     };
     let input = b"# comment\nnot comment\n# another\n";
     let result = nl_helper(input, &config);
-    let expected = b"     1\t# comment\n      \tnot comment\n     2\t# another\n";
+    // Non-numbered non-blank: 7 spaces (width 6 + separator 1) then content
+    let expected = b"     1\t# comment\n       not comment\n     2\t# another\n";
     assert_eq!(
         std::str::from_utf8(&result).unwrap(),
         std::str::from_utf8(expected).unwrap()
@@ -406,8 +407,8 @@ mod integration {
     fn test_stdin_with_blanks() {
         let (out, _, code) = run_fnl(b"a\n\nb\n", &[]);
         assert_eq!(code, 0);
-        // Default body style 't' doesn't number blank lines but adds padding
-        assert_eq!(out, b"     1\ta\n      \t\n     2\tb\n");
+        // Default body style 't' doesn't number blank lines, but adds 7 spaces
+        assert_eq!(out, b"     1\ta\n       \n     2\tb\n");
     }
 
     #[test]
