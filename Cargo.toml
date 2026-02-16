@@ -243,6 +243,38 @@ path = "src/bin/ftouch.rs"
 name = "fln"
 path = "src/bin/fln.rs"
 
+[[bin]]
+name = "fsha1sum"
+path = "src/bin/fsha1sum.rs"
+
+[[bin]]
+name = "fsha224sum"
+path = "src/bin/fsha224sum.rs"
+
+[[bin]]
+name = "fsha384sum"
+path = "src/bin/fsha384sum.rs"
+
+[[bin]]
+name = "fsha512sum"
+path = "src/bin/fsha512sum.rs"
+
+[[bin]]
+name = "fsum"
+path = "src/bin/fsum.rs"
+
+[[bin]]
+name = "fcksum"
+path = "src/bin/fcksum.rs"
+
+[[bin]]
+name = "fbase32"
+path = "src/bin/fbase32.rs"
+
+[[bin]]
+name = "fbasenc"
+path = "src/bin/fbasenc.rs"
+
 [dependencies]
 # CLI argument parsing
 clap = { version = "4", features = ["derive", "cargo"] }
@@ -261,6 +293,9 @@ blake2b_simd = "1"
 
 # SHA-256 fallback for Apple targets (ring 0.17 doesn't compile on macOS aarch64)
 sha2 = "0.10"
+
+# SHA-1 hashing
+sha1 = "0.10"
 
 # MD5 hashing (ring doesn't support MD5)
 md-5 = "0.10"
@@ -320,6 +355,7 @@ ring = "0.17"
 # Enable ASM acceleration for hash crates on non-MSVC targets
 # (sha2-asm/md5-asm use .S assembly files that MSVC cl.exe can't compile)
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
+sha1 = { version = "0.10", features = ["asm"] }
 sha2 = { version = "0.10", features = ["asm"] }
 md-5 = { version = "0.10", features = ["asm"] }
 
