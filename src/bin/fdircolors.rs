@@ -9,6 +9,67 @@ use std::process;
 const TOOL_NAME: &str = "dircolors";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Simple glob pattern matcher supporting *, ?, and [...] character classes.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    glob_match_bytes(pattern.as_bytes(), text.as_bytes())
+}
+
+fn glob_match_bytes(pat: &[u8], txt: &[u8]) -> bool {
+    if pat.is_empty() {
+        return txt.is_empty();
+    }
+    if pat[0] == b'*' {
+        for i in 0..=txt.len() {
+            if glob_match_bytes(&pat[1..], &txt[i..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if txt.is_empty() {
+        return false;
+    }
+    if pat[0] == b'?' {
+        return glob_match_bytes(&pat[1..], &txt[1..]);
+    }
+    if pat[0] == b'[' {
+        if let Some(close) = pat[1..].iter().position(|&b| b == b']') {
+            let class = &pat[1..1 + close];
+            if char_class_matches(class, txt[0]) {
+                return glob_match_bytes(&pat[2 + close..], &txt[1..]);
+            }
+        }
+        return false;
+    }
+    if pat[0] == txt[0] {
+        return glob_match_bytes(&pat[1..], &txt[1..]);
+    }
+    false
+}
+
+fn char_class_matches(class: &[u8], ch: u8) -> bool {
+    let mut i = 0;
+    let negate = !class.is_empty() && (class[0] == b'!' || class[0] == b'^');
+    if negate {
+        i = 1;
+    }
+    let mut matched = false;
+    while i < class.len() {
+        if i + 2 < class.len() && class[i + 1] == b'-' {
+            if ch >= class[i] && ch <= class[i + 2] {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if ch == class[i] {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
+    if negate { !matched } else { matched }
+}
+
 fn print_help() {
     println!("Usage: {} [OPTION]... [FILE]", TOOL_NAME);
     println!("Output commands to set LS_COLORS.");
@@ -38,7 +99,7 @@ enum OutputFormat {
 const DEFAULT_DATABASE: &str = "\
 # Configuration file for dircolors, a utility to help you set the
 # LS_COLORS environment variable used by GNU ls with the --color option.
-# Copyright (C) 1996-2025 Free Software Foundation, Inc.
+# Copyright (C) 1996-2024 Free Software Foundation, Inc.
 # Copying and distribution of this file, with or without modification,
 # are permitted provided the copyright notice and this notice are preserved.
 #
@@ -283,10 +344,22 @@ EXEC 01;32
 # config specific to those matching environment variables.
 ";
 
+/// Result of parsing a dircolors database.
+struct ParsedDatabase {
+    /// TERM patterns from the database
+    term_patterns: Vec<String>,
+    /// COLORTERM patterns from the database
+    colorterm_patterns: Vec<String>,
+    /// The LS_COLORS string
+    ls_colors: String,
+}
+
 /// Parse a dircolors database (either built-in or from a file) and return
-/// the LS_COLORS string.
-fn parse_database(input: &str) -> String {
+/// the LS_COLORS string along with TERM/COLORTERM patterns.
+fn parse_database(input: &str) -> ParsedDatabase {
     let mut entries: Vec<String> = Vec::new();
+    let mut term_patterns: Vec<String> = Vec::new();
+    let mut colorterm_patterns: Vec<String> = Vec::new();
 
     for line in input.lines() {
         let line = line.trim();
@@ -303,10 +376,16 @@ fn parse_database(input: &str) -> String {
             line
         };
 
-        // Skip TERM entries and other non-color entries
-        if line.starts_with("TERM ")
-            || line.starts_with("COLORTERM ")
-            || line.starts_with("COLOR ")
+        // Collect TERM/COLORTERM patterns, skip other non-color entries
+        if let Some(rest) = line.strip_prefix("TERM ") {
+            term_patterns.push(rest.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("COLORTERM ") {
+            colorterm_patterns.push(rest.trim().to_string());
+            continue;
+        }
+        if line.starts_with("COLOR ")
             || line.starts_with("OPTIONS ")
             || line.starts_with("EIGHTBIT ")
         {
@@ -367,7 +446,40 @@ fn parse_database(input: &str) -> String {
         entries.push(format!("{ls_key}={value}"));
     }
 
-    entries.join(":")
+    ParsedDatabase {
+        term_patterns,
+        colorterm_patterns,
+        ls_colors: entries.join(":"),
+    }
+}
+
+/// Check if the current terminal matches any TERM/COLORTERM patterns.
+/// Returns true if colors should be output (terminal matches or no patterns exist).
+fn terminal_matches(db: &ParsedDatabase) -> bool {
+    // If no TERM/COLORTERM patterns at all, always output colors
+    if db.term_patterns.is_empty() && db.colorterm_patterns.is_empty() {
+        return true;
+    }
+
+    // Check TERM env var against TERM patterns
+    if let Ok(term) = std::env::var("TERM") {
+        for pattern in &db.term_patterns {
+            if glob_match(pattern, &term) {
+                return true;
+            }
+        }
+    }
+
+    // Check COLORTERM env var against COLORTERM patterns
+    if let Ok(colorterm) = std::env::var("COLORTERM") {
+        for pattern in &db.colorterm_patterns {
+            if glob_match(pattern, &colorterm) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn output_bourne_shell(ls_colors: &str) {
@@ -406,6 +518,9 @@ fn main() {
             }
             "-p" | "--print-database" => {
                 print_database = true;
+            }
+            "-" => {
+                filename = Some("-".to_string());
             }
             _ => {
                 if arg.starts_with('-') {
@@ -467,11 +582,17 @@ fn main() {
         DEFAULT_DATABASE.to_string()
     };
 
-    let ls_colors = parse_database(&database);
+    let db = parse_database(&database);
+
+    let ls_colors = if terminal_matches(&db) {
+        &db.ls_colors
+    } else {
+        ""
+    };
 
     match format {
-        OutputFormat::BourneShell => output_bourne_shell(&ls_colors),
-        OutputFormat::CShell => output_c_shell(&ls_colors),
+        OutputFormat::BourneShell => output_bourne_shell(ls_colors),
+        OutputFormat::CShell => output_c_shell(ls_colors),
     }
 }
 
