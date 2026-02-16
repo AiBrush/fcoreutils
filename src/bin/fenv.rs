@@ -321,7 +321,10 @@ mod tests {
         let output = cmd().args(["-C", "/tmp", "pwd"]).output().unwrap();
         assert_eq!(output.status.code(), Some(0));
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert_eq!(stdout.trim(), "/tmp");
+        // On macOS, /tmp is a symlink to /private/tmp
+        let expected = std::fs::canonicalize("/tmp")
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+        assert_eq!(stdout.trim(), expected.to_str().unwrap());
     }
 
     #[test]
