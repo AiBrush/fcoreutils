@@ -216,7 +216,7 @@ fn print_since(uptime_secs: f64) {
     );
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::process::Command;
 

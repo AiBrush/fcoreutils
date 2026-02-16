@@ -397,8 +397,13 @@ mod tests {
         assert_eq!(blocks, 1);
     }
 
-    /// Check if system sum is GNU sum (BSD sum on macOS has different output format)
+    /// Check if system sum is GNU sum (BSD sum on macOS has different output format,
+    /// Windows Git Bash sum may have different filename behavior)
     fn is_gnu_sum() -> bool {
+        // Only compare against GNU sum on Linux where behavior is consistent
+        if !cfg!(target_os = "linux") {
+            return false;
+        }
         Command::new("sum")
             .arg("--version")
             .output()
