@@ -15,7 +15,10 @@
     clippy::needless_borrows_for_generic_args,
     clippy::needless_lifetimes,
     clippy::needless_return,
-    clippy::too_many_arguments
+    clippy::too_many_arguments,
+    clippy::unnecessary_cast,
+    clippy::write_literal,
+    clippy::io_other_error
 )]
 
 /// Use mimalloc as the global allocator for all binaries.
@@ -27,20 +30,70 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod base64;
 pub mod cat;
+#[cfg(unix)]
+pub mod chgrp;
+#[cfg(unix)]
+pub mod chmod;
+#[cfg(unix)]
+pub mod chown;
 pub mod comm;
 pub mod common;
+#[cfg(unix)]
+pub mod cp;
+pub mod csplit;
 pub mod cut;
+#[cfg(unix)]
+pub mod date;
+pub mod dd;
+#[cfg(unix)]
+pub mod df;
+#[cfg(unix)]
+pub mod du;
+pub mod echo;
 pub mod expand;
+pub mod expr;
+pub mod factor;
+pub mod fmt;
 pub mod fold;
 pub mod hash;
 pub mod head;
+#[cfg(unix)]
+pub mod install;
 pub mod join;
+#[cfg(unix)]
+pub mod ls;
+#[cfg(unix)]
+pub mod mv;
 pub mod nl;
+pub mod numfmt;
+pub mod od;
 pub mod paste;
+#[cfg(unix)]
+pub mod pinky;
+#[cfg(unix)]
+pub mod pr;
+pub mod printf;
+pub mod ptx;
 pub mod rev;
+#[cfg(unix)]
+pub mod rm;
+pub mod shred;
 pub mod sort;
+pub mod split;
+#[cfg(unix)]
+pub mod stat;
+#[cfg(unix)]
+pub mod stdbuf;
+#[cfg(unix)]
+pub mod stty;
 pub mod tac;
 pub mod tail;
+#[cfg(unix)]
+pub mod test_cmd;
 pub mod tr;
 pub mod uniq;
+#[cfg(unix)]
+pub mod users;
 pub mod wc;
+#[cfg(unix)]
+pub mod who;
