@@ -221,7 +221,9 @@ fn today_midnight() -> Result<i64, String> {
     let (now_sec, _) = current_time();
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe {
-        libc::localtime_r(&now_sec, &mut tm);
+        if libc::localtime_r(&now_sec, &mut tm).is_null() {
+            return Err("failed to get local time".to_string());
+        }
     }
     tm.tm_hour = 0;
     tm.tm_min = 0;
