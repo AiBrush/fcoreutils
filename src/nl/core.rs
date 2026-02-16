@@ -146,12 +146,12 @@ fn format_number(num: i64, format: NumberFormat, width: usize, buf: &mut Vec<u8>
             // Left-justified
             buf.extend_from_slice(num_str.as_bytes());
             let pad = width.saturating_sub(num_str.len());
-            buf.extend(std::iter::repeat_n(b' ', pad));
+            buf.extend(std::iter::repeat(b' ').take(pad));
         }
         NumberFormat::Rn => {
             // Right-justified with spaces
             let pad = width.saturating_sub(num_str.len());
-            buf.extend(std::iter::repeat_n(b' ', pad));
+            buf.extend(std::iter::repeat(b' ').take(pad));
             buf.extend_from_slice(num_str.as_bytes());
         }
         NumberFormat::Rz => {
@@ -160,11 +160,11 @@ fn format_number(num: i64, format: NumberFormat, width: usize, buf: &mut Vec<u8>
                 buf.push(b'-');
                 let abs_str = &num_str[1..]; // skip the '-'
                 let pad = width.saturating_sub(abs_str.len() + 1);
-                buf.extend(std::iter::repeat_n(b'0', pad));
+                buf.extend(std::iter::repeat(b'0').take(pad));
                 buf.extend_from_slice(abs_str.as_bytes());
             } else {
                 let pad = width.saturating_sub(num_str.len());
-                buf.extend(std::iter::repeat_n(b'0', pad));
+                buf.extend(std::iter::repeat(b'0').take(pad));
                 buf.extend_from_slice(num_str.as_bytes());
             }
         }
@@ -276,14 +276,14 @@ pub fn nl(data: &[u8], config: &NlConfig, out: &mut impl Write) -> std::io::Resu
             );
             output.extend_from_slice(&config.number_separator);
             output.extend_from_slice(line);
-            line_number += config.line_increment;
+            line_number = line_number.wrapping_add(config.line_increment);
         } else {
             // Non-numbered line: output spaces for alignment then content
             // GNU nl outputs spaces equal to width + separator for non-numbered lines with content
             // But for empty/blank lines that aren't numbered, just output the line
             if !is_blank {
                 // Non-numbered non-blank line: pad with spaces
-                output.extend(std::iter::repeat_n(b' ', config.number_width));
+                output.extend(std::iter::repeat(b' ').take(config.number_width));
                 output.extend_from_slice(&config.number_separator);
                 output.extend_from_slice(line);
             }
