@@ -177,8 +177,15 @@ fn main() {
         if show_machine {
             parts.push(machine);
         }
-        // On Linux, -p and -i are typically "unknown"; GNU skips "unknown" in -a mode
+        // On Linux, -p (processor) and -i (hardware platform) use the machine name
+        // matching GNU coreutils behavior. GNU skips "unknown" values in -a mode.
+        #[cfg(target_os = "linux")]
+        let processor = machine;
+        #[cfg(not(target_os = "linux"))]
         let processor = "unknown";
+        #[cfg(target_os = "linux")]
+        let hardware = machine;
+        #[cfg(not(target_os = "linux"))]
         let hardware = "unknown";
         if show_processor && !(show_all && processor == "unknown") {
             parts.push(processor);
