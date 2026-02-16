@@ -216,8 +216,32 @@ name = "funame"
 path = "src/bin/funame.rs"
 
 [[bin]]
+name = "fmktemp"
+path = "src/bin/fmktemp.rs"
+
+[[bin]]
+name = "fmknod"
+path = "src/bin/fmknod.rs"
+
+[[bin]]
+name = "fmkdir"
+path = "src/bin/fmkdir.rs"
+
+[[bin]]
 name = "fuptime"
 path = "src/bin/fuptime.rs"
+
+[[bin]]
+name = "ftruncate"
+path = "src/bin/ftruncate.rs"
+
+[[bin]]
+name = "ftouch"
+path = "src/bin/ftouch.rs"
+
+[[bin]]
+name = "fln"
+path = "src/bin/fln.rs"
 
 [dependencies]
 # CLI argument parsing
