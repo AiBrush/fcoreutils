@@ -43,77 +43,6 @@ High-performance GNU coreutils replacement in Rust — 71 tools and counting. SI
 | uniq | `funiq` | Filter duplicate lines (mmap, zero-copy, single-pass) |
 | tac | `ftac` | Reverse file lines (parallel memchr, zero-copy writev, vmsplice) |
 
-### Additional Tools (11 tools, GNU-compatible)
-
-| Tool | Binary | Description |
-|------|--------|-------------|
-| head | `fhead` | Output first lines of files (zero-copy mmap, SIMD newline scan) |
-| tail | `ftail` | Output last lines of files (reverse SIMD scan, follow mode) |
-| cat | `fcat` | Concatenate files (zero-copy splice/sendfile, mmap) |
-| rev | `frev` | Reverse lines character-by-character (mmap, SIMD) |
-| expand | `fexpand` | Convert tabs to spaces (mmap, configurable tab stops) |
-| unexpand | `funexpand` | Convert spaces to tabs (mmap, configurable tab stops) |
-| fold | `ffold` | Wrap lines to specified width (mmap, byte/char modes) |
-| paste | `fpaste` | Merge lines of files (mmap, serial/parallel modes) |
-| nl | `fnl` | Number lines of files (mmap, section delimiters, regex) |
-| comm | `fcomm` | Compare sorted files line by line (mmap, SIMD) |
-| join | `fjoin` | Join lines of two sorted files on a common field (mmap) |
-
-### GNU Utility Tools (50 tools)
-
-| Tool | Binary | Description |
-|------|--------|-------------|
-| base32 | `fbase32` | RFC 4648 base32 encoding/decoding |
-| basenc | `fbasenc` | Multi-format encoder/decoder (base64, base32, base16, base2, z85) |
-| sha1sum | `fsha1sum` | SHA-1 checksums |
-| sha224sum | `fsha224sum` | SHA-224 checksums |
-| sha384sum | `fsha384sum` | SHA-384 checksums |
-| sha512sum | `fsha512sum` | SHA-512 checksums |
-| sum | `fsum` | BSD/SysV checksums |
-| cksum | `fcksum` | CRC-32 checksums |
-| ln | `fln` | Create hard and symbolic links |
-| touch | `ftouch` | Change file timestamps |
-| truncate | `ftruncate` | Shrink or extend file sizes |
-| mkdir | `fmkdir` | Create directories |
-| rmdir | `frmdir` | Remove empty directories |
-| mkfifo | `fmkfifo` | Create named pipes (FIFOs) |
-| mknod | `fmknod` | Create special files |
-| mktemp | `fmktemp` | Create temporary files/directories |
-| link | `flink` | Create hard link (low-level) |
-| unlink | `funlink` | Remove file (low-level) |
-| basename | `fbasename` | Strip directory and suffix from paths |
-| dirname | `fdirname` | Strip last path component |
-| readlink | `freadlink` | Print symlink targets |
-| realpath | `frealpath` | Resolve absolute paths |
-| pathchk | `fpathchk` | Validate path names |
-| seq | `fseq` | Generate number sequences |
-| shuf | `fshuf` | Random permutations of input |
-| tsort | `ftsort` | Topological sorting |
-| tee | `ftee` | Read stdin, write to stdout and files |
-| yes | `fyes` | Output a string repeatedly |
-| id | `fid` | Print user and group IDs |
-| groups | `fgroups` | Print group memberships |
-| whoami | `fwhoami` | Print effective user name |
-| logname | `flogname` | Print login name |
-| uname | `funame` | Print system information |
-| uptime | `fuptime` | System uptime and load averages |
-| arch | `farch` | Print machine architecture |
-| hostid | `fhostid` | Print host identifier |
-| tty | `ftty` | Print terminal name |
-| nproc | `fnproc` | Print number of processors |
-| pwd | `fpwd` | Print working directory |
-| printenv | `fprintenv` | Print environment variables |
-| env | `fenv` | Run program with modified environment |
-| timeout | `ftimeout` | Run command with time limit |
-| nice | `fnice` | Run with modified scheduling priority |
-| nohup | `fnohup` | Run immune to hangups |
-| sleep | `fsleep` | Delay for specified time |
-| sync | `fsync` | Flush filesystem caches |
-| chroot | `fchroot` | Change root directory |
-| true | `ftrue` | Exit with status 0 |
-| false | `ffalse` | Exit with status 1 |
-| dircolors | `fdircolors` | Setup LS_COLORS environment variable |
-
 ## Installation
 
 ```bash
@@ -208,6 +137,75 @@ fjoin -t, -1 2 -2 1 a b  # Join CSV files on specific fields
 ## GNU Compatibility
 
 Output is byte-identical to GNU coreutils. All flags are supported including `--files0-from`, `--total`, `--complement`, `--check`, and correct column alignment.
+
+
+## *NOT INCLUDED IN HACKATHON SUBMISSION*
+### Additional Tools (61 tools ⚠️COMPATIBILITY IS CURRENTLY UNDER CONSTRUCTION⚠️)
+
+| Tool | Binary | Description | Compatibility | Passed | Failed | Skipped | Total |
+|------|--------|-------------|---------------|--------|--------|---------|-------|
+| head | `fhead` | Output first lines of files (zero-copy mmap, SIMD newline scan) | :white_check_mark: | 47 | 0 | 0 | 47 |
+| tail | `ftail` | Output last lines of files (reverse SIMD scan, follow mode) | :white_check_mark: | 44 | 0 | 0 | 44 |
+| cat | `fcat` | Concatenate files (zero-copy splice/sendfile, mmap) | :white_check_mark: | 44 | 0 | 0 | 44 |
+| rev | `frev` | Reverse lines character-by-character (mmap, SIMD) | :white_check_mark: | 32 | 0 | 0 | 32 |
+| expand | `fexpand` | Convert tabs to spaces (mmap, configurable tab stops) | :white_check_mark: | 33 | 0 | 0 | 33 |
+| unexpand | `funexpand` | Convert spaces to tabs (mmap, configurable tab stops) | :white_check_mark: | 26 | 0 | 0 | 26 |
+| fold | `ffold` | Wrap lines to specified width (mmap, byte/char modes) | :white_check_mark: | 35 | 0 | 0 | 35 |
+| paste | `fpaste` | Merge lines of files (mmap, serial/parallel modes) | :white_check_mark: | 30 | 0 | 0 | 30 |
+| nl | `fnl` | Number lines of files (mmap, section delimiters, regex) | :white_check_mark: | 47 | 0 | 0 | 47 |
+| comm | `fcomm` | Compare sorted files line by line (mmap, SIMD) | :white_check_mark: | 30 | 0 | 0 | 30 |
+| join | `fjoin` | Join lines of two sorted files on a common field (mmap) | :white_check_mark: | 35 | 0 | 0 | 35 |
+| base32 | `fbase32` | RFC 4648 base32 encoding/decoding | :white_check_mark: | 29 | 0 | 0 | 29 |
+| basenc | `fbasenc` | Multi-format encoder/decoder (base64, base32, base16, base2, z85) | :white_check_mark: | 40 | 0 | 0 | 40 |
+| sha1sum | `fsha1sum` | SHA-1 checksums | :white_check_mark: | 15 | 0 | 0 | 15 |
+| sha224sum | `fsha224sum` | SHA-224 checksums | :white_check_mark: | 10 | 0 | 0 | 10 |
+| sha384sum | `fsha384sum` | SHA-384 checksums | :white_check_mark: | 10 | 0 | 0 | 10 |
+| sha512sum | `fsha512sum` | SHA-512 checksums | :white_check_mark: | 10 | 0 | 0 | 10 |
+| sum | `fsum` | BSD/SysV checksums | :white_check_mark: | 23 | 0 | 0 | 23 |
+| cksum | `fcksum` | CRC-32 checksums | :white_check_mark: | 21 | 0 | 0 | 21 |
+| ln | `fln` | Create hard and symbolic links | :x: | 15 | **1** | 0 | 16 |
+| touch | `ftouch` | Change file timestamps | :white_check_mark: | 21 | 0 | 0 | 21 |
+| truncate | `ftruncate` | Shrink or extend file sizes | :white_check_mark: | 25 | 0 | 0 | 25 |
+| mkdir | `fmkdir` | Create directories | :x: | 15 | **2** | 0 | 17 |
+| rmdir | `frmdir` | Remove empty directories | :white_check_mark: | 12 | 0 | 0 | 12 |
+| mkfifo | `fmkfifo` | Create named pipes (FIFOs) | :white_check_mark: | 11 | 0 | 0 | 11 |
+| mknod | `fmknod` | Create special files | :white_check_mark: | 10 | 0 | 0 | 10 |
+| mktemp | `fmktemp` | Create temporary files/directories | :white_check_mark: | 15 | 0 | 0 | 15 |
+| link | `flink` | Create hard link (low-level) | :x: | 7 | **1** | 0 | 8 |
+| unlink | `funlink` | Remove file (low-level) | :white_check_mark: | 7 | 0 | 0 | 7 |
+| basename | `fbasename` | Strip directory and suffix from paths | :white_check_mark: | 26 | 0 | 0 | 26 |
+| dirname | `fdirname` | Strip last path component | :white_check_mark: | 23 | 0 | 0 | 23 |
+| readlink | `freadlink` | Print symlink targets | :white_check_mark: | 19 | 0 | 0 | 19 |
+| realpath | `frealpath` | Resolve absolute paths | :white_check_mark: | 24 | 0 | 0 | 24 |
+| pathchk | `fpathchk` | Validate path names | :x: | 16 | **1** | 0 | 17 |
+| seq | `fseq` | Generate number sequences | :x: | 52 | **1** | 0 | 53 |
+| shuf | `fshuf` | Random permutations of input | :x: | 26 | **1** | 0 | 27 |
+| tsort | `ftsort` | Topological sorting | :x: | 16 | **3** | 0 | 19 |
+| tee | `ftee` | Read stdin, write to stdout and files | :x: | 14 | **1** | 0 | 15 |
+| yes | `fyes` | Output a string repeatedly | :x: | - | - | - | - |
+| id | `fid` | Print user and group IDs | :white_check_mark: | 16 | 0 | 0 | 16 |
+| groups | `fgroups` | Print group memberships | :white_check_mark: | 4 | 0 | 0 | 4 |
+| whoami | `fwhoami` | Print effective user name | :white_check_mark: | 4 | 0 | 0 | 4 |
+| logname | `flogname` | Print login name | :white_check_mark: | 3 | 0 | 0 | 3 |
+| uname | `funame` | Print system information | :white_check_mark: | 14 | 0 | 0 | 14 |
+| uptime | `fuptime` | System uptime and load averages | :white_check_mark: | 5 | 0 | 0 | 5 |
+| arch | `farch` | Print machine architecture | :white_check_mark: | 5 | 0 | 0 | 5 |
+| hostid | `fhostid` | Print host identifier | :white_check_mark: | 6 | 0 | 0 | 6 |
+| tty | `ftty` | Print terminal name | :white_check_mark: | 6 | 0 | 0 | 6 |
+| nproc | `fnproc` | Print number of processors | :white_check_mark: | 8 | 0 | 0 | 8 |
+| pwd | `fpwd` | Print working directory | :white_check_mark: | 8 | 0 | 0 | 8 |
+| printenv | `fprintenv` | Print environment variables | :x: | - | - | - | - |
+| env | `fenv` | Run program with modified environment | :x: | 16 | **1** | 0 | 17 |
+| timeout | `ftimeout` | Run command with time limit | :x: | 19 | **2** | 0 | 21 |
+| nice | `fnice` | Run with modified scheduling priority | :white_check_mark: | 12 | 0 | 0 | 12 |
+| nohup | `fnohup` | Run immune to hangups | :white_check_mark: | 6 | 0 | 0 | 6 |
+| sleep | `fsleep` | Delay for specified time | :white_check_mark: | 10 | 0 | 0 | 10 |
+| sync | `fsync` | Flush filesystem caches | :white_check_mark: | 5 | 0 | 1 | 6 |
+| chroot | `fchroot` | Change root directory | :x: | - | - | - | - |
+| true | `ftrue` | Exit with status 0 | :white_check_mark: | 8 | 0 | 0 | 8 |
+| false | `ffalse` | Exit with status 1 | :white_check_mark: | 7 | 0 | 0 | 7 |
+| dircolors | `fdircolors` | Setup LS_COLORS environment variable | :x: | 2 | **12** | 0 | 14 |
+
 
 ## Contributing
 
