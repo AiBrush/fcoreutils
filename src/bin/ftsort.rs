@@ -85,12 +85,12 @@ fn topological_sort(
             // Process successors in insertion order; push onto stack
             // LIFO means last-pushed (last successor) gets processed first
             for neighbor in neighbors {
-                if let Some(deg) = in_degree.get_mut(neighbor) {
-                    if *deg > 0 {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            stack.push(neighbor.clone());
-                        }
+                if let Some(deg) = in_degree.get_mut(neighbor)
+                    && *deg > 0
+                {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        stack.push(neighbor.clone());
                     }
                 }
             }
@@ -196,12 +196,12 @@ fn run(input: &str, source_name: &str) -> i32 {
                 resolved.push(node.clone());
                 if let Some(neighbors) = adj.get(&node) {
                     for nb in neighbors {
-                        if let Some(d) = in_deg.get_mut(nb) {
-                            if *d > 0 {
-                                *d -= 1;
-                                if *d == 0 {
-                                    stack.push(nb.clone());
-                                }
+                        if let Some(d) = in_deg.get_mut(nb)
+                            && *d > 0
+                        {
+                            *d -= 1;
+                            if *d == 0 {
+                                stack.push(nb.clone());
                             }
                         }
                     }
