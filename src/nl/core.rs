@@ -93,11 +93,6 @@ enum Section {
 }
 
 /// Check if a line is a section delimiter.
-/// Returns the section type if it is.
-/// Section delimiters are formed by repeating the 2-char delimiter:
-///   header = 3x delimiter (e.g., \:\:\:)
-///   body   = 2x delimiter (e.g., \:\:)
-///   footer = 1x delimiter (e.g., \:)
 #[inline]
 fn check_section_delimiter(line: &[u8], delim: &[u8]) -> Option<Section> {
     if delim.is_empty() {
@@ -120,10 +115,8 @@ fn check_section_delimiter(line: &[u8], delim: &[u8]) -> Option<Section> {
     }
 
     // Check body (2x)
-    if line.len() == dlen * 2 {
-        if &line[..dlen] == delim && &line[dlen..] == delim {
-            return Some(Section::Body);
-        }
+    if line.len() == dlen * 2 && &line[..dlen] == delim && &line[dlen..] == delim {
+        return Some(Section::Body);
     }
 
     // Check footer (1x)
@@ -137,28 +130,24 @@ fn check_section_delimiter(line: &[u8], delim: &[u8]) -> Option<Section> {
 /// Format a line number according to the format and width.
 #[inline]
 fn format_number(num: i64, format: NumberFormat, width: usize, buf: &mut Vec<u8>) {
-    // Use itoa for fast integer-to-string conversion
     let mut num_buf = itoa::Buffer::new();
     let num_str = num_buf.format(num);
 
     match format {
         NumberFormat::Ln => {
-            // Left-justified
             buf.extend_from_slice(num_str.as_bytes());
             let pad = width.saturating_sub(num_str.len());
             buf.extend(std::iter::repeat(b' ').take(pad));
         }
         NumberFormat::Rn => {
-            // Right-justified with spaces
             let pad = width.saturating_sub(num_str.len());
             buf.extend(std::iter::repeat(b' ').take(pad));
             buf.extend_from_slice(num_str.as_bytes());
         }
         NumberFormat::Rz => {
-            // Right-justified with zeros
             if num < 0 {
                 buf.push(b'-');
-                let abs_str = &num_str[1..]; // skip the '-'
+                let abs_str = &num_str[1..];
                 let pad = width.saturating_sub(abs_str.len() + 1);
                 buf.extend(std::iter::repeat(b'0').take(pad));
                 buf.extend_from_slice(abs_str.as_bytes());
@@ -178,29 +167,25 @@ fn should_number(line: &[u8], style: &NumberingStyle) -> bool {
         NumberingStyle::All => true,
         NumberingStyle::NonEmpty => !line.is_empty(),
         NumberingStyle::None => false,
-        NumberingStyle::Regex(re) => {
-            // Try to match as UTF-8; if invalid, treat as non-matching
-            match std::str::from_utf8(line) {
-                Ok(s) => re.is_match(s),
-                Err(_) => false,
-            }
-        }
+        NumberingStyle::Regex(re) => match std::str::from_utf8(line) {
+            Ok(s) => re.is_match(s),
+            Err(_) => false,
+        },
     }
 }
 
-/// Number lines of the input data according to the config.
-pub fn nl(data: &[u8], config: &NlConfig, out: &mut impl Write) -> std::io::Result<()> {
+/// Build the nl output into a Vec.
+pub fn nl_to_vec(data: &[u8], config: &NlConfig) -> Vec<u8> {
     if data.is_empty() {
-        return Ok(());
+        return Vec::new();
     }
 
-    // Estimate output size: input + number prefix per line
     let estimated_lines = memchr::memchr_iter(b'\n', data).count() + 1;
     let prefix_size = config.number_width + config.number_separator.len() + 2;
     let mut output = Vec::with_capacity(data.len() + estimated_lines * prefix_size);
 
     let mut line_number = config.starting_line_number;
-    let mut current_section = Section::Body; // Start in body
+    let mut current_section = Section::Body;
     let mut consecutive_blanks: usize = 0;
 
     let mut start = 0;
@@ -220,13 +205,11 @@ pub fn nl(data: &[u8], config: &NlConfig, out: &mut impl Write) -> std::io::Resu
 
         // Check for section delimiter
         if let Some(section) = check_section_delimiter(line, &config.section_delimiter) {
-            // Reset line number at section boundaries (unless -p)
             if !config.no_renumber && section == Section::Header {
                 line_number = config.starting_line_number;
             }
             current_section = section;
             consecutive_blanks = 0;
-            // Output empty line for section delimiter (GNU nl behavior)
             output.push(b'\n');
             if has_newline {
                 start += line.len() + 1;
@@ -250,12 +233,8 @@ pub fn nl(data: &[u8], config: &NlConfig, out: &mut impl Write) -> std::io::Resu
             consecutive_blanks = 0;
         }
 
-        // Determine if this line should be numbered
         let do_number = if is_blank && config.join_blank_lines > 1 {
-            // Only number every N-th consecutive blank line
             if should_number(line, style) {
-                // For blank lines with join_blank_lines > 1:
-                // GNU nl only numbers when consecutive_blanks reaches the threshold
                 consecutive_blanks >= config.join_blank_lines
             } else {
                 false
@@ -266,7 +245,7 @@ pub fn nl(data: &[u8], config: &NlConfig, out: &mut impl Write) -> std::io::Resu
 
         if do_number {
             if is_blank && config.join_blank_lines > 1 {
-                consecutive_blanks = 0; // Reset after numbering
+                consecutive_blanks = 0;
             }
             format_number(
                 line_number,
@@ -278,16 +257,10 @@ pub fn nl(data: &[u8], config: &NlConfig, out: &mut impl Write) -> std::io::Resu
             output.extend_from_slice(line);
             line_number = line_number.wrapping_add(config.line_increment);
         } else {
-            // Non-numbered line: output spaces for alignment then content
-            // GNU nl outputs spaces equal to width + separator for non-numbered lines with content
-            // But for empty/blank lines that aren't numbered, just output the line
-            if !is_blank {
-                // Non-numbered non-blank line: pad with spaces
-                output.extend(std::iter::repeat(b' ').take(config.number_width));
-                output.extend_from_slice(&config.number_separator);
-                output.extend_from_slice(line);
-            }
-            // Empty/blank lines that aren't numbered: just output newline
+            // Non-numbered lines: GNU nl outputs padding (spaces + separator) for alignment
+            output.extend(std::iter::repeat(b' ').take(config.number_width));
+            output.extend_from_slice(&config.number_separator);
+            output.extend_from_slice(line);
         }
 
         if has_newline {
@@ -298,5 +271,11 @@ pub fn nl(data: &[u8], config: &NlConfig, out: &mut impl Write) -> std::io::Resu
         }
     }
 
+    output
+}
+
+/// Number lines and write to the provided writer.
+pub fn nl(data: &[u8], config: &NlConfig, out: &mut impl Write) -> std::io::Result<()> {
+    let output = nl_to_vec(data, config);
     out.write_all(&output)
 }

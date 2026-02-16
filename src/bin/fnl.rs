@@ -1,8 +1,3 @@
-use std::io::{self, BufWriter, Write};
-#[cfg(unix)]
-use std::mem::ManuallyDrop;
-#[cfg(unix)]
-use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
@@ -422,16 +417,6 @@ fn main() {
         cli.files
     };
 
-    // Use BufWriter for output
-    #[cfg(unix)]
-    let stdout_raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-    #[cfg(unix)]
-    let mut out = BufWriter::with_capacity(256 * 1024, &*stdout_raw);
-    #[cfg(not(unix))]
-    let stdout = io::stdout();
-    #[cfg(not(unix))]
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
-
     let mut had_error = false;
 
     for filename in &files {
@@ -455,8 +440,9 @@ fn main() {
             }
         };
 
-        if let Err(e) = nl::nl(&data, &cli.config, &mut out) {
-            if e.kind() == io::ErrorKind::BrokenPipe {
+        let output = nl::nl_to_vec(&data, &cli.config);
+        if let Err(e) = write_all_raw(&output) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
                 process::exit(0);
             }
             eprintln!("nl: write error: {}", io_error_msg(&e));
@@ -464,14 +450,46 @@ fn main() {
         }
     }
 
-    if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe
-    {
-        eprintln!("nl: write error: {}", io_error_msg(&e));
-        had_error = true;
-    }
-
     if had_error {
         process::exit(1);
     }
+}
+
+/// Write the full buffer to stdout, retrying on partial/interrupted writes.
+#[cfg(unix)]
+fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
+    let mut written = 0;
+    while written < data.len() {
+        let ret = unsafe {
+            libc::write(
+                1,
+                data[written..].as_ptr() as *const libc::c_void,
+                data.len() - written,
+            )
+        };
+        if ret > 0 {
+            written += ret as usize;
+        } else if ret == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "write returned 0",
+            ));
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::with_capacity(256 * 1024, stdout.lock());
+    out.write_all(data)?;
+    out.flush()
 }

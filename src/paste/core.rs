@@ -67,6 +67,17 @@ pub fn parse_delimiters(s: &str) -> Vec<u8> {
 #[inline]
 fn build_line_offsets(data: &[u8], terminator: u8) -> Vec<(usize, usize)> {
     let mut offsets = Vec::new();
+    if data.is_empty() {
+        return offsets;
+    }
+    // Pre-count lines for exact allocation
+    let count = memchr::memchr_iter(terminator, data).count()
+        + if data.last() != Some(&terminator) {
+            1
+        } else {
+            0
+        };
+    offsets.reserve_exact(count);
     let mut start = 0;
     for pos in memchr::memchr_iter(terminator, data) {
         offsets.push((start, pos));
@@ -79,13 +90,9 @@ fn build_line_offsets(data: &[u8], terminator: u8) -> Vec<(usize, usize)> {
     offsets
 }
 
-/// Paste files in normal (parallel) mode.
+/// Paste files in normal (parallel) mode and return the output buffer.
 /// For each line index, concatenate corresponding lines from all files with delimiters.
-pub fn paste_parallel(
-    file_data: &[&[u8]],
-    config: &PasteConfig,
-    out: &mut impl Write,
-) -> std::io::Result<()> {
+pub fn paste_parallel_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8> {
     let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
 
     // Build line offset arrays for each file
@@ -96,7 +103,7 @@ pub fn paste_parallel(
 
     let max_lines = all_offsets.iter().map(|o| o.len()).max().unwrap_or(0);
     if max_lines == 0 && file_data.iter().all(|d| d.is_empty()) {
-        return Ok(());
+        return Vec::new();
     }
 
     // Estimate output size
@@ -108,32 +115,23 @@ pub fn paste_parallel(
 
     for line_idx in 0..max_lines {
         for (file_idx, (offsets, data)) in all_offsets.iter().zip(file_data.iter()).enumerate() {
-            if file_idx > 0 {
-                // Insert delimiter between fields
-                if !delims.is_empty() {
-                    let d = delims[(file_idx - 1) % delims.len()];
-                    output.push(d);
-                }
+            if file_idx > 0 && !delims.is_empty() {
+                output.push(delims[(file_idx - 1) % delims.len()]);
             }
             if line_idx < offsets.len() {
                 let (start, end) = offsets[line_idx];
                 output.extend_from_slice(&data[start..end]);
             }
-            // If line_idx >= offsets.len(), we output empty field (nothing appended)
         }
         output.push(terminator);
     }
 
-    out.write_all(&output)
+    output
 }
 
-/// Paste files in serial mode.
+/// Paste files in serial mode and return the output buffer.
 /// For each file, join all lines with the delimiter list (cycling).
-pub fn paste_serial(
-    file_data: &[&[u8]],
-    config: &PasteConfig,
-    out: &mut impl Write,
-) -> std::io::Result<()> {
+pub fn paste_serial_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8> {
     let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
     let delims = &config.delimiters;
 
@@ -144,29 +142,37 @@ pub fn paste_serial(
     for data in file_data {
         let offsets = build_line_offsets(data, terminator);
         for (i, &(start, end)) in offsets.iter().enumerate() {
-            if i > 0 {
-                if !delims.is_empty() {
-                    let d = delims[(i - 1) % delims.len()];
-                    output.push(d);
-                }
+            if i > 0 && !delims.is_empty() {
+                output.push(delims[(i - 1) % delims.len()]);
             }
             output.extend_from_slice(&data[start..end]);
         }
         output.push(terminator);
     }
 
-    out.write_all(&output)
+    output
 }
 
-/// Main paste entry point.
+/// Main paste entry point. Writes directly to the provided writer.
 pub fn paste(
     file_data: &[&[u8]],
     config: &PasteConfig,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
-    if config.serial {
-        paste_serial(file_data, config, out)
+    let output = if config.serial {
+        paste_serial_to_vec(file_data, config)
     } else {
-        paste_parallel(file_data, config, out)
+        paste_parallel_to_vec(file_data, config)
+    };
+    out.write_all(&output)
+}
+
+/// Build the paste output as a Vec, then return it for the caller to write.
+/// This allows the binary to use raw write() for maximum throughput.
+pub fn paste_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8> {
+    if config.serial {
+        paste_serial_to_vec(file_data, config)
+    } else {
+        paste_parallel_to_vec(file_data, config)
     }
 }
