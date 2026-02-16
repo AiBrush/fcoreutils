@@ -559,6 +559,29 @@ pub fn join(
 
     // Drain remaining from file 1
     while i1 < lines1.len() {
+        // Check sort order even when draining (GNU join does this)
+        if config.order_check != OrderCheck::None
+            && !warned1
+            && i1 > (if config.header { 1 } else { 0 })
+        {
+            let key1 = extract_field(lines1[i1], config.field1, config.separator);
+            let prev_key = extract_field(lines1[i1 - 1], config.field1, config.separator);
+            if compare_keys(key1, prev_key, ci) == Ordering::Less {
+                had_order_error = true;
+                warned1 = true;
+                eprintln!(
+                    "{}: {}:{}: is not sorted: {}",
+                    tool_name,
+                    file1_name,
+                    i1 + 1,
+                    String::from_utf8_lossy(lines1[i1])
+                );
+                if config.order_check == OrderCheck::Strict {
+                    out.write_all(&buf)?;
+                    return Ok(true);
+                }
+            }
+        }
         if show_unpaired1 {
             let fields1 = split_fields(lines1[i1], config.separator);
             if let Some(specs) = format {
@@ -581,6 +604,29 @@ pub fn join(
 
     // Drain remaining from file 2
     while i2 < lines2.len() {
+        // Check sort order even when draining (GNU join does this)
+        if config.order_check != OrderCheck::None
+            && !warned2
+            && i2 > (if config.header { 1 } else { 0 })
+        {
+            let key2 = extract_field(lines2[i2], config.field2, config.separator);
+            let prev_key = extract_field(lines2[i2 - 1], config.field2, config.separator);
+            if compare_keys(key2, prev_key, ci) == Ordering::Less {
+                had_order_error = true;
+                warned2 = true;
+                eprintln!(
+                    "{}: {}:{}: is not sorted: {}",
+                    tool_name,
+                    file2_name,
+                    i2 + 1,
+                    String::from_utf8_lossy(lines2[i2])
+                );
+                if config.order_check == OrderCheck::Strict {
+                    out.write_all(&buf)?;
+                    return Ok(true);
+                }
+            }
+        }
         if show_unpaired2 {
             let fields2 = split_fields(lines2[i2], config.separator);
             if let Some(specs) = format {

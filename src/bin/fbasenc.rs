@@ -630,10 +630,12 @@ fn z85_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
 // ======================== Common ========================
 
 fn wrap_output(encoded: &str, wrap: usize) -> String {
-    if wrap == 0 || encoded.is_empty() {
-        let mut s = encoded.to_string();
-        s.push('\n');
-        return s;
+    if encoded.is_empty() {
+        return String::new();
+    }
+    if wrap == 0 {
+        // GNU basenc with -w 0 does NOT add a trailing newline
+        return encoded.to_string();
     }
 
     let mut result = String::with_capacity(encoded.len() + encoded.len() / wrap + 1);
@@ -1296,8 +1298,8 @@ mod tests {
         child.stdin.take().unwrap().write_all(b"").unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
-        // GNU basenc outputs a newline even for empty input
-        assert_eq!(output.stdout, b"\n");
+        // GNU basenc produces no output for empty input
+        assert!(output.stdout.is_empty());
     }
 
     // ---- Unit tests for encoding functions ----
