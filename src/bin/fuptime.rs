@@ -297,6 +297,10 @@ mod tests {
     fn test_uptime_matches_gnu_format() {
         let gnu = Command::new("uptime").arg("-p").output();
         if let Ok(gnu) = gnu {
+            // Skip if GNU uptime doesn't support -p (e.g., macOS)
+            if !gnu.status.success() {
+                return;
+            }
             let ours = cmd().arg("-p").output().unwrap();
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
             // The pretty format should be similar (may differ slightly in wording)
