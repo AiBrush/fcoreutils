@@ -251,17 +251,17 @@ pub fn should_show(entry: &UtmpxEntry, config: &WhoConfig) -> bool {
 pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
     let mut out = String::new();
 
-    let name = match entry.ut_type {
-        BOOT_TIME => "system boot".to_string(),
-        RUN_LVL => "run-level".to_string(),
-        NEW_TIME | OLD_TIME => {
-            if entry.ut_type == NEW_TIME {
-                "new-time".to_string()
-            } else {
-                "old-time".to_string()
-            }
+    // Determine name and line based on entry type
+    let (name, line) = match entry.ut_type {
+        BOOT_TIME => (String::new(), "system boot".to_string()),
+        RUN_LVL => {
+            let current = (entry.ut_pid & 0xFF) as u8 as char;
+            (String::new(), format!("run-level {}", current))
         }
-        _ => entry.ut_user.clone(),
+        LOGIN_PROCESS => ("LOGIN".to_string(), entry.ut_line.clone()),
+        NEW_TIME => (String::new(), entry.ut_line.clone()),
+        OLD_TIME => (String::new(), entry.ut_line.clone()),
+        _ => (entry.ut_user.clone(), entry.ut_line.clone()),
     };
 
     // NAME column (left-aligned, 8 chars min)
@@ -278,7 +278,7 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
     }
 
     // LINE column
-    let _ = write!(out, " {:<12}", entry.ut_line);
+    let _ = write!(out, " {:<12}", line);
 
     // TIME column
     let time_str = format_time(entry.ut_tv_sec);
@@ -286,13 +286,29 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
 
     // IDLE + PID for -u
     if config.show_users || config.show_all {
-        if entry.ut_type == USER_PROCESS {
-            let idle = idle_str(&entry.ut_line);
-            let _ = write!(out, " {:>5}", idle);
-            let _ = write!(out, " {:>5}", entry.ut_pid);
-        } else if entry.ut_type == DEAD_PROCESS {
-            let _ = write!(out, "       {:>5}", entry.ut_pid);
+        match entry.ut_type {
+            USER_PROCESS => {
+                let idle = idle_str(&entry.ut_line);
+                let _ = write!(out, " {:>5}", idle);
+                let _ = write!(out, " {:>10}", entry.ut_pid);
+            }
+            LOGIN_PROCESS => {
+                let _ = write!(out, "   ?  {:>10}", entry.ut_pid);
+            }
+            DEAD_PROCESS => {
+                let _ = write!(out, "      {:>10}", entry.ut_pid);
+            }
+            _ => {}
         }
+    }
+
+    // For LOGIN_PROCESS, always show id
+    if entry.ut_type == LOGIN_PROCESS {
+        if !(config.show_users || config.show_all) {
+            // Without -u, show PID with extra spacing
+            let _ = write!(out, "          {:>5}", entry.ut_pid);
+        }
+        let _ = write!(out, " id={}", entry.ut_id);
     }
 
     // COMMENT (host) column
@@ -300,7 +316,6 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
         if config.show_ips {
             let _ = write!(out, " ({})", entry.ut_host);
         } else if config.show_lookup {
-            // Attempt DNS lookup
             let resolved = lookup_host(&entry.ut_host);
             let _ = write!(out, " ({})", resolved);
         } else {
@@ -364,9 +379,10 @@ pub fn format_heading(config: &WhoConfig) -> String {
         let _ = write!(out, " S");
     }
     let _ = write!(out, " {:<12}", "LINE");
-    let _ = write!(out, " {}", "TIME");
+    let _ = write!(out, " {:<16}", "TIME");
     if config.show_users || config.show_all {
-        let _ = write!(out, " {:>14}", "IDLE    PID");
+        let _ = write!(out, " {:<6}", "IDLE");
+        let _ = write!(out, " {:>10}", "PID");
     }
     let _ = write!(out, " {}", "COMMENT");
     out

@@ -83,7 +83,7 @@ pub fn format_date(time: &SystemTime, format: &str, utc: bool) -> String {
         }
     }
 
-    // Process the format string, handling %N specially and passing
+    // Process the format string, handling %N, %-X, %_X specially and passing
     // everything else through to strftime.
     let mut result = String::with_capacity(format.len() * 2);
     let chars: Vec<char> = format.chars().collect();
@@ -91,6 +91,18 @@ pub fn format_date(time: &SystemTime, format: &str, utc: bool) -> String {
 
     while i < chars.len() {
         if chars[i] == '%' && i + 1 < chars.len() {
+            // Check for GNU format modifiers: %-X (no pad), %_X (space pad), %0X (zero pad)
+            let modifier = if i + 2 < chars.len()
+                && (chars[i + 1] == '-' || chars[i + 1] == '_' || chars[i + 1] == '0')
+                && chars[i + 2].is_ascii_alphabetic()
+            {
+                let m = chars[i + 1];
+                i += 1; // skip the modifier, will process specifier next
+                Some(m)
+            } else {
+                None
+            };
+
             match chars[i + 1] {
                 'N' => {
                     // Nanoseconds (9 digits, zero-padded)
@@ -110,6 +122,11 @@ pub fn format_date(time: &SystemTime, format: &str, utc: bool) -> String {
                     result.push_str(ampm);
                     i += 2;
                 }
+                'Z' if utc => {
+                    // Force "UTC" instead of platform-dependent "GMT"
+                    result.push_str("UTC");
+                    i += 2;
+                }
                 'n' => {
                     result.push('\n');
                     i += 2;
@@ -122,6 +139,12 @@ pub fn format_date(time: &SystemTime, format: &str, utc: bool) -> String {
                     // Pass this specifier to strftime
                     let spec = format!("%{}", chars[i + 1]);
                     let formatted = strftime_single(&tm, &spec);
+                    // Apply modifier if present
+                    let formatted = if let Some(mod_char) = modifier {
+                        apply_format_modifier(&formatted, mod_char)
+                    } else {
+                        formatted
+                    };
                     result.push_str(&formatted);
                     i += 2;
                 }
@@ -157,6 +180,53 @@ fn strftime_single(tm: &libc::tm, fmt: &str) -> String {
     }
     buf.truncate(len);
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Apply a GNU format modifier to a strftime result.
+/// '-' removes leading zeros/spaces (no padding).
+/// '_' replaces leading zeros with spaces.
+/// '0' replaces leading spaces with zeros.
+fn apply_format_modifier(formatted: &str, modifier: char) -> String {
+    match modifier {
+        '-' => {
+            // Remove leading zeros and spaces (no padding)
+            let trimmed = formatted.trim_start_matches(['0', ' ']);
+            if trimmed.is_empty() {
+                "0".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        '_' => {
+            // Replace leading zeros with spaces
+            let mut result = String::with_capacity(formatted.len());
+            let mut leading = true;
+            for ch in formatted.chars() {
+                if leading && ch == '0' {
+                    result.push(' ');
+                } else {
+                    leading = false;
+                    result.push(ch);
+                }
+            }
+            result
+        }
+        '0' => {
+            // Replace leading spaces with zeros
+            let mut result = String::with_capacity(formatted.len());
+            let mut leading = true;
+            for ch in formatted.chars() {
+                if leading && ch == ' ' {
+                    result.push('0');
+                } else {
+                    leading = false;
+                    result.push(ch);
+                }
+            }
+            result
+        }
+        _ => formatted.to_string(),
+    }
 }
 
 /// Format a SystemTime in ISO 8601 format.

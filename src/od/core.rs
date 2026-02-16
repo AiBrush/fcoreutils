@@ -220,41 +220,57 @@ fn format_value(bytes: &[u8], fmt: OutputFormat, width: usize) -> String {
     }
 }
 
-/// Format f32 like GNU od: uses %g-like formatting.
-fn format_float_f32(v: f32) -> String {
-    if v == 0.0 && !v.is_sign_negative() {
-        return "0".to_string();
-    }
-    if v.is_nan() {
-        return "NaN".to_string();
-    }
-    if v.is_infinite() {
-        return if v.is_sign_negative() {
-            "-Inf".to_string()
-        } else {
-            "Inf".to_string()
+/// Format a float using C's %g format.
+/// Uses libc snprintf on Unix and Rust formatting on Windows.
+fn snprintf_g(v: f64, precision: usize) -> String {
+    let precision = precision.min(50);
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 64];
+        let fmt = std::ffi::CString::new(format!("%.{}g", precision)).unwrap();
+        let len = unsafe {
+            libc::snprintf(
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                fmt.as_ptr(),
+                v,
+            )
         };
+        if len > 0 && (len as usize) < buf.len() {
+            return String::from_utf8_lossy(&buf[..len as usize]).into_owned();
+        }
     }
-    // GNU od uses printf %e style for floats
-    format!("{:e}", v)
+    // Fallback / Windows: use Rust formatting with %g-like behavior
+    let s = format!("{:.prec$e}", v, prec = precision.saturating_sub(1));
+    // Convert scientific notation to shortest form like %g
+    if let Some(e_pos) = s.find('e') {
+        let exp: i32 = s[e_pos + 1..].parse().unwrap_or(0);
+        if exp >= -(precision as i32) && exp < precision as i32 {
+            // Use fixed notation
+            let fixed = format!(
+                "{:.prec$}",
+                v,
+                prec = (precision as i32 - 1 - exp).max(0) as usize
+            );
+            // Trim trailing zeros after decimal point
+            if fixed.contains('.') {
+                let trimmed = fixed.trim_end_matches('0').trim_end_matches('.');
+                return trimmed.to_string();
+            }
+            return fixed;
+        }
+    }
+    format!("{:.*e}", precision.saturating_sub(1), v)
 }
 
-/// Format f64 like GNU od: uses %g-like formatting.
+/// Format f32 like GNU od: uses %.7g formatting.
+fn format_float_f32(v: f32) -> String {
+    snprintf_g(v as f64, 7)
+}
+
+/// Format f64 like GNU od: uses %.17g formatting.
 fn format_float_f64(v: f64) -> String {
-    if v == 0.0 && !v.is_sign_negative() {
-        return "0".to_string();
-    }
-    if v.is_nan() {
-        return "NaN".to_string();
-    }
-    if v.is_infinite() {
-        return if v.is_sign_negative() {
-            "-Inf".to_string()
-        } else {
-            "Inf".to_string()
-        };
-    }
-    format!("{:e}", v)
+    snprintf_g(v, 17)
 }
 
 /// Format one line of output for a given format type.
