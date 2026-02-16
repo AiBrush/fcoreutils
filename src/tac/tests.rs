@@ -269,10 +269,7 @@ mod integration {
     fn test_help() {
         let (stdout, _stderr, code) = run_ftac(b"", &["--help"]);
         assert_eq!(code, 0);
-        assert!(
-            !stdout.is_empty(),
-            "Expected non-empty help output"
-        );
+        assert!(!stdout.is_empty(), "Expected non-empty help output");
     }
 
     #[test]
@@ -289,8 +286,10 @@ mod integration {
 
     #[test]
     fn test_nonexistent_file() {
-        let (_stdout, stderr, code) =
-            run_ftac(b"", &["/tmp/ftac_nonexistent_file_that_does_not_exist_12345"]);
+        let (_stdout, stderr, code) = run_ftac(
+            b"",
+            &["/tmp/ftac_nonexistent_file_that_does_not_exist_12345"],
+        );
         assert_eq!(code, 1);
         assert!(
             !stderr.is_empty(),

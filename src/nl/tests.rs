@@ -416,7 +416,8 @@ fn test_custom_delimiter_double_char() {
 #[test]
 fn test_full_page_cycle() {
     // Full logical page: header (\:\:\:), body (\:\:), footer (\:)
-    let input = b"\\:\\:\\:\nheader1\nheader2\n\\:\\:\nbody1\nbody2\nbody3\n\\:\nfooter1\nfooter2\n";
+    let input =
+        b"\\:\\:\\:\nheader1\nheader2\n\\:\\:\nbody1\nbody2\nbody3\n\\:\nfooter1\nfooter2\n";
     let config = NlConfig {
         header_style: NumberingStyle::All,
         body_style: NumberingStyle::All,
@@ -870,8 +871,16 @@ mod integration {
         assert!(lines[3].trim_start().starts_with("footer1"));
         assert!(lines[4].trim_start().starts_with("footer2"));
         // Verify footer lines don't have numbers
-        assert!(!lines[3].trim_start().starts_with(|c: char| c.is_ascii_digit()));
-        assert!(!lines[4].trim_start().starts_with(|c: char| c.is_ascii_digit()));
+        assert!(
+            !lines[3]
+                .trim_start()
+                .starts_with(|c: char| c.is_ascii_digit())
+        );
+        assert!(
+            !lines[4]
+                .trim_start()
+                .starts_with(|c: char| c.is_ascii_digit())
+        );
     }
 
     // --- GNU compatibility tests ---
@@ -891,10 +900,7 @@ mod integration {
         let gnu_out = Command::new("nl")
             .args(["-h", "a", "-f", "a", path.to_str().unwrap()])
             .output();
-        let (our_out, _, code) = run_fnl(
-            b"",
-            &["-h", "a", "-f", "a", path.to_str().unwrap()],
-        );
+        let (our_out, _, code) = run_fnl(b"", &["-h", "a", "-f", "a", path.to_str().unwrap()]);
         assert_eq!(code, 0);
 
         if let Ok(gnu) = gnu_out {
@@ -922,10 +928,7 @@ mod integration {
         let gnu_out = Command::new("nl")
             .args(["-w", "3", "-b", "a", path.to_str().unwrap()])
             .output();
-        let (our_out, _, code) = run_fnl(
-            b"",
-            &["-w", "3", "-b", "a", path.to_str().unwrap()],
-        );
+        let (our_out, _, code) = run_fnl(b"", &["-w", "3", "-b", "a", path.to_str().unwrap()]);
         assert_eq!(code, 0);
 
         if let Ok(gnu) = gnu_out {

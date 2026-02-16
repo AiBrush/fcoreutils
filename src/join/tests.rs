@@ -556,12 +556,7 @@ mod integration {
         // Files with different field counts
         std::fs::write(&f1, "a 1 2\nb 3 4\n").unwrap();
         std::fs::write(&f2, "a x\nb y\n").unwrap();
-        let (out, _, code) = run_fjoin(&[
-            "-o",
-            "auto",
-            f1.to_str().unwrap(),
-            f2.to_str().unwrap(),
-        ]);
+        let (out, _, code) = run_fjoin(&["-o", "auto", f1.to_str().unwrap(), f2.to_str().unwrap()]);
         assert_eq!(code, 0);
         let output = String::from_utf8_lossy(&out);
         // -o auto should produce output based on the field counts from the first lines
@@ -589,11 +584,8 @@ mod integration {
         // Unsorted input
         std::fs::write(&f1, "b 1\na 2\n").unwrap();
         std::fs::write(&f2, "a x\nb y\n").unwrap();
-        let (_, err, code) = run_fjoin(&[
-            "--check-order",
-            f1.to_str().unwrap(),
-            f2.to_str().unwrap(),
-        ]);
+        let (_, err, code) =
+            run_fjoin(&["--check-order", f1.to_str().unwrap(), f2.to_str().unwrap()]);
         // --check-order with unsorted input should produce an error/warning on stderr
         let stderr = String::from_utf8_lossy(&err);
         assert!(
@@ -699,8 +691,12 @@ mod integration {
             std::fs::write(&f1, "a 1\nb 2\nc 3\n").unwrap();
             std::fs::write(&f2, "a x\nc z\n").unwrap();
             let args = [
-                "-e", "EMPTY", "-o", "0,1.2,2.2",
-                "-a", "1",
+                "-e",
+                "EMPTY",
+                "-o",
+                "0,1.2,2.2",
+                "-a",
+                "1",
                 f1.to_str().unwrap(),
                 f2.to_str().unwrap(),
             ];

@@ -641,7 +641,10 @@ mod integration {
 
             let (our_out, _, our_code) = run_fcomm(&args);
             if let Some((gnu_out, gnu_code)) = run_gnu_comm(&args) {
-                assert_eq!(our_out, gnu_out, "Output differs from GNU comm --output-delimiter");
+                assert_eq!(
+                    our_out, gnu_out,
+                    "Output differs from GNU comm --output-delimiter"
+                );
                 assert_eq!(our_code, gnu_code, "Exit code differs");
             }
         }

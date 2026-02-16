@@ -583,10 +583,7 @@ mod integration {
         let p2 = dir.path().join("z2.txt");
         std::fs::write(&p1, b"a\x00b\x00").unwrap();
         std::fs::write(&p2, b"c\x00d\x00").unwrap();
-        let (out, _, code) = run_fpaste(
-            b"",
-            &["-z", p1.to_str().unwrap(), p2.to_str().unwrap()],
-        );
+        let (out, _, code) = run_fpaste(b"", &["-z", p1.to_str().unwrap(), p2.to_str().unwrap()]);
         assert_eq!(code, 0);
         assert_eq!(out, b"a\tc\x00b\td\x00");
     }
@@ -630,10 +627,8 @@ mod integration {
             .args(["-z", p1.to_str().unwrap(), p2.to_str().unwrap()])
             .output();
 
-        let (our_out, _, code) = run_fpaste(
-            b"",
-            &["-z", p1.to_str().unwrap(), p2.to_str().unwrap()],
-        );
+        let (our_out, _, code) =
+            run_fpaste(b"", &["-z", p1.to_str().unwrap(), p2.to_str().unwrap()]);
         assert_eq!(code, 0);
 
         if let Ok(gnu) = gnu_out {
@@ -657,10 +652,7 @@ mod integration {
             .args(["-s", "-d", ",:", p1.to_str().unwrap()])
             .output();
 
-        let (our_out, _, code) = run_fpaste(
-            b"",
-            &["-s", "-d", ",:", p1.to_str().unwrap()],
-        );
+        let (our_out, _, code) = run_fpaste(b"", &["-s", "-d", ",:", p1.to_str().unwrap()]);
         assert_eq!(code, 0);
 
         if let Ok(gnu) = gnu_out {

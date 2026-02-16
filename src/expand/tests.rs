@@ -431,10 +431,7 @@ mod integration {
         let file2 = dir.path().join("file2.txt");
         std::fs::write(&file1, b"\thello\n").unwrap();
         std::fs::write(&file2, b"\tworld\n").unwrap();
-        let (out, code) = run_fexpand(
-            b"",
-            &[file1.to_str().unwrap(), file2.to_str().unwrap()],
-        );
+        let (out, code) = run_fexpand(b"", &[file1.to_str().unwrap(), file2.to_str().unwrap()]);
         assert_eq!(code, 0);
         let result = String::from_utf8(out).unwrap();
         assert!(result.contains("        hello"));
@@ -452,7 +449,13 @@ mod integration {
         std::fs::write(&file2, b"    world\n").unwrap();
         let (out, code) = run_funexpand(
             b"",
-            &["-a", "-t", "4", file1.to_str().unwrap(), file2.to_str().unwrap()],
+            &[
+                "-a",
+                "-t",
+                "4",
+                file1.to_str().unwrap(),
+                file2.to_str().unwrap(),
+            ],
         );
         assert_eq!(code, 0);
         let result = String::from_utf8(out).unwrap();

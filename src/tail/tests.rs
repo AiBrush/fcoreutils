@@ -461,7 +461,11 @@ fn test_verbose_flag_single_file() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("==> "), "expected verbose header in output: {}", stdout);
+    assert!(
+        stdout.contains("==> "),
+        "expected verbose header in output: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -522,7 +526,10 @@ fn test_multiple_files_bytes_mode() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("==> "), "expected file headers for multiple files");
+    assert!(
+        stdout.contains("==> "),
+        "expected file headers for multiple files"
+    );
     assert!(stdout.contains("DEF"), "expected last 3 bytes of file1");
     assert!(stdout.contains("456"), "expected last 3 bytes of file2");
 }
