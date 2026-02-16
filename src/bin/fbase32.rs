@@ -295,12 +295,12 @@ fn base32_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
 
 /// Wrap encoded text at the specified column width.
 fn wrap_output(encoded: &str, wrap: usize) -> String {
-    if wrap == 0 || encoded.is_empty() {
-        let mut s = encoded.to_string();
-        if !s.is_empty() {
-            s.push('\n');
-        }
-        return s;
+    if encoded.is_empty() {
+        return String::new();
+    }
+    if wrap == 0 {
+        // GNU base32 with -w 0 does NOT add a trailing newline
+        return encoded.to_string();
     }
 
     let mut result = String::with_capacity(encoded.len() + encoded.len() / wrap + 1);

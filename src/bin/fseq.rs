@@ -413,6 +413,7 @@ fn main() {
             "{}: invalid Zero increment value: '{}'",
             TOOL_NAME, increment_str
         );
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(1);
     }
 

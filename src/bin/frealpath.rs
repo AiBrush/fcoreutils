@@ -118,6 +118,14 @@ fn main() {
     let mut exit_code = 0;
 
     for file in &files {
+        // Empty string is an error for all modes except CanonicalizeMissing (matches GNU)
+        if file.is_empty() && mode != Mode::CanonicalizeMissing {
+            exit_code = 1;
+            if !quiet {
+                eprintln!("{}: '': No such file or directory", TOOL_NAME);
+            }
+            continue;
+        }
         match resolve_path(file, mode, no_symlinks) {
             Ok(resolved) => {
                 let output =

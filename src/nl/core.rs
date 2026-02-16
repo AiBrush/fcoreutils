@@ -267,6 +267,9 @@ pub fn nl_to_vec(data: &[u8], config: &NlConfig) -> Vec<u8> {
             output.push(b'\n');
             start += line.len() + 1;
         } else {
+            // GNU nl always adds a trailing newline, even when the input lacks one
+            // (but has content on the last line). Empty input produces empty output.
+            output.push(b'\n');
             break;
         }
     }

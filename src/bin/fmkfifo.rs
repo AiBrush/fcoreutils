@@ -23,6 +23,7 @@ fn main() {
     coreutils_rs::common::reset_sigpipe();
 
     let mut mode: libc::mode_t = 0o666;
+    let mut mode_specified = false;
     let mut names: Vec<String> = Vec::new();
     let mut saw_dashdash = false;
 
@@ -50,10 +51,12 @@ fn main() {
             s if s.starts_with("--mode=") => {
                 let val = &s["--mode=".len()..];
                 mode = parse_octal_mode(val);
+                mode_specified = true;
             }
             "--mode" | "-m" => {
                 if let Some(val) = args.next() {
                     mode = parse_octal_mode(&val);
+                    mode_specified = true;
                 } else {
                     eprintln!("{}: option '{}' requires an argument", TOOL_NAME, arg);
                     process::exit(1);
@@ -66,12 +69,14 @@ fn main() {
                     if stripped.is_empty() {
                         if let Some(val) = args.next() {
                             mode = parse_octal_mode(&val);
+                            mode_specified = true;
                         } else {
                             eprintln!("{}: option requires an argument -- 'm'", TOOL_NAME);
                             process::exit(1);
                         }
                     } else {
                         mode = parse_octal_mode(stripped);
+                        mode_specified = true;
                     }
                 } else {
                     eprintln!("{}: invalid option -- '{}'", TOOL_NAME, &rest[..1]);
@@ -110,6 +115,20 @@ fn main() {
                 coreutils_rs::common::io_error_msg(&e)
             );
             exit_code = 1;
+        } else if mode_specified {
+            // mkfifo applies umask; chmod to enforce exact mode (matches GNU behavior)
+            // SAFETY: c_name is a valid null-terminated C string, mode is a valid mode_t
+            let chmod_ret = unsafe { libc::chmod(c_name.as_ptr(), mode) };
+            if chmod_ret != 0 {
+                let e = std::io::Error::last_os_error();
+                eprintln!(
+                    "{}: cannot set permissions on '{}': {}",
+                    TOOL_NAME,
+                    name,
+                    coreutils_rs::common::io_error_msg(&e)
+                );
+                exit_code = 1;
+            }
         }
     }
 
