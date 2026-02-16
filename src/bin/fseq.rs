@@ -712,7 +712,11 @@ mod tests {
         Command::new("seq")
             .arg("--version")
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("GNU"))
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                stdout.contains("GNU") || stderr.contains("GNU")
+            })
             .unwrap_or(false)
     }
 

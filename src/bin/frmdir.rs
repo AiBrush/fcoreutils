@@ -123,8 +123,25 @@ fn remove_parents(dir: &str, ignore_nonempty: bool, verbose: bool) -> Result<(),
 }
 
 fn is_nonempty_error(e: &std::io::Error) -> bool {
-    // ENOTEMPTY (39 on Linux) or EEXIST (17)
-    matches!(e.raw_os_error(), Some(libc::ENOTEMPTY) | Some(libc::EEXIST))
+    // Check by ErrorKind for cross-platform support
+    if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
+        return true;
+    }
+    // Also check raw OS error codes as fallback
+    #[cfg(unix)]
+    {
+        if matches!(e.raw_os_error(), Some(libc::ENOTEMPTY) | Some(libc::EEXIST)) {
+            return true;
+        }
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_DIR_NOT_EMPTY = 145
+        if e.raw_os_error() == Some(145) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
