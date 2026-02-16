@@ -263,6 +263,8 @@ fn copy_file_range_linux(src: &Path, dst: &Path) -> io::Result<()> {
 
     let mut remaining = len as i64;
     while remaining > 0 {
+        // Cap to isize::MAX to avoid overflow on 32-bit when casting to usize.
+        let to_copy = (remaining as u64).min(isize::MAX as u64) as usize;
         // SAFETY: src_file and dst_file are valid open file descriptors;
         // null offsets mean the kernel uses and updates the file offsets.
         let ret = unsafe {
@@ -271,7 +273,7 @@ fn copy_file_range_linux(src: &Path, dst: &Path) -> io::Result<()> {
                 std::ptr::null_mut(),
                 dst_file.as_raw_fd(),
                 std::ptr::null_mut(),
-                remaining as usize,
+                to_copy,
                 0,
             )
         };

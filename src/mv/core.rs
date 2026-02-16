@@ -2,6 +2,9 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 /// Backup mode for destination files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackupMode {
@@ -169,20 +172,66 @@ pub fn strip_trailing_slashes(path: &str) -> &str {
     if trimmed.is_empty() { "/" } else { trimmed }
 }
 
+/// Preserve file metadata (permissions, timestamps, ownership) from `src` onto `dst`.
+/// Used during cross-device moves to maintain the original file attributes.
+fn preserve_metadata(src_meta: &fs::Metadata, dst: &Path) -> io::Result<()> {
+    // Preserve permissions
+    fs::set_permissions(dst, src_meta.permissions())?;
+
+    // Preserve timestamps
+    #[cfg(unix)]
+    {
+        let atime_spec = libc::timespec {
+            tv_sec: src_meta.atime(),
+            tv_nsec: src_meta.atime_nsec(),
+        };
+        let mtime_spec = libc::timespec {
+            tv_sec: src_meta.mtime(),
+            tv_nsec: src_meta.mtime_nsec(),
+        };
+        let times = [atime_spec, mtime_spec];
+        let c_path = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        // SAFETY: c_path is a valid NUL-terminated C string, times is a valid [timespec; 2].
+        let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    // Preserve ownership (requires root for chown)
+    #[cfg(unix)]
+    {
+        let c_path = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        // SAFETY: c_path is a valid NUL-terminated C string, uid/gid are valid u32 values.
+        let ret = unsafe { libc::lchown(c_path.as_ptr(), src_meta.uid(), src_meta.gid()) };
+        if ret != 0 {
+            let err = io::Error::last_os_error();
+            // Ownership preservation may fail for non-root; ignore EPERM.
+            if err.raw_os_error() != Some(libc::EPERM) {
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Recursively copy a file or directory from `src` to `dst`.
 fn copy_recursive(src: &Path, dst: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(src)?;
 
     if metadata.is_dir() {
         fs::create_dir_all(dst)?;
-        // Copy permissions
-        fs::set_permissions(dst, metadata.permissions())?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
             let src_child = entry.path();
             let dst_child = dst.join(entry.file_name());
             copy_recursive(&src_child, &dst_child)?;
         }
+        // Preserve directory metadata after contents are copied
+        preserve_metadata(&metadata, dst)?;
     } else if metadata.file_type().is_symlink() {
         let link_target = fs::read_link(src)?;
         #[cfg(unix)]
@@ -194,8 +243,23 @@ fn copy_recursive(src: &Path, dst: &Path) -> io::Result<()> {
             // On non-Unix, try a regular copy as fallback
             fs::copy(src, dst)?;
         }
+        // Preserve symlink ownership (timestamps are not preserved for symlinks by design)
+        #[cfg(unix)]
+        {
+            let c_path = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            // SAFETY: c_path is a valid NUL-terminated C string, uid/gid are valid u32 values.
+            let ret = unsafe { libc::lchown(c_path.as_ptr(), metadata.uid(), metadata.gid()) };
+            if ret != 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EPERM) {
+                    return Err(err);
+                }
+            }
+        }
     } else {
         fs::copy(src, dst)?;
+        preserve_metadata(&metadata, dst)?;
     }
 
     Ok(())
