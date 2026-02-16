@@ -227,19 +227,32 @@ fn format_file_terse(path: &str, meta: &std::fs::Metadata, st: &libc::stat) -> S
 // ──────────────────────────────────────────────────
 
 fn format_fs_default(path: &str, sfs: &libc::statfs) -> String {
+    #[cfg(target_os = "linux")]
     let fs_type = sfs.f_type;
+    #[cfg(not(target_os = "linux"))]
+    let fs_type = 0u32;
     let fs_type_name = fs_type_name(fs_type as u64);
     let fsid = sfs.f_fsid;
     let fsid_val = extract_fsid(&fsid);
+
+    #[cfg(target_os = "linux")]
+    let namelen = sfs.f_namelen;
+    #[cfg(not(target_os = "linux"))]
+    let namelen = 255i64; // macOS doesn't expose f_namelen
+
+    #[cfg(target_os = "linux")]
+    let frsize = sfs.f_frsize;
+    #[cfg(not(target_os = "linux"))]
+    let frsize = sfs.f_bsize as u64; // fallback to bsize
 
     format!(
         "  File: \"{}\"\n    ID: {:x} Namelen: {}     Type: {}\nBlock size: {:<10} Fundamental block size: {}\nBlocks: Total: {:<10} Free: {:<10} Available: {}\nInodes: Total: {:<10} Free: {}\n",
         path,
         fsid_val,
-        sfs.f_namelen,
+        namelen,
         fs_type_name,
         sfs.f_bsize,
-        sfs.f_frsize,
+        frsize,
         sfs.f_blocks,
         sfs.f_bfree,
         sfs.f_bavail,
@@ -255,14 +268,30 @@ fn format_fs_default(path: &str, sfs: &libc::statfs) -> String {
 fn format_fs_terse(path: &str, sfs: &libc::statfs) -> String {
     let fsid = sfs.f_fsid;
     let fsid_val = extract_fsid(&fsid);
+
+    #[cfg(target_os = "linux")]
+    let namelen = sfs.f_namelen;
+    #[cfg(not(target_os = "linux"))]
+    let namelen = 255i64;
+
+    #[cfg(target_os = "linux")]
+    let fs_type = sfs.f_type;
+    #[cfg(not(target_os = "linux"))]
+    let fs_type = 0u32; // macOS doesn't have f_type
+
+    #[cfg(target_os = "linux")]
+    let frsize = sfs.f_frsize;
+    #[cfg(not(target_os = "linux"))]
+    let frsize = sfs.f_bsize as u64;
+
     format!(
         "{} {} {} {} {} {} {} {} {} {} {} {}\n",
         path,
         fsid_val,
-        sfs.f_namelen,
-        sfs.f_type,
+        namelen,
+        fs_type,
         sfs.f_bsize,
-        sfs.f_frsize,
+        frsize,
         sfs.f_blocks,
         sfs.f_bfree,
         sfs.f_bavail,
@@ -443,7 +472,10 @@ fn format_fs_specifiers(fmt: &str, path: &str, sfs: &libc::statfs) -> String {
                     result.push_str(&format!("{:x}", fsid_val));
                 }
                 'l' => {
+                    #[cfg(target_os = "linux")]
                     result.push_str(&sfs.f_namelen.to_string());
+                    #[cfg(not(target_os = "linux"))]
+                    result.push_str("255");
                 }
                 'n' => {
                     result.push_str(path);
@@ -452,13 +484,22 @@ fn format_fs_specifiers(fmt: &str, path: &str, sfs: &libc::statfs) -> String {
                     result.push_str(&sfs.f_bsize.to_string());
                 }
                 'S' => {
+                    #[cfg(target_os = "linux")]
                     result.push_str(&sfs.f_frsize.to_string());
+                    #[cfg(not(target_os = "linux"))]
+                    result.push_str(&sfs.f_bsize.to_string());
                 }
                 't' => {
+                    #[cfg(target_os = "linux")]
                     result.push_str(&format!("{:x}", sfs.f_type));
+                    #[cfg(not(target_os = "linux"))]
+                    result.push_str("0");
                 }
                 'T' => {
+                    #[cfg(target_os = "linux")]
                     result.push_str(fs_type_name(sfs.f_type as u64));
+                    #[cfg(not(target_os = "linux"))]
+                    result.push_str("unknown");
                 }
                 '%' => {
                     result.push('%');

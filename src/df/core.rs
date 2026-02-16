@@ -171,7 +171,10 @@ fn statvfs_info(mount: &MountEntry) -> Option<FsInfo> {
         return None;
     }
 
+    #[cfg(target_os = "linux")]
     let block_size = stat.f_frsize as u64;
+    #[cfg(not(target_os = "linux"))]
+    let block_size = stat.f_bsize as u64;
     let total = stat.f_blocks as u64 * block_size;
     let free = stat.f_bfree as u64 * block_size;
     let available = stat.f_bavail as u64 * block_size;
