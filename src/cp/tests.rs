@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::MetadataExt;
 
 fn bin_path(name: &str) -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap();

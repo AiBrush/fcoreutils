@@ -180,21 +180,21 @@ impl Default for LsConfig {
 /// Parsed colour database.
 #[derive(Debug, Clone)]
 pub struct ColorDb {
-    map: HashMap<String, String>,
-    dir: String,
-    link: String,
-    exec: String,
-    pipe: String,
-    socket: String,
-    block_dev: String,
-    char_dev: String,
-    orphan: String,
-    setuid: String,
-    setgid: String,
-    sticky: String,
-    other_writable: String,
-    sticky_other_writable: String,
-    reset: String,
+    pub map: HashMap<String, String>,
+    pub dir: String,
+    pub link: String,
+    pub exec: String,
+    pub pipe: String,
+    pub socket: String,
+    pub block_dev: String,
+    pub char_dev: String,
+    pub orphan: String,
+    pub setuid: String,
+    pub setgid: String,
+    pub sticky: String,
+    pub other_writable: String,
+    pub sticky_other_writable: String,
+    pub reset: String,
 }
 
 impl Default for ColorDb {
@@ -369,7 +369,7 @@ impl FileEntry {
 
     /// Create from a path using the full path as the display name (for -d with
     /// arguments, or for the `.` and `..` virtual entries).
-    fn from_path_with_name(name: String, path: &Path, config: &LsConfig) -> io::Result<Self> {
+    pub fn from_path_with_name(name: String, path: &Path, config: &LsConfig) -> io::Result<Self> {
         let meta = if config.dereference {
             fs::metadata(path).or_else(|_| fs::symlink_metadata(path))?
         } else {
@@ -644,7 +644,7 @@ fn locale_quote(name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Natural version sort comparison (like GNU `ls -v` / `sort -V`).
-fn version_cmp(a: &str, b: &str) -> Ordering {
+pub fn version_cmp(a: &str, b: &str) -> Ordering {
     let ab = a.as_bytes();
     let bb = b.as_bytes();
     let mut ai = 0;
@@ -1023,7 +1023,7 @@ fn lookup_group(gid: u32) -> String {
 // ---------------------------------------------------------------------------
 
 /// Simple glob matching (supports * and ?).
-fn glob_match(pattern: &str, name: &str) -> bool {
+pub fn glob_match(pattern: &str, name: &str) -> bool {
     let pat = pattern.as_bytes();
     let txt = name.as_bytes();
     let mut pi = 0;
@@ -1539,7 +1539,7 @@ fn print_single_column(
 // Comma-separated output
 // ---------------------------------------------------------------------------
 
-fn print_comma(
+pub fn print_comma(
     out: &mut impl Write,
     entries: &[FileEntry],
     config: &LsConfig,
