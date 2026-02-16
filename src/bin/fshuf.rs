@@ -298,10 +298,7 @@ fn parse_range(s: &str) -> (u64, u64) {
         match rest.find('-') {
             Some(p) => p + 1,
             None => {
-                eprintln!(
-                    "{}: invalid input range: \u{2018}{}\u{2019}",
-                    TOOL_NAME, s
-                );
+                eprintln!("{}: invalid input range: \u{2018}{}\u{2019}", TOOL_NAME, s);
                 process::exit(1);
             }
         }
@@ -309,10 +306,7 @@ fn parse_range(s: &str) -> (u64, u64) {
         match s.find('-') {
             Some(p) => p,
             None => {
-                eprintln!(
-                    "{}: invalid input range: \u{2018}{}\u{2019}",
-                    TOOL_NAME, s
-                );
+                eprintln!("{}: invalid input range: \u{2018}{}\u{2019}", TOOL_NAME, s);
                 process::exit(1);
             }
         }
@@ -324,28 +318,19 @@ fn parse_range(s: &str) -> (u64, u64) {
     let lo: u64 = match lo_str.parse() {
         Ok(v) => v,
         Err(_) => {
-            eprintln!(
-                "{}: invalid input range: \u{2018}{}\u{2019}",
-                TOOL_NAME, s
-            );
+            eprintln!("{}: invalid input range: \u{2018}{}\u{2019}", TOOL_NAME, s);
             process::exit(1);
         }
     };
     let hi: u64 = match hi_str.parse() {
         Ok(v) => v,
         Err(_) => {
-            eprintln!(
-                "{}: invalid input range: \u{2018}{}\u{2019}",
-                TOOL_NAME, s
-            );
+            eprintln!("{}: invalid input range: \u{2018}{}\u{2019}", TOOL_NAME, s);
             process::exit(1);
         }
     };
     if lo > hi {
-        eprintln!(
-            "{}: invalid input range: \u{2018}{}\u{2019}",
-            TOOL_NAME, s
-        );
+        eprintln!("{}: invalid input range: \u{2018}{}\u{2019}", TOOL_NAME, s);
         process::exit(1);
     }
     (lo, hi)

@@ -816,7 +816,9 @@ mod tests {
         ];
 
         for (mode_str, expected) in &test_cases {
-            let target = dir.path().join(format!("gnu_sym_{}", mode_str.replace(',', "_")));
+            let target = dir
+                .path()
+                .join(format!("gnu_sym_{}", mode_str.replace(',', "_")));
             let output = cmd()
                 .args(["-m", mode_str, target.to_str().unwrap()])
                 .output()
