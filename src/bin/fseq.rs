@@ -7,7 +7,6 @@
 use std::io::{BufWriter, Write};
 use std::process;
 
-use itoa;
 
 const TOOL_NAME: &str = "seq";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -550,7 +549,6 @@ fn main() {
             let _ = out.write_all(&buf);
         }
         let _ = out.flush();
-        return;
     } else if use_int && !fmt.is_empty() {
         // Integer values with format string (e.g., equal-width)
         let first_i = first as i64;
@@ -577,16 +575,12 @@ fn main() {
                         let digits = &s_bytes[1..]; // skip '-'
                         if digits.len() < int_pad_width - 1 {
                             let pad = int_pad_width - 1 - digits.len();
-                            for _ in 0..pad {
-                                buf.push(b'0');
-                            }
+                            buf.extend(std::iter::repeat_n(b'0', pad));
                         }
                         buf.extend_from_slice(digits);
                     } else if s_bytes.len() < int_pad_width {
                         let pad = int_pad_width - s_bytes.len();
-                        for _ in 0..pad {
-                            buf.push(b'0');
-                        }
+                        buf.extend(std::iter::repeat_n(b'0', pad));
                         buf.extend_from_slice(s_bytes);
                     } else {
                         buf.extend_from_slice(s_bytes);
@@ -615,16 +609,12 @@ fn main() {
                         let digits = &s_bytes[1..];
                         if digits.len() < int_pad_width - 1 {
                             let pad = int_pad_width - 1 - digits.len();
-                            for _ in 0..pad {
-                                buf.push(b'0');
-                            }
+                            buf.extend(std::iter::repeat_n(b'0', pad));
                         }
                         buf.extend_from_slice(digits);
                     } else if s_bytes.len() < int_pad_width {
                         let pad = int_pad_width - s_bytes.len();
-                        for _ in 0..pad {
-                            buf.push(b'0');
-                        }
+                        buf.extend(std::iter::repeat_n(b'0', pad));
                         buf.extend_from_slice(s_bytes);
                     } else {
                         buf.extend_from_slice(s_bytes);
@@ -647,7 +637,6 @@ fn main() {
             let _ = out.write_all(&buf);
         }
         let _ = out.flush();
-        return;
     } else {
         // Float path
         // Use a step counter to avoid accumulation errors
@@ -710,7 +699,6 @@ fn main() {
             let _ = out.write_all(&buf);
         }
         let _ = out.flush();
-        return;
     }
 }
 
