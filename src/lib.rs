@@ -26,12 +26,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod base64;
 pub mod cat;
+pub mod comm;
 pub mod common;
 pub mod cut;
 pub mod expand;
 pub mod fold;
 pub mod hash;
 pub mod head;
+pub mod join;
 pub mod rev;
 pub mod sort;
 pub mod tac;
