@@ -648,7 +648,12 @@ mod tests {
 
     #[test]
     fn test_ls_colors_content() {
-        let output = cmd().arg("-b").output().unwrap();
+        // Set TERM to a matching terminal so colors are output
+        let output = cmd()
+            .arg("-b")
+            .env("TERM", "xterm-256color")
+            .output()
+            .unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         // Should contain directory color
