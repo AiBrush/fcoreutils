@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/AiBrush/coreutils-rs)](https://github.com/AiBrush/coreutils-rs/releases)
 
-High-performance GNU coreutils replacement in Rust — 89 tools and counting. SIMD-accelerated, drop-in compatible, cross-platform.
+High-performance GNU coreutils replacement in Rust — 96 tools and counting. SIMD-accelerated, drop-in compatible, cross-platform.
 
 ## Performance ([independent benchmarks](https://github.com/AiBrush/coreutils-rs-independent-test) v0.7.1, Linux, hyperfine)
 
@@ -140,7 +140,7 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 
 ## *NOT INCLUDED IN HACKATHON SUBMISSION*
-### Additional Tools (61 tools)
+### Additional Tools (96 tools) — [independent compatibility tests](https://github.com/AiBrush/coreutils-rs-independent-test) v0.7.2: **1593/1724 tests passing (92.4%)**
 
 | Tool | Binary | Description | Compatibility | Passed | Failed | Skipped | Total |
 |------|--------|-------------|---------------|--------|--------|---------|-------|
@@ -179,7 +179,7 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 | realpath | `frealpath` | Resolve absolute paths | :white_check_mark: | 24 | 0 | 0 | 24 |
 | pathchk | `fpathchk` | Validate path names | :white_check_mark: | 17 | 0 | 0 | 17 |
 | seq | `fseq` | Generate number sequences | :white_check_mark: | 53 | 0 | 0 | 53 |
-| shuf | `fshuf` | Random permutations of input | :white_check_mark: | 27 | 0 | 0 | 27 |
+| shuf | `fshuf` | Random permutations of input | :warning: | 26 | 1 | 0 | 27 |
 | tsort | `ftsort` | Topological sorting | :white_check_mark: | 19 | 0 | 0 | 19 |
 | tee | `ftee` | Read stdin, write to stdout and files | :white_check_mark: | 15 | 0 | 0 | 15 |
 | yes | `fyes` | Output a string repeatedly | :white_check_mark: | 5 | 0 | 0 | 5 |
@@ -196,7 +196,7 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 | pwd | `fpwd` | Print working directory | :white_check_mark: | 8 | 0 | 0 | 8 |
 | printenv | `fprintenv` | Print environment variables | :white_check_mark: | 5 | 0 | 0 | 5 |
 | env | `fenv` | Run program with modified environment | :white_check_mark: | 17 | 0 | 0 | 17 |
-| timeout | `ftimeout` | Run command with time limit | :white_check_mark: | 21 | 0 | 0 | 21 |
+| timeout | `ftimeout` | Run command with time limit | :warning: | 19 | 2 | 0 | 21 |
 | nice | `fnice` | Run with modified scheduling priority | :white_check_mark: | 12 | 0 | 0 | 12 |
 | nohup | `fnohup` | Run immune to hangups | :white_check_mark: | 6 | 0 | 0 | 6 |
 | sleep | `fsleep` | Delay for specified time | :white_check_mark: | 10 | 0 | 0 | 10 |
@@ -204,8 +204,46 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 | chroot | `fchroot` | Change root directory (requires root) | :white_check_mark: | 11 | 0 | 0 | 11 |
 | true | `ftrue` | Exit with status 0 | :white_check_mark: | 8 | 0 | 0 | 8 |
 | false | `ffalse` | Exit with status 1 | :white_check_mark: | 7 | 0 | 0 | 7 |
-| dircolors | `fdircolors` | Setup LS_COLORS environment variable | :white_check_mark: | 14 | 0 | 0 | 14 |
+| dircolors | `fdircolors` | Setup LS_COLORS environment variable | :warning: | 12 | 2 | 0 | 14 |
+| cp | `fcp` | Copy files and directories | :white_check_mark: | 18 | 0 | 0 | 18 |
+| rm | `frm` | Remove files or directories | :white_check_mark: | 12 | 0 | 0 | 12 |
+| chmod | `fchmod` | Change file mode/permission bits | :white_check_mark: | 33 | 0 | 0 | 33 |
+| chown | `fchown` | Change file owner and group | :white_check_mark: | 11 | 0 | 0 | 11 |
+| chgrp | `fchgrp` | Change group ownership of files | :white_check_mark: | 11 | 0 | 0 | 11 |
+| dd | `fdd` | Convert and copy files with block-level operations | :white_check_mark: | 17 | 0 | 0 | 17 |
+| split | `fsplit` | Split files into pieces | :white_check_mark: | 20 | 0 | 0 | 20 |
+| shred | `fshred` | Overwrite files to hide contents | :white_check_mark: | 10 | 0 | 0 | 10 |
+| install | `finstall` | Copy files and set attributes | :white_check_mark: | 11 | 0 | 0 | 11 |
+| echo | `fecho` | Display a line of text | :white_check_mark: | 38 | 0 | 0 | 38 |
+| expr | `fexpr` | Evaluate expressions | :white_check_mark: | 43 | 0 | 0 | 43 |
+| factor | `ffactor` | Print prime factors of numbers | :white_check_mark: | 26 | 0 | 0 | 26 |
+| test | `ftest` | Check file types and compare values | :white_check_mark: | 51 | 0 | 0 | 51 |
+| users | `fusers` | Print logged-in user names | :white_check_mark: | 8 | 0 | 0 | 8 |
+| stdbuf | `fstdbuf` | Run command with modified I/O stream buffering | :white_check_mark: | 6 | 0 | 0 | 6 |
+| stty | `fstty` | Change and print terminal line settings | :white_check_mark: | 4 | 0 | 3 | 7 |
+| ls | `fls` | List directory contents | :warning: | 27 | 12 | 0 | 39 |
+| stat | `fstat` | Display file or filesystem status | :warning: | 17 | 6 | 0 | 23 |
+| date | `fdate` | Display or set the system date and time | :warning: | 16 | 6 | 0 | 22 |
+| who | `fwho` | Show who is logged on | :warning: | 3 | 6 | 0 | 9 |
+| pinky | `fpinky` | Lightweight finger information | :warning: | 2 | 7 | 0 | 9 |
+| df | `fdf` | Report filesystem disk space usage | :warning: | 2 | 15 | 0 | 17 |
+| du | `fdu` | Estimate file space usage | :warning: | 9 | 6 | 0 | 15 |
+| od | `fod` | Octal dump of file contents | :warning: | 1 | 34 | 0 | 35 |
+| pr | `fpr` | Paginate or columnate files for printing | :warning: | 4 | 15 | 0 | 19 |
+| printf | `fprintf` | Format and print data | :warning: | 48 | 5 | 0 | 53 |
+| numfmt | `fnumfmt` | Convert numbers to/from human-readable format | :warning: | 26 | 1 | 0 | 27 |
+| fmt | `ffmt` | Simple text formatter (reflow paragraphs) | :warning: | 17 | 1 | 0 | 18 |
+| ptx | `fptx` | Produce permuted index of file contents | :warning: | 2 | 8 | 0 | 10 |
+| mv | `fmv` | Move or rename files and directories | :construction: | - | - | - | - |
+| dir | `fdir` | List directory contents (like ls) | :construction: | - | - | - | - |
+| vdir | `fvdir` | List directory contents verbosely (like ls -l) | :construction: | - | - | - | - |
+| csplit | `fcsplit` | Split files based on context/patterns | :construction: | - | - | - | - |
+| runcon | `fruncon` | Run command with specified SELinux security context | :construction: | - | - | - | - |
+| chcon | `fchcon` | Change SELinux security context of files | :construction: | - | - | - | - |
 
+## Roadmap
+
+We are actively working toward **100% compatibility** with GNU coreutils — byte-identical output, same exit codes, and matching error messages for all 96+ tools. Once we achieve full compatibility, we will focus on **performance optimization** targeting 10-30x speedup over GNU coreutils across all tools.
 
 ## Contributing
 
