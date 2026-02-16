@@ -35,7 +35,7 @@ fn test_multiple_lines() {
 fn test_empty_lines_not_numbered() {
     // Default body style 't' skips empty lines
     let result = nl_helper(b"a\n\nb\n", &default_config());
-    assert_eq!(result, b"     1\ta\n\n     2\tb\n");
+    assert_eq!(result, b"     1\ta\n      \t\n     2\tb\n");
 }
 
 #[test]
@@ -169,11 +169,8 @@ fn test_section_header() {
     let result = nl_helper(input, &config);
     // Section delimiter lines produce empty lines in output
     // Header line numbered with header style, body line with body style
-    let expected = b"\n     1\theader line\n\n     1\tbody line\n";
-    assert_eq!(
-        std::str::from_utf8(&result).unwrap(),
-        std::str::from_utf8(expected).unwrap()
-    );
+    let expected = "\n     1\theader line\n\n     1\tbody line\n";
+    assert_eq!(std::str::from_utf8(&result).unwrap(), expected);
 }
 
 #[test]
@@ -220,8 +217,8 @@ fn test_join_blank_lines() {
     };
     let input = b"a\n\n\n\nb\n";
     let result = nl_helper(input, &config);
-    // With -l 3 and -b a: first 2 blanks not numbered, 3rd blank is numbered
-    let expected = b"     1\ta\n\n\n     2\t\n     3\tb\n";
+    // With -l 3 and -b a: first 2 blanks get padding but not numbered, 3rd blank is numbered
+    let expected = b"     1\ta\n      \t\n      \t\n     2\t\n     3\tb\n";
     assert_eq!(
         std::str::from_utf8(&result).unwrap(),
         std::str::from_utf8(expected).unwrap()
@@ -255,9 +252,9 @@ fn test_no_trailing_newline() {
 
 #[test]
 fn test_only_newlines() {
-    // Default body style 't' doesn't number empty lines
+    // Default body style 't' doesn't number empty lines, but they still get padding
     let result = nl_helper(b"\n\n\n", &default_config());
-    assert_eq!(result, b"\n\n\n");
+    assert_eq!(result, b"      \t\n      \t\n      \t\n");
 }
 
 #[test]
@@ -273,7 +270,7 @@ fn test_all_empty_lines_numbered() {
 #[test]
 fn test_single_newline() {
     let result = nl_helper(b"\n", &default_config());
-    assert_eq!(result, b"\n");
+    assert_eq!(result, b"      \t\n");
 }
 
 #[test]
@@ -405,8 +402,8 @@ mod integration {
     fn test_stdin_with_blanks() {
         let (out, _, code) = run_fnl(b"a\n\nb\n", &[]);
         assert_eq!(code, 0);
-        // Default body style 't' doesn't number blank lines
-        assert_eq!(out, b"     1\ta\n\n     2\tb\n");
+        // Default body style 't' doesn't number blank lines but adds padding
+        assert_eq!(out, b"     1\ta\n      \t\n     2\tb\n");
     }
 
     #[test]
