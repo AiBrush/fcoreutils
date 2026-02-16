@@ -391,6 +391,7 @@ dependencies = [
  "clap",
  "criterion",
  "digest",
+ "itoa",
  "libc",
  "md-5",
  "memchr",

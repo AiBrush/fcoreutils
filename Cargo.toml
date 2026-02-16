@@ -103,6 +103,14 @@ path = "src/bin/fcomm.rs"
 name = "fjoin"
 path = "src/bin/fjoin.rs"
 
+[[bin]]
+name = "fpaste"
+path = "src/bin/fpaste.rs"
+
+[[bin]]
+name = "fnl"
+path = "src/bin/fnl.rs"
+
 [dependencies]
 # CLI argument parsing
 clap = { version = "4", features = ["derive", "cargo"] }
@@ -131,8 +139,11 @@ digest = "0.10"
 # Base64 (SIMD-accelerated)
 base64-simd = "0.8"
 
-# Regex for tac -r
+# Regex for tac -r and nl -b pBRE
 regex = "1"
+
+# Fast integer-to-string conversion (for nl line numbers)
+itoa = "1"
 
 # System calls (readahead, madvise)
 libc = "0.2"
