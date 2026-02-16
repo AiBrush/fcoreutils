@@ -555,7 +555,7 @@ fn print_help() {
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::os::unix::fs::MetadataExt;

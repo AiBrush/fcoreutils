@@ -83,6 +83,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_arch_matches_gnu() {
         let gnu = Command::new("arch").output();
         if let Ok(gnu) = gnu {

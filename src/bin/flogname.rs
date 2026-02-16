@@ -48,13 +48,9 @@ fn main() {
 
     let login = unsafe { libc::getlogin() };
     if login.is_null() {
-        // Fallback: try LOGNAME env var
-        if let Ok(name) = std::env::var("LOGNAME") {
-            println!("{}", name);
-        } else {
-            eprintln!("{}: no login name", TOOL_NAME);
-            process::exit(1);
-        }
+        // GNU logname only uses getlogin(), does not fall back to LOGNAME
+        eprintln!("{}: no login name", TOOL_NAME);
+        process::exit(1);
     } else {
         // SAFETY: getlogin() returned a valid non-null pointer
         let name = unsafe { CStr::from_ptr(login) };
@@ -93,6 +89,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_logname_matches_gnu() {
         let gnu = Command::new("logname").output();
         if let Ok(gnu) = gnu {
