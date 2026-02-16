@@ -719,4 +719,126 @@ mod tests {
         assert_eq!(output.status.code(), Some(0));
         assert!(target.is_dir(), "should create dir with -- separator");
     }
+
+    #[test]
+    fn test_symbolic_mode_a_equals_rx() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sym_arx");
+        let output = cmd()
+            .args(["-m", "a=rx", target.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&target).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o555, "a=rx should give 0555, got {:o}", mode);
+        }
+    }
+
+    #[test]
+    fn test_symbolic_mode_u_equals_rwx_go_none() {
+        // u=rwx,go= means: user rwx, clear group and other
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sym_urwx");
+        let output = cmd()
+            .args(["-m", "u=rwx,go=", target.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&target).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "u=rwx,go= should give 0700, got {:o}", mode);
+        }
+    }
+
+    #[test]
+    fn test_symbolic_mode_comma_separated() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sym_comma");
+        let output = cmd()
+            .args(["-m", "u=rwx,g=rx,o=rx", target.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&target).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o755,
+                "u=rwx,g=rx,o=rx should give 0755, got {:o}",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn test_symbolic_mode_go_minus_w() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sym_gow");
+        let output = cmd()
+            .args(["-m", "go-w", target.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&target).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "go-w should give 0755, got {:o}", mode);
+        }
+    }
+
+    #[test]
+    fn test_symbolic_mode_matches_gnu() {
+        // Test that symbolic modes produce the same result as GNU mkdir
+        let dir = tempfile::tempdir().unwrap();
+
+        let test_cases = [
+            ("a=rwx", 0o777),
+            ("a=rx", 0o555),
+            ("u=rwx,go=rx", 0o755),
+            ("755", 0o755),
+            ("700", 0o700),
+            ("a=r", 0o444),
+        ];
+
+        for (mode_str, expected) in &test_cases {
+            let target = dir.path().join(format!("gnu_sym_{}", mode_str.replace(',', "_")));
+            let output = cmd()
+                .args(["-m", mode_str, target.to_str().unwrap()])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "failed for mode '{}'",
+                mode_str
+            );
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let meta = std::fs::metadata(&target).unwrap();
+                let mode = meta.permissions().mode() & 0o777;
+                assert_eq!(
+                    mode, *expected,
+                    "mode '{}' should give {:o}, got {:o}",
+                    mode_str, expected, mode
+                );
+            }
+        }
+    }
 }
