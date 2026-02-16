@@ -213,9 +213,9 @@ fn create_special(name: &str, node_type: &str, major: u64, minor: u64, mode: &Op
         _ => unreachable!(),
     };
 
-    // macOS makedev uses i32, Linux uses c_uint
+    // macOS makedev uses i32 and is safe, Linux uses c_uint
     #[cfg(target_vendor = "apple")]
-    let dev = unsafe { libc::makedev(major as i32, minor as i32) };
+    let dev = libc::makedev(major as i32, minor as i32);
     #[cfg(not(target_vendor = "apple"))]
     let dev = libc::makedev(major as libc::c_uint, minor as libc::c_uint);
 

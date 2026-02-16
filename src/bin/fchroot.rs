@@ -173,7 +173,7 @@ fn main() {
 
     // Set supplementary groups
     if !sup_groups.is_empty()
-        && unsafe { libc::setgroups(sup_groups.len(), sup_groups.as_ptr()) } != 0
+        && unsafe { libc::setgroups(sup_groups.len() as _, sup_groups.as_ptr()) } != 0
     {
         let err = std::io::Error::last_os_error();
         eprintln!(
