@@ -137,11 +137,11 @@ fn format_number(num: i64, format: NumberFormat, width: usize, buf: &mut Vec<u8>
         NumberFormat::Ln => {
             buf.extend_from_slice(num_str.as_bytes());
             let pad = width.saturating_sub(num_str.len());
-            buf.extend(std::iter::repeat(b' ').take(pad));
+            buf.extend(std::iter::repeat_n(b' ', pad));
         }
         NumberFormat::Rn => {
             let pad = width.saturating_sub(num_str.len());
-            buf.extend(std::iter::repeat(b' ').take(pad));
+            buf.extend(std::iter::repeat_n(b' ', pad));
             buf.extend_from_slice(num_str.as_bytes());
         }
         NumberFormat::Rz => {
@@ -149,11 +149,11 @@ fn format_number(num: i64, format: NumberFormat, width: usize, buf: &mut Vec<u8>
                 buf.push(b'-');
                 let abs_str = &num_str[1..];
                 let pad = width.saturating_sub(abs_str.len() + 1);
-                buf.extend(std::iter::repeat(b'0').take(pad));
+                buf.extend(std::iter::repeat_n(b'0', pad));
                 buf.extend_from_slice(abs_str.as_bytes());
             } else {
                 let pad = width.saturating_sub(num_str.len());
-                buf.extend(std::iter::repeat(b'0').take(pad));
+                buf.extend(std::iter::repeat_n(b'0', pad));
                 buf.extend_from_slice(num_str.as_bytes());
             }
         }
@@ -255,10 +255,10 @@ pub fn nl_to_vec(data: &[u8], config: &NlConfig) -> Vec<u8> {
             );
             output.extend_from_slice(&config.number_separator);
             output.extend_from_slice(line);
-            line_number = line_number.wrapping_add(config.line_increment);
-        } else {
-            // Non-numbered lines: GNU nl outputs padding (spaces + separator) for alignment
-            output.extend(std::iter::repeat(b' ').take(config.number_width));
+            line_number += config.line_increment;
+        } else if !is_blank {
+            // Non-numbered non-blank: output padding for alignment
+            output.extend(std::iter::repeat_n(b' ', config.number_width));
             output.extend_from_slice(&config.number_separator);
             output.extend_from_slice(line);
         }
