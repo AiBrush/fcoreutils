@@ -194,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_yes_matches_gnu() {
         // Compare first 1000 lines with GNU yes
         let gnu = Command::new("sh")
