@@ -84,18 +84,14 @@ fn check_path(path: &str, posix_check: bool, extra_check: bool) -> Result<(), St
         return Err("empty file name".to_string());
     }
 
-    // -P checks: leading hyphen and empty components
+    // -P checks: leading hyphen in components (NOT empty components from double slashes)
     if extra_check {
-        // Check each component for leading hyphen and empty components
         let components: Vec<&str> = if path.contains('/') {
             path.split('/').collect()
         } else {
             vec![path]
         };
         for component in &components {
-            if component.is_empty() && path != "/" && !path.starts_with('/') {
-                return Err(format!("empty file name component in '{}'", path));
-            }
             if component.starts_with('-') {
                 return Err(format!(
                     "leading '-' in a component of file name '{}'",

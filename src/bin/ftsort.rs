@@ -4,7 +4,7 @@
 // Read pairs of strings from FILE (or stdin), representing edges in a
 // directed graph, and output a topological ordering.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, Write};
 use std::process;
 
@@ -24,8 +24,8 @@ fn print_version() {
     println!("{} (fcoreutils) {}", TOOL_NAME, VERSION);
 }
 
-/// Perform topological sort using stack-based Kahn's algorithm.
-/// Uses LIFO (stack) instead of FIFO (queue) to match GNU tsort's DFS-like ordering.
+/// Perform topological sort using FIFO queue with reverse successor push.
+/// This matches GNU tsort's output ordering exactly.
 /// Returns Ok(sorted) if successful, or Err with cycle members if a cycle exists.
 fn topological_sort(
     nodes: &[String],
@@ -63,28 +63,23 @@ fn topological_sort(
 
     let total = unique_nodes.len();
 
-    // Stack-based Kahn's algorithm (LIFO instead of FIFO)
-    // This matches GNU tsort's DFS-like output ordering
-    let mut stack: Vec<String> = Vec::new();
+    // FIFO queue-based Kahn's algorithm with reverse successor push
+    // to match GNU tsort's exact output ordering
+    let mut queue: VecDeque<String> = VecDeque::new();
     let mut result: Vec<String> = Vec::new();
 
-    // Push initial zero-degree nodes in reverse input order
-    // so the first-in-input node is on top and gets processed first
-    let zero_degree: Vec<String> = unique_nodes
-        .iter()
-        .filter(|n| in_degree.get(*n).copied().unwrap_or(0) == 0)
-        .cloned()
-        .collect();
-    for node in zero_degree.into_iter().rev() {
-        stack.push(node);
+    // Add initial zero-degree nodes in input order (FIFO: first in = first out)
+    for node in &unique_nodes {
+        if in_degree.get(node).copied().unwrap_or(0) == 0 {
+            queue.push_back(node.clone());
+        }
     }
 
-    while let Some(node) = stack.pop() {
+    while let Some(node) = queue.pop_front() {
         result.push(node.clone());
         if let Some(neighbors) = adj.get(&node) {
-            // Collect newly freed successors, then push in reverse order
-            // so that the first successor in adjacency list is on top of the stack
-            // and gets processed first (matching GNU tsort's DFS ordering)
+            // Collect newly freed successors, then enqueue in REVERSE order
+            // so the last-listed successor is dequeued first (matching GNU)
             let mut new_zeros = Vec::new();
             for neighbor in neighbors {
                 if let Some(deg) = in_degree.get_mut(neighbor)
@@ -97,7 +92,7 @@ fn topological_sort(
                 }
             }
             for n in new_zeros.into_iter().rev() {
-                stack.push(n);
+                queue.push_back(n);
             }
         }
     }
@@ -187,17 +182,14 @@ fn run(input: &str, source_name: &str) -> i32 {
                 }
             }
 
-            let mut stack: Vec<String> = Vec::new();
-            let zero: Vec<String> = unique
-                .iter()
-                .filter(|n| in_deg.get(*n).copied().unwrap_or(0) == 0)
-                .cloned()
-                .collect();
-            for n in zero.into_iter().rev() {
-                stack.push(n);
+            let mut queue: VecDeque<String> = VecDeque::new();
+            for n in &unique {
+                if in_deg.get(n).copied().unwrap_or(0) == 0 {
+                    queue.push_back(n.clone());
+                }
             }
             let mut resolved: Vec<String> = Vec::new();
-            while let Some(node) = stack.pop() {
+            while let Some(node) = queue.pop_front() {
                 resolved.push(node.clone());
                 if let Some(neighbors) = adj.get(&node) {
                     let mut new_zeros = Vec::new();
@@ -212,7 +204,7 @@ fn run(input: &str, source_name: &str) -> i32 {
                         }
                     }
                     for n in new_zeros.into_iter().rev() {
-                        stack.push(n);
+                        queue.push_back(n);
                     }
                 }
             }
