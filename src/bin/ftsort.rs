@@ -4,7 +4,7 @@
 // Read pairs of strings from FILE (or stdin), representing edges in a
 // directed graph, and output a topological ordering.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::process;
 
@@ -24,7 +24,8 @@ fn print_version() {
     println!("{} (fcoreutils) {}", TOOL_NAME, VERSION);
 }
 
-/// Perform topological sort using Kahn's algorithm.
+/// Perform topological sort using stack-based Kahn's algorithm.
+/// Uses LIFO (stack) instead of FIFO (queue) to match GNU tsort's DFS-like ordering.
 /// Returns Ok(sorted) if successful, or Err with cycle members if a cycle exists.
 fn topological_sort(
     nodes: &[String],
@@ -34,60 +35,76 @@ fn topological_sort(
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
     let mut in_degree: HashMap<String, usize> = HashMap::new();
 
+    // Deduplicate nodes preserving input order
+    let mut unique_nodes: Vec<String> = Vec::new();
+    {
+        let mut seen = HashSet::new();
+        for node in nodes {
+            if seen.insert(node.clone()) {
+                unique_nodes.push(node.clone());
+            }
+        }
+    }
+
     // Initialize all nodes
-    for node in nodes {
+    for node in &unique_nodes {
         adj.entry(node.clone()).or_default();
         in_degree.entry(node.clone()).or_insert(0);
     }
 
-    // Add edges
+    // Add edges, deduplicating (matches GNU behavior)
+    let mut edge_set: HashSet<(String, String)> = HashSet::new();
     for (from, to) in edges {
-        if from != to {
+        if from != to && edge_set.insert((from.clone(), to.clone())) {
             adj.entry(from.clone()).or_default().push(to.clone());
             *in_degree.entry(to.clone()).or_insert(0) += 1;
         }
     }
 
-    // Kahn's algorithm
-    let mut queue: VecDeque<String> = VecDeque::new();
+    let total = unique_nodes.len();
 
-    // Collect nodes with in-degree 0, sorted for deterministic output
-    let mut zero_degree: Vec<String> = in_degree
-        .iter()
-        .filter(|(_, deg)| **deg == 0)
-        .map(|(n, _)| n.clone())
-        .collect();
-    zero_degree.sort();
-    for node in zero_degree {
-        queue.push_back(node);
-    }
-
+    // Stack-based Kahn's algorithm (LIFO instead of FIFO)
+    // This matches GNU tsort's DFS-like output ordering
+    let mut stack: Vec<String> = Vec::new();
     let mut result: Vec<String> = Vec::new();
 
-    while let Some(node) = queue.pop_front() {
+    // Push initial zero-degree nodes in reverse input order
+    // so the first-in-input node is on top and gets processed first
+    let zero_degree: Vec<String> = unique_nodes
+        .iter()
+        .filter(|n| in_degree.get(*n).copied().unwrap_or(0) == 0)
+        .cloned()
+        .collect();
+    for node in zero_degree.into_iter().rev() {
+        stack.push(node);
+    }
+
+    while let Some(node) = stack.pop() {
         result.push(node.clone());
         if let Some(neighbors) = adj.get(&node) {
-            let mut sorted_neighbors: Vec<&String> = neighbors.iter().collect();
-            sorted_neighbors.sort();
-            for neighbor in sorted_neighbors {
+            // Process successors in insertion order; push onto stack
+            // LIFO means last-pushed (last successor) gets processed first
+            for neighbor in neighbors {
                 if let Some(deg) = in_degree.get_mut(neighbor) {
-                    *deg -= 1;
-                    if *deg == 0 {
-                        queue.push_back(neighbor.clone());
+                    if *deg > 0 {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            stack.push(neighbor.clone());
+                        }
                     }
                 }
             }
         }
     }
 
-    if result.len() != in_degree.len() {
+    if result.len() != total {
         // Cycle detected -- find the nodes in the cycle, preserving input order
-        let mut cycle_members: Vec<String> = nodes
+        let result_set: HashSet<&String> = result.iter().collect();
+        let cycle_members: Vec<String> = unique_nodes
             .iter()
-            .filter(|n| !result.contains(n))
+            .filter(|n| !result_set.contains(n))
             .cloned()
             .collect();
-        cycle_members.dedup();
         Err(cycle_members)
     } else {
         Ok(result)
@@ -135,78 +152,71 @@ fn run(input: &str, source_name: &str) -> i32 {
         }
         Err(cycle_members) => {
             // Print what we can, then report cycle
-            // Re-run partial sort: output nodes with no remaining dependencies first
             // GNU tsort outputs nodes as it can, reporting loops inline
             eprintln!("{}: {}: input contains a loop:", TOOL_NAME, source_name);
             for member in &cycle_members {
                 eprintln!("{}: {member}", TOOL_NAME);
             }
 
-            // Still output what we resolved, plus the cycle members
-            match topological_sort(&all_nodes, &edges) {
-                Ok(sorted) => {
-                    for node in &sorted {
-                        let _ = writeln!(out, "{node}");
+            // Output partial results using stack-based Kahn's, then cycle members
+            let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+            let mut in_deg: HashMap<String, usize> = HashMap::new();
+            let mut unique: Vec<String> = Vec::new();
+            {
+                let mut seen = HashSet::new();
+                for node in &all_nodes {
+                    if seen.insert(node.clone()) {
+                        unique.push(node.clone());
                     }
                 }
-                Err(_) => {
-                    // Output resolved nodes first using partial Kahn's
-                    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
-                    let mut in_deg: HashMap<String, usize> = HashMap::new();
+            }
+            for node in &unique {
+                adj.entry(node.clone()).or_default();
+                in_deg.entry(node.clone()).or_insert(0);
+            }
+            let mut edge_set: HashSet<(String, String)> = HashSet::new();
+            for (from, to) in &edges {
+                if from != to && edge_set.insert((from.clone(), to.clone())) {
+                    adj.entry(from.clone()).or_default().push(to.clone());
+                    *in_deg.entry(to.clone()).or_insert(0) += 1;
+                }
+            }
 
-                    for node in &all_nodes {
-                        adj.entry(node.clone()).or_default();
-                        in_deg.entry(node.clone()).or_insert(0);
-                    }
-                    for (from, to) in &edges {
-                        if from != to {
-                            adj.entry(from.clone()).or_default().push(to.clone());
-                            *in_deg.entry(to.clone()).or_insert(0) += 1;
-                        }
-                    }
-
-                    let mut queue: VecDeque<String> = VecDeque::new();
-                    let mut zero: Vec<String> = in_deg
-                        .iter()
-                        .filter(|(_, d)| **d == 0)
-                        .map(|(n, _)| n.clone())
-                        .collect();
-                    zero.sort();
-                    for n in zero {
-                        queue.push_back(n);
-                    }
-
-                    let mut resolved = Vec::new();
-                    while let Some(node) = queue.pop_front() {
-                        resolved.push(node.clone());
-                        if let Some(neighbors) = adj.get(&node) {
-                            let mut sorted_n: Vec<&String> = neighbors.iter().collect();
-                            sorted_n.sort();
-                            for nb in sorted_n {
-                                if let Some(d) = in_deg.get_mut(nb) {
-                                    *d -= 1;
-                                    if *d == 0 {
-                                        queue.push_back(nb.clone());
-                                    }
+            let mut stack: Vec<String> = Vec::new();
+            let zero: Vec<String> = unique
+                .iter()
+                .filter(|n| in_deg.get(*n).copied().unwrap_or(0) == 0)
+                .cloned()
+                .collect();
+            for n in zero.into_iter().rev() {
+                stack.push(n);
+            }
+            let mut resolved: Vec<String> = Vec::new();
+            while let Some(node) = stack.pop() {
+                resolved.push(node.clone());
+                if let Some(neighbors) = adj.get(&node) {
+                    for nb in neighbors {
+                        if let Some(d) = in_deg.get_mut(nb) {
+                            if *d > 0 {
+                                *d -= 1;
+                                if *d == 0 {
+                                    stack.push(nb.clone());
                                 }
                             }
                         }
                     }
+                }
+            }
 
-                    for node in &resolved {
-                        let _ = writeln!(out, "{node}");
-                    }
+            for node in &resolved {
+                let _ = writeln!(out, "{node}");
+            }
 
-                    // Output remaining cycle nodes
-                    let mut remaining: Vec<String> = in_deg
-                        .iter()
-                        .filter(|(n, _)| !resolved.contains(n))
-                        .map(|(n, _)| n.clone())
-                        .collect();
-                    remaining.sort();
-                    for node in &remaining {
-                        let _ = writeln!(out, "{node}");
-                    }
+            // Output remaining cycle nodes in input order
+            let resolved_set: HashSet<&String> = resolved.iter().collect();
+            for node in &unique {
+                if !resolved_set.contains(node) {
+                    let _ = writeln!(out, "{node}");
                 }
             }
             1
