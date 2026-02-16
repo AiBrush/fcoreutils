@@ -1,3 +1,9 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("install: only available on Unix");
+    std::process::exit(1);
+}
+
 // finstall -- copy files and set attributes
 //
 // Usage: install [OPTION]... [-T] SOURCE DEST
@@ -5,17 +11,23 @@
 //        install [OPTION]... -t DIRECTORY SOURCE...
 //        install [OPTION]... -d DIRECTORY...
 
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 use coreutils_rs::install::{
     install_directories, install_file, parse_backup_mode, parse_mode,
     BackupMode, InstallConfig,
 };
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "install";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -449,6 +461,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn print_help() {
     println!("Usage: {} [OPTION]... [-T] SOURCE DEST", TOOL_NAME);
     println!("  or:  {} [OPTION]... SOURCE... DIRECTORY", TOOL_NAME);

@@ -1,8 +1,18 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("test: only available on Unix");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 use coreutils_rs::common::reset_sigpipe;
+#[cfg(unix)]
 use coreutils_rs::test_cmd;
 
+#[cfg(unix)]
 fn main() {
     reset_sigpipe();
 

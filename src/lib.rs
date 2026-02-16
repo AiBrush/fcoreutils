@@ -42,10 +42,12 @@ pub mod common;
 pub mod cp;
 pub mod csplit;
 pub mod cut;
+#[cfg(unix)]
 pub mod date;
 pub mod dd;
 #[cfg(unix)]
 pub mod df;
+#[cfg(unix)]
 pub mod du;
 pub mod echo;
 pub mod expand;
@@ -68,6 +70,7 @@ pub mod od;
 pub mod paste;
 #[cfg(unix)]
 pub mod pinky;
+#[cfg(unix)]
 pub mod pr;
 pub mod printf;
 pub mod ptx;
@@ -81,9 +84,11 @@ pub mod split;
 pub mod stat;
 #[cfg(unix)]
 pub mod stdbuf;
+#[cfg(unix)]
 pub mod stty;
 pub mod tac;
 pub mod tail;
+#[cfg(unix)]
 pub mod test_cmd;
 pub mod tr;
 pub mod uniq;

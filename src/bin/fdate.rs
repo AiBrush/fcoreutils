@@ -1,14 +1,27 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("date: only available on Unix");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::io::{self, BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::process;
+#[cfg(unix)]
 use std::time::SystemTime;
 
+#[cfg(unix)]
 use coreutils_rs::common::{io_error_msg, reset_sigpipe};
+#[cfg(unix)]
 use coreutils_rs::date::{self, DateConfig, IsoFormat};
 
+#[cfg(unix)]
 struct Cli {
     config: DateConfig,
 }
 
+#[cfg(unix)]
 fn parse_args() -> Cli {
     let mut cli = Cli {
         config: DateConfig::default(),
@@ -174,6 +187,7 @@ fn parse_args() -> Cli {
     cli
 }
 
+#[cfg(unix)]
 fn short_opt_value(
     s: &str,
     chars: &[char],
@@ -194,6 +208,7 @@ fn short_opt_value(
     }
 }
 
+#[cfg(unix)]
 fn require_arg(args: &mut impl Iterator<Item = std::ffi::OsString>, opt: &str) -> String {
     args.next()
         .unwrap_or_else(|| {
@@ -204,6 +219,7 @@ fn require_arg(args: &mut impl Iterator<Item = std::ffi::OsString>, opt: &str) -
         .into_owned()
 }
 
+#[cfg(unix)]
 fn print_help() {
     print!(
         "Usage: date [OPTION]... [+FORMAT]\n\
@@ -261,6 +277,7 @@ fn print_help() {
     );
 }
 
+#[cfg(unix)]
 fn display_date(time: &SystemTime, config: &DateConfig) -> Result<String, String> {
     let utc = config.utc;
 
@@ -281,6 +298,7 @@ fn display_date(time: &SystemTime, config: &DateConfig) -> Result<String, String
     Ok(date::format_date(time, date::default_format(), utc))
 }
 
+#[cfg(unix)]
 fn main() {
     reset_sigpipe();
 

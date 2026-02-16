@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("du: only available on Unix");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::io::{self, BufWriter, Write};
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 use coreutils_rs::du::{
     DuConfig, DuEntry, du_path, parse_block_size, parse_threshold, print_entry,
     read_exclude_file,
 };
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "du";
 
+#[cfg(unix)]
 fn usage() {
     eprintln!(
         "Usage: {} [OPTION]... [FILE]...
@@ -46,11 +57,13 @@ Summarize device usage of the set of FILEs, recursively for directories.
     );
 }
 
+#[cfg(unix)]
 fn version() {
     eprintln!("{} (fcoreutils) {}", TOOL_NAME, env!("CARGO_PKG_VERSION"));
 }
 
 /// Parse command-line arguments manually (matching the project's style for sort, touch, etc.).
+#[cfg(unix)]
 fn parse_args() -> (DuConfig, Vec<String>) {
     let mut config = DuConfig::default();
     let mut files = Vec::new();
@@ -285,6 +298,7 @@ fn parse_args() -> (DuConfig, Vec<String>) {
     (config, files)
 }
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -343,6 +357,7 @@ fn main() {
 }
 
 /// Format an IO error without the "(os error N)" suffix.
+#[cfg(unix)]
 fn format_io_error(e: &io::Error) -> String {
     if let Some(raw) = e.raw_os_error() {
         let os_err = io::Error::from_raw_os_error(raw);

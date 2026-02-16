@@ -1,14 +1,25 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("rm: only available on Unix");
+    std::process::exit(1);
+}
+
 // frm — remove files or directories
 //
 // Usage: rm [OPTION]... [FILE]...
 
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 use coreutils_rs::rm::{InteractiveMode, PreserveRoot, RmConfig};
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "rm";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn print_help() {
     println!("Usage: {} [OPTION]... [FILE]...", TOOL_NAME);
     println!("Remove (unlink) the FILE(s).");
@@ -44,6 +55,7 @@ fn print_help() {
     println!("      --version         output version information and exit");
 }
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 

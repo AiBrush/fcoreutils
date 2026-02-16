@@ -1,19 +1,31 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("mv: only available on Unix");
+    std::process::exit(1);
+}
+
 // fmv -- move (rename) files
 //
 // Usage: mv [OPTION]... [-T] SOURCE DEST
 //        mv [OPTION]... SOURCE... DIRECTORY
 //        mv [OPTION]... -t DIRECTORY SOURCE...
 
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 use coreutils_rs::mv::{
     mv_file, parse_backup_mode, strip_trailing_slashes, BackupMode, MvConfig,
 };
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "mv";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -360,6 +372,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn print_help() {
     println!("Usage: {} [OPTION]... [-T] SOURCE DEST", TOOL_NAME);
     println!("  or:  {} [OPTION]... SOURCE... DIRECTORY", TOOL_NAME);

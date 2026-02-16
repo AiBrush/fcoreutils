@@ -1,16 +1,30 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("pr: only available on Unix");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+#[cfg(unix)]
 use std::process;
+#[cfg(unix)]
 use std::time::SystemTime;
 
+#[cfg(unix)]
 use coreutils_rs::common::{io_error_msg, reset_sigpipe};
+#[cfg(unix)]
 use coreutils_rs::pr::{self, PrConfig};
 
+#[cfg(unix)]
 struct Cli {
     config: PrConfig,
     files: Vec<String>,
 }
 
+#[cfg(unix)]
 fn parse_args() -> Cli {
     let mut cli = Cli {
         config: PrConfig::default(),
@@ -269,6 +283,7 @@ fn parse_args() -> Cli {
     cli
 }
 
+#[cfg(unix)]
 fn print_help() {
     print!(
         "Usage: pr [OPTION]... [FILE]...\n\
@@ -314,10 +329,12 @@ fn print_help() {
     );
 }
 
+#[cfg(unix)]
 fn file_mod_time(path: &str) -> Option<SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
 }
 
+#[cfg(unix)]
 fn main() {
     reset_sigpipe();
 

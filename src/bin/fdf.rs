@@ -1,12 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("df: only available on Unix");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 use coreutils_rs::common::reset_sigpipe;
+#[cfg(unix)]
 use coreutils_rs::df::{DfConfig, parse_block_size, parse_output_fields, run_df};
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "df";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Take the next value for an option from the rest of the current arg or the next arg.
+#[cfg(unix)]
 fn take_value(
     bytes: &[u8],
     pos: usize,
@@ -27,6 +39,7 @@ fn take_value(
     }
 }
 
+#[cfg(unix)]
 fn parse_args() -> DfConfig {
     let mut config = DfConfig::default();
     let mut args = std::env::args_os().skip(1);
@@ -196,6 +209,7 @@ fn parse_args() -> DfConfig {
     config
 }
 
+#[cfg(unix)]
 fn print_help() {
     print!(
         "Usage: {0} [OPTION]... [FILE]...\n\
@@ -228,6 +242,7 @@ fn print_help() {
     );
 }
 
+#[cfg(unix)]
 fn main() {
     reset_sigpipe();
 

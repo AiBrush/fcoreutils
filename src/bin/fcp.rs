@@ -1,13 +1,25 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("cp: only available on Unix");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 use coreutils_rs::common::reset_sigpipe;
+#[cfg(unix)]
 use coreutils_rs::cp::{
     apply_preserve, parse_backup_mode, parse_reflink_mode, CpConfig, DerefMode,
 };
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "cp";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn print_help() {
     print!(
         "\
@@ -46,6 +58,7 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
     );
 }
 
+#[cfg(unix)]
 fn main() {
     reset_sigpipe();
 

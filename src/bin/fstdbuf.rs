@@ -1,3 +1,9 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("stdbuf: only available on Unix");
+    std::process::exit(1);
+}
+
 // fstdbuf -- run a command with modified buffering for its standard streams
 //
 // Usage: stdbuf [OPTION]... COMMAND [ARG]...
@@ -5,11 +11,15 @@
 // Adjusts stdin/stdout/stderr buffering of COMMAND by setting environment
 // variables and executing the command.
 
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "stdbuf";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn print_help() {
     println!("Usage: {} OPTION... COMMAND", TOOL_NAME);
     println!("Run COMMAND, with modified buffering operations for its standard streams.");
@@ -29,6 +39,7 @@ fn print_help() {
     println!("environment variables. A full implementation requires an LD_PRELOAD library.");
 }
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -206,6 +217,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn parse_mode_or_exit(s: &str) -> coreutils_rs::stdbuf::BufferMode {
     coreutils_rs::stdbuf::parse_buffer_mode(s).unwrap_or_else(|msg| {
         eprintln!("{}: {}", TOOL_NAME, msg);
