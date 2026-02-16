@@ -164,13 +164,13 @@ pub fn format_short_heading(config: &PinkyConfig) -> String {
     let mut out = String::new();
     let _ = write!(out, "{:<8}", "Login");
     if !config.omit_fullname && !config.omit_fullname_host && !config.omit_fullname_host_idle {
-        let _ = write!(out, " {:<19}", "Name");
+        let _ = write!(out, " {:<20}", "Name");
     }
-    let _ = write!(out, " {:<8}", "Tty");
+    let _ = write!(out, " {:<8}", "TTY");
     if !config.omit_fullname_host_idle {
-        let _ = write!(out, " {:>5}", "Idle");
+        let _ = write!(out, " {:>6}", "Idle");
     }
-    let _ = write!(out, " {:<12}", "When");
+    let _ = write!(out, " {:<16}", "When");
     if !config.omit_fullname_host && !config.omit_fullname_host_idle {
         let _ = write!(out, " {}", "Where");
     }
@@ -189,9 +189,9 @@ pub fn format_short_entry(entry: &who::UtmpxEntry, config: &PinkyConfig) -> Stri
         let fullname = get_user_info(&entry.ut_user)
             .map(|u| u.fullname)
             .unwrap_or_default();
-        // Truncate full name to 19 chars for alignment
-        let display_name: String = fullname.chars().take(19).collect();
-        let _ = write!(out, " {:<19}", display_name);
+        // Truncate full name to 20 chars for alignment
+        let display_name: String = fullname.chars().take(20).collect();
+        let _ = write!(out, " {:<20}", display_name);
     }
 
     // Tty
@@ -205,12 +205,12 @@ pub fn format_short_entry(entry: &who::UtmpxEntry, config: &PinkyConfig) -> Stri
     // Idle time
     if !config.omit_fullname_host_idle {
         let idle = idle_str(&entry.ut_line);
-        let _ = write!(out, " {:>5}", idle);
+        let _ = write!(out, " {:>6}", idle);
     }
 
     // When (login time)
     let time_str = format_time_short(entry.ut_tv_sec);
-    let _ = write!(out, " {:<12}", time_str);
+    let _ = write!(out, " {:<16}", time_str);
 
     // Where (remote host)
     if !config.omit_fullname_host && !config.omit_fullname_host_idle {
@@ -230,7 +230,7 @@ pub fn format_long_entry(username: &str, config: &PinkyConfig) -> String {
 
     let _ = write!(out, "Login name: {:<28}", username);
     if let Some(ref info) = info {
-        let _ = write!(out, "In real life: {}", info.fullname);
+        let _ = write!(out, "In real life:  {}", info.fullname);
     }
     let _ = writeln!(out);
 
@@ -247,11 +247,11 @@ pub fn format_long_entry(username: &str, config: &PinkyConfig) -> String {
     if !config.omit_project {
         if let Some(ref info) = info {
             let project_path = PathBuf::from(&info.home_dir).join(".project");
-            let project = read_first_line(&project_path);
-            if !project.is_empty() {
-                let _ = writeln!(out, "Project: {}", project);
-            } else {
-                let _ = writeln!(out, "No Project.");
+            if project_path.exists() {
+                let project = read_first_line(&project_path);
+                if !project.is_empty() {
+                    let _ = writeln!(out, "Project: {}", project);
+                }
             }
         }
     }
@@ -260,16 +260,16 @@ pub fn format_long_entry(username: &str, config: &PinkyConfig) -> String {
     if !config.omit_plan {
         if let Some(ref info) = info {
             let plan_path = PathBuf::from(&info.home_dir).join(".plan");
-            let plan = read_file_contents(&plan_path);
-            if !plan.is_empty() {
-                let _ = writeln!(out, "Plan:");
-                let _ = write!(out, "{}", plan);
-                // Ensure plan ends with newline
-                if !plan.ends_with('\n') {
-                    let _ = writeln!(out);
+            if plan_path.exists() {
+                let plan = read_file_contents(&plan_path);
+                if !plan.is_empty() {
+                    let _ = writeln!(out, "Plan:");
+                    let _ = write!(out, "{}", plan);
+                    // Ensure plan ends with newline
+                    if !plan.ends_with('\n') {
+                        let _ = writeln!(out);
+                    }
                 }
-            } else {
-                let _ = writeln!(out, "No Plan.");
             }
         }
     }

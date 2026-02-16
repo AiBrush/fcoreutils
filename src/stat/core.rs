@@ -16,10 +16,10 @@ fn extract_fsid(fsid: &libc::fsid_t) -> u64 {
     // fsid_t is an opaque type; safely read its raw bytes
     let bytes: [u8; std::mem::size_of::<libc::fsid_t>()] =
         unsafe { std::mem::transmute_copy(fsid) };
-    // Interpret as two i32 values in native endian (matching __val[0] and __val[1])
-    let val0 = i32::from_ne_bytes(bytes[0..4].try_into().unwrap()) as u64;
-    let val1 = i32::from_ne_bytes(bytes[4..8].try_into().unwrap()) as u64;
-    (val0 << 32) | val1
+    // Interpret as two u32 values in native endian (matching __val[0] and __val[1])
+    let val0 = u32::from_ne_bytes(bytes[0..4].try_into().unwrap()) as u64;
+    let val1 = u32::from_ne_bytes(bytes[4..8].try_into().unwrap()) as u64;
+    (val1 << 32) | val0
 }
 
 /// Perform a libc stat/lstat call and return the raw `libc::stat` structure.
@@ -138,11 +138,11 @@ fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat) ->
 
     let name_display = if meta.file_type().is_symlink() {
         match std::fs::read_link(path) {
-            Ok(target) => format!("'{}' -> '{}'", path, target.display()),
-            Err(_) => format!("'{}'", path),
+            Ok(target) => format!("{} -> {}", path, target.display()),
+            Err(_) => path.to_string(),
         }
     } else {
-        format!("'{}'", path)
+        path.to_string()
     };
 
     let size_line = if meta.file_type().is_block_device() || meta.file_type().is_char_device() {
@@ -150,7 +150,7 @@ fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat) ->
         let rmaj = major(rdev);
         let rmin = minor(rdev);
         format!(
-            "  Size: {:<15} Blocks: {:<10} IO Block: {:<6} {}",
+            "  Size: {:<10}\tBlocks: {:<10} IO Block: {:<6} {}",
             format!("{}, {}", rmaj, rmin),
             meta.blocks(),
             meta.blksize(),
@@ -158,7 +158,7 @@ fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat) ->
         )
     } else {
         format!(
-            "  Size: {:<15} Blocks: {:<10} IO Block: {:<6} {}",
+            "  Size: {:<10}\tBlocks: {:<10} IO Block: {:<6} {}",
             meta.size(),
             meta.blocks(),
             meta.blksize(),
@@ -167,9 +167,9 @@ fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat) ->
     };
 
     let device_line = format!(
-        "Device: {:x}h/{}d\tInode: {:<11} Links: {}",
-        dev,
-        dev_major * 256 + dev_minor,
+        "Device: {},{}\tInode: {:<11} Links: {}",
+        dev_major,
+        dev_minor,
         meta.ino(),
         meta.nlink()
     );
@@ -202,7 +202,7 @@ fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat) ->
 fn format_file_terse(path: &str, meta: &std::fs::Metadata, st: &libc::stat) -> String {
     let dev = meta.dev();
     format!(
-        "{} {} {} {:x} {} {} {} {} {} {} {} {} {} {} {} {}\n",
+        "{} {} {} {:x} {} {} {:x} {} {} {:x} {:x} {} {} {} 0 {}\n",
         path,
         meta.size(),
         meta.blocks(),
@@ -217,7 +217,6 @@ fn format_file_terse(path: &str, meta: &std::fs::Metadata, st: &libc::stat) -> S
         st.st_atime,
         st.st_mtime,
         st.st_ctime,
-        st.st_atime,
         meta.blksize()
     )
 }

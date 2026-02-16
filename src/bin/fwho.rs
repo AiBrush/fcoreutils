@@ -23,6 +23,7 @@ use coreutils_rs::who;
 #[derive(Parser)]
 #[command(
     name = "who",
+    version = env!("CARGO_PKG_VERSION"),
     about = "Show who is logged on",
     after_help = "If ARG1 ARG2 given (e.g. 'who am i'), print only the entry for the current terminal."
 )]
@@ -95,6 +96,14 @@ struct Cli {
 #[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
+
+    // Handle --version before clap (clap exits with code 2 for unknown options)
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.iter().any(|a| a == "--version") {
+        println!("who (fcoreutils) {}", env!("CARGO_PKG_VERSION"));
+        process::exit(0);
+    }
+
     let cli = Cli::parse();
 
     let mut config = who::WhoConfig::default();

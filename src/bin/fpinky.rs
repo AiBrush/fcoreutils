@@ -22,7 +22,7 @@ use coreutils_rs::pinky;
 
 #[cfg(unix)]
 #[derive(Parser)]
-#[command(name = "pinky", about = "Lightweight finger", disable_help_flag = true)]
+#[command(name = "pinky", version = env!("CARGO_PKG_VERSION"), about = "Lightweight finger", disable_help_flag = true)]
 struct Cli {
     /// display this help and exit
     #[arg(long = "help", action = clap::ArgAction::Help)]
@@ -70,6 +70,14 @@ struct Cli {
 #[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
+
+    // Handle --version before clap
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.iter().any(|a| a == "--version") {
+        println!("pinky (fcoreutils) {}", env!("CARGO_PKG_VERSION"));
+        process::exit(0);
+    }
+
     let cli = Cli::parse();
 
     let short_format = !cli.long_format;

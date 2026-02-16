@@ -220,41 +220,33 @@ fn format_value(bytes: &[u8], fmt: OutputFormat, width: usize) -> String {
     }
 }
 
-/// Format f32 like GNU od: uses %g-like formatting.
-fn format_float_f32(v: f32) -> String {
-    if v == 0.0 && !v.is_sign_negative() {
-        return "0".to_string();
+/// Format a float using C's %g format via libc snprintf.
+fn snprintf_g(v: f64, precision: usize) -> String {
+    let mut buf = [0u8; 64];
+    let fmt = std::ffi::CString::new(format!("%.{}g", precision)).unwrap();
+    let len = unsafe {
+        libc::snprintf(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            fmt.as_ptr(),
+            v,
+        )
+    };
+    if len > 0 && (len as usize) < buf.len() {
+        String::from_utf8_lossy(&buf[..len as usize]).into_owned()
+    } else {
+        format!("{}", v)
     }
-    if v.is_nan() {
-        return "NaN".to_string();
-    }
-    if v.is_infinite() {
-        return if v.is_sign_negative() {
-            "-Inf".to_string()
-        } else {
-            "Inf".to_string()
-        };
-    }
-    // GNU od uses printf %e style for floats
-    format!("{:e}", v)
 }
 
-/// Format f64 like GNU od: uses %g-like formatting.
+/// Format f32 like GNU od: uses %.7g formatting.
+fn format_float_f32(v: f32) -> String {
+    snprintf_g(v as f64, 7)
+}
+
+/// Format f64 like GNU od: uses %.17g formatting.
 fn format_float_f64(v: f64) -> String {
-    if v == 0.0 && !v.is_sign_negative() {
-        return "0".to_string();
-    }
-    if v.is_nan() {
-        return "NaN".to_string();
-    }
-    if v.is_infinite() {
-        return if v.is_sign_negative() {
-            "-Inf".to_string()
-        } else {
-            "Inf".to_string()
-        };
-    }
-    format!("{:e}", v)
+    snprintf_g(v, 17)
 }
 
 /// Format one line of output for a given format type.
