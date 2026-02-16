@@ -20,6 +20,7 @@ fn main() {
     let mut show_hardware = false;
     let mut show_os = false;
     let mut any_flag = false;
+    let mut show_all = false;
 
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
@@ -53,6 +54,7 @@ fn main() {
                 show_processor = true;
                 show_hardware = true;
                 show_os = true;
+                show_all = true;
                 any_flag = true;
             }
             "-s" | "--kernel-name" => { show_sysname = true; any_flag = true; }
@@ -75,6 +77,7 @@ fn main() {
                             show_processor = true;
                             show_hardware = true;
                             show_os = true;
+                            show_all = true;
                         }
                         's' => show_sysname = true,
                         'n' => show_nodename = true,
@@ -128,9 +131,15 @@ fn main() {
         if show_release { parts.push(release); }
         if show_version { parts.push(version); }
         if show_machine { parts.push(machine); }
-        // On Linux, -p and -i often return "unknown" or same as -m
-        if show_processor { parts.push(machine); }
-        if show_hardware { parts.push(machine); }
+        // On Linux, -p and -i are typically "unknown"; GNU skips "unknown" in -a mode
+        let processor = "unknown";
+        let hardware = "unknown";
+        if show_processor && !(show_all && processor == "unknown") {
+            parts.push(processor);
+        }
+        if show_hardware && !(show_all && hardware == "unknown") {
+            parts.push(hardware);
+        }
         if show_os {
             #[cfg(target_os = "linux")]
             parts.push("GNU/Linux");

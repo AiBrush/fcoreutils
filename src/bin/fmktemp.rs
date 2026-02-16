@@ -1,12 +1,22 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("mktemp: only available on Unix");
+    std::process::exit(1);
+}
+
 // fmktemp — create a temporary file or directory
 //
 // Usage: mktemp [OPTION]... [TEMPLATE]
 
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "mktemp";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -172,6 +182,7 @@ fn main() {
 
 /// Parse a template into (prefix, x_count, suffix).
 /// The X's are the trailing X's before the suffix.
+#[cfg(unix)]
 fn parse_template(template: &str, suffix: &Option<String>) -> (String, usize, String) {
     let suf_len = suffix.as_ref().map_or(0, |s| s.len());
     let base = &template[..template.len() - suf_len];
@@ -184,6 +195,7 @@ fn parse_template(template: &str, suffix: &Option<String>) -> (String, usize, St
     (prefix.to_string(), x_count, suf_part.to_string())
 }
 
+#[cfg(unix)]
 fn generate_random_name(x_count: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -216,6 +228,7 @@ fn generate_random_name(x_count: usize) -> String {
         .collect()
 }
 
+#[cfg(unix)]
 fn create_temp(
     prefix: &str,
     x_count: usize,
@@ -304,6 +317,7 @@ fn create_temp(
     ))
 }
 
+#[cfg(unix)]
 fn print_help() {
     println!("Usage: {} [OPTION]... [TEMPLATE]", TOOL_NAME);
     println!("Create a temporary file or directory, safely, and print its name.");

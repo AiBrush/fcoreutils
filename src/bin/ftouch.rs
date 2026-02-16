@@ -1,16 +1,28 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("touch: only available on Unix");
+    std::process::exit(1);
+}
+
 // ftouch -- change file timestamps
 //
 // Usage: touch [OPTION]... FILE...
 
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "touch";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Which timestamps to change.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg(unix)]
 enum TimeTarget {
     Both,
     AccessOnly,
@@ -19,6 +31,7 @@ enum TimeTarget {
 
 /// A timespec pair: (access_time, modification_time) in (seconds, nanoseconds).
 #[derive(Clone, Copy)]
+#[cfg(unix)]
 struct TimePair {
     atime_sec: i64,
     atime_nsec: i64,
@@ -26,6 +39,7 @@ struct TimePair {
     mtime_nsec: i64,
 }
 
+#[cfg(unix)]
 fn current_time() -> (i64, i64) {
     let mut tv = libc::timespec {
         tv_sec: 0,
@@ -37,6 +51,7 @@ fn current_time() -> (i64, i64) {
     (tv.tv_sec, tv.tv_nsec)
 }
 
+#[cfg(unix)]
 fn get_file_times(path: &str) -> Result<TimePair, std::io::Error> {
     use std::os::unix::fs::MetadataExt;
     let meta = fs::symlink_metadata(path)?;
@@ -49,6 +64,7 @@ fn get_file_times(path: &str) -> Result<TimePair, std::io::Error> {
 }
 
 /// Parse a -t STAMP format: [[CC]YY]MMDDhhmm[.ss]
+#[cfg(unix)]
 fn parse_touch_timestamp(s: &str) -> Result<(i64, i64), String> {
     let (main_part, seconds) = if let Some(dot_pos) = s.rfind('.') {
         let secs_str = &s[dot_pos + 1..];
@@ -144,6 +160,7 @@ fn parse_touch_timestamp(s: &str) -> Result<(i64, i64), String> {
     Ok((epoch, 0))
 }
 
+#[cfg(unix)]
 fn mktime_local(
     year: i32,
     month: u32,
@@ -170,6 +187,7 @@ fn mktime_local(
 
 /// Parse a -d DATE string.
 /// Supports: YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, YYYY-MM-DDTHH:MM:SS, @epoch, "now"
+#[cfg(unix)]
 fn parse_date_string(s: &str) -> Result<(i64, i64), String> {
     let trimmed = s.trim();
 
@@ -268,6 +286,7 @@ fn parse_date_string(s: &str) -> Result<(i64, i64), String> {
 }
 
 /// Apply timestamps to a file using utimensat for nanosecond precision.
+#[cfg(unix)]
 fn set_file_times(
     path: &str,
     target: TimeTarget,
@@ -326,6 +345,7 @@ fn set_file_times(
     Ok(())
 }
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -516,10 +536,12 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn path_exists(path: &str) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
+#[cfg(unix)]
 fn print_help() {
     println!("Usage: {} [OPTION]... FILE...", TOOL_NAME);
     println!("Update the access and modification times of each FILE to the current time.");

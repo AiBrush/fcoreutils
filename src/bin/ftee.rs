@@ -1,15 +1,27 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("tee: only available on Unix");
+    std::process::exit(1);
+}
+
 // ftee -- read from stdin, write to stdout and files
 //
 // Usage: tee [OPTION]... [FILE]...
 
+#[cfg(unix)]
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "tee";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Copy, PartialEq)]
+#[cfg(unix)]
 enum OutputErrorMode {
     /// Default: exit on error
     WarnDefault,
@@ -23,6 +35,7 @@ enum OutputErrorMode {
     ExitNoPipe,
 }
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -203,6 +216,7 @@ fn main() {
     process::exit(exit_code);
 }
 
+#[cfg(unix)]
 fn handle_write_error(
     tool_name: &str,
     target: &str,

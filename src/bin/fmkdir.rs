@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("mkdir: only available on Unix");
+    std::process::exit(1);
+}
+
 // fmkdir — make directories
 //
 // Usage: mkdir [OPTION]... DIRECTORY...
 
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "mkdir";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -124,6 +135,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn create_directory(
     dir: &str,
     parents: bool,
@@ -137,6 +149,7 @@ fn create_directory(
     }
 }
 
+#[cfg(unix)]
 fn create_single(dir: &str, verbose: bool, mode: Option<libc::mode_t>) -> Result<(), i32> {
     match std::fs::create_dir(dir) {
         Ok(()) => {
@@ -160,6 +173,7 @@ fn create_single(dir: &str, verbose: bool, mode: Option<libc::mode_t>) -> Result
     }
 }
 
+#[cfg(unix)]
 fn create_with_parents(
     dir: &str,
     verbose: bool,
@@ -215,6 +229,7 @@ fn create_with_parents(
     Ok(())
 }
 
+#[cfg(unix)]
 fn apply_mode(path: &str, mode: libc::mode_t) -> Result<(), i32> {
     let c_path = match CString::new(path) {
         Ok(c) => c,
@@ -238,6 +253,7 @@ fn apply_mode(path: &str, mode: libc::mode_t) -> Result<(), i32> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn parse_octal_mode(s: &str) -> libc::mode_t {
     libc::mode_t::from_str_radix(s, 8).unwrap_or_else(|_| {
         eprintln!("{}: invalid mode: '{}'", TOOL_NAME, s);
@@ -245,6 +261,7 @@ fn parse_octal_mode(s: &str) -> libc::mode_t {
     })
 }
 
+#[cfg(unix)]
 fn print_help() {
     println!("Usage: {} [OPTION]... DIRECTORY...", TOOL_NAME);
     println!("Create the DIRECTORY(ies), if they do not already exist.");

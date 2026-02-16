@@ -1,3 +1,9 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("ln: only available on Unix");
+    std::process::exit(1);
+}
+
 // fln -- make links between files
 //
 // Usage: ln [OPTION]... [-T] TARGET LINK_NAME
@@ -5,20 +11,27 @@
 //        ln [OPTION]... TARGET... DIRECTORY
 //        ln [OPTION]... -t DIRECTORY TARGET...
 
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "ln";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 const DEFAULT_BACKUP_SUFFIX: &str = "~";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg(unix)]
 enum BackupMode {
     None,
     Simple,
 }
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -305,6 +318,7 @@ fn main() {
 }
 
 /// Compute the link name when linking TARGET into DIRECTORY.
+#[cfg(unix)]
 fn link_name_in_dir(target: &str, dir: &str) -> String {
     let basename = Path::new(target)
         .file_name()
@@ -316,6 +330,7 @@ fn link_name_in_dir(target: &str, dir: &str) -> String {
 
 /// Create a link from target to link_name.
 #[allow(clippy::too_many_arguments)]
+#[cfg(unix)]
 fn make_link(
     target: &str,
     link_name: &str,
@@ -405,6 +420,7 @@ fn make_link(
 }
 
 /// Remove a destination file or symlink.
+#[cfg(unix)]
 fn remove_dest(path: &str) -> Result<(), std::io::Error> {
     let meta = std::fs::symlink_metadata(path)?;
     if meta.is_dir() {
@@ -415,6 +431,7 @@ fn remove_dest(path: &str) -> Result<(), std::io::Error> {
 }
 
 /// Compute a relative path from the link location directory to the target.
+#[cfg(unix)]
 fn compute_relative_target(target: &str, link_name: &str) -> String {
     let target_abs = make_absolute(target);
     let link_abs = make_absolute(link_name);
@@ -427,6 +444,7 @@ fn compute_relative_target(target: &str, link_name: &str) -> String {
     make_relative(&target_abs, &link_dir)
 }
 
+#[cfg(unix)]
 fn make_absolute(path: &str) -> PathBuf {
     let p = Path::new(path);
     if p.is_absolute() {
@@ -440,6 +458,7 @@ fn make_absolute(path: &str) -> PathBuf {
 }
 
 /// Compute a relative path from `from_dir` to `to_path`.
+#[cfg(unix)]
 fn make_relative(to_path: &Path, from_dir: &Path) -> String {
     // Normalize both paths by collecting components
     let to_components: Vec<_> = to_path.components().collect();
@@ -468,6 +487,7 @@ fn make_relative(to_path: &Path, from_dir: &Path) -> String {
     }
 }
 
+#[cfg(unix)]
 fn print_help() {
     println!("Usage: {} [OPTION]... [-T] TARGET LINK_NAME", TOOL_NAME);
     println!("  or:  {} [OPTION]... TARGET", TOOL_NAME);

@@ -1,12 +1,22 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("hostid: only available on Unix");
+    std::process::exit(1);
+}
+
 // fhostid — print the numeric identifier for the current host
 //
 // Prints the host identifier as an 8-character lowercase hexadecimal number.
 
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "hostid";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
     let args: Vec<String> = std::env::args().skip(1).collect();

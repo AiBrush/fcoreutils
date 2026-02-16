@@ -1,14 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("nproc: only available on Unix");
+    std::process::exit(1);
+}
+
 // fnproc — print the number of processing units available
 //
 // By default, prints the number of processing units available to the current
 // process (respects cgroups, OMP_NUM_THREADS, etc.). With --all, prints the
 // number of installed processors.
 
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "nproc";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -74,6 +84,7 @@ fn main() {
     println!("{}", result);
 }
 
+#[cfg(unix)]
 fn get_nprocs_available() -> usize {
     // First check OMP_NUM_THREADS (GNU nproc respects this)
     if let Ok(val) = std::env::var("OMP_NUM_THREADS") {
@@ -94,6 +105,7 @@ fn get_nprocs_available() -> usize {
         .unwrap_or(1)
 }
 
+#[cfg(unix)]
 fn get_nprocs_conf() -> usize {
     // _SC_NPROCESSORS_CONF: number of configured (installed) processors
     #[cfg(unix)]

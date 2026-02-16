@@ -1,12 +1,22 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("uptime: only available on Unix");
+    std::process::exit(1);
+}
+
 // fuptime — tell how long the system has been running
 //
 // Usage: uptime [OPTION]...
 
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "uptime";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -67,6 +77,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn read_uptime() -> Result<f64, String> {
     let content =
         std::fs::read_to_string("/proc/uptime").map_err(|e| format!("cannot read /proc/uptime: {}", e))?;
@@ -78,6 +89,7 @@ fn read_uptime() -> Result<f64, String> {
         .map_err(|_| "cannot parse uptime".to_string())
 }
 
+#[cfg(unix)]
 fn read_loadavg() -> (f64, f64, f64) {
     if let Ok(content) = std::fs::read_to_string("/proc/loadavg") {
         let parts: Vec<&str> = content.split_whitespace().collect();
@@ -91,6 +103,7 @@ fn read_loadavg() -> (f64, f64, f64) {
     (0.0, 0.0, 0.0)
 }
 
+#[cfg(unix)]
 fn count_users() -> usize {
     // Count logged-in users by reading utmp
     // Simplified: count entries in /var/run/utmp
@@ -107,6 +120,7 @@ fn count_users() -> usize {
     0
 }
 
+#[cfg(unix)]
 fn format_uptime(secs: f64) -> String {
     let total_secs = secs as u64;
     let days = total_secs / 86400;
@@ -124,6 +138,7 @@ fn format_uptime(secs: f64) -> String {
     }
 }
 
+#[cfg(unix)]
 fn print_default(uptime_secs: f64) {
     // Get current time
     let now = unsafe { libc::time(std::ptr::null_mut()) };
@@ -145,6 +160,7 @@ fn print_default(uptime_secs: f64) {
     );
 }
 
+#[cfg(unix)]
 fn print_pretty(uptime_secs: f64) {
     let total_secs = uptime_secs as u64;
     let days = total_secs / 86400;
@@ -181,6 +197,7 @@ fn print_pretty(uptime_secs: f64) {
     }
 }
 
+#[cfg(unix)]
 fn print_since(uptime_secs: f64) {
     let now = unsafe { libc::time(std::ptr::null_mut()) };
     let boot_time = now - uptime_secs as libc::time_t;

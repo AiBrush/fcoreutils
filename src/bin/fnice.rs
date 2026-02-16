@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("nice: only available on Unix");
+    std::process::exit(1);
+}
+
 // fnice — run a program with modified scheduling priority
 //
 // Usage: nice [OPTION] [COMMAND [ARG]...]
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "nice";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 

@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("whoami: only available on Unix");
+    std::process::exit(1);
+}
+
 // fwhoami — print effective user name
 //
 // Uses geteuid() + getpwuid() to get the effective user's name.
 
+#[cfg(unix)]
 use std::ffi::CStr;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "whoami";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
     let args: Vec<String> = std::env::args().skip(1).collect();

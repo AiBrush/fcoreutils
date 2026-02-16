@@ -1,13 +1,23 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("link: only available on Unix");
+    std::process::exit(1);
+}
+
 // flink — create a hard link (call the link function)
 //
 // Usage: link FILE1 FILE2
 // Create a hard link named FILE2 to FILE1.
 
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "link";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
     let args: Vec<String> = std::env::args().skip(1).collect();

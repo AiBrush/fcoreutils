@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("id: only available on Unix");
+    std::process::exit(1);
+}
+
 // fid -- print real and effective user and group IDs
 //
 // Usage: id [OPTION]... [USER]
 
+#[cfg(unix)]
 use std::ffi::{CStr, CString};
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "id";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -159,6 +170,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn print_id(uid: libc::uid_t, name: bool, delim: char) {
     if name {
         print!("{}{}", uid_to_name(uid), delim);
@@ -167,6 +179,7 @@ fn print_id(uid: libc::uid_t, name: bool, delim: char) {
     }
 }
 
+#[cfg(unix)]
 fn print_gid(gid: libc::gid_t, name: bool, delim: char) {
     if name {
         print!("{}{}", gid_to_name(gid), delim);
@@ -175,6 +188,7 @@ fn print_gid(gid: libc::gid_t, name: bool, delim: char) {
     }
 }
 
+#[cfg(unix)]
 fn print_groups(groups: &[libc::gid_t], name: bool, zero: bool, delim: char) {
     let sep = if zero { '\0' } else { ' ' };
     for (i, &gid) in groups.iter().enumerate() {
@@ -190,6 +204,7 @@ fn print_groups(groups: &[libc::gid_t], name: bool, zero: bool, delim: char) {
     print!("{}", delim);
 }
 
+#[cfg(unix)]
 fn print_default(uid: libc::uid_t, gid: libc::gid_t, groups: &[libc::gid_t], delim: char) {
     print!("uid={}({})", uid, uid_to_name(uid));
     print!(" gid={}({})", gid, gid_to_name(gid));
@@ -204,6 +219,7 @@ fn print_default(uid: libc::uid_t, gid: libc::gid_t, groups: &[libc::gid_t], del
     print!("{}", delim);
 }
 
+#[cfg(unix)]
 fn uid_to_name(uid: libc::uid_t) -> String {
     let pw = unsafe { libc::getpwuid(uid) };
     if pw.is_null() {
@@ -213,6 +229,7 @@ fn uid_to_name(uid: libc::uid_t) -> String {
     name.to_string_lossy().into_owned()
 }
 
+#[cfg(unix)]
 fn gid_to_name(gid: libc::gid_t) -> String {
     let gr = unsafe { libc::getgrgid(gid) };
     if gr.is_null() {
@@ -222,6 +239,7 @@ fn gid_to_name(gid: libc::gid_t) -> String {
     name.to_string_lossy().into_owned()
 }
 
+#[cfg(unix)]
 fn get_user_groups(c_name: &CString, pw_gid: libc::gid_t) -> Vec<libc::gid_t> {
     let mut ngroups: libc::c_int = 64;
     let mut gids: Vec<libc::gid_t> = vec![0; ngroups as usize];
@@ -251,6 +269,7 @@ fn get_user_groups(c_name: &CString, pw_gid: libc::gid_t) -> Vec<libc::gid_t> {
     gids
 }
 
+#[cfg(unix)]
 fn get_current_groups() -> Vec<libc::gid_t> {
     let ngroups = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
     if ngroups < 0 {
@@ -264,7 +283,13 @@ fn get_current_groups() -> Vec<libc::gid_t> {
     gids.truncate(n as usize);
 
     let egid = unsafe { libc::getegid() };
-    if !gids.contains(&egid) {
+    // Ensure egid is at position 0, matching GNU behavior
+    if let Some(pos) = gids.iter().position(|&g| g == egid) {
+        if pos != 0 {
+            gids.remove(pos);
+            gids.insert(0, egid);
+        }
+    } else {
         gids.insert(0, egid);
     }
     gids

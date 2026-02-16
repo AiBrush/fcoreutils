@@ -1,21 +1,35 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("timeout: only available on Unix");
+    std::process::exit(1);
+}
+
 // ftimeout -- run a command with a time limit
 //
 // Usage: timeout [OPTION] DURATION COMMAND [ARG]...
 
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "timeout";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Exit code when the command times out.
+#[cfg(unix)]
 const EXIT_TIMEOUT: i32 = 124;
 /// Exit code when timeout itself fails.
+#[cfg(unix)]
 const EXIT_FAILURE: i32 = 125;
 /// Exit code when the command cannot be executed.
+#[cfg(unix)]
 const EXIT_CANNOT_INVOKE: i32 = 126;
 /// Exit code when the command is not found.
+#[cfg(unix)]
 const EXIT_ENOENT: i32 = 127;
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -371,6 +385,7 @@ fn main() {
     process::exit(status_to_code(status));
 }
 
+#[cfg(unix)]
 fn status_to_code(status: libc::c_int) -> i32 {
     if libc::WIFEXITED(status) {
         libc::WEXITSTATUS(status)
@@ -381,6 +396,7 @@ fn status_to_code(status: libc::c_int) -> i32 {
     }
 }
 
+#[cfg(unix)]
 fn parse_duration(s: &str) -> Option<f64> {
     if s.is_empty() {
         return None;
@@ -413,6 +429,7 @@ fn parse_duration(s: &str) -> Option<f64> {
     Some(value * multiplier)
 }
 
+#[cfg(unix)]
 fn parse_signal(name: &str) -> Option<libc::c_int> {
     // Try numeric first
     if let Ok(n) = name.parse::<libc::c_int>() {

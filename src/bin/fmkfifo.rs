@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("mkfifo: only available on Unix");
+    std::process::exit(1);
+}
+
 // fmkfifo — make FIFOs (named pipes)
 //
 // Usage: mkfifo [OPTION]... NAME...
 
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "mkfifo";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -107,6 +118,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn parse_octal_mode(s: &str) -> libc::mode_t {
     libc::mode_t::from_str_radix(s, 8).unwrap_or_else(|_| {
         eprintln!("{}: invalid mode: '{}'", TOOL_NAME, s);

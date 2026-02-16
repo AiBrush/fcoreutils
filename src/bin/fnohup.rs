@@ -1,15 +1,28 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("nohup: only available on Unix");
+    std::process::exit(1);
+}
+
 // fnohup — run a command immune to hangups, with output to a non-tty
 //
 // Usage: nohup COMMAND [ARG]...
 
+#[cfg(unix)]
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "nohup";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -101,6 +114,7 @@ fn main() {
     process::exit(code);
 }
 
+#[cfg(unix)]
 fn open_nohup_out() -> Option<File> {
     // Try current directory first
     if let Ok(f) = OpenOptions::new().create(true).append(true).open("nohup.out") {

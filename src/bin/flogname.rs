@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("logname: only available on Unix");
+    std::process::exit(1);
+}
+
 // flogname — print the user's login name
 //
 // Uses getlogin() to retrieve the login name from utmp.
 
+#[cfg(unix)]
 use std::ffi::CStr;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "logname";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
     let args: Vec<String> = std::env::args().skip(1).collect();

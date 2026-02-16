@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("groups: only available on Unix");
+    std::process::exit(1);
+}
+
 // fgroups — print the groups a user is in
 //
 // Usage: groups [USERNAME]...
 
+#[cfg(unix)]
 use std::ffi::CStr;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "groups";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -58,6 +69,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn get_current_groups() -> Result<Vec<String>, String> {
     let ngroups = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
     if ngroups < 0 {
@@ -72,13 +84,20 @@ fn get_current_groups() -> Result<Vec<String>, String> {
 
     // Also include the effective gid
     let egid = unsafe { libc::getegid() };
-    if !gids.contains(&egid) {
+    // Ensure egid is at position 0, matching GNU behavior
+    if let Some(pos) = gids.iter().position(|&g| g == egid) {
+        if pos != 0 {
+            gids.remove(pos);
+            gids.insert(0, egid);
+        }
+    } else {
         gids.insert(0, egid);
     }
 
     Ok(gids.iter().map(|&gid| gid_to_name(gid)).collect())
 }
 
+#[cfg(unix)]
 fn get_user_groups(user: &str) -> Result<Vec<String>, String> {
     let c_user = std::ffi::CString::new(user).map_err(|_| "invalid username".to_string())?;
     let pw = unsafe { libc::getpwnam(c_user.as_ptr()) };
@@ -88,36 +107,43 @@ fn get_user_groups(user: &str) -> Result<Vec<String>, String> {
     let pw_gid = unsafe { (*pw).pw_gid };
 
     // Get supplementary groups
+    // macOS getgrouplist uses c_int for gid args, Linux uses gid_t
     let mut ngroups: libc::c_int = 32;
-    let mut gids: Vec<libc::gid_t> = vec![0; ngroups as usize];
 
-    // SAFETY: pw is valid, gids has capacity ngroups
-    let ret = unsafe {
-        libc::getgrouplist(
-            c_user.as_ptr(),
-            pw_gid as libc::gid_t,
-            gids.as_mut_ptr(),
-            &mut ngroups,
-        )
-    };
-
-    if ret == -1 {
-        // Buffer too small, resize
-        gids.resize(ngroups as usize, 0);
-        unsafe {
-            libc::getgrouplist(
-                c_user.as_ptr(),
-                pw_gid as libc::gid_t,
-                gids.as_mut_ptr(),
-                &mut ngroups,
-            );
+    #[cfg(target_vendor = "apple")]
+    {
+        let mut gids: Vec<libc::c_int> = vec![0; ngroups as usize];
+        let ret = unsafe {
+            libc::getgrouplist(c_user.as_ptr(), pw_gid as libc::c_int, gids.as_mut_ptr(), &mut ngroups)
+        };
+        if ret == -1 {
+            gids.resize(ngroups as usize, 0);
+            unsafe {
+                libc::getgrouplist(c_user.as_ptr(), pw_gid as libc::c_int, gids.as_mut_ptr(), &mut ngroups);
+            }
         }
+        gids.truncate(ngroups as usize);
+        return Ok(gids.iter().map(|&gid| gid_to_name(gid as libc::gid_t)).collect());
     }
 
-    gids.truncate(ngroups as usize);
-    Ok(gids.iter().map(|&gid| gid_to_name(gid)).collect())
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let mut gids: Vec<libc::gid_t> = vec![0; ngroups as usize];
+        let ret = unsafe {
+            libc::getgrouplist(c_user.as_ptr(), pw_gid as libc::gid_t, gids.as_mut_ptr(), &mut ngroups)
+        };
+        if ret == -1 {
+            gids.resize(ngroups as usize, 0);
+            unsafe {
+                libc::getgrouplist(c_user.as_ptr(), pw_gid as libc::gid_t, gids.as_mut_ptr(), &mut ngroups);
+            }
+        }
+        gids.truncate(ngroups as usize);
+        Ok(gids.iter().map(|&gid| gid_to_name(gid)).collect())
+    }
 }
 
+#[cfg(unix)]
 fn gid_to_name(gid: libc::gid_t) -> String {
     let gr = unsafe { libc::getgrgid(gid) };
     if gr.is_null() {

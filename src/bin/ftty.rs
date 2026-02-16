@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("tty: only available on Unix");
+    std::process::exit(1);
+}
+
 // ftty — print the file name of the terminal connected to standard input
 //
 // If stdin is not a terminal, prints "not a tty" and exits 1.
 
+#[cfg(unix)]
 use std::ffi::CStr;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "tty";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 

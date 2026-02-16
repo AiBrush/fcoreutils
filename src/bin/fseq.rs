@@ -297,9 +297,18 @@ fn main() {
     let mut positional: Vec<String> = Vec::new();
 
     let mut i = 0;
+    let mut saw_dashdash = false;
     while i < args.len() {
         let arg = &args[i];
+        if saw_dashdash {
+            positional.push(arg.clone());
+            i += 1;
+            continue;
+        }
         match arg.as_str() {
+            "--" => {
+                saw_dashdash = true;
+            }
             "--help" => {
                 print_help();
                 return;

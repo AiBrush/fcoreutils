@@ -93,7 +93,7 @@ fn topological_sort(
     }
 }
 
-fn run(input: &str) -> i32 {
+fn run(input: &str, source_name: &str) -> i32 {
     let mut all_nodes: Vec<String> = Vec::new();
     let mut edges: Vec<(String, String)> = Vec::new();
     let mut seen_nodes: HashMap<String, bool> = HashMap::new();
@@ -139,7 +139,7 @@ fn run(input: &str) -> i32 {
             // Print what we can, then report cycle
             // Re-run partial sort: output nodes with no remaining dependencies first
             // GNU tsort outputs nodes as it can, reporting loops inline
-            eprintln!("{}: {}: input contains a loop:", TOOL_NAME, TOOL_NAME);
+            eprintln!("{}: {}: input contains a loop:", TOOL_NAME, source_name);
             for member in &cycle_members {
                 eprintln!("{}: {member}", TOOL_NAME);
             }
@@ -246,9 +246,9 @@ fn main() {
         }
     }
 
-    let input = if let Some(ref file) = filename {
+    let (input, source_name) = if let Some(ref file) = filename {
         match std::fs::read_to_string(file) {
-            Ok(contents) => contents,
+            Ok(contents) => (contents, file.clone()),
             Err(e) => {
                 eprintln!(
                     "{}: {}: {}",
@@ -274,10 +274,10 @@ fn main() {
                 }
             }
         }
-        input
+        (input, "-".to_string())
     };
 
-    let exit_code = run(&input);
+    let exit_code = run(&input, &source_name);
     process::exit(exit_code);
 }
 

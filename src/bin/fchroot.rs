@@ -1,14 +1,26 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("chroot: only available on Unix");
+    std::process::exit(1);
+}
+
 // fchroot -- run command or interactive shell with special root directory
 //
 // Usage: chroot [OPTION] NEWROOT [COMMAND [ARG]...]
 
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "chroot";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -218,6 +230,7 @@ fn main() {
     process::exit(code);
 }
 
+#[cfg(unix)]
 fn resolve_user(spec: &str) -> Option<libc::uid_t> {
     // Try numeric first
     if let Ok(uid) = spec.parse::<libc::uid_t>() {
@@ -233,6 +246,7 @@ fn resolve_user(spec: &str) -> Option<libc::uid_t> {
     }
 }
 
+#[cfg(unix)]
 fn resolve_group(spec: &str) -> Option<libc::gid_t> {
     // Try numeric first
     if let Ok(gid) = spec.parse::<libc::gid_t>() {

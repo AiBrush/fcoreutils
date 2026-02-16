@@ -1,12 +1,22 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("env: only available on Unix");
+    std::process::exit(1);
+}
+
 // fenv -- run a program in a modified environment
 //
 // Usage: env [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]
 
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "env";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -217,6 +227,7 @@ fn main() {
 }
 
 // Import CommandExt for exec()
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 #[cfg(test)]

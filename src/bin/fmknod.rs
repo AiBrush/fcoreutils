@@ -1,13 +1,24 @@
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("mknod: only available on Unix");
+    std::process::exit(1);
+}
+
 // fmknod — make block or character special files, or FIFOs
 //
 // Usage: mknod [OPTION]... NAME TYPE [MAJOR MINOR]
 
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const TOOL_NAME: &str = "mknod";
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -135,6 +146,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn parse_device_number(s: &str, label: &str) -> u64 {
     // Support hex (0x), octal (0), and decimal
     let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -151,6 +163,7 @@ fn parse_device_number(s: &str, label: &str) -> u64 {
     })
 }
 
+#[cfg(unix)]
 fn parse_mode_str(mode_str: &str) -> libc::mode_t {
     libc::mode_t::from_str_radix(mode_str, 8).unwrap_or_else(|_| {
         eprintln!("{}: invalid mode: '{}'", TOOL_NAME, mode_str);
@@ -158,6 +171,7 @@ fn parse_mode_str(mode_str: &str) -> libc::mode_t {
     })
 }
 
+#[cfg(unix)]
 fn create_fifo(name: &str, mode: &Option<String>) {
     let file_mode = match mode {
         Some(m) => parse_mode_str(m),
@@ -186,6 +200,7 @@ fn create_fifo(name: &str, mode: &Option<String>) {
     }
 }
 
+#[cfg(unix)]
 fn create_special(name: &str, node_type: &str, major: u64, minor: u64, mode: &Option<String>) {
     let file_mode = match mode {
         Some(m) => parse_mode_str(m),
@@ -222,6 +237,7 @@ fn create_special(name: &str, node_type: &str, major: u64, minor: u64, mode: &Op
     }
 }
 
+#[cfg(unix)]
 fn print_help() {
     println!("Usage: {} [OPTION]... NAME TYPE [MAJOR MINOR]", TOOL_NAME);
     println!("Create the special file NAME of the given TYPE.");
