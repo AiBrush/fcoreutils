@@ -993,8 +993,8 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("->"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("->"));
     }
 
     #[test]
