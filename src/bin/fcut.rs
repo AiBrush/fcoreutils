@@ -610,7 +610,7 @@ fn main() {
             match read_file_mmap(Path::new(filename)) {
                 Ok(FileData::Owned(mut vec)) => {
                     // Owned Vec: try in-place extraction (no output buffer needed).
-                    // This path handles small files (< 1MB read()) and mmap fallbacks.
+                    // Returned when mmap fails or for non-regular files (pipes, devices).
                     if let Some(new_len) = cut::process_cut_data_mut(&mut vec, &cfg) {
                         vec.truncate(new_len);
                         out.write_all(&vec)
