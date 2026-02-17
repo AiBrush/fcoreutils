@@ -1,10 +1,12 @@
 use memchr::memchr_iter;
 use std::io::{self, BufRead, IoSlice, Write};
 
-/// Minimum file size for parallel processing (2MB).
-/// Uses Rayon's persistent thread pool for low-overhead dispatch (~10µs).
-/// For data >= 2MB with 4 cores, the parallel savings (~3ms) far exceed overhead.
-const PARALLEL_THRESHOLD: usize = 2 * 1024 * 1024;
+/// Minimum file size for parallel processing (16MB).
+/// For 10MB benchmark files, the split_for_scope scan (~300µs) + rayon dispatch
+/// overhead exceeds the parallel benefit. Sequential memchr2_iter is faster
+/// because it avoids the redundant full-data scan for chunk boundaries.
+/// 16MB ensures only genuinely large files use parallel processing.
+const PARALLEL_THRESHOLD: usize = 16 * 1024 * 1024;
 
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
@@ -155,6 +157,21 @@ unsafe fn buf_push(buf: &mut Vec<u8>, b: u8) {
         let len = buf.len();
         *buf.as_mut_ptr().add(len) = b;
         buf.set_len(len + 1);
+    }
+}
+
+/// Append a slice + a single trailing byte to buf without capacity checks.
+/// Fused operation saves one len load/store vs separate buf_extend + buf_push.
+/// Hot path for field extraction: copies field content + newline in one call.
+/// Caller MUST ensure buf has enough remaining capacity.
+#[inline(always)]
+unsafe fn buf_extend_byte(buf: &mut Vec<u8>, data: &[u8], b: u8) {
+    unsafe {
+        let len = buf.len();
+        let ptr = buf.as_mut_ptr().add(len);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        *ptr.add(data.len()) = b;
+        buf.set_len(len + data.len() + 1);
     }
 }
 
@@ -980,9 +997,10 @@ fn process_single_field(
 ) -> io::Result<()> {
     let target_idx = target - 1;
 
-    // For single-field extraction, parallelize at 2MB+ to match PARALLEL_THRESHOLD.
-    // The 10MB benchmark regressed from ~7x to ~5.3x when this was set to 32MB.
-    const FIELD_PARALLEL_MIN: usize = 2 * 1024 * 1024;
+    // For single-field extraction, parallelize at 16MB+ to match PARALLEL_THRESHOLD.
+    // For 10MB: the split_for_scope scan (~300µs) is redundant work — the processing
+    // already scans with memchr2_iter. Sequential is faster because it does ONE scan.
+    const FIELD_PARALLEL_MIN: usize = 16 * 1024 * 1024;
 
     if delim != line_delim {
         // Field 1 fast path: memchr2 single-pass scan.
@@ -2236,50 +2254,82 @@ fn single_field1_parallel(
 /// Uses a single memchr2_iter pass over the entire chunk to find both delimiters
 /// and newlines. This eliminates the per-line memchr function call overhead
 /// (~5-10ns per call × 2 calls per line) that dominates for short-field data.
-/// For 100MB with 1M lines: saves ~10-20ms of function call setup overhead.
+///
+/// Optimizations:
+/// - Contiguous run tracking: consecutive no-delimiter lines are batched into
+///   a single buf_extend (one memcpy instead of one per line).
+/// - Deferred field output: records delimiter position, outputs field+newline
+///   together via fused buf_extend_byte on newline (saves one len load/store
+///   per line vs separate buf_extend + buf_push).
 #[inline]
 fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8>) {
     buf.reserve(data.len());
     let base = data.as_ptr();
     let mut line_start: usize = 0;
-    let mut found_delim = false;
+    // Position of first delimiter on current line (usize::MAX = not found yet).
+    // Defers field output until newline, enabling fused buf_extend_byte.
+    let mut first_delim: usize = usize::MAX;
+    // Start of contiguous run of unchanged lines (no delimiter).
+    let mut run_start: usize = 0;
 
     for pos in memchr::memchr2_iter(delim, line_delim, data) {
         let byte = unsafe { *base.add(pos) };
         if byte == line_delim {
-            if !found_delim {
-                // No delimiter on this line — output entire line including newline
+            if first_delim != usize::MAX {
+                // Line has delimiter — flush run, write field + newline together.
+                if run_start < line_start {
+                    unsafe {
+                        buf_extend(
+                            buf,
+                            std::slice::from_raw_parts(base.add(run_start), line_start - run_start),
+                        );
+                    }
+                }
+                // Fused: field content + newline in one operation
                 unsafe {
-                    buf_extend(
+                    buf_extend_byte(
                         buf,
-                        std::slice::from_raw_parts(base.add(line_start), pos + 1 - line_start),
+                        std::slice::from_raw_parts(base.add(line_start), first_delim - line_start),
+                        line_delim,
                     );
                 }
-            } else {
-                // Delimiter was found earlier — just add the line terminator
-                unsafe { buf_push(buf, line_delim) };
+                first_delim = usize::MAX;
+                run_start = pos + 1;
             }
+            // else: no delimiter on this line — part of contiguous run, skip copy.
             line_start = pos + 1;
-            found_delim = false;
-        } else if !found_delim {
-            // First delimiter on this line — output field 1
-            unsafe {
-                buf_extend(
-                    buf,
-                    std::slice::from_raw_parts(base.add(line_start), pos - line_start),
-                );
-            }
-            found_delim = true;
+        } else if first_delim == usize::MAX {
+            // First delimiter on this line — just record position (defer output).
+            first_delim = pos;
         }
         // Subsequent delimiters on same line: ignore
     }
-    // Handle trailing data without final line_delim
-    if line_start < data.len() {
-        if !found_delim {
+
+    // Flush remaining data
+    if run_start < data.len() {
+        if first_delim != usize::MAX {
+            // Last line has delimiter but no trailing newline.
+            // Flush run up to this line, then output field content (no newline).
+            if run_start < line_start {
+                unsafe {
+                    buf_extend(
+                        buf,
+                        std::slice::from_raw_parts(base.add(run_start), line_start - run_start),
+                    );
+                }
+            }
             unsafe {
                 buf_extend(
                     buf,
-                    std::slice::from_raw_parts(base.add(line_start), data.len() - line_start),
+                    std::slice::from_raw_parts(base.add(line_start), first_delim - line_start),
+                );
+            }
+        } else {
+            // Remaining data is part of contiguous run — flush entire run
+            unsafe {
+                buf_extend(
+                    buf,
+                    std::slice::from_raw_parts(base.add(run_start), data.len() - run_start),
                 );
             }
         }
