@@ -143,6 +143,37 @@ pub fn read_file_vec(path: &Path) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Read a file into a Vec, always using read() instead of mmap.
+/// Handles both regular files (exact-size pre-allocation) and non-regular
+/// files (FIFOs, devices, process substitution) via read_to_end.
+///
+/// Faster than mmap for tools that read the entire file (tac, base64) because:
+/// - Page faults for the user buffer happen in-kernel during read(), where the
+///   kernel batches PTE allocation and avoids per-fault user/kernel transitions.
+/// - mmap triggers user-space page faults (~1-2µs each on CI runners), totaling
+///   ~2.5-5ms for 10MB (2560 faults × 1-2µs).
+/// - A single read() syscall handles the entire file vs mmap's per-page faults.
+pub fn read_file_direct(path: &Path) -> io::Result<FileData> {
+    let file = open_noatime(path)?;
+    let metadata = file.metadata()?;
+    let len = metadata.len();
+
+    if len > 0 && metadata.file_type().is_file() {
+        let mut buf = vec![0u8; len as usize];
+        let n = read_full(&mut &file, &mut buf)?;
+        buf.truncate(n);
+        Ok(FileData::Owned(buf))
+    } else if !metadata.file_type().is_file() {
+        // Non-regular file (pipe, FIFO, device, process substitution) — read to end.
+        let mut buf = Vec::new();
+        let mut reader = file;
+        reader.read_to_end(&mut buf)?;
+        Ok(FileData::Owned(buf))
+    } else {
+        Ok(FileData::Owned(Vec::new()))
+    }
+}
+
 /// Read a file always using mmap, with optimal page fault strategy.
 /// Used by tac for zero-copy output and parallel scanning.
 ///
