@@ -1,8 +1,12 @@
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::ops::Deref;
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+use std::mem::ManuallyDrop;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::FromRawFd;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -297,10 +301,14 @@ fn read_stdin_raw() -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Splice piped stdin to a memfd, then mmap for zero-copy access.
-/// Uses splice(2) to move data from the stdin pipe directly into a memfd's
-/// page cache (kernel→kernel, no userspace copy). Returns a mutable mmap.
-/// Returns None if stdin is not a pipe or splice fails.
+/// Splice piped stdin to a memfd, then mmap for direct access.
+/// Uses splice(2) to copy data from the stdin pipe into a memfd's page
+/// cache (kernel-to-kernel copy, avoids userspace read()+write() round-trip).
+/// Returns a mutable mmap. Returns None if stdin is not a pipe or splice fails.
+///
+/// Note: SPLICE_F_MOVE is a no-op since Linux 2.6.21 — splice performs a
+/// kernel-to-kernel copy rather than a true page move. Still faster than
+/// userspace read() because it avoids the kernel→user→kernel data copies.
 ///
 /// For translate operations: caller can modify the mmap'd data in-place.
 /// For filter operations (delete, cut): caller reads from the mmap.
@@ -456,4 +464,138 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
         }
     }
     Ok(total)
+}
+
+/// Writer that uses vmsplice(2) for pipe output on Linux.
+/// When stdout is a pipe, vmsplice maps user-space pages directly into
+/// the pipe buffer without kernel memcpy (via get_user_pages). Falls back
+/// to regular write(2) for non-pipe fds (files, terminals) or on error.
+///
+/// # Safety requirements for callers
+///
+/// Buffers passed to write/write_all MUST remain valid and unmodified until
+/// the pipe reader consumes the data. vmsplice without SPLICE_F_GIFT pins
+/// pages via get_user_pages() — the kernel references the caller's physical
+/// pages directly.
+///
+/// Safe buffer types:
+/// - **mmap-backed data**: pages are pinned by get_user_pages and persist
+///   even after munmap (kernel holds a reference).
+/// - **Large one-shot Vec buffers**: glibc allocates Vec > ~128KB via
+///   anonymous mmap. After write_all, the physical pages remain pinned
+///   by the pipe even if the Vec is dropped (munmap only removes the
+///   virtual mapping). Note: this relies on glibc's mmap threshold
+///   behavior — custom allocators (jemalloc, mimalloc) may not provide
+///   the same guarantee.
+///
+/// UNSAFE buffer types (use raw write instead):
+/// - **Reused streaming buffers**: overwriting a buffer while the pipe
+///   reader still references its pages causes data corruption.
+/// - **Small heap buffers**: may use sbrk/brk allocation, where freed
+///   memory can be immediately reused by subsequent allocations.
+#[cfg(target_os = "linux")]
+pub struct VmspliceWriter {
+    raw: ManuallyDrop<std::fs::File>,
+    is_pipe: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl VmspliceWriter {
+    pub fn new() -> Self {
+        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        let is_pipe = unsafe {
+            let mut stat: libc::stat = std::mem::zeroed();
+            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
+        };
+        Self { raw, is_pipe }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Write for VmspliceWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write(buf);
+        }
+        loop {
+            let iov = libc::iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            };
+            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+            if n > 0 {
+                return Ok(n as usize);
+            } else if n == 0 {
+                // vmsplice returned 0 for non-empty buf (pipe full or closed).
+                // Fall back to regular write to avoid busy spin (Write trait
+                // contract: Ok(0) from write() may cause callers to spin).
+                self.is_pipe = false;
+                return (&*self.raw).write(buf);
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            self.is_pipe = false;
+            return (&*self.raw).write(buf);
+        }
+    }
+
+    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write_all(buf);
+        }
+        while !buf.is_empty() {
+            let iov = libc::iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            };
+            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+            if n > 0 {
+                buf = &buf[n as usize..];
+            } else if n == 0 {
+                // Fall back to raw write instead of returning WriteZero error.
+                // Avoids potential spin loops in callers.
+                self.is_pipe = false;
+                return (&*self.raw).write_all(buf);
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                self.is_pipe = false;
+                return (&*self.raw).write_all(buf);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        if !self.is_pipe || bufs.is_empty() {
+            return (&*self.raw).write_vectored(bufs);
+        }
+        // SAFETY: IoSlice is #[repr(transparent)] over iovec on Unix,
+        // so &[IoSlice] has the same memory layout as &[iovec].
+        loop {
+            let count = bufs.len().min(1024);
+            let iovs = bufs.as_ptr() as *const libc::iovec;
+            let n = unsafe { libc::vmsplice(1, iovs, count, 0) };
+            if n > 0 {
+                return Ok(n as usize);
+            } else if n == 0 {
+                self.is_pipe = false;
+                return (&*self.raw).write_vectored(bufs);
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            self.is_pipe = false;
+            return (&*self.raw).write_vectored(bufs);
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }

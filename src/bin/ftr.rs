@@ -1,11 +1,13 @@
 use std::io::{self, Write};
-#[cfg(any(target_os = "linux", unix))]
+#[cfg(unix)]
 use std::mem::ManuallyDrop;
-#[cfg(any(target_os = "linux", unix))]
+#[cfg(unix)]
 use std::os::unix::io::FromRawFd;
 use std::process;
 
 use coreutils_rs::common::io::FileData;
+#[cfg(target_os = "linux")]
+use coreutils_rs::common::io::VmspliceWriter;
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::tr;
 
@@ -53,89 +55,6 @@ impl io::Read for RawStdin {
                 return Err(err);
             }
         }
-    }
-}
-
-/// Writer that uses vmsplice(2) for zero-copy pipe output on Linux.
-/// When stdout is a pipe, vmsplice references user-space pages directly
-/// in the pipe buffer (no kernel memcpy). Falls back to regular write
-/// for non-pipe fds (files, terminals).
-///
-/// SAFETY: Caller must ensure the buffer passed to write/write_all stays
-/// valid until the pipe reader consumes the data. Safe for:
-/// - mmap-backed data (pages persist until munmap, and get_user_pages pins them)
-/// - Large heap buffers (Vec > ~128KB uses mmap, munmap keeps pinned pages alive)
-/// UNSAFE for reused/streaming buffers that are overwritten between writes.
-#[cfg(target_os = "linux")]
-struct VmspliceWriter {
-    raw: ManuallyDrop<std::fs::File>,
-    is_pipe: bool,
-}
-
-#[cfg(target_os = "linux")]
-impl VmspliceWriter {
-    fn new() -> Self {
-        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        let is_pipe = unsafe {
-            let mut stat: libc::stat = std::mem::zeroed();
-            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
-        };
-        Self { raw, is_pipe }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Write for VmspliceWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if !self.is_pipe || buf.is_empty() {
-            return (&*self.raw).write(buf);
-        }
-        loop {
-            let iov = libc::iovec {
-                iov_base: buf.as_ptr() as *mut libc::c_void,
-                iov_len: buf.len(),
-            };
-            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-            if n >= 0 {
-                return Ok(n as usize);
-            }
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            self.is_pipe = false;
-            return (&*self.raw).write(buf);
-        }
-    }
-
-    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
-        if !self.is_pipe || buf.is_empty() {
-            return (&*self.raw).write_all(buf);
-        }
-        while !buf.is_empty() {
-            let iov = libc::iovec {
-                iov_base: buf.as_ptr() as *mut libc::c_void,
-                iov_len: buf.len(),
-            };
-            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-            if n > 0 {
-                buf = &buf[n as usize..];
-            } else if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "vmsplice wrote 0"));
-            } else {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                self.is_pipe = false;
-                return (&*self.raw).write_all(buf);
-            }
-        }
-        Ok(())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -456,8 +375,8 @@ fn main() {
                 tr::translate_mmap_readonly(&set1, &set2, &mm, &mut lock)
             }
         } else {
-            // Piped stdin: try splice→memfd→mmap for zero-copy pipe reads.
-            // splice(2) moves pipe pages to memfd without kernel→user copy.
+            // Piped stdin: try splice→memfd→mmap to avoid userspace read() copies.
+            // splice(2) copies pipe data to memfd in-kernel (no user-space round-trip).
             // Then translate in-place on the mmap'd buffer and vmsplice output.
             // Falls back to streaming translate if splice fails.
             #[cfg(target_os = "linux")]
@@ -529,7 +448,7 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: try splice→memfd→mmap for zero-copy pipe reads,
+        // Piped stdin: try splice→memfd→mmap to avoid userspace read() copies,
         // then fall back to streaming mode.
         // Use raw write (not vmsplice) for delete/squeeze output — those modes
         // create intermediate heap buffers that may be reused across writes.
