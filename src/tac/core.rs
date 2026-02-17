@@ -210,6 +210,11 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
         positions.push(pos);
     }
 
+    // No separators found — output is identical to input, skip alloc+copy
+    if positions.is_empty() {
+        return out.write_all(data);
+    }
+
     // Build contiguous reversed output buffer
     let mut buf = Vec::with_capacity(data.len());
     let mut end = data.len();
@@ -227,7 +232,7 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
 }
 
 /// Before-separator mode for small files: forward SIMD scan + contiguous buffer.
-/// Uses IoSlice pointing directly at input data — eliminates the buffer copy.
+/// Builds a contiguous reversed output buffer, then writes with a single write_all.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -237,6 +242,11 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
     let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
         positions.push(pos);
+    }
+
+    // No separators found — output is identical to input, skip alloc+copy
+    if positions.is_empty() {
+        return out.write_all(data);
     }
 
     // Build contiguous reversed output buffer
