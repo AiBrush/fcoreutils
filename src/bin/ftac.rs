@@ -9,7 +9,7 @@ use std::process;
 #[cfg(unix)]
 use memmap2::MmapOptions;
 
-use coreutils_rs::common::io::{FileData, read_file_direct, read_stdin};
+use coreutils_rs::common::io::{FileData, read_file_mmap, read_stdin};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::tac;
 
@@ -210,11 +210,7 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
                 }
             }
         } else {
-            // Use read() instead of mmap for file inputs.
-            // read() is faster because page faults for the user buffer happen
-            // in-kernel (batched PTE allocation), while mmap triggers per-page
-            // user-space faults (~2.5-5ms for 10MB on CI runners).
-            match read_file_direct(Path::new(filename)) {
+            match read_file_mmap(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("tac: {}: {}", filename, io_error_msg(&e));

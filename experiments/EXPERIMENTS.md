@@ -94,9 +94,15 @@ Check what has been tried, what worked, and what REGRESSED performance.
 - **Result (v0.5.5)**: cut **6.8x → 6.5x** (-4%), tac 3.8x → 3.9x (neutral). Plus 1 tac compatibility FAILURE (1MB file).
 - **Conclusion**: Two-level scan is NOT faster than memchr2_iter for cut. Contiguous buffer tac approach neutral. REVERT.
 
+### EXP-009: Lower parallel thresholds + mmap→read() (PRs #249, #254, #255) — FAILED
+- **Idea**: Lower PARALLEL_THRESHOLD from 64MB→8MB (tac) and 16MB→8MB (cut) to enable parallel processing for 10MB benchmarks. Switch file I/O from mmap to read() for tac, cut, base64. Pre-warm Rayon.
+- **Implementation**: Changed constants, switched read_file_mmap → read_file_direct/read_file_vec in fcut.rs, ftac.rs, fbase64.rs. Added Rayon pre-warming in ftac.rs.
+- **Result (v0.7.7)**: tac **3.9x → 2.8x** (-28%), cut **5.8x → 4.8x** (-17%), base64 **6.6x → 5.6x** (-15%), tr 7.5x → 6.9x (-8%). ALL REGRESSED.
+- **Conclusion**: Parallel overhead for 10MB files exceeds benefit even with pre-warmed Rayon. mmap is faster than read() because mmap is zero-copy while read() requires kernel→user memcpy. REVERT ALL.
+
 ---
 
-## Current Status (v0.5.4 — after revert of v0.5.5 regressions)
+## Current Status (v0.7.6 — pre-threshold-regression)
 
 | Tool | Speedup vs GNU | Target | Status |
 |------|---------------:|-------:|--------|
@@ -133,3 +139,5 @@ Check what has been tried, what worked, and what REGRESSED performance.
 - Do NOT use read_full() buffer-filling for tr — adds latency, hurts performance
 - Do NOT replace memchr2_iter with "two-level scan" for cut — not actually faster
 - Do NOT skip the in-place single-field path for cut — it's already optimized
+- Do NOT lower PARALLEL_THRESHOLD below 16MB for cut or 64MB for tac — thread overhead dominates
+- Do NOT switch from mmap to read()/read_file_direct for file I/O — mmap is zero-copy, read() requires memcpy

@@ -10,7 +10,7 @@ use std::process;
 use memmap2::MmapOptions;
 
 use coreutils_rs::base64::core as b64;
-use coreutils_rs::common::io::read_file_direct;
+use coreutils_rs::common::io::read_file_mmap;
 use coreutils_rs::common::io_error_msg;
 
 /// Raw stdin reader for zero-overhead pipe reads on Linux.
@@ -310,11 +310,7 @@ fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
 }
 
 fn process_file(filename: &str, cli: &Cli, out: &mut impl Write) -> io::Result<()> {
-    // Use read() instead of mmap for file inputs.
-    // read() is faster because page faults for the user buffer happen in-kernel
-    // (batched PTE allocation), while mmap triggers per-page user-space faults
-    // (~1-2µs each, totaling ~2.5-5ms for 10MB on CI runners).
-    let data = read_file_direct(Path::new(filename))?;
+    let data = read_file_mmap(Path::new(filename))?;
     if cli.decode {
         b64::decode_to_writer(&data, cli.ignore_garbage, out)
     } else {
