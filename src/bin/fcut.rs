@@ -11,7 +11,7 @@ use std::process;
 #[cfg(unix)]
 use memmap2::MmapOptions;
 
-use coreutils_rs::common::io::{read_file_mmap, FileData};
+use coreutils_rs::common::io::{FileData, read_file_mmap};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::cut::{self, CutMode};
 

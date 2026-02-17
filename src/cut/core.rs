@@ -2337,7 +2337,11 @@ fn single_field1_parallel(
 fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8>) {
     // Reserve data.len() + 1: output ≤ input for all lines except potentially
     // the last line without trailing newline, where we add a newline (GNU compat).
-    debug_assert_eq!(buf.len(), 0, "single_field1_to_buf: buf must be empty on entry");
+    debug_assert_eq!(
+        buf.len(),
+        0,
+        "single_field1_to_buf: buf must be empty on entry"
+    );
     buf.reserve(data.len() + 1);
     let base = data.as_ptr();
     let mut line_start: usize = 0;
