@@ -2256,7 +2256,9 @@ fn single_field1_parallel(
 ///   a single buf_extend (one memcpy instead of one per line).
 #[inline]
 fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8>) {
-    buf.reserve(data.len());
+    // Reserve data.len() + 1: output ≤ input for all lines except potentially
+    // the last line without trailing newline, where we add a newline (GNU compat).
+    buf.reserve(data.len() + 1);
     let base = data.as_ptr();
     let mut line_start: usize = 0;
     let mut found_delim = false;
@@ -2291,18 +2293,21 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
         // Subsequent delimiters: ignore
     }
 
-    // Handle last line (no trailing newline)
+    // Handle last line without trailing newline — GNU cut always adds newline
     if line_start < data.len() {
         if !found_delim {
-            // No delimiter — output remaining data as-is
+            // No delimiter — output remaining data + newline (GNU compat)
             unsafe {
-                buf_extend(
+                buf_extend_byte(
                     buf,
                     std::slice::from_raw_parts(base.add(line_start), data.len() - line_start),
+                    line_delim,
                 );
             }
+        } else {
+            // Field already output — add trailing newline (GNU compat)
+            unsafe { buf_push(buf, line_delim) };
         }
-        // If found_delim: field already output, no trailing newline to add
     }
 }
 
