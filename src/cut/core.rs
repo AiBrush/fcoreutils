@@ -1006,16 +1006,11 @@ fn process_single_field(
             if data.len() >= FIELD_PARALLEL_MIN {
                 return single_field1_parallel(data, delim, line_delim, out);
             }
-            // Sequential: scan with memchr2 into buffer, single write_all.
-            // Faster than writev/IoSlice for moderate data because it produces
-            // one contiguous buffer → one write syscall, and avoids IoSlice
-            // allocation overhead for high-delimiter-density data.
-            let mut buf = Vec::with_capacity(data.len() + 1);
-            single_field1_to_buf(data, delim, line_delim, &mut buf);
-            if !buf.is_empty() {
-                out.write_all(&buf)?;
-            }
-            return Ok(());
+            // Zero-copy writev: build IoSlice entries pointing directly into
+            // the source data (mmap). Avoids allocating a Vec<u8> output buffer
+            // and the memcpy into it. Combined with VmspliceWriter, this is
+            // fully zero-copy: mmap → IoSlice → vmsplice → pipe.
+            return single_field1_writev(data, delim, line_delim, out);
         }
 
         // Two-level approach for field N: outer newline scan + inner delim scan
@@ -2211,11 +2206,93 @@ fn fields_mid_range_line(
     }
 }
 
-/// Zero-copy field-1 extraction using writev: builds IoSlice entries pointing
-/// directly into the source data, flushing in MAX_IOV-sized batches.
-/// For each line: if delimiter exists, output field1 + newline; otherwise pass through.
+/// Zero-copy field 1 extraction using writev: builds IoSlice entries pointing
+/// directly into the source data (e.g. mmap). Uses memchr2_iter single-pass
+/// SIMD scanning — a single pass finds both delimiters and newlines.
 ///
-/// Uses a two-level scan: outer memchr(newline) for line boundaries, inner memchr(delim)
+/// Lines without delimiter stay in contiguous runs (one IoSlice per run).
+/// Lines with delimiter produce two IoSlices (truncated field + newline byte).
+/// Static newline buffers ensure vmsplice safety (data lives for entire process).
+///
+/// Flushes in MAX_IOV-sized batches to respect writev limits.
+#[inline]
+fn single_field1_writev(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    // Static newline buffers — safe for vmsplice (live for entire process)
+    static NL: [u8; 1] = [b'\n'];
+    static NUL: [u8; 1] = [b'\0'];
+    let nl_ref: &'static [u8] = if line_delim == b'\n' { &NL } else { &NUL };
+
+    let mut iovs: Vec<IoSlice<'_>> = Vec::with_capacity(MAX_IOV);
+    let mut line_start: usize = 0;
+    let mut run_start: usize = 0; // Start of contiguous unchanged region
+    let mut found_delim = false;
+    let mut delim_pos: usize = 0;
+
+    for pos in memchr::memchr2_iter(delim, line_delim, data) {
+        let byte = data[pos];
+        if byte == line_delim {
+            if found_delim {
+                // Delimiter was found — truncate line at delimiter.
+                // Flush contiguous run before this line.
+                if run_start < line_start {
+                    iovs.push(IoSlice::new(&data[run_start..line_start]));
+                }
+                // Truncated field + newline
+                iovs.push(IoSlice::new(&data[line_start..delim_pos]));
+                iovs.push(IoSlice::new(nl_ref));
+                run_start = pos + 1;
+
+                if iovs.len() >= MAX_IOV - 4 {
+                    write_ioslices(out, &iovs)?;
+                    iovs.clear();
+                }
+            }
+            // else: no delimiter — line stays in contiguous run (unchanged)
+            line_start = pos + 1;
+            found_delim = false;
+        } else if !found_delim {
+            // First delimiter on this line — record position
+            found_delim = true;
+            delim_pos = pos;
+        }
+        // Subsequent delimiters on same line: ignore
+    }
+
+    // Handle remaining data after last newline
+    if line_start < data.len() {
+        if !found_delim {
+            // No delimiter on last line — include in contiguous run
+            if run_start < data.len() {
+                iovs.push(IoSlice::new(&data[run_start..]));
+            }
+            // GNU compat: add newline if data doesn't end with one
+            if !data.is_empty() && data[data.len() - 1] != line_delim {
+                iovs.push(IoSlice::new(nl_ref));
+            }
+        } else {
+            // Delimiter on last line — flush run + truncated field + newline
+            if run_start < line_start {
+                iovs.push(IoSlice::new(&data[run_start..line_start]));
+            }
+            iovs.push(IoSlice::new(&data[line_start..delim_pos]));
+            iovs.push(IoSlice::new(nl_ref));
+        }
+    } else if run_start < line_start {
+        // All lines ended with newline — flush remaining contiguous run
+        iovs.push(IoSlice::new(&data[run_start..line_start]));
+    }
+
+    if !iovs.is_empty() {
+        write_ioslices(out, &iovs)?;
+    }
+    Ok(())
+}
+
 /// Parallel field-1 extraction for large data using memchr2 single-pass.
 /// Splits data into per-thread chunks, each chunk extracts field 1 using
 /// memchr2(delim, newline) which finds the first special byte in one scan.
@@ -2309,78 +2386,6 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
             unsafe { buf_push(buf, line_delim) };
         }
     }
-}
-
-/// Zero-copy field 1 extraction using writev: builds IoSlice entries pointing
-/// directly into the source data. Uses two-level scan: outer memchr(newline)
-/// for the first delimiter. This is faster than memchr2 for SMALL data because
-/// the inner scan exits after the FIRST delimiter, skipping all
-/// subsequent delimiters on the line.
-///
-/// Lines without delimiter stay in contiguous runs (zero-copy pass-through).
-/// Lines with delimiter produce two IoSlices (truncated field + newline byte).
-#[inline]
-#[allow(dead_code)]
-fn single_field1_zerocopy(
-    data: &[u8],
-    delim: u8,
-    line_delim: u8,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    let newline_buf: [u8; 1] = [line_delim];
-
-    let mut iov: Vec<IoSlice> = Vec::with_capacity(MAX_IOV);
-    let mut run_start: usize = 0;
-    let mut start = 0;
-
-    for end_pos in memchr_iter(line_delim, data) {
-        let line = &data[start..end_pos];
-        if let Some(dp) = memchr::memchr(delim, line) {
-            // Line has delimiter — truncate at first delimiter.
-            // Flush current contiguous run, then add truncated field + newline.
-            if run_start < start {
-                iov.push(IoSlice::new(&data[run_start..start]));
-            }
-            iov.push(IoSlice::new(&data[start..start + dp]));
-            iov.push(IoSlice::new(&newline_buf));
-            run_start = end_pos + 1;
-
-            if iov.len() >= MAX_IOV - 2 {
-                write_ioslices(out, &iov)?;
-                iov.clear();
-            }
-        }
-        // else: no delimiter in line, output unchanged (stays in contiguous run)
-        start = end_pos + 1;
-    }
-
-    // Handle last line (no trailing newline)
-    if start < data.len() {
-        let line = &data[start..];
-        if let Some(dp) = memchr::memchr(delim, line) {
-            if run_start < start {
-                iov.push(IoSlice::new(&data[run_start..start]));
-            }
-            iov.push(IoSlice::new(&data[start..start + dp]));
-            iov.push(IoSlice::new(&newline_buf));
-            if !iov.is_empty() {
-                write_ioslices(out, &iov)?;
-            }
-            return Ok(());
-        }
-    }
-
-    // Flush remaining contiguous run
-    if run_start < data.len() {
-        iov.push(IoSlice::new(&data[run_start..]));
-        if !data.is_empty() && *data.last().unwrap() != line_delim {
-            iov.push(IoSlice::new(&newline_buf));
-        }
-    }
-    if !iov.is_empty() {
-        write_ioslices(out, &iov)?;
-    }
-    Ok(())
 }
 
 /// Process a chunk of data for single-field extraction.
