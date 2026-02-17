@@ -2266,6 +2266,7 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
     // Reserve data.len() + 1: output ≤ input for all lines except potentially
     // the last line without trailing newline, where we add a newline (GNU compat).
     buf.reserve(data.len() + 1);
+    debug_assert_eq!(buf.len(), 0, "single_field1_to_buf: buf must be empty on entry");
     let src = data.as_ptr();
     let dst = buf.as_mut_ptr();
     let mut wp = buf.len();
@@ -2337,8 +2338,8 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
             }
             wp += field_len + 1;
         }
-    } else if run_start < data.len() {
-        // Data ended with newline — flush remaining pass-through run.
+    } else if run_start < line_start {
+        // Data ended on a newline boundary; flush any remaining pass-through run.
         let run_len = data.len() - run_start;
         unsafe {
             std::ptr::copy_nonoverlapping(src.add(run_start), dst.add(wp), run_len);
