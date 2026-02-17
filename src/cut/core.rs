@@ -2252,63 +2252,101 @@ fn single_field1_parallel(
 /// (~5-10ns per call × 2 calls per line) that dominates for short-field data.
 ///
 /// Optimizations:
+/// - Direct pointer arithmetic: bypasses Vec len/set_len per operation. All copies
+///   go through raw pointers with a single set_len at the end, eliminating ~3 memory
+///   ops per line (load len, store len) that buf_extend/buf_push would incur.
+/// - Deferred field copy: records delimiter position but defers the actual copy
+///   until the newline, fusing field + newline into one copy_nonoverlapping + byte
+///   write. This saves the separate buf_extend at delimiter + buf_push at newline.
 /// - Contiguous run tracking: consecutive no-delimiter lines are batched into
-///   a single buf_extend (one memcpy instead of one per line).
+///   a single copy_nonoverlapping. The run starts at run_start and extends
+///   until a line with a delimiter is found.
 #[inline]
 fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8>) {
     // Reserve data.len() + 1: output ≤ input for all lines except potentially
     // the last line without trailing newline, where we add a newline (GNU compat).
     buf.reserve(data.len() + 1);
-    let base = data.as_ptr();
+    let src = data.as_ptr();
+    let dst = buf.as_mut_ptr();
+    let mut wp = buf.len();
     let mut line_start: usize = 0;
+    let mut delim_pos: usize = 0;
     let mut found_delim = false;
+    // Start of contiguous pass-through run (no-delimiter lines output unchanged).
+    // Lines without delimiter are contiguous in source and destination, so we
+    // batch them into a single copy instead of one per line.
+    let mut run_start: usize = 0;
 
     for pos in memchr::memchr2_iter(delim, line_delim, data) {
-        let byte = unsafe { *base.add(pos) };
+        let byte = unsafe { *src.add(pos) };
         if byte == line_delim {
             if !found_delim {
-                // No delimiter on this line — output entire line including newline
-                unsafe {
-                    buf_extend(
-                        buf,
-                        std::slice::from_raw_parts(base.add(line_start), pos + 1 - line_start),
-                    );
-                }
+                // No delimiter — line is part of the contiguous pass-through run.
+                // Nothing to copy yet; the run extends through this line's newline.
             } else {
-                // Delimiter was found earlier — just add the line terminator
-                unsafe { buf_push(buf, line_delim) };
+                // Delimiter was found — flush pending contiguous run, then output field.
+                let run_len = line_start - run_start;
+                if run_len > 0 {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.add(run_start), dst.add(wp), run_len);
+                    }
+                    wp += run_len;
+                }
+                // Fused field1 + newline into one copy + byte write.
+                let field_len = delim_pos - line_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), field_len);
+                    *dst.add(wp + field_len) = line_delim;
+                }
+                wp += field_len + 1;
+                run_start = pos + 1;
             }
             line_start = pos + 1;
             found_delim = false;
         } else if !found_delim {
-            // First delimiter on this line — output from line_start to here
+            // First delimiter on this line — record position, defer copy to newline.
             found_delim = true;
-            unsafe {
-                buf_extend(
-                    buf,
-                    std::slice::from_raw_parts(base.add(line_start), pos - line_start),
-                );
-            }
+            delim_pos = pos;
         }
         // Subsequent delimiters: ignore
     }
 
-    // Handle last line without trailing newline — GNU cut always adds newline
+    // Handle last line (no trailing newline) and flush remaining run.
     if line_start < data.len() {
         if !found_delim {
-            // No delimiter — output remaining data + newline (GNU compat)
+            // No delimiter on last line — flush entire run including this line + newline.
+            let run_len = data.len() - run_start;
             unsafe {
-                buf_extend_byte(
-                    buf,
-                    std::slice::from_raw_parts(base.add(line_start), data.len() - line_start),
-                    line_delim,
-                );
+                std::ptr::copy_nonoverlapping(src.add(run_start), dst.add(wp), run_len);
+                *dst.add(wp + run_len) = line_delim;
             }
+            wp += run_len + 1;
         } else {
-            // Field already output — add trailing newline (GNU compat)
-            unsafe { buf_push(buf, line_delim) };
+            // Delimiter on last line — flush pending run, then output field + newline.
+            let run_len = line_start - run_start;
+            if run_len > 0 {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(run_start), dst.add(wp), run_len);
+                }
+                wp += run_len;
+            }
+            let field_len = delim_pos - line_start;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(line_start), dst.add(wp), field_len);
+                *dst.add(wp + field_len) = line_delim;
+            }
+            wp += field_len + 1;
         }
+    } else if run_start < data.len() {
+        // Data ended with newline — flush remaining pass-through run.
+        let run_len = data.len() - run_start;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(run_start), dst.add(wp), run_len);
+        }
+        wp += run_len;
     }
+
+    unsafe { buf.set_len(wp) };
 }
 
 /// Zero-copy field 1 extraction using writev: builds IoSlice entries pointing
