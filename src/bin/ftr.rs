@@ -433,11 +433,13 @@ fn main() {
             }
         } else if let Some(mm) = try_mmap_stdin_with_threshold(0) {
             // Fallback: read-only mmap + separate buffer translate.
-            // vmsplice is safe: output references mmap pages (pinned).
+            // MUST use raw write (not vmsplice) — translate_mmap_readonly calls
+            // translate_to_separate_buf which allocates a heap Vec. With vmsplice,
+            // the heap pages could be freed/reused before the pipe reader reads them.
             #[cfg(target_os = "linux")]
             {
-                let mut out = VmspliceWriter::new();
-                tr::translate_mmap_readonly(&set1, &set2, &mm, &mut out)
+                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                tr::translate_mmap_readonly(&set1, &set2, &mm, &mut *raw_out)
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -491,14 +493,15 @@ fn main() {
 
     if let Some(m) = mmap {
         // File-redirected stdin: use batch path with mmap data.
-        // vmsplice is safe here: mmap _mmap functions write slices of the
-        // original mmap data (delete/squeeze output subsets of input).
-        // The mmap pages are pinned and live until process exit.
+        // MUST use raw write (not vmsplice) — delete/squeeze functions create
+        // intermediate heap buffers (alloc_uninit_vec, Vec<Vec<u8>>). With vmsplice,
+        // freed heap pages can be reused by the allocator before the pipe reader
+        // reads them, causing data corruption.
         let data = FileData::Mmap(m);
         #[cfg(target_os = "linux")]
         let result = {
-            let mut out = VmspliceWriter::new();
-            run_mmap_mode(&cli, set1_str, &data, &mut out)
+            let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+            run_mmap_mode(&cli, set1_str, &data, &mut *raw_out)
         };
         #[cfg(all(unix, not(target_os = "linux")))]
         let result = run_mmap_mode(&cli, set1_str, &data, &mut *raw);
