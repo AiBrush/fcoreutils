@@ -11,7 +11,7 @@ use std::process;
 #[cfg(unix)]
 use memmap2::MmapOptions;
 
-use coreutils_rs::common::io::read_file_mmap;
+use coreutils_rs::common::io::{read_file_mmap, FileData};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::cut::{self, CutMode};
 
@@ -608,7 +608,20 @@ fn main() {
             }
         } else {
             match read_file_mmap(Path::new(filename)) {
-                Ok(data) => cut::process_cut_data(&data, &cfg, &mut out),
+                Ok(FileData::Owned(mut vec)) => {
+                    // Owned Vec: try in-place extraction (no output buffer needed).
+                    // This path handles small files (< 1MB read()) and mmap fallbacks.
+                    if let Some(new_len) = cut::process_cut_data_mut(&mut vec, &cfg) {
+                        vec.truncate(new_len);
+                        out.write_all(&vec)
+                    } else {
+                        cut::process_cut_data(&vec, &cfg, &mut out)
+                    }
+                }
+                Ok(data) => {
+                    // Mmap: read-only path with zero-copy writev output
+                    cut::process_cut_data(&data, &cfg, &mut out)
+                }
                 Err(e) => {
                     eprintln!("cut: {}: {}", filename, io_error_msg(&e));
                     had_error = true;
