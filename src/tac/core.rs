@@ -210,7 +210,7 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
     }
 
     // Zero-copy output: IoSlice refs point directly at input data
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(positions.len().min(IOSLICE_BATCH_SIZE));
     let mut end = data.len();
     for &pos in positions.iter().rev() {
         let rec_start = pos + 1;
@@ -246,7 +246,7 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
     }
 
     // Zero-copy output: IoSlice refs point directly at input data
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(positions.len().min(IOSLICE_BATCH_SIZE));
     let mut end = data.len();
     for &pos in positions.iter().rev() {
         if pos < end {
