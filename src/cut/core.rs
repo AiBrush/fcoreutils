@@ -2287,9 +2287,9 @@ fn single_field1_writev(
             iovs.push(IoSlice::new(&data[line_start..delim_pos]));
             iovs.push(IoSlice::new(nl_ref));
         }
-    } else if run_start < data.len() {
+    } else if run_start < line_start {
         // All lines ended with newline — flush remaining contiguous run
-        iovs.push(IoSlice::new(&data[run_start..data.len()]));
+        iovs.push(IoSlice::new(&data[run_start..line_start]));
     }
 
     if !iovs.is_empty() {
@@ -2315,7 +2315,6 @@ fn single_field1_parallel(
     rayon::scope(|s| {
         for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
             s.spawn(move |_| {
-                result.reserve(chunk.len() + 1);
                 single_field1_to_buf(chunk, delim, line_delim, result);
             });
         }
@@ -2340,6 +2339,7 @@ fn single_field1_parallel(
 fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8>) {
     // Reserve data.len() + 1: output ≤ input for all lines except potentially
     // the last line without trailing newline, where we add a newline (GNU compat).
+    debug_assert_eq!(buf.len(), 0, "single_field1_to_buf: buf must be empty on entry");
     buf.reserve(data.len() + 1);
     let base = data.as_ptr();
     let mut line_start: usize = 0;
