@@ -3548,11 +3548,26 @@ fn squeeze_single_stream(
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    let pair = [ch, ch];
-    let finder = memchr::memmem::Finder::new(&pair);
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     let mut was_squeeze_char = false;
 
+    #[cfg(target_arch = "x86_64")]
+    if get_simd_level() >= 3 {
+        loop {
+            let n = read_once(reader, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            let wp = unsafe { squeeze_single_avx2_inplace(&mut buf, n, ch, &mut was_squeeze_char) };
+            if wp > 0 {
+                writer.write_all(&buf[..wp])?;
+            }
+        }
+        return Ok(());
+    }
+
+    let pair = [ch, ch];
+    let finder = memchr::memmem::Finder::new(&pair);
     loop {
         let n = read_once(reader, &mut buf)?;
         if n == 0 {
@@ -3630,6 +3645,123 @@ fn squeeze_single_compact(
         }
     }
     wp
+}
+
+/// AVX2 in-place squeeze for single byte: processes 32 bytes at a time.
+/// For each byte, removes it if both it AND its predecessor equal `ch`.
+/// Uses the same pshufb compaction as delete_range_inplace_avx2.
+/// Much faster than memmem-based approach for data with sparse squeeze points:
+/// processes all 32 bytes uniformly with SIMD instead of searching for pairs.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn squeeze_single_avx2_inplace(
+    buf: &mut [u8],
+    n: usize,
+    ch: u8,
+    was_squeeze_char: &mut bool,
+) -> usize {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let ch_v = _mm256_set1_epi8(ch as i8);
+        let ptr = buf.as_mut_ptr();
+        let mut ri = 0;
+        let mut wp = 0;
+        // carry = 1 if the last byte of the previous chunk was the squeeze char
+        let mut carry: u32 = if *was_squeeze_char { 1 } else { 0 };
+
+        while ri + 32 <= n {
+            let input = _mm256_loadu_si256(ptr.add(ri) as *const _);
+            let cmp = _mm256_cmpeq_epi8(input, ch_v);
+            // sq_mask: bit i = 1 if byte i == ch
+            let sq_mask = _mm256_movemask_epi8(cmp) as u32;
+
+            // prev_sq_mask: bit i = 1 if byte (i-1) == ch
+            let prev_sq_mask = (sq_mask << 1) | carry;
+
+            // remove_mask: bytes where both current AND predecessor are ch
+            let remove_mask = sq_mask & prev_sq_mask;
+
+            // Update carry for next iteration
+            carry = (sq_mask >> 31) & 1;
+
+            if remove_mask == 0 {
+                // No duplicates to squeeze — keep all 32 bytes
+                if wp != ri {
+                    std::ptr::copy(ptr.add(ri), ptr.add(wp), 32);
+                }
+                wp += 32;
+            } else if remove_mask != 0xFFFFFFFF {
+                // Some bytes removed — compact per 8-byte lane
+                let keep_mask = !remove_mask;
+                let m0 = keep_mask as u8;
+                let m1 = (keep_mask >> 8) as u8;
+                let m2 = (keep_mask >> 16) as u8;
+                let m3 = (keep_mask >> 24) as u8;
+
+                let c0 = m0.count_ones() as usize;
+                let c1 = m1.count_ones() as usize;
+                let c2 = m2.count_ones() as usize;
+                let c3 = m3.count_ones() as usize;
+
+                if m0 == 0xFF {
+                    std::ptr::copy(ptr.add(ri), ptr.add(wp), 8);
+                } else if m0 != 0 {
+                    let src_v = _mm_loadl_epi64(ptr.add(ri) as *const _);
+                    let shuf = _mm_loadl_epi64(COMPACT_LUT[m0 as usize].as_ptr() as *const _);
+                    let out_v = _mm_shuffle_epi8(src_v, shuf);
+                    _mm_storel_epi64(ptr.add(wp) as *mut _, out_v);
+                }
+
+                if m1 == 0xFF {
+                    std::ptr::copy(ptr.add(ri + 8), ptr.add(wp + c0), 8);
+                } else if m1 != 0 {
+                    let src_v = _mm_loadl_epi64(ptr.add(ri + 8) as *const _);
+                    let shuf = _mm_loadl_epi64(COMPACT_LUT[m1 as usize].as_ptr() as *const _);
+                    let out_v = _mm_shuffle_epi8(src_v, shuf);
+                    _mm_storel_epi64(ptr.add(wp + c0) as *mut _, out_v);
+                }
+
+                if m2 == 0xFF {
+                    std::ptr::copy(ptr.add(ri + 16), ptr.add(wp + c0 + c1), 8);
+                } else if m2 != 0 {
+                    let src_v = _mm_loadl_epi64(ptr.add(ri + 16) as *const _);
+                    let shuf = _mm_loadl_epi64(COMPACT_LUT[m2 as usize].as_ptr() as *const _);
+                    let out_v = _mm_shuffle_epi8(src_v, shuf);
+                    _mm_storel_epi64(ptr.add(wp + c0 + c1) as *mut _, out_v);
+                }
+
+                if m3 == 0xFF {
+                    std::ptr::copy(ptr.add(ri + 24), ptr.add(wp + c0 + c1 + c2), 8);
+                } else if m3 != 0 {
+                    let src_v = _mm_loadl_epi64(ptr.add(ri + 24) as *const _);
+                    let shuf = _mm_loadl_epi64(COMPACT_LUT[m3 as usize].as_ptr() as *const _);
+                    let out_v = _mm_shuffle_epi8(src_v, shuf);
+                    _mm_storel_epi64(ptr.add(wp + c0 + c1 + c2) as *mut _, out_v);
+                }
+
+                wp += c0 + c1 + c2 + c3;
+            }
+            // remove_mask == 0xFFFFFFFF: all bytes are duplicate squeeze chars, skip
+            ri += 32;
+        }
+
+        // Scalar tail
+        while ri < n {
+            let b = *ptr.add(ri);
+            if b == ch && carry != 0 {
+                // Duplicate squeeze char, skip
+            } else {
+                *ptr.add(wp) = b;
+                wp += 1;
+            }
+            carry = if b == ch { 1 } else { 0 };
+            ri += 1;
+        }
+
+        *was_squeeze_char = carry != 0;
+        wp
+    }
 }
 
 // ============================================================================

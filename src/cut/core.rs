@@ -2655,10 +2655,9 @@ fn process_bytes_from_start(
         // managing millions of IoSlice entries through the kernel.
         // Threshold at 512 covers common byte-range benchmarks like -b1-100.
         if max_bytes <= 512 {
-            // Estimate output size without scanning: output <= data.len(),
-            // typically ~data.len()/4 for short max_bytes on longer lines.
-            let est_out = (data.len() / 4).max(max_bytes + 2);
-            let mut buf = Vec::with_capacity(est_out.min(data.len()));
+            // Output is always <= input size. Pre-allocate to avoid reallocation
+            // inside bytes_from_start_chunk (its reserve becomes a no-op).
+            let mut buf = Vec::with_capacity(data.len());
             bytes_from_start_chunk(data, max_bytes, line_delim, &mut buf);
             if !buf.is_empty() {
                 out.write_all(&buf)?;
@@ -2736,40 +2735,83 @@ fn bytes_from_start_zerocopy(
 }
 
 /// Process a chunk for from-start byte range extraction (parallel path).
-/// Uses unsafe appends to eliminate bounds checking in the hot loop.
-/// Pre-reserves data.len() (output never exceeds input), then uses a single
-/// write pointer with deferred set_len — no per-line capacity checks.
+/// Run-tracking optimization: batches contiguous passthrough lines (≤ max_bytes)
+/// into single large memcpy operations instead of per-line copies.
+/// For data with many short lines, this reduces ~100K small copies to a few large ones.
+/// Lines needing truncation (> max_bytes) are handled individually.
 #[inline]
 fn bytes_from_start_chunk(data: &[u8], max_bytes: usize, line_delim: u8, buf: &mut Vec<u8>) {
     // Output is always <= input size (we only truncate, never expand).
-    // Single reserve eliminates ALL per-line capacity checks.
     buf.reserve(data.len());
 
     let src = data.as_ptr();
     let dst_base = buf.as_mut_ptr();
     let mut wp = buf.len();
     let mut start = 0;
+    // Start of current contiguous passthrough region in source data.
+    // Lines with len ≤ max_bytes are "passthrough" (output = input including delimiter).
+    let mut run_start: usize = 0;
 
     for pos in memchr_iter(line_delim, data) {
         let line_len = pos - start;
-        let take = line_len.min(max_bytes);
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.add(start), dst_base.add(wp), take);
-            *dst_base.add(wp + take) = line_delim;
+        if line_len > max_bytes {
+            // Line needs truncation — flush the passthrough run first
+            if run_start < start {
+                let run_len = start - run_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(run_start), dst_base.add(wp), run_len);
+                }
+                wp += run_len;
+            }
+            // Copy truncated line + delimiter
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(start), dst_base.add(wp), max_bytes);
+                *dst_base.add(wp + max_bytes) = line_delim;
+            }
+            wp += max_bytes + 1;
+            // New run starts after this line
+            run_start = pos + 1;
         }
-        wp += take + 1;
+        // If line fits (≤ max_bytes), it stays in the current run (no action needed)
         start = pos + 1;
     }
-    // Handle last line without terminator
+
+    // Handle last line (no trailing delimiter)
     if start < data.len() {
         let line_len = data.len() - start;
-        let take = line_len.min(max_bytes);
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.add(start), dst_base.add(wp), take);
-            *dst_base.add(wp + take) = line_delim;
+        if line_len > max_bytes {
+            // Flush passthrough run
+            if run_start < start {
+                let run_len = start - run_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(run_start), dst_base.add(wp), run_len);
+                }
+                wp += run_len;
+            }
+            // Copy truncated last line + delimiter
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(start), dst_base.add(wp), max_bytes);
+                *dst_base.add(wp + max_bytes) = line_delim;
+            }
+            wp += max_bytes + 1;
+        } else {
+            // Last line fits — flush entire remaining run + last line + delimiter
+            let run_len = data.len() - run_start;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(run_start), dst_base.add(wp), run_len);
+                *dst_base.add(wp + run_len) = line_delim;
+            }
+            wp += run_len + 1;
         }
-        wp += take + 1;
+    } else if run_start < data.len() {
+        // All remaining data is passthrough (ends with delimiter)
+        let run_len = data.len() - run_start;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(run_start), dst_base.add(wp), run_len);
+        }
+        wp += run_len;
     }
+
     unsafe { buf.set_len(wp) };
 }
 
