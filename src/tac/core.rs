@@ -204,6 +204,12 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
         return Ok(());
     }
 
+    // Fast path: if no separator exists, output is identical to input.
+    // Check before allocating the positions Vec to avoid unnecessary allocation.
+    if memchr::memchr(sep, data).is_none() {
+        return out.write_all(data);
+    }
+
     // Forward scan for separator positions
     let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
@@ -227,10 +233,16 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
 }
 
 /// Before-separator mode for small files: forward SIMD scan + contiguous buffer.
-/// Uses IoSlice pointing directly at input data — eliminates the buffer copy.
+/// Builds a contiguous reversed output buffer, then writes with a single write_all.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
+    }
+
+    // Fast path: if no separator exists, output is identical to input.
+    // Check before allocating the positions Vec to avoid unnecessary allocation.
+    if memchr::memchr(sep, data).is_none() {
+        return out.write_all(data);
     }
 
     // Forward scan for separator positions
