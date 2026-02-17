@@ -281,9 +281,10 @@ fn main() {
 
     let is_byte_sep = !cli.regex && cli.separator.is_none();
 
-    // File data is read into Vec; stdin may be mmap'd or Vec.
-    // Use raw write(2) — vmsplice is unsafe for heap-allocated Vec data
-    // (anonymous pages may be freed/zeroed before pipe reader consumes them).
+    // Byte-separator path: contiguous buffer + single write_all is fastest
+    // for 10MB files with high line density (~244K lines). One write(2)
+    // syscall beats ~238 batched writev calls (EXP-010).
+    // Non-byte-sep paths use BufWriter for buffered output.
     #[cfg(unix)]
     let had_error = {
         let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
