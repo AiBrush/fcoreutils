@@ -18,6 +18,27 @@ use coreutils_rs::tr;
 #[cfg(target_os = "linux")]
 struct RawStdin;
 
+/// Create a stdin reader and execute body with it.
+/// On Linux, uses RawStdin for zero-overhead reads.
+/// On other platforms, uses Rust's StdinLock.
+/// Uses a macro because tr functions take `impl Read` (requires Sized),
+/// which is incompatible with `dyn Read`.
+macro_rules! with_stdin_reader {
+    ($reader:ident => $body:expr) => {{
+        #[cfg(target_os = "linux")]
+        {
+            let mut $reader = RawStdin;
+            $body
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let stdin = io::stdin();
+            let mut $reader = stdin.lock();
+            $body
+        }
+    }};
+}
+
 #[cfg(target_os = "linux")]
 impl io::Read for RawStdin {
     #[inline]
@@ -356,8 +377,9 @@ fn main() {
             // locked reader, and the internal buffer is overwritten each iteration.
             #[cfg(target_os = "linux")]
             {
+                let mut reader = RawStdin;
                 let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                with_stdin_reader(|reader| tr::translate(&set1, &set2, reader, &mut *raw_out))
+                tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -437,26 +459,6 @@ fn main() {
     }
 }
 
-/// Create a stdin reader. On Linux, uses RawStdin for zero-overhead reads.
-/// On other platforms, uses Rust's StdinLock.
-#[cfg(target_os = "linux")]
-fn with_stdin_reader<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut dyn io::Read) -> R,
-{
-    f(&mut RawStdin)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn with_stdin_reader<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut dyn io::Read) -> R,
-{
-    let stdin = io::stdin();
-    let mut reader = stdin.lock();
-    f(&mut reader)
-}
-
 /// Dispatch streaming modes for piped stdin.
 /// Processes data chunk-by-chunk for pipeline parallelism with upstream cat.
 fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io::Result<()> {
@@ -475,7 +477,7 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
         } else {
             set1
         };
-        with_stdin_reader(|reader| tr::delete_squeeze(&delete_set, &set2, reader, writer))
+        with_stdin_reader!(reader => tr::delete_squeeze(&delete_set, &set2, &mut reader, writer))
     } else if cli.delete {
         if cli.sets.len() > 1 {
             eprintln!("tr: extra operand '{}'", cli.sets[1]);
@@ -489,7 +491,7 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
         } else {
             set1
         };
-        with_stdin_reader(|reader| tr::delete(&delete_set, reader, writer))
+        with_stdin_reader!(reader => tr::delete(&delete_set, &mut reader, writer))
     } else if cli.squeeze && cli.sets.len() < 2 {
         let set1 = tr::parse_set(set1_str);
         let squeeze_set = if cli.complement {
@@ -497,7 +499,7 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
         } else {
             set1
         };
-        with_stdin_reader(|reader| tr::squeeze(&squeeze_set, reader, writer))
+        with_stdin_reader!(reader => tr::squeeze(&squeeze_set, &mut reader, writer))
     } else if cli.squeeze {
         let set2_str = &cli.sets[1];
         let mut set1 = tr::parse_set(set1_str);
@@ -511,7 +513,7 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
         } else {
             tr::expand_set2(set2_str, set1.len())
         };
-        with_stdin_reader(|reader| tr::translate_squeeze(&set1, &set2, reader, writer))
+        with_stdin_reader!(reader => tr::translate_squeeze(&set1, &set2, &mut reader, writer))
     } else {
         eprintln!("tr: missing operand after '{}'", set1_str);
         eprintln!("Two strings must be given when translating.");
