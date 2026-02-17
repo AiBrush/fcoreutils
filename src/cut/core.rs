@@ -2224,8 +2224,12 @@ fn single_field1_writev(
 ) -> io::Result<()> {
     // Static newline buffers — safe for vmsplice (live for entire process)
     static NL: [u8; 1] = [b'\n'];
-    static NUL: [u8; 1] = [b'\0'];
-    let nl_ref: &'static [u8] = if line_delim == b'\n' { &NL } else { &NUL };
+    static ZERO: [u8; 1] = [b'\0'];
+    debug_assert!(
+        line_delim == b'\n' || line_delim == b'\0',
+        "unexpected line_delim"
+    );
+    let nl_ref: &'static [u8] = if line_delim == b'\n' { &NL } else { &ZERO };
 
     let mut iovs: Vec<IoSlice<'_>> = Vec::with_capacity(MAX_IOV);
     let mut line_start: usize = 0;
@@ -2252,7 +2256,9 @@ fn single_field1_writev(
                     iovs.clear();
                 }
             }
-            // else: no delimiter — line stays in contiguous run (unchanged)
+            // else: no delimiter — line stays in contiguous run (unchanged).
+            // No iovs pushed here: the run extends implicitly (zero iovs per
+            // no-delimiter line), so no in-loop overflow guard is needed.
             line_start = pos + 1;
             found_delim = false;
         } else if !found_delim {
@@ -2266,7 +2272,8 @@ fn single_field1_writev(
     // Handle remaining data after last newline
     if line_start < data.len() {
         if !found_delim {
-            // No delimiter on last line — include in contiguous run
+            // No delimiter on last line — the run covers all contiguous
+            // no-delimiter lines including this partial last line.
             if run_start < data.len() {
                 iovs.push(IoSlice::new(&data[run_start..]));
             }
