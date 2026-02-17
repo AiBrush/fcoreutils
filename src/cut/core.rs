@@ -2252,8 +2252,10 @@ fn single_field1_parallel(
 /// (~5-10ns per call × 2 calls per line) that dominates for short-field data.
 ///
 /// Optimizations:
-/// - Contiguous run tracking: consecutive no-delimiter lines are batched into
-///   a single buf_extend (one memcpy instead of one per line).
+/// - Deferred field copy: delays copying from delimiter position to newline,
+///   enabling fused field+newline output in a single copy sequence.
+/// - Single output pointer: avoids per-line buf.len() load/store (saves ~488K
+///   ops for 244K lines). One set_len at the end.
 #[inline]
 fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8>) {
     debug_assert_ne!(delim, line_delim, "delim and line_delim must differ");
@@ -2264,15 +2266,18 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
     // Use a single output pointer — avoids per-line buf.len() load/store.
     // Only one set_len at the end instead of 2 per line (saves ~488K ops for 244K lines).
     let base = data.as_ptr();
-    let mut out_ptr = unsafe { buf.as_mut_ptr().add(buf.len()) };
+    let initial_len = buf.len();
+    let mut out_ptr = unsafe { buf.as_mut_ptr().add(initial_len) };
     let mut line_start: usize = 0;
     let mut found_delim = false;
     let mut delim_pos: usize = 0; // only valid when found_delim == true
 
-    // SAFETY (capacity): Total output <= data.len() + 1 because each output byte
-    // comes from a subrange of data, plus at most one added newline for an
-    // unterminated last line. reserve(data.len() + 1) guarantees sufficient capacity
-    // for all copy_nonoverlapping calls below.
+    // SAFETY (capacity): Total output <= data.len() + 1 because:
+    // - Lines without delimiter: output exactly the input bytes (subrange of data)
+    // - Lines with delimiter: output field bytes (< input line), uses base reservation
+    // - Unterminated last line: adds 1 newline, which is why we reserve +1
+    // The +1 is only consumed by the unterminated-last-line case; all other cases
+    // stay within data.len(). reserve(data.len() + 1) guarantees sufficient capacity.
     for pos in memchr::memchr2_iter(delim, line_delim, data) {
         let byte = unsafe { *base.add(pos) };
         if byte == line_delim {
@@ -2284,7 +2289,9 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
                     out_ptr = out_ptr.add(len);
                 }
             } else {
-                // Delimiter was found — output field + newline in one fused copy
+                // Delimiter was found — output field + newline in one fused copy.
+                // field_len may be 0 (line starts with delimiter, e.g. "\trest"):
+                // copy_nonoverlapping with count=0 is a no-op, which is correct.
                 let field_len = delim_pos - line_start;
                 unsafe {
                     std::ptr::copy_nonoverlapping(base.add(line_start), out_ptr, field_len);
@@ -2326,13 +2333,15 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
         }
     }
 
-    // SAFETY: out_ptr was derived from buf.as_mut_ptr().add(buf.len()) after
-    // the reserve() call above, and no Vec reallocation occurred between capture
-    // and here (no safe buf.* calls in the loop body). Both pointers are in the
-    // same allocation, and out_ptr >= buf.as_ptr() by construction.
+    // SAFETY: out_ptr was derived from buf.as_mut_ptr().add(initial_len) after
+    // the reserve() call, and no Vec reallocation occurred between capture and
+    // here (no safe buf.* calls in the loop body). Using pointer subtraction
+    // instead of offset_from avoids the isize intermediate — both pointers are
+    // in the same allocation so the subtraction is always non-negative.
     unsafe {
-        debug_assert!(out_ptr as *const u8 >= buf.as_ptr());
-        buf.set_len(out_ptr.offset_from(buf.as_ptr()) as usize);
+        let new_len = out_ptr as usize - buf.as_ptr() as usize;
+        debug_assert!(new_len >= initial_len && new_len <= buf.capacity());
+        buf.set_len(new_len);
     }
 }
 
