@@ -1,12 +1,10 @@
 use memchr::memchr_iter;
 use std::io::{self, BufRead, IoSlice, Write};
 
-/// Minimum file size for parallel processing (16MB).
-/// For 10MB benchmark files, the split_for_scope scan (~300µs) + rayon dispatch
-/// overhead exceeds the parallel benefit. Sequential memchr2_iter is faster
-/// because it avoids the redundant full-data scan for chunk boundaries.
-/// 16MB ensures only genuinely large files use parallel processing.
-const PARALLEL_THRESHOLD: usize = 16 * 1024 * 1024;
+/// Minimum file size for parallel processing (8MB).
+/// Files above this threshold use rayon parallel chunked processing.
+/// 8MB balances the split_for_scope scan overhead against parallel benefits.
+const PARALLEL_THRESHOLD: usize = 8 * 1024 * 1024;
 
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
@@ -997,10 +995,8 @@ fn process_single_field(
 ) -> io::Result<()> {
     let target_idx = target - 1;
 
-    // For single-field extraction, parallelize at 16MB+ to match PARALLEL_THRESHOLD.
-    // For 10MB: the split_for_scope scan (~300µs) is redundant work — the processing
-    // already scans with memchr2_iter. Sequential is faster because it does ONE scan.
-    const FIELD_PARALLEL_MIN: usize = 16 * 1024 * 1024;
+    // For single-field extraction, parallelize at 8MB+ to match PARALLEL_THRESHOLD.
+    const FIELD_PARALLEL_MIN: usize = 8 * 1024 * 1024;
 
     if delim != line_delim {
         // Field 1 fast path: memchr2 single-pass scan.
