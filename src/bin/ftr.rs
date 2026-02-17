@@ -56,6 +56,89 @@ impl io::Read for RawStdin {
     }
 }
 
+/// Writer that uses vmsplice(2) for zero-copy pipe output on Linux.
+/// When stdout is a pipe, vmsplice references user-space pages directly
+/// in the pipe buffer (no kernel memcpy). Falls back to regular write
+/// for non-pipe fds (files, terminals).
+///
+/// SAFETY: Caller must ensure the buffer passed to write/write_all stays
+/// valid until the pipe reader consumes the data. Safe for:
+/// - mmap-backed data (pages persist until munmap, and get_user_pages pins them)
+/// - Large heap buffers (Vec > ~128KB uses mmap, munmap keeps pinned pages alive)
+/// UNSAFE for reused/streaming buffers that are overwritten between writes.
+#[cfg(target_os = "linux")]
+struct VmspliceWriter {
+    raw: ManuallyDrop<std::fs::File>,
+    is_pipe: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl VmspliceWriter {
+    fn new() -> Self {
+        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        let is_pipe = unsafe {
+            let mut stat: libc::stat = std::mem::zeroed();
+            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
+        };
+        Self { raw, is_pipe }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Write for VmspliceWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write(buf);
+        }
+        loop {
+            let iov = libc::iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            };
+            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+            if n >= 0 {
+                return Ok(n as usize);
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            self.is_pipe = false;
+            return (&*self.raw).write(buf);
+        }
+    }
+
+    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write_all(buf);
+        }
+        while !buf.is_empty() {
+            let iov = libc::iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            };
+            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+            if n > 0 {
+                buf = &buf[n as usize..];
+            } else if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "vmsplice wrote 0"));
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                self.is_pipe = false;
+                return (&*self.raw).write_all(buf);
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 struct Cli {
     complement: bool,
     delete: bool,
@@ -338,8 +421,8 @@ fn main() {
             // the pipe reader releases its references.
             #[cfg(target_os = "linux")]
             {
-                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut *raw_out)
+                let mut out = VmspliceWriter::new();
+                tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut out)
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -352,11 +435,15 @@ fn main() {
                 tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut lock)
             }
         } else if let Some(mm) = try_mmap_stdin_with_threshold(0) {
-            // Fallback: read-only mmap + separate buffer translate
+            // Fallback: read-only mmap + separate buffer translate.
+            // vmsplice safe: translate_to_separate_buf allocates a large Vec
+            // (data.len() bytes, uses mmap for allocation). After write_all,
+            // munmap removes the mapping but get_user_pages pins the physical
+            // pages until the pipe reader releases them.
             #[cfg(target_os = "linux")]
             {
-                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                tr::translate_mmap_readonly(&set1, &set2, &mm, &mut *raw_out)
+                let mut out = VmspliceWriter::new();
+                tr::translate_mmap_readonly(&set1, &set2, &mm, &mut out)
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -369,17 +456,25 @@ fn main() {
                 tr::translate_mmap_readonly(&set1, &set2, &mm, &mut lock)
             }
         } else {
-            // Piped stdin: streaming translate for pipeline parallelism.
-            // Read chunks, translate in-place with SIMD, write immediately.
-            // This overlaps I/O with compute: while ftr translates chunk N,
-            // upstream cat writes chunk N+1 to the pipe.
-            // MUST use raw write (not vmsplice) — stdin is read in chunks via a
-            // locked reader, and the internal buffer is overwritten each iteration.
+            // Piped stdin: try splice→memfd→mmap for zero-copy pipe reads.
+            // splice(2) moves pipe pages to memfd without kernel→user copy.
+            // Then translate in-place on the mmap'd buffer and vmsplice output.
+            // Falls back to streaming translate if splice fails.
             #[cfg(target_os = "linux")]
             {
-                let mut reader = RawStdin;
-                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
+                if let Ok(Some(mut splice_mmap)) =
+                    coreutils_rs::common::io::splice_stdin_to_mmap()
+                {
+                    let mut out = VmspliceWriter::new();
+                    tr::translate_mmap_inplace(&set1, &set2, &mut splice_mmap, &mut out)
+                } else {
+                    // Streaming fallback: read chunks, translate in-place, write.
+                    // MUST use raw write (not vmsplice) — buffer is overwritten each iteration.
+                    let mut reader = RawStdin;
+                    let mut raw_out =
+                        unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                    tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
+                }
             }
             #[cfg(all(unix, not(target_os = "linux")))]
             {
@@ -434,13 +529,19 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Piped stdin: streaming mode for pipeline parallelism with upstream cat.
-        // Process chunks as they arrive instead of batching all data first.
-        // Use raw write (not vmsplice) since streaming buffers are reused.
+        // Piped stdin: try splice→memfd→mmap for zero-copy pipe reads,
+        // then fall back to streaming mode.
+        // Use raw write (not vmsplice) for delete/squeeze output — those modes
+        // create intermediate heap buffers that may be reused across writes.
         #[cfg(target_os = "linux")]
         let result = {
-            let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-            run_streaming_mode(&cli, set1_str, &mut *raw_out)
+            if let Ok(Some(splice_mmap)) = coreutils_rs::common::io::splice_stdin_to_mmap() {
+                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                run_mmap_mode(&cli, set1_str, &*splice_mmap, &mut *raw_out)
+            } else {
+                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                run_streaming_mode(&cli, set1_str, &mut *raw_out)
+            }
         };
         #[cfg(all(unix, not(target_os = "linux")))]
         let result = run_streaming_mode(&cli, set1_str, &mut *raw);

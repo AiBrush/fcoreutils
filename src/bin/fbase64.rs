@@ -35,6 +35,87 @@ impl io::Read for RawStdin {
     }
 }
 
+/// Writer that uses vmsplice(2) for zero-copy pipe output on Linux.
+/// When stdout is a pipe, vmsplice references user-space pages directly
+/// in the pipe buffer (no kernel memcpy). Falls back to regular write
+/// for non-pipe fds (files, terminals).
+///
+/// SAFETY: Only safe for one-shot buffers (mmap data, large Vecs) that are
+/// not reused after write_all returns. For streaming paths with buffer reuse,
+/// use raw write(2) instead.
+#[cfg(target_os = "linux")]
+struct VmspliceWriter {
+    raw: ManuallyDrop<std::fs::File>,
+    is_pipe: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl VmspliceWriter {
+    fn new() -> Self {
+        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        let is_pipe = unsafe {
+            let mut stat: libc::stat = std::mem::zeroed();
+            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
+        };
+        Self { raw, is_pipe }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Write for VmspliceWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write(buf);
+        }
+        loop {
+            let iov = libc::iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            };
+            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+            if n >= 0 {
+                return Ok(n as usize);
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            self.is_pipe = false;
+            return (&*self.raw).write(buf);
+        }
+    }
+
+    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        if !self.is_pipe || buf.is_empty() {
+            return (&*self.raw).write_all(buf);
+        }
+        while !buf.is_empty() {
+            let iov = libc::iovec {
+                iov_base: buf.as_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            };
+            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+            if n > 0 {
+                buf = &buf[n as usize..];
+            } else if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "vmsplice wrote 0"));
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                self.is_pipe = false;
+                return (&*self.raw).write_all(buf);
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 struct Cli {
     decode: bool,
     ignore_garbage: bool,
@@ -159,11 +240,9 @@ fn parse_args() -> Cli {
 }
 
 /// Raw fd stdout for zero-overhead writes on Unix.
-/// Uses regular write(2) instead of vmsplice — all base64 encode/decode paths
-/// write temporary buffers that are freed after write_all returns. vmsplice
-/// without SPLICE_F_GIFT maps user pages into the pipe buffer without copying,
-/// so freed/reused pages corrupt the data the reader sees. Regular write(2)
-/// copies data into the kernel pipe buffer, making it safe for temporary buffers.
+/// Used for streaming paths where buffers are reused across writes.
+/// vmsplice is unsafe for reused buffers — regular write(2) copies data
+/// into the kernel pipe buffer, making it safe.
 #[cfg(unix)]
 #[inline]
 fn raw_stdout() -> ManuallyDrop<std::fs::File> {
@@ -202,7 +281,18 @@ fn main() {
 
     let filename = cli.file.as_deref().unwrap_or("-");
 
-    #[cfg(unix)]
+    // On Linux: use VmspliceWriter for file/mmap paths (one-shot output buffers),
+    // and raw write for streaming paths (reused buffers).
+    #[cfg(target_os = "linux")]
+    let result = {
+        if filename != "-" {
+            let mut out = VmspliceWriter::new();
+            process_file(filename, &cli, &mut out)
+        } else {
+            process_stdin_linux(&cli)
+        }
+    };
+    #[cfg(all(unix, not(target_os = "linux")))]
     let result = {
         let mut raw = raw_stdout();
         if filename == "-" {
@@ -277,6 +367,42 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     mmap
 }
 
+/// Process stdin on Linux with optimal I/O paths:
+/// 1. mmap stdin (regular file redirect) → VmspliceWriter output
+/// 2. splice stdin→memfd→mmap (pipe) → VmspliceWriter output
+/// 3. Streaming fallback (pipe, splice failed) → raw write output
+#[cfg(target_os = "linux")]
+fn process_stdin_linux(cli: &Cli) -> io::Result<()> {
+    // Try mmap stdin (regular file redirect)
+    if let Some(mmap) = try_mmap_stdin() {
+        let mut out = VmspliceWriter::new();
+        return if cli.decode {
+            b64::decode_to_writer(&mmap, cli.ignore_garbage, &mut out)
+        } else {
+            b64::encode_to_writer(&mmap, cli.wrap, &mut out)
+        };
+    }
+
+    // Try splice stdin→memfd→mmap (pipe input, zero-copy)
+    if let Ok(Some(splice_mmap)) = coreutils_rs::common::io::splice_stdin_to_mmap() {
+        let mut out = VmspliceWriter::new();
+        return if cli.decode {
+            b64::decode_to_writer(&*splice_mmap, cli.ignore_garbage, &mut out)
+        } else {
+            b64::encode_to_writer(&*splice_mmap, cli.wrap, &mut out)
+        };
+    }
+
+    // Streaming fallback — buffers are reused, must use raw write
+    let mut raw_out = raw_stdout();
+    if cli.decode {
+        b64::decode_stream(&mut RawStdin, cli.ignore_garbage, &mut *raw_out)
+    } else {
+        b64::encode_stream(&mut RawStdin, cli.wrap, &mut *raw_out)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
     if cli.decode {
         #[cfg(unix)]
@@ -284,14 +410,9 @@ fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
             return b64::decode_to_writer(&mmap, cli.ignore_garbage, out);
         }
 
-        #[cfg(target_os = "linux")]
-        return b64::decode_stream(&mut RawStdin, cli.ignore_garbage, out);
-        #[cfg(not(target_os = "linux"))]
-        {
-            let stdin = io::stdin();
-            let mut reader = stdin.lock();
-            return b64::decode_stream(&mut reader, cli.ignore_garbage, out);
-        }
+        let stdin = io::stdin();
+        let mut reader = stdin.lock();
+        return b64::decode_stream(&mut reader, cli.ignore_garbage, out);
     }
 
     #[cfg(unix)]
@@ -299,14 +420,9 @@ fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
         return b64::encode_to_writer(&mmap, cli.wrap, out);
     }
 
-    #[cfg(target_os = "linux")]
-    return b64::encode_stream(&mut RawStdin, cli.wrap, out);
-    #[cfg(not(target_os = "linux"))]
-    {
-        let stdin = io::stdin();
-        let mut reader = stdin.lock();
-        b64::encode_stream(&mut reader, cli.wrap, out)
-    }
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    b64::encode_stream(&mut reader, cli.wrap, out)
 }
 
 fn process_file(filename: &str, cli: &Cli, out: &mut impl Write) -> io::Result<()> {
