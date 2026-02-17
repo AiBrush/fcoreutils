@@ -2266,8 +2266,12 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
     let mut out_ptr = unsafe { buf.as_mut_ptr().add(buf.len()) };
     let mut line_start: usize = 0;
     let mut found_delim = false;
-    let mut delim_pos: usize = 0;
+    let mut delim_pos: usize = 0; // only valid when found_delim == true
 
+    // SAFETY (capacity): Total output <= data.len() + 1 because each output byte
+    // comes from a subrange of data, plus at most one added newline for an
+    // unterminated last line. reserve(data.len() + 1) guarantees sufficient capacity
+    // for all copy_nonoverlapping calls below.
     for pos in memchr::memchr2_iter(delim, line_delim, data) {
         let byte = unsafe { *base.add(pos) };
         if byte == line_delim {
@@ -2321,8 +2325,12 @@ fn single_field1_to_buf(data: &[u8], delim: u8, line_delim: u8, buf: &mut Vec<u8
         }
     }
 
-    // Single set_len for entire output
+    // SAFETY: out_ptr was derived from buf.as_mut_ptr().add(buf.len()) after
+    // the reserve() call above, and no Vec reallocation occurred between capture
+    // and here (no safe buf.* calls in the loop body). Both pointers are in the
+    // same allocation, and out_ptr >= buf.as_ptr() by construction.
     unsafe {
+        debug_assert!(out_ptr >= buf.as_ptr());
         buf.set_len(out_ptr.offset_from(buf.as_ptr()) as usize);
     }
 }
