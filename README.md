@@ -256,7 +256,7 @@ Our assembly `yes` achieves **~2.6 GB/s** (1.89× faster than GNU yes, 1.25× fa
 Benchmarked on Linux x86_64. At pipe-limited throughput all three write at ~2.1 GB/s.
 The assembly wins on binary size (25× smaller), memory (70× less RSS), and startup latency (3× faster).
 
-On **Linux x86_64**, releases ship the assembly binary. All other platforms (macOS, Windows, ARM) use the Rust implementation. The assembly binary is a static ELF with only two syscalls (`write` and `exit`), no dynamic linker, and a non-executable stack.
+On **Linux x86_64** and **Linux ARM64**, releases ship the assembly binary. All other platforms (macOS, Windows) use the Rust implementation. The assembly binary is a static ELF with only two syscalls (`write` and `exit`/`exit_group`), no dynamic linker, and a non-executable stack.
 
 Our priority remains **100% GNU compatibility in Rust first**. We will pursue assembly implementations for additional commands over time, as the tooling and verification process matures. The goal is not to rush assembly ports but to do them right — with full security review and byte-for-byte compatibility testing.
 

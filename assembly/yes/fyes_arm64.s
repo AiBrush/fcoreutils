@@ -1,30 +1,37 @@
 // ============================================================================
-//  fyes_arm64.s — GNU-compatible "yes" for AArch64 Linux (GNU assembler)
+//  fyes_arm64.s — GNU-compatible "yes" in AArch64 Linux assembly
+//
+//  Drop-in replacement for GNU coreutils `yes` for ARM64 Linux.
+//  Produces a small static ELF binary with no runtime dependencies.
 //
 //  BUILD:
-//    as -o fyes_arm64.o fyes_arm64.s && ld -static -s -e _start -o fyes_arm64 fyes_arm64.o
+//    as -o fyes_arm64.o fyes_arm64.s
+//    ld -static -s -e _start -o fyes_arm64 fyes_arm64.o
 //
-//  DESCRIPTION:
-//    Drop-in replacement for GNU coreutils `yes` in AArch64 Linux assembly.
-//    Produces a tiny static ELF64 binary with no runtime dependencies.
+//  COMPATIBILITY:
+//    - --help / --version recognized in argv[1]
+//    - "--" in argv[1] stripped (subsequent "--" included in output)
+//    - Unrecognized long options (--foo): error to stderr, exit 1
+//    - Invalid short options (-x): error to stderr, exit 1
+//    - Bare "-" is a literal string, not an option
+//    - SIGPIPE/EPIPE: clean exit 0
+//    - EINTR on write: automatic retry
 //
-//  AArch64 Linux syscall ABI:
-//    w8  = syscall number
-//    x0  = arg1 / return value
-//    x1  = arg2
-//    x2  = arg3
-//    svc #0 = invoke syscall
-//    Syscall numbers: write=64  exit_group=94
+//  SYSCALLS (only 2):
+//    write (64): output to stdout/stderr
+//    exit_group (94): terminate process
 //
-//  REGISTER CONVENTIONS (main loop):
-//    x19 = argc (saved)
-//    x20 = argv pointer (saved)
-//    x21 = output line length
-//    x22 = write count (BUFSZ after fill, or line length for long lines)
-//
-//  MEMORY LAYOUT:
-//    BUF    (0x20000) — 16KB write buffer
-//    ARGBUF (0x24000) — 2MB argument assembly buffer
+//  REGISTER CONVENTIONS (main execution):
+//    x19 = write buffer pointer (saved for write loop)
+//    x20 = argc
+//    x21 = &argv[0] pointer
+//    x22 = write byte count (for write loop)
+//    x23 = scratch / option string save
+//    x24 = argbuf base pointer
+//    x25 = line length (bytes in argbuf including \n)
+//    x26 = argv scan pointer (build_line)
+//    x27 = "any arg included" flag
+//    x28 = bytes filled in buf
 // ============================================================================
 
     .set    SYS_WRITE,      64
@@ -33,24 +40,17 @@
     .set    STDERR,         2
     .set    BUFSZ,          16384
     .set    ARGBUFSZ,       2097152
-    .set    EINTR,          -4
 
-// ============================================================================
-//  BSS — runtime buffers (zero-initialized by OS)
-// ============================================================================
+// ======================== BSS — zero-initialized buffers =====================
     .section .bss
-    .align  12              // 4KB page-aligned
-
+    .balign 4096
 buf:
-    .zero   BUFSZ           // 16KB write buffer
-
-    .align  12
+    .zero   BUFSZ               // 16KB write buffer
+    .balign 4096
 argbuf:
-    .zero   ARGBUFSZ        // 2MB argument assembly buffer
+    .zero   ARGBUFSZ            // 2MB argument assembly buffer
 
-// ============================================================================
-//  Read-only data — help/version/error strings
-// ============================================================================
+// ======================== Read-only data =====================================
     .section .rodata
 
 help_text:
@@ -78,63 +78,37 @@ err_suffix:
     .ascii  "'\nTry 'yes --help' for more information.\n"
     .set    err_suffix_len, . - err_suffix
 
-default_line:
-    .ascii  "y\n"
-    .set    default_line_len, . - default_line
-
-// ============================================================================
-//  CODE
-// ============================================================================
+// ======================== Code ===============================================
     .section .text
     .globl  _start
 
-// Utility macro: write(fd, buf, len) — uses x0/x1/x2/w8, clobbers x0
-.macro  WRITE fd, buf, len
-    mov     x0, \fd
-    adr     x1, \buf
-    mov     x2, \len
-    mov     w8, #SYS_WRITE
-    svc     #0
-.endm
-
-// ============================================================================
-//  _start — program entry point
-//
-//  Stack on entry: [sp] = argc, [sp+8] = argv[0], [sp+16] = argv[1], ...
-// ============================================================================
 _start:
-    ldr     x19, [sp]           // x19 = argc
-    mov     x20, sp             // x20 = stack pointer (argv array)
-    add     x20, x20, #8        // x20 = &argv[0]
+    // Stack at entry: [sp]=argc, [sp+8]=argv[0], [sp+16]=argv[1], ...
+    ldr     x20, [sp]              // x20 = argc
+    add     x21, sp, #8            // x21 = &argv[0]
 
-    cmp     x19, #2
-    b.lt    .default_path       // 0 or 1 args (just program name) → default "y\n"
+    cmp     x20, #2
+    b.lt    .default_path           // argc < 2: no args, output "y\n"
 
-    // argc >= 2: check if argv[1] is an option
-    ldr     x0, [x20, #8]       // x0 = argv[1]
+    // ---- Check argv[1] for options ----
+    ldr     x0, [x21, #8]          // x0 = argv[1]
     ldrb    w1, [x0]
     cmp     w1, #'-'
-    b.ne    .build_line         // doesn't start with '-' → it's a normal arg
+    b.ne    .build_line             // doesn't start with '-': normal arg
 
     ldrb    w1, [x0, #1]
-    cmp     w1, #'\0'
-    b.eq    .build_line         // just "-" alone → literal string
+    cbz     w1, .build_line         // just "-" alone: literal string
 
     cmp     w1, #'-'
-    b.ne    .err_short_opt      // single dash + char (e.g. "-n") → invalid option
+    b.ne    .err_short_opt          // single dash + char (e.g. "-n"): invalid
 
     // Starts with "--"
     ldrb    w1, [x0, #2]
-    cmp     w1, #'\0'
-    b.eq    .build_line         // exactly "--" → treat as arg separator, build from rest
+    cbz     w1, .build_line         // exactly "--": separator, build from rest
 
-    // Check "--help" (7 bytes including null): '-','-','h','e','l','p','\0'
-    ldr     x1, =0x0070_6c65_682d_2d00  // le: "\0--help\0p" nope
-    // Use byte comparison instead
-    ldrb    w1, [x0, #2]        // char after "--"
+    // ---- Check "--help" byte-by-byte ----
     cmp     w1, #'h'
     b.ne    .chk_version
-    // Check "elp\0"
     ldrb    w1, [x0, #3]
     cmp     w1, #'e'
     b.ne    .err_long_opt
@@ -145,21 +119,12 @@ _start:
     cmp     w1, #'p'
     b.ne    .err_long_opt
     ldrb    w1, [x0, #6]
-    cmp     w1, #'\0'
-    b.ne    .err_long_opt
-
-    // --help matched
-    mov     x0, #STDOUT
-    adr     x1, help_text
-    mov     x2, #help_text_len
-    mov     w8, #SYS_WRITE
-    svc     #0
-    b       .exit_ok
+    cbz     w1, .do_help
+    b       .err_long_opt
 
 .chk_version:
-    // Check "--version" (9 bytes + null)
-    ldrb    w1, [x0, #2]
-    cmp     w1, #'v'
+    // ---- Check "--version" byte-by-byte ----
+    cmp     w1, #'v'               // w1 still has [x0, #2]
     b.ne    .err_long_opt
     ldrb    w1, [x0, #3]
     cmp     w1, #'e'
@@ -180,10 +145,20 @@ _start:
     cmp     w1, #'n'
     b.ne    .err_long_opt
     ldrb    w1, [x0, #9]
-    cmp     w1, #'\0'
-    b.ne    .err_long_opt
+    cbz     w1, .do_version
+    b       .err_long_opt
 
-    // --version matched
+// ======================== --help =============================================
+.do_help:
+    mov     x0, #STDOUT
+    adr     x1, help_text
+    mov     x2, #help_text_len
+    mov     w8, #SYS_WRITE
+    svc     #0
+    b       .exit_ok
+
+// ======================== --version ==========================================
+.do_version:
     mov     x0, #STDOUT
     adr     x1, version_text
     mov     x2, #version_text_len
@@ -191,14 +166,10 @@ _start:
     svc     #0
     b       .exit_ok
 
-// ============================================================================
-//  Error: unrecognized long option (e.g. --foo)
-// ============================================================================
+// ======================== Error: unrecognized long option (--foo) =============
 .err_long_opt:
-    // x0 still points to the option string (e.g. "--foo")
-    mov     x22, x0             // save option string
+    ldr     x23, [x21, #8]         // x23 = save argv[1] pointer
 
-    // Write prefix "yes: unrecognized option '"
     mov     x0, #STDERR
     adr     x1, err_unrec_pre
     mov     x2, #err_unrec_pre_len
@@ -206,22 +177,19 @@ _start:
     svc     #0
 
     // Compute strlen of option string
-    mov     x1, x22
+    mov     x1, x23
     mov     x2, #0
-.strlen_unrec:
+.strlen_long:
     ldrb    w3, [x1, x2]
-    cbz     w3, .strlen_unrec_done
+    cbz     w3, .strlen_long_done
     add     x2, x2, #1
-    b       .strlen_unrec
-.strlen_unrec_done:
-    // Write option string
+    b       .strlen_long
+.strlen_long_done:
     mov     x0, #STDERR
-    mov     x1, x22
-    // x2 already = length
+    mov     x1, x23
     mov     w8, #SYS_WRITE
     svc     #0
 
-    // Write suffix
     mov     x0, #STDERR
     adr     x1, err_suffix
     mov     x2, #err_suffix_len
@@ -229,14 +197,11 @@ _start:
     svc     #0
     b       .exit_fail
 
-// ============================================================================
-//  Error: invalid short option (e.g. -n)
-// ============================================================================
+// ======================== Error: invalid short option (-x) ===================
 .err_short_opt:
-    // x0 points to the option string (e.g. "-n"); x0[1] is the char
-    ldrb    w22, [x0, #1]       // save option char
+    ldr     x0, [x21, #8]          // argv[1]
+    ldrb    w23, [x0, #1]          // save option char
 
-    // Write prefix "yes: invalid option -- '"
     mov     x0, #STDERR
     adr     x1, err_inval_pre
     mov     x2, #err_inval_pre_len
@@ -244,15 +209,14 @@ _start:
     svc     #0
 
     // Write the single option char from the stack
-    strb    w22, [sp, #-16]!    // push char onto stack (16-byte aligned)
+    strb    w23, [sp, #-16]!       // push char (16-byte aligned)
     mov     x0, #STDERR
     mov     x1, sp
     mov     x2, #1
     mov     w8, #SYS_WRITE
     svc     #0
-    add     sp, sp, #16         // pop stack
+    add     sp, sp, #16            // pop
 
-    // Write suffix
     mov     x0, #STDERR
     adr     x1, err_suffix
     mov     x2, #err_suffix_len
@@ -260,169 +224,150 @@ _start:
     svc     #0
     b       .exit_fail
 
-// ============================================================================
-//  Default path: no args → output "y\n" forever
-// ============================================================================
+// ======================== Default "y\n" fast path ============================
 .default_path:
-    // Fill BUF with "y\n" repeated (BUFSZ/2 pairs = 8192 iterations)
     adr     x0, buf
-    mov     x1, #(BUFSZ / 2)
-    mov     w2, #0x0A79         // 'y'=0x79, '\n'=0x0A → little-endian halfword
+    mov     x1, #(BUFSZ / 2)       // 8192 halfwords
+    mov     w2, #0x0A79             // "y\n" as little-endian halfword
 .fill_default:
     strh    w2, [x0], #2
     subs    x1, x1, #1
     b.ne    .fill_default
 
-    mov     x21, #BUFSZ         // x21 = bytes to write per iteration
+    adr     x19, buf                // x19 = write source
+    mov     x22, #BUFSZ             // x22 = bytes per write
     b       .write_loop
 
-// ============================================================================
-//  Build output line from argv[1..argc-1] into ARGBUF
-//  Join with spaces, append \n, fill BUF with repeated copies
-// ============================================================================
+// ======================== Build output line from argv =========================
+//
+// Join argv[1..] with spaces into argbuf, append \n.
+// Skip first "--" if argv[1] is exactly "--".
+// Fill buf with repeated copies, then enter write loop.
 .build_line:
-    adr     x10, argbuf         // x10 = write cursor in ARGBUF
-    mov     x11, #0             // x11 = byte count in ARGBUF
-    mov     x12, #0             // x12 = "any arg included" flag
-    mov     x13, #2             // x13 = argv index (start at 1, but we start at index 1 = offset 8)
+    adr     x24, argbuf             // x24 = argbuf base
+    mov     x0, x24                 // x0 = write cursor
+    mov     x25, #0                 // x25 = bytes written
+    mov     w27, #0                 // w27 = "any arg included" flag
 
-    // Skip first "--" if present
-    ldr     x0, [x20, #8]      // argv[1]
-    ldrb    w1, [x0]
-    cmp     w1, #'-'
-    b.ne    .bl_start_copy
-    ldrb    w1, [x0, #1]
-    cmp     w1, #'-'
-    b.ne    .bl_start_copy
-    ldrb    w1, [x0, #2]
-    cmp     w1, #'\0'
-    b.ne    .bl_start_copy
+    // x26 = pointer to current argv slot (start at argv[1])
+    add     x26, x21, #8           // x26 = &argv[1]
+
+    // Check if argv[1] is exactly "--" and skip it
+    ldr     x1, [x26]
+    ldrb    w2, [x1]
+    cmp     w2, #'-'
+    b.ne    .bl_loop
+    ldrb    w2, [x1, #1]
+    cmp     w2, #'-'
+    b.ne    .bl_loop
+    ldrb    w2, [x1, #2]
+    cbnz    w2, .bl_loop
     // argv[1] is exactly "--", skip it
-    mov     x13, #3             // start from argv[2]
+    add     x26, x26, #8          // advance to argv[2]
 
-.bl_start_copy:
-    // Loop: x13 = current argv index (1-based, i.e. argv[x13-1])
 .bl_loop:
-    cmp     x13, x19            // x13 >= argc? (x19 = argc)
+    ldr     x1, [x26], #8         // x1 = current arg, advance ptr
+    cbz     x1, .bl_done          // NULL = end of argv
+
+    // Space separator before arg (unless first)
+    cbz     w27, .bl_first
+
+    // Check buffer space
+    mov     x9, #(ARGBUFSZ - 2)
+    cmp     x25, x9
     b.ge    .bl_done
+    mov     w2, #' '
+    strb    w2, [x0], #1
+    add     x25, x25, #1
+    b       .bl_copy
 
-    // Load current arg: argv[x13] = *(x20 + x13*8)
-    lsl     x14, x13, #3       // x14 = x13 * 8
-    ldr     x0, [x20, x14]     // x0 = argv[x13]
-    add     x13, x13, #1
+.bl_first:
+    mov     w27, #1                 // mark: started including args
 
-    // Add space separator before arg (if not first)
-    cbz     x12, .bl_first_arg
-    // Check buffer not full
-    mov     x15, #(ARGBUFSZ - 2)
-    cmp     x11, x15
-    b.ge    .bl_done
-    mov     w1, #' '
-    strb    w1, [x10], #1
-    add     x11, x11, #1
+.bl_copy:
+    mov     x9, #(ARGBUFSZ - 2)
+    cmp     x25, x9
+    b.ge    .bl_skip_rest
+    ldrb    w2, [x1], #1           // load byte from arg
+    cbz     w2, .bl_loop           // null -> next arg
+    strb    w2, [x0], #1           // store in argbuf
+    add     x25, x25, #1
+    b       .bl_copy
 
-.bl_first_arg:
-    mov     x12, #1             // mark: have included an arg
-
-.bl_copy_bytes:
-    // Check buffer not full
-    mov     x15, #(ARGBUFSZ - 2)
-    cmp     x11, x15
-    b.ge    .bl_skip_arg
-    ldrb    w1, [x0], #1        // load byte, advance source
-    cbz     w1, .bl_loop        // null terminator → next arg
-    strb    w1, [x10], #1       // store byte, advance dest
-    add     x11, x11, #1
-    b       .bl_copy_bytes
-
-.bl_skip_arg:
-    // Buffer full: drain rest of arg
-    ldrb    w1, [x0], #1
-    cbnz    w1, .bl_skip_arg
+.bl_skip_rest:
+    ldrb    w2, [x1], #1
+    cbnz    w2, .bl_skip_rest
     b       .bl_loop
 
 .bl_done:
-    cbz     x12, .default_path  // no args included → use default
+    cbz     w27, .default_path     // no args included -> default
 
-    // Append '\n'
-    mov     w1, #'\n'
-    strb    w1, [x10]
-    add     x11, x11, #1       // x11 = total line length
+    // Append newline
+    mov     w2, #'\n'
+    strb    w2, [x0]
+    add     x25, x25, #1          // x25 = total line length
 
-    // Now fill BUF with repeated copies of ARGBUF[0..x11)
-    adr     x14, argbuf         // source = ARGBUF
-    adr     x10, buf            // dest = BUF
-    mov     x15, #0             // bytes filled so far
+    // ---- Fill buf with repeated copies of the line ----
+    adr     x19, buf                // x19 = buf base (write source)
+    mov     x0, x19                 // x0 = destination cursor
+    mov     x28, #0                 // x28 = bytes filled
 
 .fill_loop:
-    // remaining = BUFSZ - x15
-    mov     x16, #BUFSZ
-    sub     x16, x16, x15
-    cbz     x16, .fill_done
+    mov     x2, #BUFSZ
+    sub     x2, x2, x28           // remaining space
+    cmp     x2, x25               // room for another complete line?
+    b.lt    .fill_done
 
-    // copy_len = min(remaining, x11)
-    cmp     x16, x11
-    csel    x17, x16, x11, lt  // x17 = min
+    // Copy one line from argbuf to buf
+    mov     x3, x25               // bytes to copy
+    mov     x4, x24               // source = argbuf base
+.fill_copy:
+    cbz     x3, .fill_next
+    ldrb    w5, [x4], #1
+    strb    w5, [x0], #1
+    sub     x3, x3, #1
+    b       .fill_copy
 
-    // memcpy x17 bytes from x14 to x10
-    mov     x5, x14             // source
-    mov     x6, x10             // dest
-    mov     x7, x17             // count
-.copy_bytes:
-    cbz     x7, .copy_done
-    ldrb    w0, [x5], #1
-    strb    w0, [x6], #1
-    sub     x7, x7, #1
-    b       .copy_bytes
-.copy_done:
-    add     x10, x10, x17      // advance dest
-    add     x15, x15, x17      // update filled count
-    cmp     x15, #BUFSZ
-    b.lt    .fill_loop
+.fill_next:
+    add     x28, x28, x25
+    b       .fill_loop
 
 .fill_done:
-    // Round down to complete lines: x15 - (x15 % x11)
-    // If line > BUFSZ, write directly from ARGBUF
-    mov     x16, #BUFSZ
-    cmp     x11, x16
-    b.gt    .long_line
+    // If line > BUFSZ (buffer empty), write directly from argbuf
+    cbz     x28, .long_line
 
-    udiv    x16, x15, x11      // x16 = complete lines
-    mul     x16, x16, x11      // x16 = complete lines * line_len
-    mov     x21, x16           // x21 = write count (trimmed to complete lines)
+    // Round down to complete lines
+    udiv    x2, x28, x25          // complete lines
+    mul     x22, x2, x25          // x22 = complete lines * line_len
+    // x19 already = buf base
     b       .write_loop
 
 .long_line:
-    // Line longer than BUF: write directly from ARGBUF
-    mov     x21, x11           // write count = line length
-    adr     x0, argbuf
-    b       .write_direct
+    mov     x19, x24               // write from argbuf
+    mov     x22, x25               // write count = line length
 
-// ============================================================================
-//  Write loop — write x21 bytes from buf to stdout forever
-// ============================================================================
+// ======================== Write loop =========================================
+//
+// Hot loop: write x22 bytes from x19 to stdout forever.
+// x19 = buffer pointer (callee-saved, survives syscalls)
+// x22 = byte count (callee-saved, survives syscalls)
 .write_loop:
-    adr     x0, buf             // source = BUF
-
-.write_direct:
-    // write(STDOUT, x0, x21)
-    mov     x1, x0
     mov     x0, #STDOUT
-    mov     x2, x21
+    mov     x1, x19               // buffer
+    mov     x2, x22               // count
     mov     w8, #SYS_WRITE
     svc     #0
 
-    // Check return value
-    cmn     x0, #EINTR          // returned -EINTR?
-    b.eq    .write_direct       // retry on EINTR (x0/x1/x2 still valid? No — need to reload)
-    // Actually need to reload after EINTR
-    cmp     x0, #0
-    b.le    .exit_ok            // EPIPE or other error → exit 0
-    b       .write_loop
+    // Check for -EINTR: x0 == -4 means cmn(x0, 4) sets Z
+    cmn     x0, #4
+    b.eq    .write_loop            // retry on EINTR
 
-// ============================================================================
-//  Exit helpers
-// ============================================================================
+    cmp     x0, #0
+    b.gt    .write_loop            // positive: bytes written, keep going
+
+    // Zero or negative (EPIPE, error) -> exit 0
+
+// ======================== Exit helpers =======================================
 .exit_ok:
     mov     x0, #0
     mov     w8, #SYS_EXIT_GROUP

@@ -67,12 +67,24 @@ Behavior is byte-identical to GNU coreutils `yes`:
 
 ## Platform Support
 
-This implementation is **Linux x86_64 only**. The flat ELF binary format (`nasm -f bin`)
-with fixed virtual addresses (`org 0x400000`) is not portable to other architectures
-or operating systems.
+### x86_64 (fyes.asm)
+The x86_64 implementation uses NASM flat binary format (`nasm -f bin`)
+with fixed virtual addresses (`org 0x400000`). It produces a ~1,700 byte static ELF
+with no dependencies.
 
-Other platforms use the Rust implementation (`src/bin/fyes.rs`), which achieves
-~1.51× the throughput of GNU yes with full cross-platform support.
+### ARM64 / AArch64 (fyes_arm64.s)
+The ARM64 implementation uses GNU assembler (GAS) format. Build with:
+
+```bash
+as -o fyes_arm64.o fyes_arm64.s
+ld -static -s -e _start -o fyes_arm64 fyes_arm64.o
+```
+
+It produces a small static ELF binary using only two syscalls (`write` and `exit_group`).
+
+### Other platforms
+macOS, Windows, and other architectures use the Rust implementation (`src/bin/fyes.rs`),
+which achieves ~1.51x the throughput of GNU yes with full cross-platform support.
 
 ## Testing
 
