@@ -68,9 +68,7 @@ fn build_x86_64(manifest_dir: &str, out_dir: &str) {
             println!("cargo:rustc-cfg=fyes_has_asm");
         }
         _ => {
-            println!(
-                "cargo:warning=fyes assembly (x86_64): build failed — using Rust fallback"
-            );
+            println!("cargo:warning=fyes assembly (x86_64): build failed — using Rust fallback");
         }
     }
 }
@@ -101,20 +99,24 @@ fn build_aarch64(manifest_dir: &str, out_dir: &str) {
     let fyes_asm_out = format!("{}/fyes_asm", out_dir);
 
     // Assemble.
-    let as_status = Command::new("as")
-        .args(["-o", &obj_out, &asm_src])
-        .status();
+    let as_status = Command::new("as").args(["-o", &obj_out, &asm_src]).status();
 
     if !matches!(as_status, Ok(s) if s.success()) {
-        println!(
-            "cargo:warning=fyes assembly (aarch64): 'as' failed — using Rust fallback"
-        );
+        println!("cargo:warning=fyes assembly (aarch64): 'as' failed — using Rust fallback");
         return;
     }
 
     // Link.
     let ld_status = Command::new("ld")
-        .args(["-static", "-s", "-e", "_start", "-o", &fyes_asm_out, &obj_out])
+        .args([
+            "-static",
+            "-s",
+            "-e",
+            "_start",
+            "-o",
+            &fyes_asm_out,
+            &obj_out,
+        ])
         .status();
 
     match ld_status {
@@ -127,9 +129,7 @@ fn build_aarch64(manifest_dir: &str, out_dir: &str) {
             println!("cargo:rustc-cfg=fyes_has_asm");
         }
         _ => {
-            println!(
-                "cargo:warning=fyes assembly (aarch64): 'ld' failed — using Rust fallback"
-            );
+            println!("cargo:warning=fyes assembly (aarch64): 'ld' failed — using Rust fallback");
         }
     }
 }
