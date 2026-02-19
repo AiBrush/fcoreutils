@@ -111,8 +111,11 @@ def find_yes_binary(target):
     # On macOS, system yes is BSD (no --help/--version).
     # Try Homebrew GNU coreutils first.
     if target.startswith("macos"):
-        for candidate in ["/opt/homebrew/bin/gyes", "/usr/local/bin/gyes",
-                          "/opt/homebrew/opt/coreutils/libexec/gnubin/yes"]:
+        # Prefer gnubin paths (basename='yes') over gyes (basename='gyes')
+        # so that captured error messages use 'yes:' not 'gyes:'.
+        for candidate in ["/opt/homebrew/opt/coreutils/libexec/gnubin/yes",
+                          "/usr/local/opt/coreutils/libexec/gnubin/yes",
+                          "/opt/homebrew/bin/gyes", "/usr/local/bin/gyes"]:
             out, _, rc = capture([candidate, "--help"])
             if rc == 0 and b"STRING" in out:
                 return candidate
@@ -135,8 +138,8 @@ def detect_system_yes(target):
     Returns a dict with keys: help, version, err_unrec, err_inval, err_suffix.
     Returns None if detection fails (e.g. GNU yes not available on macOS).
 
-    IMPORTANT: Call yes by its bare name (not full path) so that argv[0]
-    equals "yes" and the help/error messages don't embed the full path.
+    On Linux, yes_bin is bare "yes" so program_name == "yes".
+    On macOS, gnubin paths (basename="yes") are preferred over gyes paths.
     """
     yes_bin = find_yes_binary(target)
     if yes_bin is None:

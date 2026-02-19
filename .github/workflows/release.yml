@@ -155,7 +155,7 @@ jobs:
           if [[ "$OSTYPE" == "linux"* ]]; then
             sudo apt-get install -y --no-install-recommends nasm
           else
-            brew install nasm 2>/dev/null || true
+            brew install nasm || true
           fi
 
       - name: Build

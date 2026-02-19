@@ -409,7 +409,8 @@ _start:
     svc     #0x80
     b.cs    .write_error           // carry set = macOS error
 
-    // Success: x0 = bytes written
+    // x0 = bytes written (>= 1 after carry-clear on macOS)
+    cbz     x0, .exit_ok           // defensive guard against zero return
     add     x26, x26, x0
     subs    x27, x27, x0
     b.gt    .write_loop
