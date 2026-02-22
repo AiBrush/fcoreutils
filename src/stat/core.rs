@@ -81,11 +81,11 @@ fn stat_regular(path: &str, config: &StatConfig) -> Result<String, io::Error> {
 
     if let Some(ref fmt) = config.printf_format {
         let expanded = expand_backslash_escapes(fmt);
-        return Ok(format_file_specifiers(&expanded, path, &meta, &st));
+        return Ok(format_file_specifiers(&expanded, path, &meta, &st, config.dereference));
     }
 
     if let Some(ref fmt) = config.format {
-        let result = format_file_specifiers(fmt, path, &meta, &st);
+        let result = format_file_specifiers(fmt, path, &meta, &st, config.dereference);
         return Ok(result + "\n");
     }
 
@@ -93,7 +93,7 @@ fn stat_regular(path: &str, config: &StatConfig) -> Result<String, io::Error> {
         return Ok(format_file_terse(path, &meta, &st));
     }
 
-    Ok(format_file_default(path, &meta, &st))
+    Ok(format_file_default(path, &meta, &st, config.dereference))
 }
 
 // ──────────────────────────────────────────────────
@@ -124,7 +124,7 @@ fn stat_filesystem(path: &str, config: &StatConfig) -> Result<String, io::Error>
 // Default file format
 // ──────────────────────────────────────────────────
 
-fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat) -> String {
+fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat, dereference: bool) -> String {
     let mode = meta.mode();
     let file_type_str = file_type_label(mode);
     let perms_str = mode_to_human(mode);
@@ -187,7 +187,7 @@ fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat) ->
     let atime = format_timestamp(st.st_atime, st.st_atime_nsec);
     let mtime = format_timestamp(st.st_mtime, st.st_mtime_nsec);
     let ctime = format_timestamp(st.st_ctime, st.st_ctime_nsec);
-    let birth = format_birth_time(st);
+    let birth = format_birth_time_for_path(path, dereference);
 
     format!(
         "  File: {}\n{}\n{}\n{}\nAccess: {}\nModify: {}\nChange: {}\n Birth: {}\n",
@@ -309,6 +309,7 @@ fn format_file_specifiers(
     path: &str,
     meta: &std::fs::Metadata,
     st: &libc::stat,
+    dereference: bool,
 ) -> String {
     let mut result = String::new();
     let chars: Vec<char> = fmt.chars().collect();
@@ -393,10 +394,10 @@ fn format_file_specifiers(
                     result.push_str(&lookup_username(meta.uid()));
                 }
                 'w' => {
-                    result.push_str(&format_birth_time(st));
+                    result.push_str(&format_birth_time_for_path(path, dereference));
                 }
                 'W' => {
-                    result.push_str(&format_birth_seconds(st));
+                    result.push_str(&format_birth_seconds_for_path(path, dereference));
                 }
                 'x' => {
                     result.push_str(&format_timestamp(st.st_atime, st.st_atime_nsec));
@@ -613,27 +614,51 @@ fn format_timestamp(secs: i64, nsec: i64) -> String {
     )
 }
 
-/// Format birth time. Returns "-" if unavailable.
-fn format_birth_time(st: &libc::stat) -> String {
-    #[cfg(target_os = "linux")]
-    {
-        // Linux statx provides birth time, but libc::stat does not reliably expose it.
-        // st_birthtim is not available on all Linux libc versions.
-        // Fall back to "-" which matches GNU stat behavior on older kernels.
-        let _ = st;
-        "-".to_string()
+/// Get birth time using statx() syscall. Returns (seconds, nanoseconds) or None.
+#[cfg(target_os = "linux")]
+fn get_birth_time(path: &str, dereference: bool) -> Option<(i64, i64)> {
+    use std::mem::MaybeUninit;
+
+    let c_path = CString::new(path).ok()?;
+    unsafe {
+        let mut statx_buf: libc::statx = MaybeUninit::zeroed().assume_init();
+        let flags = if dereference { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
+        let rc = libc::statx(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            flags,
+            libc::STATX_BTIME,
+            &mut statx_buf,
+        );
+        if rc == 0 && (statx_buf.stx_mask & libc::STATX_BTIME) != 0 {
+            Some((statx_buf.stx_btime.tv_sec, statx_buf.stx_btime.tv_nsec as i64))
+        } else {
+            None
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = st;
+}
+
+#[cfg(not(target_os = "linux"))]
+fn get_birth_time(_path: &str, _dereference: bool) -> Option<(i64, i64)> {
+    None
+}
+
+/// Format birth time. Returns "-" if unavailable.
+fn format_birth_time_for_path(path: &str, dereference: bool) -> String {
+    if let Some((secs, nsec)) = get_birth_time(path, dereference) {
+        format_timestamp(secs, nsec)
+    } else {
         "-".to_string()
     }
 }
 
 /// Format birth time as seconds since epoch. Returns "0" if unavailable.
-fn format_birth_seconds(st: &libc::stat) -> String {
-    let _ = st;
-    "0".to_string()
+fn format_birth_seconds_for_path(path: &str, dereference: bool) -> String {
+    if let Some((secs, _nsec)) = get_birth_time(path, dereference) {
+        secs.to_string()
+    } else {
+        "0".to_string()
+    }
 }
 
 /// Extract the major device number from a dev_t.

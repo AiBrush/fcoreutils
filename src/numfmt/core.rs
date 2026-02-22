@@ -83,8 +83,9 @@ impl Default for NumfmtConfig {
 }
 
 /// SI suffix table: suffix char -> multiplier.
+/// GNU coreutils uses lowercase 'k' for SI (powers of 1000) and uppercase 'K' for IEC (powers of 1024).
 const SI_SUFFIXES: &[(char, f64)] = &[
-    ('K', 1e3),
+    ('k', 1e3),
     ('M', 1e6),
     ('G', 1e9),
     ('T', 1e12),
@@ -279,7 +280,7 @@ fn is_scale_suffix(c: char) -> bool {
 
 fn find_si_multiplier(c: char) -> Result<f64, String> {
     for &(suffix, mult) in SI_SUFFIXES {
-        if suffix == c {
+        if suffix == c || suffix.to_ascii_uppercase() == c.to_ascii_uppercase() {
             return Ok(mult);
         }
     }
@@ -371,6 +372,25 @@ fn format_with_scale(
     if let Some(suffix) = chosen_suffix {
         let scaled = value / chosen_mult;
         let scaled = apply_round_for_display(scaled, round);
+
+        // Check if rounding pushed the value to the next suffix level.
+        // E.g., 999.999k rounds to 1000.0k -> should become 1.0M.
+        let base = suffixes[0].1; // the base multiplier (e.g., 1000 for SI, 1024 for IEC)
+        if scaled.abs() >= base {
+            // Find the next suffix.
+            let mut found_current = false;
+            for &(next_suffix, next_mult) in suffixes.iter() {
+                if found_current {
+                    let re_scaled = value / next_mult;
+                    let re_scaled = apply_round_for_display(re_scaled, round);
+                    return format!("{sign}{:.1}{}{}", re_scaled.abs(), next_suffix, i_suffix);
+                }
+                if next_suffix == suffix {
+                    found_current = true;
+                }
+            }
+            // No next suffix available, just use what we have.
+        }
 
         format!("{sign}{:.1}{}{}", scaled.abs(), suffix, i_suffix)
     } else {

@@ -11,7 +11,7 @@ use std::process;
 
 #[cfg(unix)]
 use coreutils_rs::du::{
-    DuConfig, DuEntry, du_path, parse_block_size, parse_threshold, print_entry, read_exclude_file,
+    DuConfig, DuEntry, du_path_with_seen, parse_block_size, parse_threshold, print_entry, read_exclude_file,
 };
 
 #[cfg(unix)]
@@ -304,10 +304,11 @@ fn main() {
     let mut out = BufWriter::new(stdout.lock());
     let mut had_error = false;
     let mut grand_total: u64 = 0;
+    let mut seen_inodes = std::collections::HashSet::new();
 
     for file in &files {
         let path = std::path::Path::new(file);
-        match du_path(path, &config) {
+        match du_path_with_seen(path, &config, &mut seen_inodes) {
             Ok(entries) => {
                 for entry in &entries {
                     if let Err(e) = print_entry(&mut out, entry, &config) {
