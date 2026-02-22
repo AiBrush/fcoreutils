@@ -702,14 +702,9 @@ fn write_multicolumn_body<W: Write>(
                     };
                     write!(output, "{}", truncated)?;
                     abs_pos += truncated.len();
-                    if col < last_data_col {
+                    if col < last_data_col && !explicit_sep {
                         let target = (col + 1) * col_width + config.indent;
-                        if explicit_sep {
-                            let pad = target.saturating_sub(abs_pos);
-                            write!(output, "{}", " ".repeat(pad))?;
-                        } else {
-                            write_column_padding(output, abs_pos, target)?;
-                        }
+                        write_column_padding(output, abs_pos, target)?;
                         abs_pos = target;
                     }
                 }
@@ -778,15 +773,10 @@ fn write_multicolumn_body<W: Write>(
                     };
                     write!(output, "{}", truncated)?;
                     abs_pos += truncated.len();
-                    if col < last_data_col {
+                    if col < last_data_col && !explicit_sep {
                         // Not the last column with data: pad to next column boundary
                         let target = (col + 1) * col_width + config.indent;
-                        if explicit_sep {
-                            let pad = target.saturating_sub(abs_pos);
-                            write!(output, "{}", " ".repeat(pad))?;
-                        } else {
-                            write_column_padding(output, abs_pos, target)?;
-                        }
+                        write_column_padding(output, abs_pos, target)?;
                         abs_pos = target;
                     }
                 } else if col <= last_data_col {
@@ -796,10 +786,7 @@ fn write_multicolumn_body<W: Write>(
                             write!(output, "{}", col_sep)?;
                             abs_pos += col_sep.len();
                         }
-                        let target = (col + 1) * col_width + config.indent;
-                        let pad = target.saturating_sub(abs_pos);
-                        write!(output, "{}", " ".repeat(pad))?;
-                        abs_pos = target;
+                        // For explicit separator, just write separator, no padding
                     } else {
                         let target = (col + 1) * col_width + config.indent;
                         write_column_padding(output, abs_pos, target)?;
