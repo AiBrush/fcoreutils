@@ -53,11 +53,15 @@ impl Default for PtxConfig {
 struct KwicEntry {
     /// Reference (filename:line or line number).
     reference: String,
-    /// Text before the keyword (left context).
-    left_context: String,
+    /// The full input line.
+    full_line: String,
+    /// Byte offset of the keyword within the full line.
+    word_start: usize,
     /// The keyword itself.
     keyword: String,
-    /// Text after the keyword (right context).
+    /// Text before the keyword (left context) - for roff/tex.
+    left_context: String,
+    /// Text after the keyword (right context) - for roff/tex.
     right_context: String,
     /// Sort key (lowercase keyword for case-insensitive sorting).
     sort_key: String,
@@ -141,8 +145,10 @@ fn generate_entries(lines: &[(String, String)], config: &PtxConfig) -> Vec<KwicE
 
             entries.push(KwicEntry {
                 reference: reference.clone(),
-                left_context: left.to_string(),
+                full_line: line.clone(),
+                word_start,
                 keyword: word.to_string(),
+                left_context: left.to_string(),
                 right_context: right.to_string(),
                 sort_key,
             });
@@ -159,34 +165,62 @@ fn generate_entries(lines: &[(String, String)], config: &PtxConfig) -> Vec<KwicE
     entries
 }
 
-/// Truncate a string from the left to fit within max_len characters.
-fn truncate_left(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        return s;
+/// Advance past one "word" (consecutive word chars) or one non-word char.
+/// Returns the new position after skipping.
+fn skip_something(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return pos;
     }
-    let skip = s.len() - max_len;
-    // Find a valid char boundary
-    let mut idx = skip;
-    while idx < s.len() && !s.is_char_boundary(idx) {
-        idx += 1;
+    let bytes = s.as_bytes();
+    if bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_' {
+        // Skip word characters
+        let mut p = pos;
+        while p < s.len() && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
+            p += 1;
+        }
+        p
+    } else {
+        // Skip one non-word character
+        pos + 1
     }
-    &s[idx..]
 }
 
-/// Truncate a string from the right to fit within max_len characters.
-fn truncate_right(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        return s;
+/// Skip whitespace forward from position.
+fn skip_white(s: &str, pos: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut p = pos;
+    while p < s.len() && bytes[p].is_ascii_whitespace() {
+        p += 1;
     }
-    let mut idx = max_len;
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
+    p
+}
+
+/// Skip whitespace backward from position (exclusive end).
+fn skip_white_backwards(s: &str, pos: usize, start: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut p = pos;
+    while p > start && bytes[p - 1].is_ascii_whitespace() {
+        p -= 1;
     }
-    &s[..idx]
+    p
 }
 
 /// Format a KWIC entry for plain text output.
-fn format_plain(entry: &KwicEntry, config: &PtxConfig) -> String {
+///
+/// Follows the GNU ptx algorithm from coreutils. The output has four fields:
+///
+/// Left half (half_line_width chars):
+///   [tail][tail_trunc] ... padding ... [before_trunc][before]
+/// Gap (gap_size spaces)
+/// Right half (half_line_width chars):
+///   [keyafter][keyafter_trunc] ... padding ... [head_trunc][head]
+///
+/// Where:
+///   keyafter = keyword + right context (up to keyafter_max_width)
+///   before   = left context nearest to keyword (up to before_max_width)
+///   tail     = overflow from keyafter that wraps to left half
+///   head     = overflow from before that wraps to right half
+fn format_plain(entry: &KwicEntry, config: &PtxConfig, max_word_length: usize, ref_max_width: usize) -> String {
     let ref_str = if config.auto_reference || config.references {
         &entry.reference
     } else {
@@ -195,68 +229,285 @@ fn format_plain(entry: &KwicEntry, config: &PtxConfig) -> String {
 
     let total_width = config.width;
     let gap = config.gap_size;
+    let trunc_str = "/";
+    let trunc_len = trunc_str.len(); // 1
 
-    // Calculate available space
-    let ref_width = if ref_str.is_empty() {
+    // Calculate available line width (subtract reference if on the left)
+    // GNU ptx uses reference_max_width (max across all entries) + gap_size
+    let ref_width = if ref_str.is_empty() || config.right_reference {
         0
     } else {
-        ref_str.len() + gap
+        ref_max_width + gap
     };
 
-    let available = if total_width > ref_width {
+    let line_width = if total_width > ref_width {
         total_width - ref_width
     } else {
         total_width
     };
 
-    // Split available space: left context, keyword+right context
-    // Allocate roughly half for left, half for keyword+right
-    let right_half = available / 2;
-    let left_half = available - right_half;
+    let half_line_width = line_width / 2;
 
-    // Left context (truncated from the left to fit)
-    let left = truncate_left(
-        &entry.left_context,
-        if left_half > gap { left_half - gap } else { 0 },
-    );
-
-    // Right side: keyword + right context
-    let right_text = if entry.right_context.is_empty() {
-        entry.keyword.clone()
+    // GNU ptx: before_max_width = half_line_width - gap_size - 2 * trunc_len
+    // keyafter_max_width = half_line_width - 2 * trunc_len
+    let before_max_width = if half_line_width > gap + 2 * trunc_len {
+        half_line_width - gap - 2 * trunc_len
     } else {
-        format!("{} {}", entry.keyword, entry.right_context)
+        0
     };
-    let right = truncate_right(&right_text, right_half);
-
-    if ref_str.is_empty() {
-        format!(
-            "{:>left_w$}{}{}",
-            left,
-            " ".repeat(gap),
-            right,
-            left_w = left_half - gap
-        )
-    } else if config.right_reference {
-        format!(
-            "{:>left_w$}{}{}{}{}",
-            left,
-            " ".repeat(gap),
-            right,
-            " ".repeat(gap),
-            ref_str,
-            left_w = left_half - gap,
-        )
+    let keyafter_max_width = if half_line_width > 2 * trunc_len {
+        half_line_width - 2 * trunc_len
     } else {
-        format!(
-            "{}{}{:>left_w$}{}{}",
-            ref_str,
-            " ".repeat(gap),
-            left,
-            " ".repeat(gap),
-            right,
-            left_w = left_half - gap,
-        )
+        0
+    };
+
+    let sentence = &entry.full_line;
+    let word_start = entry.word_start;
+    let line_len = sentence.len();
+
+    // ========== Step 1: Compute keyafter ==========
+    // keyafter starts at keyword and extends right, word-by-word, up to keyafter_max_width chars.
+    let keyafter_start = word_start;
+    let mut keyafter_end = word_start + entry.keyword.len();
+    {
+        let mut cursor = keyafter_end;
+        while cursor < line_len && cursor <= keyafter_start + keyafter_max_width {
+            keyafter_end = cursor;
+            cursor = skip_something(sentence, cursor);
+        }
+        if cursor <= keyafter_start + keyafter_max_width {
+            keyafter_end = cursor;
+        }
     }
+    let mut keyafter_truncation = keyafter_end < line_len;
+    // Remove trailing whitespace from keyafter
+    keyafter_end = skip_white_backwards(sentence, keyafter_end, keyafter_start);
+
+    // ========== Compute left_field_start ==========
+    // When the left context is very wide, GNU ptx jumps back from the keyword
+    // by half_line_width + max_word_length, then advances past one word/separator.
+    // This avoids scanning from the very beginning of the line.
+    let left_context_start: usize = 0; // start of line
+    let left_field_start = if word_start > half_line_width + max_word_length {
+        let mut lfs = word_start - (half_line_width + max_word_length);
+        lfs = skip_something(sentence, lfs);
+        lfs
+    } else {
+        left_context_start
+    };
+
+    // ========== Step 2: Compute before ==========
+    // before is the left context immediately before the keyword, up to before_max_width.
+    // It's truncated from the LEFT (start advances forward).
+    let mut before_start: usize = left_field_start;
+    let mut before_end = keyafter_start;
+    // Remove trailing whitespace from before
+    before_end = skip_white_backwards(sentence, before_end, before_start);
+
+    // Advance before_start word-by-word until it fits in before_max_width
+    while before_start + before_max_width < before_end {
+        before_start = skip_something(sentence, before_start);
+    }
+
+    // Check if before was truncated (text exists before before_start)
+    let mut before_truncation = {
+        let cursor = skip_white_backwards(sentence, before_start, 0);
+        cursor > left_context_start
+    };
+
+    // Skip leading whitespace from before
+    before_start = skip_white(sentence, before_start);
+    let before_len = if before_end > before_start { before_end - before_start } else { 0 };
+
+    // ========== Step 3: Compute tail ==========
+    // tail is the overflow from keyafter that wraps to the left half.
+    // tail_max_width = before_max_width - before_len - gap_size
+    let tail_max_width_raw: isize = before_max_width as isize - before_len as isize - gap as isize;
+    let mut tail_start: usize = 0;
+    let mut tail_end: usize = 0;
+    let mut tail_truncation = false;
+    let mut has_tail = false;
+
+    if tail_max_width_raw > 0 {
+        let tail_max_width = tail_max_width_raw as usize;
+        tail_start = skip_white(sentence, keyafter_end);
+        tail_end = tail_start;
+        let mut cursor = tail_end;
+        while cursor < line_len && cursor < tail_start + tail_max_width {
+            tail_end = cursor;
+            cursor = skip_something(sentence, cursor);
+        }
+        if cursor < tail_start + tail_max_width {
+            tail_end = cursor;
+        }
+
+        if tail_end > tail_start {
+            has_tail = true;
+            keyafter_truncation = false; // tail takes over truncation from keyafter
+            tail_truncation = tail_end < line_len;
+        } else {
+            tail_truncation = false;
+        }
+
+        // Remove trailing whitespace from tail
+        tail_end = skip_white_backwards(sentence, tail_end, tail_start);
+    }
+
+    // ========== Step 4: Compute head ==========
+    // head is the overflow from before that wraps to the right half.
+    // head_max_width = keyafter_max_width - keyafter_len - gap_size
+    let keyafter_len = if keyafter_end > keyafter_start { keyafter_end - keyafter_start } else { 0 };
+    let head_max_width_raw: isize = keyafter_max_width as isize - keyafter_len as isize - gap as isize;
+    let mut head_start: usize = 0;
+    let mut head_end: usize = 0;
+    let mut head_truncation = false;
+    let mut has_head = false;
+
+    if head_max_width_raw > 0 {
+        let head_max_width = head_max_width_raw as usize;
+        // head.end = before.start (before leading whitespace was skipped)
+        // We need the position before SKIP_WHITE was applied to before_start.
+        // head covers text from start-of-line to just before before_start.
+        head_end = skip_white_backwards(sentence, before_start, 0);
+
+        head_start = left_field_start;
+        while head_start + head_max_width < head_end {
+            head_start = skip_something(sentence, head_start);
+        }
+
+        if head_end > head_start {
+            has_head = true;
+            before_truncation = false; // head takes over truncation from before
+            head_truncation = {
+                // Check if there's text before head_start
+                let cursor = skip_white_backwards(sentence, head_start, 0);
+                cursor > left_context_start
+            };
+        } else {
+            head_truncation = false;
+        }
+
+        // Skip leading whitespace from head
+        if head_end > head_start {
+            head_start = skip_white(sentence, head_start);
+        }
+    }
+
+    // ========== Step 5: Format output ==========
+    // Extract the text for each field
+    let before_text = if before_len > 0 { &sentence[before_start..before_end] } else { "" };
+    let keyafter_text = if keyafter_end > keyafter_start { &sentence[keyafter_start..keyafter_end] } else { "" };
+    let tail_text = if has_tail && tail_end > tail_start { &sentence[tail_start..tail_end] } else { "" };
+    let head_text = if has_head && head_end > head_start { &sentence[head_start..head_end] } else { "" };
+
+    let before_trunc_len = if before_truncation { trunc_len } else { 0 };
+    let keyafter_trunc_len = if keyafter_truncation { trunc_len } else { 0 };
+    let tail_trunc_len = if tail_truncation { trunc_len } else { 0 };
+    let head_trunc_len = if head_truncation { trunc_len } else { 0 };
+
+    let mut result = String::with_capacity(total_width + 10);
+
+    // Reference prefix (if not right_reference).
+    // GNU ptx always outputs reference_max_width + gap_size chars here,
+    // even when there's no reference (reference_max_width = 0, so gap_size spaces).
+    if !config.right_reference {
+        if !ref_str.is_empty() && config.auto_reference {
+            // GNU emacs style: reference followed by colon, then padding
+            result.push_str(ref_str);
+            result.push(':');
+            let ref_total = ref_str.len() + 1; // +1 for colon
+            let ref_pad_total = ref_max_width + gap; // reference_max_width + gap_size
+            let padding = ref_pad_total.saturating_sub(ref_total);
+            for _ in 0..padding {
+                result.push(' ');
+            }
+        } else if !ref_str.is_empty() {
+            // Output reference and padding to reference_max_width + gap_size
+            result.push_str(ref_str);
+            let ref_pad_total = ref_max_width + gap;
+            let padding = ref_pad_total.saturating_sub(ref_str.len());
+            for _ in 0..padding {
+                result.push(' ');
+            }
+        } else {
+            // No reference: GNU ptx still outputs gap_size spaces
+            // (reference_max_width=0, so padding = 0 + gap_size - 0 = gap_size)
+            for _ in 0..gap {
+                result.push(' ');
+            }
+        }
+    }
+
+    // Left half: [tail][tail_trunc] ... padding ... [before_trunc][before]
+    if !tail_text.is_empty() {
+        // Has tail field
+        result.push_str(tail_text);
+        if tail_truncation {
+            result.push_str(trunc_str);
+        }
+        // Padding between tail and before
+        let tail_used = tail_text.len() + tail_trunc_len;
+        let before_used = before_text.len() + before_trunc_len;
+        let padding = half_line_width.saturating_sub(gap).saturating_sub(tail_used).saturating_sub(before_used);
+        for _ in 0..padding {
+            result.push(' ');
+        }
+    } else {
+        // No tail: padding before the [before_trunc][before] block
+        let before_used = before_text.len() + before_trunc_len;
+        let padding = half_line_width.saturating_sub(gap).saturating_sub(before_used);
+        for _ in 0..padding {
+            result.push(' ');
+        }
+    }
+
+    // before field (right side of left half)
+    if before_truncation {
+        result.push_str(trunc_str);
+    }
+    result.push_str(before_text);
+
+    // Gap
+    for _ in 0..gap {
+        result.push(' ');
+    }
+
+    // Right half: [keyafter][keyafter_trunc] ... padding ... [head_trunc][head]
+    result.push_str(keyafter_text);
+    if keyafter_truncation {
+        result.push_str(trunc_str);
+    }
+
+    if has_head && !head_text.is_empty() {
+        // Padding between keyafter and head
+        let keyafter_used = keyafter_text.len() + keyafter_trunc_len;
+        let head_used = head_text.len() + head_trunc_len;
+        let padding = half_line_width.saturating_sub(keyafter_used).saturating_sub(head_used);
+        for _ in 0..padding {
+            result.push(' ');
+        }
+        if head_truncation {
+            result.push_str(trunc_str);
+        }
+        result.push_str(head_text);
+    } else if !ref_str.is_empty() && config.right_reference {
+        // Pad to full half_line_width for right reference alignment
+        let keyafter_used = keyafter_text.len() + keyafter_trunc_len;
+        let padding = half_line_width.saturating_sub(keyafter_used);
+        for _ in 0..padding {
+            result.push(' ');
+        }
+    }
+
+    // Reference on the right (if right_reference)
+    if !ref_str.is_empty() && config.right_reference {
+        for _ in 0..gap {
+            result.push(' ');
+        }
+        result.push_str(ref_str);
+    }
+
+    result
 }
 
 /// Format a KWIC entry for roff output.
@@ -352,10 +603,27 @@ pub fn generate_ptx<R: BufRead, W: Write>(
     // Generate KWIC entries
     let entries = generate_entries(&lines, config);
 
+    // Compute maximum word length across all input (needed for left_field_start)
+    let max_word_length = lines
+        .iter()
+        .flat_map(|(_, line)| extract_words(line))
+        .map(|(_, word)| word.len())
+        .max()
+        .unwrap_or(0);
+
+    // Compute maximum reference width (for consistent left-alignment)
+    let ref_max_width = if config.auto_reference {
+        // GNU ptx adds 1 for ":" and computes max across all references
+        // For auto_reference, reference is "filename:linenum" - we just use line number
+        entries.iter().map(|e| e.reference.len()).max().unwrap_or(0) + 1 // +1 for ":"
+    } else {
+        entries.iter().map(|e| e.reference.len()).max().unwrap_or(0)
+    };
+
     // Format and output
     for entry in &entries {
         let formatted = match config.format {
-            OutputFormat::Plain => format_plain(entry, config),
+            OutputFormat::Plain => format_plain(entry, config, max_word_length, ref_max_width),
             OutputFormat::Roff => format_roff(entry, config),
             OutputFormat::Tex => format_tex(entry, config),
         };

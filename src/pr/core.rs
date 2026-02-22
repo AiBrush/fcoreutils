@@ -208,6 +208,31 @@ fn get_column_separator(config: &PrConfig) -> String {
     }
 }
 
+/// Check if the user has explicitly set a column separator.
+fn has_explicit_separator(config: &PrConfig) -> bool {
+    config.sep_string.is_some() || config.separator.is_some()
+}
+
+/// Write tab-based padding from an absolute position on the line to a target absolute position.
+/// GNU pr pads columns using tab characters (8-space tab stops) to reach the column boundary.
+/// `abs_pos` is the current absolute position on the line.
+/// `target_abs_pos` is the target absolute position.
+fn write_column_padding<W: Write>(output: &mut W, abs_pos: usize, target_abs_pos: usize) -> io::Result<()> {
+    let tab_size = 8;
+    let mut pos = abs_pos;
+    while pos < target_abs_pos {
+        let next_tab = ((pos / tab_size) + 1) * tab_size;
+        if next_tab <= target_abs_pos {
+            write!(output, "\t")?;
+            pos = next_tab;
+        } else {
+            write!(output, "{}", " ".repeat(target_abs_pos - pos))?;
+            pos = target_abs_pos;
+        }
+    }
+    Ok(())
+}
+
 /// Paginate a single file and write output.
 pub fn pr_file<R: BufRead, W: Write>(
     input: R,
@@ -261,14 +286,13 @@ pub fn pr_file<R: BufRead, W: Write>(
 
     // Handle multi-column mode
     let columns = config.columns.max(1);
-    let lines_per_column = if columns > 1 && !config.across {
-        input_lines_per_page / columns
-    } else {
-        input_lines_per_page
-    };
 
+    // GNU pr in multi-column down mode: each page has body_lines_per_page rows,
+    // each row shows one value from each column. So up to
+    // input_lines_per_page * columns input lines can be consumed per page.
+    // actual_lines_per_column = ceil(page_lines / columns) for each page.
     let lines_consumed_per_page = if columns > 1 && !config.across {
-        lines_per_column * columns
+        input_lines_per_page * columns
     } else {
         input_lines_per_page
     };
@@ -311,7 +335,6 @@ pub fn pr_file<R: BufRead, W: Write>(
                     &all_lines[line_idx..page_end],
                     config,
                     columns,
-                    lines_per_column,
                     &mut line_number,
                     body_lines_per_page,
                 )?;
@@ -348,15 +371,12 @@ pub fn pr_merge<W: Write>(
     inputs: &[Vec<String>],
     output: &mut W,
     config: &PrConfig,
-    filenames: &[&str],
+    _filenames: &[&str],
     file_dates: &[SystemTime],
 ) -> io::Result<()> {
     let date = file_dates.first().copied().unwrap_or_else(SystemTime::now);
     let date_str = format_header_date(&date, &config.date_format);
-    let header_str = config
-        .header
-        .as_deref()
-        .unwrap_or_else(|| filenames.first().copied().unwrap_or(""));
+    let header_str = config.header.as_deref().unwrap_or("");
 
     let body_lines_per_page = if config.omit_header || config.omit_pagination {
         if config.page_length > 0 {
@@ -377,14 +397,19 @@ pub fn pr_merge<W: Write>(
     };
 
     let num_files = inputs.len();
+    let explicit_sep = has_explicit_separator(config);
     let col_sep = get_column_separator(config);
-    let col_width = if num_files > 1 {
-        (config
-            .page_width
-            .saturating_sub(col_sep.len() * (num_files - 1)))
-            / num_files
+    let col_width = if explicit_sep {
+        if num_files > 1 {
+            (config
+                .page_width
+                .saturating_sub(col_sep.len() * (num_files - 1)))
+                / num_files
+        } else {
+            config.page_width
+        }
     } else {
-        config.page_width
+        config.page_width / num_files
     };
 
     let max_lines = inputs.iter().map(|f| f.len()).max().unwrap_or(0);
@@ -410,9 +435,11 @@ pub fn pr_merge<W: Write>(
 
                 let indent_str = " ".repeat(config.indent);
                 write!(output, "{}", indent_str)?;
+                let mut abs_pos = config.indent;
 
                 if let Some((sep, digits)) = config.number_lines {
                     write!(output, "{:>width$}{}", line_number, sep, width = digits)?;
+                    abs_pos += digits + 1;
                     line_number += 1;
                 }
 
@@ -427,10 +454,28 @@ pub fn pr_merge<W: Write>(
                     } else {
                         content
                     };
-                    if fi > 0 {
-                        write!(output, "{}", col_sep)?;
+                    if fi < num_files - 1 {
+                        // Non-last column: pad to next column boundary
+                        if explicit_sep {
+                            if fi > 0 {
+                                write!(output, "{}", col_sep)?;
+                            }
+                            write!(output, "{:<width$}", truncated, width = col_width)?;
+                            abs_pos = (fi + 1) * col_width + config.indent + fi * col_sep.len();
+                        } else {
+                            write!(output, "{}", truncated)?;
+                            abs_pos += truncated.len();
+                            let target = (fi + 1) * col_width + config.indent;
+                            write_column_padding(output, abs_pos, target)?;
+                            abs_pos = target;
+                        }
+                    } else {
+                        // Last column: no padding
+                        if explicit_sep && fi > 0 {
+                            write!(output, "{}", col_sep)?;
+                        }
+                        write!(output, "{}", truncated)?;
                     }
-                    write!(output, "{:<width$}", truncated, width = col_width)?;
                 }
                 writeln!(output)?;
                 body_lines_written += 1;
@@ -590,18 +635,24 @@ fn write_multicolumn_body<W: Write>(
     lines: &[String],
     config: &PrConfig,
     columns: usize,
-    lines_per_column: usize,
     line_number: &mut usize,
     body_lines_per_page: usize,
 ) -> io::Result<()> {
+    let explicit_sep = has_explicit_separator(config);
     let col_sep = get_column_separator(config);
-    let col_width = if columns > 1 {
-        (config
-            .page_width
-            .saturating_sub(col_sep.len() * (columns - 1)))
-            / columns
+    // When no explicit separator, GNU pr uses the full page_width / columns as column width
+    // and pads with tabs. When separator is explicit, use sep width in calculation.
+    let col_width = if explicit_sep {
+        if columns > 1 {
+            (config
+                .page_width
+                .saturating_sub(col_sep.len() * (columns - 1)))
+                / columns
+        } else {
+            config.page_width
+        }
     } else {
-        config.page_width
+        config.page_width / columns
     };
 
     let indent_str = " ".repeat(config.indent);
@@ -620,15 +671,27 @@ fn write_multicolumn_body<W: Write>(
             }
 
             write!(output, "{}", indent_str)?;
+            let mut abs_pos = config.indent;
+
+            // Find the last column with data on this row
+            let mut last_data_col = 0;
+            for col in 0..columns {
+                let li = i + col;
+                if li < lines.len() {
+                    last_data_col = col;
+                }
+            }
 
             for col in 0..columns {
                 let li = i + col;
-                if col > 0 {
-                    write!(output, "{}", col_sep)?;
-                }
                 if li < lines.len() {
+                    if explicit_sep && col > 0 {
+                        write!(output, "{}", col_sep)?;
+                        abs_pos += col_sep.len();
+                    }
                     if let Some((sep, digits)) = config.number_lines {
                         write!(output, "{:>width$}{}", line_number, sep, width = digits)?;
+                        abs_pos += digits + 1;
                         *line_number += 1;
                     }
                     let content = &lines[li];
@@ -637,10 +700,17 @@ fn write_multicolumn_body<W: Write>(
                     } else {
                         content.as_str()
                     };
-                    if col < columns - 1 {
-                        write!(output, "{:<width$}", truncated, width = col_width)?;
-                    } else {
-                        write!(output, "{}", truncated)?;
+                    write!(output, "{}", truncated)?;
+                    abs_pos += truncated.len();
+                    if col < last_data_col {
+                        let target = (col + 1) * col_width + config.indent;
+                        if explicit_sep {
+                            let pad = target.saturating_sub(abs_pos);
+                            write!(output, "{}", " ".repeat(pad))?;
+                        } else {
+                            write_column_padding(output, abs_pos, target)?;
+                        }
+                        abs_pos = target;
                     }
                 }
             }
@@ -649,8 +719,24 @@ fn write_multicolumn_body<W: Write>(
             i += columns;
         }
     } else {
-        // Print columns down: first lines_per_column lines in col0, next in col1, etc.
-        for row in 0..lines_per_column {
+        // Print columns down: distribute lines across columns.
+        // GNU pr distributes evenly: base = lines/cols, extra = lines%cols.
+        // First 'extra' columns get base+1 lines, rest get base lines.
+        let n = lines.len();
+        let base = n / columns;
+        let extra = n % columns;
+
+        // Compute start offset of each column
+        let mut col_starts = vec![0usize; columns + 1];
+        for col in 0..columns {
+            let col_lines = base + if col < extra { 1 } else { 0 };
+            col_starts[col + 1] = col_starts[col] + col_lines;
+        }
+
+        // Number of rows = max lines in any column
+        let num_rows = if extra > 0 { base + 1 } else { base };
+
+        for row in 0..num_rows {
             if config.double_space && row > 0 {
                 writeln!(output)?;
                 body_lines_written += 1;
@@ -660,16 +746,29 @@ fn write_multicolumn_body<W: Write>(
             }
 
             write!(output, "{}", indent_str)?;
+            let mut abs_pos = config.indent;
+
+            // Find the last column with data for this row
+            let mut last_data_col = 0;
+            for col in 0..columns {
+                let col_lines = col_starts[col + 1] - col_starts[col];
+                if row < col_lines {
+                    last_data_col = col;
+                }
+            }
 
             for col in 0..columns {
-                let li = col * lines_per_column + row;
-                if col > 0 {
-                    write!(output, "{}", col_sep)?;
-                }
-                if li < lines.len() {
+                let col_lines = col_starts[col + 1] - col_starts[col];
+                let li = col_starts[col] + row;
+                if row < col_lines {
+                    if explicit_sep && col > 0 {
+                        write!(output, "{}", col_sep)?;
+                        abs_pos += col_sep.len();
+                    }
                     if let Some((sep, digits)) = config.number_lines {
                         let num = config.first_line_number + li;
                         write!(output, "{:>width$}{}", num, sep, width = digits)?;
+                        abs_pos += digits + 1;
                     }
                     let content = &lines[li];
                     let truncated = if config.truncate_lines && content.len() > col_width {
@@ -677,14 +776,37 @@ fn write_multicolumn_body<W: Write>(
                     } else {
                         content.as_str()
                     };
-                    if col < columns - 1 {
-                        write!(output, "{:<width$}", truncated, width = col_width)?;
-                    } else {
-                        write!(output, "{}", truncated)?;
+                    write!(output, "{}", truncated)?;
+                    abs_pos += truncated.len();
+                    if col < last_data_col {
+                        // Not the last column with data: pad to next column boundary
+                        let target = (col + 1) * col_width + config.indent;
+                        if explicit_sep {
+                            let pad = target.saturating_sub(abs_pos);
+                            write!(output, "{}", " ".repeat(pad))?;
+                        } else {
+                            write_column_padding(output, abs_pos, target)?;
+                        }
+                        abs_pos = target;
                     }
-                } else if col < columns - 1 {
-                    write!(output, "{:<width$}", "", width = col_width)?;
+                } else if col <= last_data_col {
+                    // Empty column before the last data column: pad to next boundary
+                    if explicit_sep {
+                        if col > 0 {
+                            write!(output, "{}", col_sep)?;
+                            abs_pos += col_sep.len();
+                        }
+                        let target = (col + 1) * col_width + config.indent;
+                        let pad = target.saturating_sub(abs_pos);
+                        write!(output, "{}", " ".repeat(pad))?;
+                        abs_pos = target;
+                    } else {
+                        let target = (col + 1) * col_width + config.indent;
+                        write_column_padding(output, abs_pos, target)?;
+                        abs_pos = target;
+                    }
                 }
+                // Empty columns after last data column: skip entirely
             }
             writeln!(output)?;
             body_lines_written += 1;
