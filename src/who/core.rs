@@ -271,8 +271,11 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
     if config.show_mesg {
         let status = if entry.ut_type == USER_PROCESS {
             mesg_status(&entry.ut_line)
-        } else {
+        } else if entry.ut_type == LOGIN_PROCESS || entry.ut_type == DEAD_PROCESS {
             '?'
+        } else {
+            // BOOT_TIME, RUN_LVL, NEW_TIME, OLD_TIME: no terminal, show space
+            ' '
         };
         let _ = write!(out, " {}", status);
     }
@@ -388,9 +391,44 @@ pub fn format_heading(config: &WhoConfig) -> String {
     out
 }
 
+/// Read boot time from /proc/stat (Linux-specific fallback).
+/// Returns the boot timestamp in seconds since epoch, or None if unavailable.
+#[cfg(target_os = "linux")]
+fn read_boot_time_from_proc() -> Option<i64> {
+    let data = std::fs::read_to_string("/proc/stat").ok()?;
+    for line in data.lines() {
+        if let Some(val) = line.strip_prefix("btime ") {
+            return val.trim().parse::<i64>().ok();
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_boot_time_from_proc() -> Option<i64> {
+    None
+}
+
 /// Run the who command and return the formatted output.
 pub fn run_who(config: &WhoConfig) -> String {
-    let entries = read_utmpx();
+    let mut entries = read_utmpx();
+
+    // If no BOOT_TIME entry was found in utmpx (common in containers and some
+    // Linux configurations), synthesize one from /proc/stat btime.
+    if !entries.iter().any(|e| e.ut_type == BOOT_TIME) {
+        if let Some(btime) = read_boot_time_from_proc() {
+            entries.push(UtmpxEntry {
+                ut_type: BOOT_TIME,
+                ut_pid: 0,
+                ut_line: String::new(),
+                ut_id: String::new(),
+                ut_user: String::new(),
+                ut_host: String::new(),
+                ut_tv_sec: btime,
+            });
+        }
+    }
+
     let mut output = String::new();
 
     if config.show_count {

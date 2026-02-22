@@ -263,9 +263,9 @@ fn snprintf_g(v: f64, precision: usize) -> String {
     format!("{:.*e}", precision.saturating_sub(1), v)
 }
 
-/// Format f32 like GNU od: uses %.7g formatting.
+/// Format f32 like GNU od: uses %.8g formatting (8 significant digits).
 fn format_float_f32(v: f32) -> String {
-    snprintf_g(v as f64, 7)
+    snprintf_g(v as f64, 8)
 }
 
 /// Format f64 like GNU od: uses %.17g formatting.
