@@ -310,7 +310,7 @@ fn format_timezone_colon(time: &SystemTime, utc: bool) -> String {
 /// - Relative: "yesterday", "tomorrow", "now", "today"
 /// - Relative offset: "1 day ago", "2 hours ago", "3 days", "+1 week"
 /// - Epoch: "@SECONDS"
-pub fn parse_date_string(s: &str) -> Result<SystemTime, String> {
+pub fn parse_date_string(s: &str, utc: bool) -> Result<SystemTime, String> {
     let s = s.trim();
 
     // Handle epoch format: @SECONDS
@@ -346,7 +346,7 @@ pub fn parse_date_string(s: &str) -> Result<SystemTime, String> {
     }
 
     // Try ISO-like format: "YYYY-MM-DD[ HH:MM[:SS]]"
-    if let Some(result) = try_parse_iso(s) {
+    if let Some(result) = try_parse_iso(s, utc) {
         return Ok(result);
     }
 
@@ -392,7 +392,7 @@ fn try_parse_relative(s: &str, now: &SystemTime) -> Option<SystemTime> {
 }
 
 /// Try to parse an ISO-like date string.
-fn try_parse_iso(s: &str) -> Option<SystemTime> {
+fn try_parse_iso(s: &str, utc: bool) -> Option<SystemTime> {
     // Split on space or T
     let s = s.replace('T', " ");
     let parts: Vec<&str> = s.splitn(2, ' ').collect();
@@ -450,7 +450,11 @@ fn try_parse_iso(s: &str) -> Option<SystemTime> {
     tm.tm_sec = second as i32;
     tm.tm_isdst = -1; // Let mktime determine DST
 
-    let epoch_secs = unsafe { libc::mktime(&mut tm) };
+    let epoch_secs = if utc {
+        unsafe { libc::timegm(&mut tm) }
+    } else {
+        unsafe { libc::mktime(&mut tm) }
+    };
     if epoch_secs == -1 {
         return None;
     }

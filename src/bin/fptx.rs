@@ -232,6 +232,7 @@ fn parse_args() -> Cli {
                         }
                         break;
                     }
+                    't' => {} // silently ignore (unimplemented typeset mode, like GNU)
                     _ => {
                         eprintln!("ptx: invalid option -- '{}'", ch);
                         eprintln!("Try 'ptx --help' for more information.");

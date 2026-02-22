@@ -29,9 +29,15 @@ pub struct WcCounts {
 
 /// Byte classification for C/POSIX locale word counting.
 /// GNU wc treats whitespace as word breaks and everything else as word content.
+/// In C locale, 0xa0 (non-breaking space) is also treated as whitespace.
 ///   0 = word content: starts or continues a word
 ///   1 = space (word break): ends any current word
-const BYTE_CLASS_C: [u8; 256] = BYTE_CLASS_UTF8;
+const fn make_byte_class_c() -> [u8; 256] {
+    let mut t = make_byte_class_utf8();
+    t[0xa0] = 1; // non-breaking space (0xa0) is whitespace in C locale
+    t
+}
+const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
 
 /// 2-state single-byte classification for UTF-8 locale.
 /// Multi-byte UTF-8 sequences are handled by the state machine separately.

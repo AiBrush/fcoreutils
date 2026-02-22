@@ -583,9 +583,14 @@ pub fn generate_ptx<R: BufRead, W: Write>(
     output: &mut W,
     config: &PtxConfig,
 ) -> io::Result<()> {
-    // Read all lines with references
+    // Read all lines and group them into contexts based on sentence terminators.
+    // GNU ptx joins consecutive lines into one circular context unless a line
+    // ends with a sentence terminator (`.`, `?`, `!`).
     let mut lines: Vec<(String, String)> = Vec::new();
     let mut line_num = 0usize;
+    let mut current_text = String::new();
+    let mut context_ref = String::new();
+    let mut first_line_of_context = true;
 
     for line_result in input.lines() {
         let line = line_result?;
@@ -597,7 +602,32 @@ pub fn generate_ptx<R: BufRead, W: Write>(
             String::new()
         };
 
-        lines.push((reference, line));
+        if first_line_of_context {
+            context_ref = reference;
+            first_line_of_context = false;
+        }
+
+        if !current_text.is_empty() {
+            current_text.push(' ');
+        }
+        current_text.push_str(&line);
+
+        // Check if line ends with a sentence terminator
+        let trimmed = line.trim_end();
+        let ends_with_terminator = trimmed.ends_with('.') || trimmed.ends_with('?') || trimmed.ends_with('!');
+
+        if ends_with_terminator || line.is_empty() {
+            if !current_text.trim().is_empty() {
+                lines.push((context_ref.clone(), current_text.clone()));
+            }
+            current_text.clear();
+            first_line_of_context = true;
+        }
+    }
+
+    // Don't forget any remaining context (lines without terminators at end)
+    if !current_text.trim().is_empty() {
+        lines.push((context_ref.clone(), current_text.clone()));
     }
 
     // Generate KWIC entries

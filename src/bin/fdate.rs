@@ -311,7 +311,7 @@ fn main() {
 
     // Handle --set (we parse but don't actually set the clock; that requires root)
     if let Some(ref set_str) = config.set_string {
-        match date::parse_date_string(set_str) {
+        match date::parse_date_string(set_str, config.utc) {
             Ok(_time) => {
                 eprintln!("date: cannot set date: Operation not permitted");
                 process::exit(1);
@@ -339,7 +339,7 @@ fn main() {
 
         for line in reader.lines() {
             match line {
-                Ok(date_str) => match date::parse_date_string(&date_str) {
+                Ok(date_str) => match date::parse_date_string(&date_str, config.utc) {
                     Ok(time) => match display_date(&time, config) {
                         Ok(s) => {
                             if let Err(e) = writeln!(out, "{}", s) {
@@ -375,7 +375,7 @@ fn main() {
 
     // Determine the time to display
     let time = if let Some(ref date_str) = config.date_string {
-        match date::parse_date_string(date_str) {
+        match date::parse_date_string(date_str, config.utc) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("date: {}", e);
