@@ -104,6 +104,13 @@ pub fn format_date(time: &SystemTime, format: &str, utc: bool) -> String {
             };
 
             match chars[i + 1] {
+                's' => {
+                    // Unix timestamp — output directly to avoid mktime timezone issues.
+                    // strftime("%s") calls mktime() internally which treats the tm struct
+                    // as local time, causing wrong results when tm was filled with gmtime_r().
+                    result.push_str(&secs.to_string());
+                    i += 2;
+                }
                 'N' => {
                     // Nanoseconds (9 digits, zero-padded)
                     result.push_str(&format!("{:09}", nanos));
@@ -464,6 +471,7 @@ pub fn file_mod_time(path: &str) -> Result<SystemTime, String> {
 }
 
 /// Get the default date format (matches GNU date default output).
+/// Uses %r (12-hour clock with AM/PM) to match GNU behavior.
 pub fn default_format() -> &'static str {
-    "%a %b %e %H:%M:%S %Z %Y"
+    "%a %b %e %r %Z %Y"
 }
