@@ -82,8 +82,17 @@ pub struct DuEntry {
 /// Traverse `path` and collect `DuEntry` results according to `config`.
 pub fn du_path(path: &Path, config: &DuConfig) -> io::Result<Vec<DuEntry>> {
     let mut seen_inodes: HashSet<(u64, u64)> = HashSet::new();
+    du_path_with_seen(path, config, &mut seen_inodes)
+}
+
+/// Traverse `path` with a shared inode set (for deduplication across multiple arguments).
+pub fn du_path_with_seen(
+    path: &Path,
+    config: &DuConfig,
+    seen_inodes: &mut HashSet<(u64, u64)>,
+) -> io::Result<Vec<DuEntry>> {
     let mut entries = Vec::new();
-    du_recursive(path, config, &mut seen_inodes, &mut entries, 0, None)?;
+    du_recursive(path, config, seen_inodes, &mut entries, 0, None)?;
     Ok(entries)
 }
 
@@ -211,7 +220,8 @@ fn du_recursive(
         Ok(subtree_size)
     } else {
         // Regular file / symlink / special file.
-        if config.all && within_depth(config, depth) {
+        // Always report top-level arguments (depth 0), or all files if --all.
+        if (depth == 0 || config.all) && within_depth(config, depth) {
             entries.push(DuEntry {
                 size,
                 path: path.to_path_buf(),
@@ -290,6 +300,7 @@ pub fn format_size(raw_bytes: u64, config: &DuConfig) -> String {
 }
 
 /// Format a byte count in human-readable form (e.g., 1.5K, 23M).
+/// GNU du uses ceiling rounding and always shows one decimal for values < 10.
 fn human_readable(bytes: u64, base: u64) -> String {
     let suffixes = if base == 1024 {
         &["", "K", "M", "G", "T", "P", "E"]
@@ -309,12 +320,15 @@ fn human_readable(bytes: u64, base: u64) -> String {
     }
 
     if value >= 10.0 {
-        format!("{:.0}{}", value, suffixes[idx])
+        format!("{:.0}{}", value.ceil(), suffixes[idx])
     } else {
-        // Show one decimal place for values < 10.
-        let formatted = format!("{:.1}{}", value, suffixes[idx]);
-        // Remove trailing ".0" like GNU does.
-        formatted.replace(".0", "").replacen(".0", "", 1) // only first occurrence
+        // Show one decimal place for values < 10 (GNU keeps the .0).
+        let rounded = (value * 10.0).ceil() / 10.0;
+        if rounded >= 10.0 {
+            format!("{:.0}{}", rounded.ceil(), suffixes[idx])
+        } else {
+            format!("{:.1}{}", rounded, suffixes[idx])
+        }
     }
 }
 

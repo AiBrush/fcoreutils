@@ -822,7 +822,12 @@ fn format_g(value: f64, prec: usize, upper: bool) -> String {
 }
 
 /// Shell-quote a string for %q format specifier (GNU printf compat).
-/// Uses backslash escaping for special characters, or $'...' for control chars.
+/// Matches GNU coreutils quoting style:
+/// - Empty string -> ''
+/// - Safe chars only -> no quoting
+/// - No single quotes or control chars -> single-quote: 'hello world'
+/// - Has single quotes but no control/special double-quote chars -> double-quote: "it's"
+/// - Otherwise -> $'...' quoting
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
@@ -848,8 +853,10 @@ fn shell_quote(s: &str) -> String {
 
     // Check if we have control characters that need $'...' quoting.
     let has_control = s.bytes().any(|b| b < 0x20 || b == 0x7f || b >= 0x80);
+    let has_single_quote = s.contains('\'');
 
     if has_control {
+        // Use $'...' quoting for control characters.
         let mut result = String::from("$'");
         for byte in s.bytes() {
             match byte {
@@ -874,20 +881,32 @@ fn shell_quote(s: &str) -> String {
         }
         result.push('\'');
         result
+    } else if !has_single_quote {
+        // No control chars, no single quotes: wrap in single quotes.
+        format!("'{}'", s)
     } else {
-        // Use backslash escaping for simple special chars.
-        let mut result = String::with_capacity(s.len() * 2);
-        for ch in s.chars() {
-            match ch {
-                ' ' | '\'' | '"' | '\\' | '$' | '`' | '!' | '(' | ')' | '[' | ']' | '{' | '}'
-                | '<' | '>' | '|' | '&' | ';' | '#' | '~' | '?' | '*' | '=' | '^' => {
-                    result.push('\\');
-                    result.push(ch);
+        // Has single quotes but no control chars.
+        // Check if safe for double-quoting (no $, `, \, !, " that would be
+        // interpreted inside double quotes).
+        let unsafe_for_dquote = s.bytes().any(|b| {
+            b == b'$' || b == b'`' || b == b'\\' || b == b'!' || b == b'"'
+        });
+        if !unsafe_for_dquote {
+            // Safe to double-quote.
+            format!("\"{}\"", s)
+        } else {
+            // Fall back to $'...' quoting.
+            let mut result = String::from("$'");
+            for byte in s.bytes() {
+                match byte {
+                    b'\'' => result.push_str("\\'"),
+                    b'\\' => result.push_str("\\\\"),
+                    _ => result.push(byte as char),
                 }
-                _ => result.push(ch),
             }
+            result.push('\'');
+            result
         }
-        result
     }
 }
 

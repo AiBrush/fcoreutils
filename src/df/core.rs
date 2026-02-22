@@ -349,6 +349,7 @@ pub fn get_filesystems(config: &DfConfig) -> (Vec<FsInfo>, bool) {
 // ──────────────────────────────────────────────────
 
 /// Format a byte count in human-readable form using powers of 1024.
+/// GNU df uses ceiling rounding for human-readable display.
 pub fn human_readable_1024(bytes: u64) -> String {
     const UNITS: &[&str] = &["", "K", "M", "G", "T", "P", "E"];
     if bytes == 0 {
@@ -358,16 +359,22 @@ pub fn human_readable_1024(bytes: u64) -> String {
     for unit in UNITS {
         if value < 1024.0 {
             if value < 10.0 && !unit.is_empty() {
-                return format!("{:.1}{}", value, unit);
+                // Round up to 1 decimal place
+                let rounded = (value * 10.0).ceil() / 10.0;
+                if rounded >= 10.0 {
+                    return format!("{:.0}{}", rounded.ceil(), unit);
+                }
+                return format!("{:.1}{}", rounded, unit);
             }
-            return format!("{:.0}{}", value, unit);
+            return format!("{:.0}{}", value.ceil(), unit);
         }
         value /= 1024.0;
     }
-    format!("{:.0}E", value)
+    format!("{:.0}E", value.ceil())
 }
 
 /// Format a byte count in human-readable form using powers of 1000.
+/// GNU df uses ceiling rounding for human-readable display.
 pub fn human_readable_1000(bytes: u64) -> String {
     const UNITS: &[&str] = &["", "k", "M", "G", "T", "P", "E"];
     if bytes == 0 {
@@ -377,13 +384,17 @@ pub fn human_readable_1000(bytes: u64) -> String {
     for unit in UNITS {
         if value < 1000.0 {
             if value < 10.0 && !unit.is_empty() {
-                return format!("{:.1}{}", value, unit);
+                let rounded = (value * 10.0).ceil() / 10.0;
+                if rounded >= 10.0 {
+                    return format!("{:.0}{}", rounded.ceil(), unit);
+                }
+                return format!("{:.1}{}", rounded, unit);
             }
-            return format!("{:.0}{}", value, unit);
+            return format!("{:.0}{}", value.ceil(), unit);
         }
         value /= 1000.0;
     }
-    format!("{:.0}E", value)
+    format!("{:.0}E", value.ceil())
 }
 
 /// Format a size value according to the config.
@@ -589,31 +600,31 @@ fn build_header_row(config: &DfConfig) -> Vec<String> {
             "Mounted on".to_string(),
         ]
     } else if config.print_type {
+        let avail_header = if config.human_readable || config.si {
+            "Avail"
+        } else {
+            "Available"
+        };
         vec![
             "Filesystem".to_string(),
             "Type".to_string(),
             size_header(config),
             "Used".to_string(),
-            if config.portability {
-                "Available"
-            } else {
-                "Avail"
-            }
-            .to_string(),
+            avail_header.to_string(),
             pct_header.to_string(),
             "Mounted on".to_string(),
         ]
     } else {
+        let avail_header = if config.human_readable || config.si {
+            "Avail"
+        } else {
+            "Available"
+        };
         vec![
             "Filesystem".to_string(),
             size_header(config),
             "Used".to_string(),
-            if config.portability {
-                "Available"
-            } else {
-                "Avail"
-            }
-            .to_string(),
+            avail_header.to_string(),
             pct_header.to_string(),
             "Mounted on".to_string(),
         ]
@@ -742,6 +753,20 @@ fn print_table(
         for (i, val) in row.iter().enumerate() {
             if i < num_cols {
                 widths[i] = widths[i].max(val.len());
+            }
+        }
+    }
+
+    // GNU df applies minimum column widths for numeric size columns in human-readable mode.
+    // In -h/--si mode, the Size/Used/Avail columns have a minimum width of 5.
+    if (config.human_readable || config.si) && config.output_fields.is_none() {
+        // For standard layout: [Filesystem, Size, Used, Avail, Use%, Mounted on]
+        // Minimum width of 5 for Size, Used, Avail columns (not Use% or Mounted on)
+        let start_col = if config.print_type { 2 } else { 1 };
+        // Apply to exactly the 3 size columns (Size, Used, Avail)
+        for i in start_col..start_col + 3 {
+            if i < num_cols {
+                widths[i] = widths[i].max(5);
             }
         }
     }
