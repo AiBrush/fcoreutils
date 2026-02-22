@@ -15,10 +15,15 @@ const BUF_SIZE: usize = 64 * 1024;
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.len() == 1 {
-        match args[0].as_str() {
+    // GNU yes: scan args BEFORE "--" for --help / --version (GNU permutation behavior)
+    // Once "--" is seen, --help/--version are literal strings, not options.
+    for arg in &raw_args {
+        if arg == "--" {
+            break; // stop scanning for options
+        }
+        match arg.as_str() {
             "--help" => {
                 println!("Usage: {} [STRING]...", TOOL_NAME);
                 println!("  or:  {} OPTION", TOOL_NAME);
@@ -26,20 +31,59 @@ fn main() {
                 println!();
                 println!("      --help     display this help and exit");
                 println!("      --version  output version information and exit");
-                return;
+                process::exit(0);
             }
             "--version" => {
                 println!("{} (fcoreutils) {}", TOOL_NAME, VERSION);
-                return;
+                process::exit(0);
             }
             _ => {}
         }
     }
 
-    let line = if args.is_empty() {
+    // GNU yes argument processing:
+    // - The first "--" terminates option scanning; remaining args are literal strings
+    // - Unrecognized long options (--foo) → error to stderr, exit 1
+    // - Invalid short options (-x) → error to stderr, exit 1
+    // - Bare "-" is treated as a literal string (not an option)
+    let mut end_of_opts = false;
+    let mut output_args: Vec<&str> = Vec::new();
+
+    for arg in &raw_args {
+        if end_of_opts {
+            output_args.push(arg.as_str());
+            continue;
+        }
+
+        if arg == "--" {
+            // First "--" is consumed; subsequent args are literal
+            end_of_opts = true;
+            continue;
+        }
+
+        if arg.starts_with("--") && arg.len() > 2 {
+            // Unrecognized long option
+            eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
+            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+            process::exit(1);
+        }
+
+        if arg.starts_with('-') && arg.len() > 1 {
+            // Invalid short option — report first char after '-'
+            let c = arg.chars().nth(1).unwrap_or('?');
+            eprintln!("{}: invalid option -- '{}'", TOOL_NAME, c);
+            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+            process::exit(1);
+        }
+
+        // Regular argument (including bare "-")
+        output_args.push(arg.as_str());
+    }
+
+    let line = if output_args.is_empty() {
         "y\n".to_string()
     } else {
-        let mut s = args.join(" ");
+        let mut s = output_args.join(" ");
         s.push('\n');
         s
     };
@@ -86,7 +130,6 @@ mod tests {
 
         let mut stdout = child.stdout.take().unwrap();
         let mut buf = Vec::new();
-        // Read enough to get at least 5 lines
         let mut tmp = [0u8; 4096];
         while buf.len() < 10 {
             let n = stdout.read(&mut tmp).unwrap();
@@ -173,6 +216,80 @@ mod tests {
         for line in &lines[..2] {
             assert_eq!(*line, "a b");
         }
+    }
+
+    #[test]
+    fn test_yes_dash_dash_strips_separator() {
+        // yes -- foo should output "foo", not "-- foo"
+        let mut child = cmd()
+            .args(["--", "foo"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        while buf.len() < 20 {
+            let n = stdout.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        drop(stdout);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let text = String::from_utf8_lossy(&buf);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() >= 2);
+        for line in &lines[..2] {
+            assert_eq!(*line, "foo");
+        }
+    }
+
+    #[test]
+    fn test_yes_dash_dash_alone_gives_y() {
+        // yes -- should output "y", not "--"
+        let mut child = cmd().arg("--").stdout(Stdio::piped()).spawn().unwrap();
+
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        while buf.len() < 20 {
+            let n = stdout.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        drop(stdout);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let text = String::from_utf8_lossy(&buf);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() >= 2);
+        for line in &lines[..2] {
+            assert_eq!(*line, "y");
+        }
+    }
+
+    #[test]
+    fn test_yes_unknown_long_option_errors() {
+        let out = cmd().arg("--badopt").output().unwrap();
+        assert_ne!(out.status.code(), Some(0), "Should exit non-zero for --badopt");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("unrecognized option"), "Should print error: {}", stderr);
+    }
+
+    #[test]
+    fn test_yes_unknown_short_option_errors() {
+        let out = cmd().arg("-z").output().unwrap();
+        assert_ne!(out.status.code(), Some(0), "Should exit non-zero for -z");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("invalid option"), "Should print error: {}", stderr);
     }
 
     #[test]

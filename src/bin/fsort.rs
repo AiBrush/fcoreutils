@@ -338,11 +338,10 @@ fn parse_args() -> Cli {
 }
 
 fn main() {
-    // NOTE: We intentionally do NOT call reset_sigpipe() here.
-    // GNU sort handles SIGPIPE/BrokenPipe explicitly: it prints error messages
-    // to stderr and exits with code 2, rather than being killed by signal 13.
-    // Keeping SIGPIPE as SIG_IGN (Rust's default) lets us receive BrokenPipe
-    // errors in write() calls and handle them ourselves.
+    // Reset SIGPIPE to default so the process is killed silently by the signal
+    // when a downstream reader (e.g. head) closes the pipe early, matching GNU
+    // sort's behavior of exiting without error messages.
+    coreutils_rs::common::reset_sigpipe();
 
     // Enlarge pipe buffers on Linux for higher throughput.
     #[cfg(target_os = "linux")]
@@ -451,10 +450,8 @@ fn main() {
 
     if let Err(e) = sort_and_output(&inputs, &config) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
-            // Match GNU sort's exact error messages and exit code for broken pipe.
-            // GNU sort prints these two lines to stderr, then exits with code 2.
-            eprintln!("sort: write failed: 'standard output': Broken pipe");
-            eprintln!("sort: write error");
+            // With SIGPIPE reset, we normally get killed by the signal before
+            // reaching here. If we do reach here, exit silently like GNU sort.
             process::exit(2);
         }
         eprintln!("sort: {}", io_error_msg(&e));

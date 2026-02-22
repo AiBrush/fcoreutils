@@ -962,9 +962,8 @@ pub fn decode_mmap_inplace(
                 wp += 1;
             }
         }
-        match BASE64_ENGINE.decode_inplace(&mut data[..wp]) {
-            Ok(decoded) => return out.write_all(decoded),
-            Err(_) => return decode_error(),
+        match decode_inplace_with_padding(&mut data[..wp], out) {
+            r => return r,
         }
     }
 
@@ -985,10 +984,7 @@ pub fn decode_mmap_inplace(
             .any(|&b| b == b' ' || b == b'\t' || b == 0x0b || b == 0x0c)
         {
             // Perfectly clean — decode in-place directly
-            match BASE64_ENGINE.decode_inplace(data) {
-                Ok(decoded) => return out.write_all(decoded),
-                Err(_) => return decode_error(),
-            }
+            return decode_inplace_with_padding(data, out);
         }
         // Rare whitespace only — strip in-place
         let ptr = data.as_mut_ptr();
@@ -1001,10 +997,7 @@ pub fn decode_mmap_inplace(
                 wp += 1;
             }
         }
-        match BASE64_ENGINE.decode_inplace(&mut data[..wp]) {
-            Ok(decoded) => return out.write_all(decoded),
-            Err(_) => return decode_error(),
-        }
+        return decode_inplace_with_padding(&mut data[..wp], out);
     }
 
     // SIMD gap-copy: strip \n and \r in-place using memchr2
@@ -1070,10 +1063,7 @@ pub fn decode_mmap_inplace(
         // For large data, use parallel decode from the cleaned slice
         return decode_borrowed_clean_parallel(out, &data[..wp]);
     }
-    match BASE64_ENGINE.decode_inplace(&mut data[..wp]) {
-        Ok(decoded) => out.write_all(decoded),
-        Err(_) => decode_error(),
-    }
+    decode_inplace_with_padding(&mut data[..wp], out)
 }
 
 /// Decode base64 from an owned Vec (in-place whitespace strip + decode).
@@ -1809,7 +1799,22 @@ fn decode_clean_slice(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
     }
     match BASE64_ENGINE.decode_inplace(data) {
         Ok(decoded) => out.write_all(decoded),
-        Err(_) => decode_error(),
+        Err(_) => {
+            // Try padding truncated input (GNU base64 accepts missing padding).
+            let remainder = data.len() % 4;
+            if remainder == 2 || remainder == 3 {
+                let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
+                padded.extend_from_slice(data);
+                for _ in 0..(4 - remainder) {
+                    padded.push(b'=');
+                }
+                match BASE64_ENGINE.decode_inplace(&mut padded) {
+                    Ok(decoded) => return out.write_all(decoded),
+                    Err(_) => {}
+                }
+            }
+            decode_error()
+        }
     }
 }
 
@@ -1818,6 +1823,30 @@ fn decode_clean_slice(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
 #[inline(never)]
 fn decode_error() -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::InvalidData, "invalid input"))
+}
+
+/// Decode in-place with padding fallback for truncated input.
+/// GNU base64 accepts missing padding at end of stream, so if decode fails
+/// and the length mod 4 is 2 or 3, retry with padding added.
+fn decode_inplace_with_padding(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
+    match BASE64_ENGINE.decode_inplace(data) {
+        Ok(decoded) => out.write_all(decoded),
+        Err(_) => {
+            let remainder = data.len() % 4;
+            if remainder == 2 || remainder == 3 {
+                let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
+                padded.extend_from_slice(data);
+                for _ in 0..(4 - remainder) {
+                    padded.push(b'=');
+                }
+                match BASE64_ENGINE.decode_inplace(&mut padded) {
+                    Ok(decoded) => return out.write_all(decoded),
+                    Err(_) => {}
+                }
+            }
+            decode_error()
+        }
+    }
 }
 
 /// Decode clean base64 data (no whitespace) from a borrowed slice.
@@ -1829,6 +1858,16 @@ fn decode_borrowed_clean(out: &mut impl Write, data: &[u8]) -> io::Result<()> {
     // decode each chunk independently (base64 is context-free per 4-char group).
     if data.len() >= PARALLEL_DECODE_THRESHOLD {
         return decode_borrowed_clean_parallel(out, data);
+    }
+    // If input has truncated padding, pad it first (GNU base64 accepts missing padding).
+    let remainder = data.len() % 4;
+    if remainder == 2 || remainder == 3 {
+        let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
+        padded.extend_from_slice(data);
+        for _ in 0..(4 - remainder) {
+            padded.push(b'=');
+        }
+        return decode_borrowed_clean(out, &padded);
     }
     // Pre-allocate exact output size to avoid decode_to_vec's reallocation.
     // Decoded size = data.len() * 3 / 4 minus padding.

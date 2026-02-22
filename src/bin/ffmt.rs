@@ -269,7 +269,9 @@ fn main() {
 
     let cli = parse_args();
 
-    let goal = cli.goal.unwrap_or((cli.width * 93) / 100);
+    // GNU fmt default goal: max_width * (2 * (100 - LEEWAY) + 1) / 200
+    // where LEEWAY = 7, so goal = max_width * 187 / 200
+    let goal = cli.goal.unwrap_or((cli.width * 187) / 200);
 
     let config = FmtConfig {
         width: cli.width,

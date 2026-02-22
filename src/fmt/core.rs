@@ -23,7 +23,7 @@ impl Default for FmtConfig {
         let width = 75;
         Self {
             width,
-            goal: (width * 93) / 100,
+            goal: (width * 187) / 200,
             split_only: false,
             crown_margin: false,
             tagged: false,
@@ -197,7 +197,8 @@ fn format_paragraph<W: Write>(
 /// Uses optimal line breaking with a cost function matching GNU fmt:
 ///   SHORT_COST(n) = (n * 10)^2  where n = goal - line_length
 ///   RAGGED_COST(n) = (n * 10)^2 / 2  where n = line_length - next_line_length
-///   Last line has zero cost.
+///   Last line has zero cost. Ragged cost only applies when the next line
+///   is not the last line of the paragraph.
 fn reflow_paragraph(
     words: &[&str],
     prefix: &str,
@@ -230,6 +231,38 @@ fn reflow_paragraph(
 
     let word_lens: Vec<usize> = words.iter().map(|w| w.len()).collect();
 
+    // GNU fmt cost constants (expressed as EQUIV values squared):
+    // LINE_COST = 70^2 = 4900 (base cost per line break)
+    // NOBREAK_COST = 600^2 = 360000 (penalty for breaking after non-sentence-ending period)
+    // SENTENCE_BONUS = 50^2 = 2500 (bonus for breaking at sentence boundary)
+    const LINE_COST: i64 = 70 * 70;
+    const NOBREAK_COST: i64 = 600 * 600;
+    const SENTENCE_BONUS: i64 = 50 * 50;
+
+    // Compute per-break-position cost matching GNU fmt's base_cost().
+    // In normal single-spaced text, a word ending with '.', '?', or '!' that is
+    // NOT at a sentence boundary gets NOBREAK_COST (heavily discourages breaking there).
+    // Since we don't have original spacing info, a period is considered sentence-ending
+    // only in uniform_spacing mode (which doubles spaces after sentences).
+    let break_cost: Vec<i64> = (0..n)
+        .map(|j| {
+            if j == n - 1 {
+                return 0; // last word, no break cost
+            }
+            let mut cost = LINE_COST;
+            if is_sentence_end(words[j]) {
+                if config.uniform_spacing {
+                    // In uniform spacing mode, period words are sentence-ending
+                    cost -= SENTENCE_BONUS;
+                } else {
+                    // In normal mode, mid-paragraph periods are NOT sentence-ending
+                    cost += NOBREAK_COST;
+                }
+            }
+            cost
+        })
+        .collect();
+
     // DP state:
     // cost[i] = minimum cost to format words[i..n]
     // best[i] = last word index of the optimal line starting at word i
@@ -252,7 +285,7 @@ fn reflow_paragraph(
 
             if len > width {
                 if j == i {
-                    let line_cost = if j == n - 1 {
+                    let lc = if j == n - 1 {
                         0
                     } else {
                         let short_n = goal - len as i64;
@@ -265,10 +298,10 @@ fn reflow_paragraph(
                         } else {
                             0
                         };
-                        short_cost + ragged_cost
+                        break_cost[j] + short_cost + ragged_cost
                     };
                     if cost[j + 1] != i64::MAX {
-                        let total = line_cost + cost[j + 1];
+                        let total = lc + cost[j + 1];
                         if total < cost[i] {
                             cost[i] = total;
                             best[i] = j;
@@ -280,7 +313,7 @@ fn reflow_paragraph(
                 break;
             }
 
-            let line_cost = if j == n - 1 {
+            let lc = if j == n - 1 {
                 0
             } else {
                 let short_n = goal - len as i64;
@@ -292,11 +325,11 @@ fn reflow_paragraph(
                 } else {
                     0
                 };
-                short_cost + ragged_cost
+                break_cost[j] + short_cost + ragged_cost
             };
 
             if cost[j + 1] != i64::MAX {
-                let total = line_cost + cost[j + 1];
+                let total = lc + cost[j + 1];
                 if total < cost[i] {
                     cost[i] = total;
                     best[i] = j;
