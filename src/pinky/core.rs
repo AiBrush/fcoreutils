@@ -159,20 +159,20 @@ fn read_file_contents(path: &PathBuf) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-/// Format the short-format heading line.
+/// Format the short-format heading line (matches GNU pinky column widths).
 pub fn format_short_heading(config: &PinkyConfig) -> String {
     let mut out = String::new();
     let _ = write!(out, "{:<8}", "Login");
     if !config.omit_fullname && !config.omit_fullname_host && !config.omit_fullname_host_idle {
         let _ = write!(out, " {:<20}", "Name");
     }
-    let _ = write!(out, " {:<8}", "TTY");
+    let _ = write!(out, " {:<9}", "TTY");
     if !config.omit_fullname_host_idle {
-        let _ = write!(out, " {:>6}", "Idle");
+        let _ = write!(out, "{:<7}", "Idle");
     }
-    let _ = write!(out, " {:<16}", "When");
+    let _ = write!(out, "{:<17}", "When");
     if !config.omit_fullname_host && !config.omit_fullname_host_idle {
-        let _ = write!(out, " {}", "Where");
+        let _ = write!(out, "{}", "Where");
     }
     out
 }
@@ -200,22 +200,22 @@ pub fn format_short_entry(entry: &who::UtmpxEntry, config: &PinkyConfig) -> Stri
         .strip_prefix("pts/")
         .map(|s| format!("pts/{}", s))
         .unwrap_or_else(|| entry.ut_line.clone());
-    let _ = write!(out, " {:<8}", tty);
+    let _ = write!(out, " {:<9}", tty);
 
     // Idle time
     if !config.omit_fullname_host_idle {
         let idle = idle_str(&entry.ut_line);
-        let _ = write!(out, " {:>6}", idle);
+        let _ = write!(out, "{:<7}", idle);
     }
 
     // When (login time)
     let time_str = format_time_short(entry.ut_tv_sec);
-    let _ = write!(out, " {:<16}", time_str);
+    let _ = write!(out, "{:<17}", time_str);
 
     // Where (remote host)
     if !config.omit_fullname_host && !config.omit_fullname_host_idle {
         if !entry.ut_host.is_empty() {
-            let _ = write!(out, " {}", entry.ut_host);
+            let _ = write!(out, "{}", entry.ut_host);
         }
     }
 

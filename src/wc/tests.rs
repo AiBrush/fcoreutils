@@ -67,7 +67,7 @@ fn test_count_bytes_utf8() {
 }
 
 // ──────────────────────────────────────────────────
-// Word counting tests (3-state logic)
+// Word counting tests (2-state logic: space or word content)
 // ──────────────────────────────────────────────────
 
 #[test]
@@ -127,16 +127,17 @@ fn test_count_words_crlf_separated() {
 }
 
 #[test]
-fn test_count_words_binary_data_transparent() {
-    // NUL bytes are non-printable, non-space → transparent (3-state logic)
+fn test_count_words_binary_data_word_content() {
+    // NUL bytes are non-space → word content (2-state logic)
     // They do NOT break words — "hello" and "world" merge into 1 word
     assert_eq!(count_words(b"\x00hello\x00world"), 1);
 }
 
 #[test]
 fn test_count_words_nul_between_spaces() {
-    // NUL between spaces: both spaces break words, NUL is transparent
-    assert_eq!(count_words(b"hello \x00 world"), 2);
+    // NUL between spaces: spaces break words, NUL is word content
+    // "hello" = word 1, " " breaks, "\x00" = word 2 (NUL is word content), " " breaks, "world" = word 3
+    assert_eq!(count_words(b"hello \x00 world"), 3);
 }
 
 #[test]
@@ -151,76 +152,75 @@ fn test_count_words_all_whitespace_types() {
 }
 
 // ──────────────────────────────────────────────────
-// 3-state word counting: transparent byte tests
+// 2-state word counting: non-space bytes are word content
 // ──────────────────────────────────────────────────
 
 #[test]
-fn test_3state_nul_only() {
-    // NUL alone: transparent, starts at in_word=false, stays false → 0 words
-    assert_eq!(count_words(b"\x00"), 0);
+fn test_2state_nul_is_word_content() {
+    // NUL alone: word content → 1 word (matches GNU wc)
+    assert_eq!(count_words(b"\x00"), 1);
 }
 
 #[test]
-fn test_3state_control_chars_transparent() {
-    // Control chars (0x01-0x08, 0x0E-0x1F, 0x7F) are transparent
-    assert_eq!(count_words(b"\x01"), 0);
-    assert_eq!(count_words(b"\x08"), 0);
-    assert_eq!(count_words(b"\x0E"), 0);
-    assert_eq!(count_words(b"\x1F"), 0);
-    assert_eq!(count_words(b"\x7f"), 0);
+fn test_2state_control_chars_are_word_content() {
+    // Control chars (0x01-0x08, 0x0E-0x1F, 0x7F) are word content (matches GNU wc)
+    assert_eq!(count_words(b"\x01"), 1);
+    assert_eq!(count_words(b"\x08"), 1);
+    assert_eq!(count_words(b"\x0E"), 1);
+    assert_eq!(count_words(b"\x1F"), 1);
+    assert_eq!(count_words(b"\x7f"), 1);
 }
 
 #[test]
-fn test_3state_transparent_doesnt_break_words() {
-    // Control chars between printable chars don't break words
+fn test_2state_nonspace_doesnt_break_words() {
+    // Non-space bytes between printable chars don't break words
     assert_eq!(count_words(b"hello\x01world"), 1);
     assert_eq!(count_words(b"hello\x7fworld"), 1);
     assert_eq!(count_words(b"hello\x00world"), 1);
 }
 
 #[test]
-fn test_3state_transparent_doesnt_start_words() {
-    // Transparent bytes at start don't start a word
-    assert_eq!(count_words(b"\x00\x01\x02"), 0);
-    // Transparent at start, then printable: 1 word
+fn test_2state_nonspace_starts_words() {
+    // Non-space bytes at start DO start a word (matches GNU wc)
+    assert_eq!(count_words(b"\x00\x01\x02"), 1);
+    // Non-space at start, then printable: still 1 word (continuous)
     assert_eq!(count_words(b"\x00hello"), 1);
 }
 
 #[test]
-fn test_3state_space_still_breaks() {
-    // Space after transparent still breaks (transparent preserves state, space resets)
+fn test_2state_space_still_breaks() {
+    // Space breaks words; non-space bytes don't
     assert_eq!(count_words(b"hello\x00 world"), 2);
     assert_eq!(count_words(b"hello \x00world"), 2);
 }
 
 #[test]
-fn test_c_locale_high_bytes_are_transparent() {
-    // In C locale, bytes >= 0x80 are TRANSPARENT (not printable, not space in C locale).
-    // They don't start or break words — they leave the word state unchanged.
-    assert_eq!(count_words_locale(b"\x80", false), 0);
-    assert_eq!(count_words_locale(b"\xFF", false), 0);
-    // High bytes between printable ASCII: transparent, doesn't break word
+fn test_c_locale_high_bytes_are_word_content() {
+    // In C locale, bytes >= 0x80 are word content (matches GNU wc).
+    assert_eq!(count_words_locale(b"\x80", false), 1);
+    assert_eq!(count_words_locale(b"\xFF", false), 1);
+    // High bytes between printable ASCII: word content, doesn't break word
     assert_eq!(count_words_locale(b"hello\x80world", false), 1);
-    // High bytes alone between spaces: transparent (no word), spaces break
-    assert_eq!(count_words_locale(b"hello \x80 world", false), 2);
+    // High bytes alone between spaces: word content, spaces break
+    assert_eq!(count_words_locale(b"hello \x80 world", false), 3);
 }
 
 #[test]
 fn test_c_locale_word_counting() {
-    // In C locale, only printable ASCII (0x21-0x7E) forms words
+    // In C locale, all non-space bytes are word content
     assert_eq!(count_words_locale(b"hello", false), 1);
     assert_eq!(count_words_locale(b"hello world", false), 2);
-    // Control chars are transparent in C locale (not printable, not space)
-    assert_eq!(count_words_locale(b"\x01", false), 0);
-    assert_eq!(count_words_locale(b"\x7f", false), 0);
+    // Control chars are word content in C locale (matches GNU wc)
+    assert_eq!(count_words_locale(b"\x01", false), 1);
+    assert_eq!(count_words_locale(b"\x7f", false), 1);
 }
 
 #[test]
-fn test_3state_utf8_c1_controls_transparent() {
-    // C1 control characters (U+0080-U+009F) in UTF-8 are non-printable → transparent
+fn test_2state_utf8_c1_controls_word_content() {
+    // C1 control characters (U+0080-U+009F) in UTF-8 are word content (matches GNU wc)
     // U+0080 = 0xC2 0x80 (PAD control)
-    assert_eq!(count_words(b"\xC2\x80"), 0);
-    // C1 control between words: transparent, doesn't break
+    assert_eq!(count_words(b"\xC2\x80"), 1);
+    // C1 control between words: word content, doesn't break
     assert_eq!(count_words(b"hello\xC2\x80world"), 1);
 }
 
@@ -234,10 +234,10 @@ fn test_3state_utf8_valid_multibyte_is_word() {
 }
 
 #[test]
-fn test_3state_utf8_invalid_standalone_transparent() {
-    // Standalone continuation bytes (0x80-0xBF) in UTF-8: invalid → transparent
-    assert_eq!(count_words(b"\x80\x81\x82"), 0);
-    // Between words: transparent, doesn't break
+fn test_2state_utf8_invalid_standalone_word_content() {
+    // Standalone continuation bytes (0x80-0xBF) in UTF-8: invalid → word content (matches GNU wc)
+    assert_eq!(count_words(b"\x80\x81\x82"), 1);
+    // Between words: word content, doesn't break
     assert_eq!(count_words(b"hello\x80world"), 1);
 }
 
@@ -492,9 +492,9 @@ fn test_count_all_binary_data() {
     let counts = count_all(data, false);
     assert_eq!(counts.lines, 2);
     assert_eq!(counts.bytes, 7);
-    // C locale 3-state: \x00, \x01, \x02 are transparent (not printable, not space) = 0 words.
-    // \n breaks. \xFF, \xFE are transparent = 0 words. Total: 0 words.
-    assert_eq!(counts.words, 0);
+    // C locale 2-state: \x00, \x01, \x02 are word content = 1 word.
+    // \n breaks. \xFF, \xFE are word content = 1 word. Total: 2 words.
+    assert_eq!(counts.words, 2);
     // C locale: each byte is a char
     assert_eq!(counts.chars, 7);
 }
@@ -514,48 +514,46 @@ fn test_gnu_trailing_newline() {
 
 #[test]
 fn test_gnu_word_definition() {
-    // UTF-8 mode: non-printable non-space bytes are transparent (don't change in_word)
-    assert_eq!(count_words(b"\x00"), 0); // NUL: transparent, starts false -> stays false
-    assert_eq!(count_words(b"\x01"), 0); // SOH: transparent in UTF-8
-    assert_eq!(count_words(b"\x7f"), 0); // DEL: transparent in UTF-8
+    // GNU wc 2-state: non-space bytes are word content (matches GNU wc behavior)
+    assert_eq!(count_words(b"\x00"), 1); // NUL: word content
+    assert_eq!(count_words(b"\x01"), 1); // SOH: word content
+    assert_eq!(count_words(b"\x7f"), 1); // DEL: word content
     // Printable ASCII is always word content
     assert_eq!(count_words(b"!"), 1);
     assert_eq!(count_words(b"hello"), 1);
     // In UTF-8 mode, valid multi-byte sequences (>= U+00A0) are word content
     assert_eq!(count_words("café".as_bytes()), 1);
-    // In C locale, bytes >= 0x80 are TRANSPARENT (like GNU wc with mbrtowc/iswprint):
-    // they don't start or break words, they leave the word state unchanged.
-    assert_eq!(count_words_locale(b"\x80", false), 0); // transparent: no word
-    assert_eq!(count_words_locale(b"hello\x80world", false), 1); // transparent: doesn't break word
+    // In C locale, all non-space bytes are word content (matches GNU wc).
+    assert_eq!(count_words_locale(b"\x80", false), 1); // word content
+    assert_eq!(count_words_locale(b"hello\x80world", false), 1); // doesn't break word
     assert_eq!(count_words_locale(b"hello", false), 1);
-    // C locale: control chars are also transparent (not printable, not space)
-    assert_eq!(count_words_locale(b"\x01", false), 0);
-    assert_eq!(count_words_locale(b"\x7f", false), 0);
+    // C locale: control chars are word content (matches GNU wc)
+    assert_eq!(count_words_locale(b"\x01", false), 1);
+    assert_eq!(count_words_locale(b"\x7f", false), 1);
 }
 
 #[test]
 fn test_c_locale_cjk_word_count() {
-    // CJK text in C locale with 3-state logic:
-    // Bytes >= 0x80 are TRANSPARENT (not printable, not space) — they don't start words.
-    // Only printable ASCII (0x21-0x7E) starts words.
-    // "世界" bytes: e4 b8 96 e7 95 8c — all transparent, NO word.
+    // CJK text in C locale with 2-state logic:
+    // All non-space bytes are word content (matches GNU wc).
+    // "世界" bytes: e4 b8 96 e7 95 8c — all word content, 1 word.
     let data = "世界".as_bytes();
-    assert_eq!(count_words_locale(data, false), 0);
-    // Mixed: "Hello, 世界!" — "Hello," is word 1, space breaks,
-    // e4 b8 96 e7 95 8c are transparent (no word start), then "!" (0x21) starts word 2.
+    assert_eq!(count_words_locale(data, false), 1);
+    // Mixed: "Hello, 世界!" — "Hello," is word content, space breaks,
+    // e4 b8 96 e7 95 8c are word content continuing "!" = 1 word. Total: 2 words.
     let mixed = "Hello, 世界!".as_bytes();
     assert_eq!(count_words_locale(mixed, false), 2);
-    // Just CJK: each line is all transparent bytes + newline = 0 words
+    // Just CJK: each line has non-space bytes = 1 word per line
     let multi = "你好世界\nこんにちは\n".as_bytes();
-    assert_eq!(count_words_locale(multi, false), 0);
-    // Full test data matching independent test:
+    assert_eq!(count_words_locale(multi, false), 2);
+    // Full test data:
     // "Hello, 世界!\n你好世界\nこんにちは\n"
-    // Line 1: "Hello," (word 1) + space + transparent bytes + "!" (word 2) + newline
-    // Line 2: all transparent bytes + newline = 0 words
-    // Line 3: all transparent bytes + newline = 0 words
-    // Total: 2 words (matches GNU wc on CI Linux)
+    // Line 1: "Hello," (word 1) + space + "世界!" (word 2) + newline
+    // Line 2: "你好世界" (word 3) + newline
+    // Line 3: "こんにちは" (word 4) + newline
+    // Total: 4 words
     let full = "Hello, 世界!\n你好世界\nこんにちは\n".as_bytes();
-    assert_eq!(count_words_locale(full, false), 2);
+    assert_eq!(count_words_locale(full, false), 4);
 }
 
 #[test]

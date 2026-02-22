@@ -180,6 +180,10 @@ name = "fjoin"
 path = "src/bin/fjoin.rs"
 
 [[bin]]
+name = "fkill"
+path = "src/bin/fkill.rs"
+
+[[bin]]
 name = "flink"
 path = "src/bin/flink.rs"
 
