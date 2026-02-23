@@ -33,38 +33,206 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  # Build + test on all platforms. Clippy/fmt handled by lint job above.
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  # === Build jobs: compile once per platform, upload artifacts ===
+
+  build-linux:
+    name: Build (ubuntu-latest)
+    runs-on: ubuntu-latest
     env:
-      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
-      # when rust-cache provides artifacts from runners with different CPUs.
       RUSTFLAGS: ""
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared cache key — benchmarks reuse this cache to avoid a redundant build
-          key: test-v2-${{ matrix.os }}
-      - name: Install nasm and libssl-dev (Linux only)
-        if: matrix.os == 'ubuntu-latest'
+          key: build-v1-ubuntu-latest
+      - name: Install nasm and libssl-dev
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Build binaries
         run: cargo build --release
+      - name: Compile tests
+        run: cargo test --release --no-run
+      - name: Collect artifacts
+        run: |
+          mkdir -p artifacts/release artifacts/test-bins
+          # Get test executable paths from cargo's JSON output
+          cargo test --release --no-run --message-format=json 2>/dev/null | \
+            jq -r 'select(.reason == "compiler-artifact") | select(.executable != null) | select(.profile.test == true) | .executable' > test_executables.txt
+          # Copy f* release binaries (exclude .d dependency files)
+          for f in target/release/f*; do
+            [ -f "$f" ] && [ -x "$f" ] && [[ "$f" != *.d ]] && cp "$f" artifacts/release/
+          done
+          # Copy test executables
+          while IFS= read -r exe; do
+            [ -n "$exe" ] && [ -f "$exe" ] && cp "$exe" artifacts/test-bins/
+          done < test_executables.txt
+          # Verify we found something
+          echo "Release binaries: $(ls artifacts/release/ | wc -l)"
+          echo "Test executables: $(ls artifacts/test-bins/ | wc -l)"
+          [ -s test_executables.txt ] || { echo "ERROR: No test executables found"; exit 1; }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: build-ubuntu-latest
+          path: artifacts/
+          retention-days: 1
+
+  build-macos:
+    name: Build (macos-latest)
+    runs-on: macos-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-v1-macos-latest
+      - name: Build binaries
+        run: cargo build --release
+      - name: Compile tests
+        run: cargo test --release --no-run
+      - name: Collect artifacts
+        run: |
+          mkdir -p artifacts/release artifacts/test-bins
+          cargo test --release --no-run --message-format=json 2>/dev/null | \
+            jq -r 'select(.reason == "compiler-artifact") | select(.executable != null) | select(.profile.test == true) | .executable' > test_executables.txt
+          for f in target/release/f*; do
+            [ -f "$f" ] && [ -x "$f" ] && [[ "$f" != *.d ]] && cp "$f" artifacts/release/
+          done
+          while IFS= read -r exe; do
+            [ -n "$exe" ] && [ -f "$exe" ] && cp "$exe" artifacts/test-bins/
+          done < test_executables.txt
+          echo "Release binaries: $(ls artifacts/release/ | wc -l)"
+          echo "Test executables: $(ls artifacts/test-bins/ | wc -l)"
+          [ -s test_executables.txt ] || { echo "ERROR: No test executables found"; exit 1; }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: build-macos-latest
+          path: artifacts/
+          retention-days: 1
+
+  build-windows:
+    name: Build (windows-latest)
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-v1-windows-latest
+      - name: Build binaries
+        run: cargo build --release
+      - name: Compile tests
+        run: cargo test --release --no-run
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p artifacts/release artifacts/test-bins
+          cargo test --release --no-run --message-format=json 2>/dev/null | \
+            jq -r 'select(.reason == "compiler-artifact") | select(.executable != null) | select(.profile.test == true) | .executable' > test_executables.txt
+          # On Windows, binaries have .exe extension
+          for f in target/release/f*.exe; do
+            [ -f "$f" ] && cp "$f" artifacts/release/
+          done
+          while IFS= read -r exe; do
+            [ -n "$exe" ] && [ -f "$exe" ] && cp "$exe" artifacts/test-bins/
+          done < test_executables.txt
+          echo "Release binaries: $(ls artifacts/release/ | wc -l)"
+          echo "Test executables: $(ls artifacts/test-bins/ | wc -l)"
+          [ -s test_executables.txt ] || { echo "ERROR: No test executables found"; exit 1; }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: build-windows-latest
+          path: artifacts/
+          retention-days: 1
+
+  # === Test jobs: download pre-built artifacts, run tests ===
+
+  test-linux:
+    name: Test (ubuntu-latest)
+    needs: [build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: build-ubuntu-latest
+          path: artifacts/
+      - name: Restore binaries
+        run: |
+          mkdir -p target/release
+          cp artifacts/release/* target/release/
+          chmod +x target/release/* artifacts/test-bins/*
       - name: Run tests
-        run: cargo test --release
+        run: |
+          failed=0
+          for exe in artifacts/test-bins/*; do
+            [ -f "$exe" ] || continue
+            echo "::group::Running $(basename "$exe")"
+            "$exe" || failed=1
+            echo "::endgroup::"
+          done
+          [ $failed -eq 0 ]
       - name: Build and test assembly fyes (Linux x86_64 only)
-        if: matrix.os == 'ubuntu-latest'
         run: |
           cd assembly/yes
           python3 build.py --no-verify
           python3 ../../tests/assembly/fyes_vs_yes_tests.py --test-only
+
+  test-macos:
+    name: Test (macos-latest)
+    needs: [build-macos]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: build-macos-latest
+          path: artifacts/
+      - name: Restore binaries
+        run: |
+          mkdir -p target/release
+          cp artifacts/release/* target/release/
+          chmod +x target/release/* artifacts/test-bins/*
+      - name: Run tests
+        run: |
+          failed=0
+          for exe in artifacts/test-bins/*; do
+            [ -f "$exe" ] || continue
+            echo "::group::Running $(basename "$exe")"
+            "$exe" || failed=1
+            echo "::endgroup::"
+          done
+          [ $failed -eq 0 ]
+
+  test-windows:
+    name: Test (windows-latest)
+    needs: [build-windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: build-windows-latest
+          path: artifacts/
+      - name: Restore binaries
+        shell: bash
+        run: |
+          mkdir -p target/release
+          cp artifacts/release/* target/release/
+      - name: Run tests
+        shell: bash
+        run: |
+          failed=0
+          for exe in artifacts/test-bins/*.exe; do
+            [ -f "$exe" ] || continue
+            echo "::group::Running $(basename "$exe")"
+            "$exe" || failed=1
+            echo "::endgroup::"
+          done
+          [ $failed -eq 0 ]
 
   test-assembly-arm64:
     name: Test assembly fyes (Linux ARM64)
@@ -86,7 +254,7 @@ jobs:
 
   benchmarks:
     name: Benchmarks
-    needs: [test]
+    needs: [test-linux]
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: ""
@@ -95,8 +263,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # Reuse the same cache as the ubuntu test job — avoids a full rebuild
-          key: test-v2-ubuntu-latest
+          # Reuse the same cache as the ubuntu build job
+          key: build-v1-ubuntu-latest
       - name: Install nasm and libssl-dev
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Run benchmarks
