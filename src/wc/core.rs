@@ -159,9 +159,10 @@ fn count_words_c(data: &[u8]) -> u64 {
 
 /// Scalar tail for SIMD line+word counters: processes remaining bytes after
 /// the SIMD loop and returns final counts with boundary info.
+/// SAFETY: caller must ensure ptr is valid for [0..len) and i <= len.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn count_lw_c_scalar_tail(
+fn count_lw_c_scalar_tail(
     ptr: *const u8,
     mut i: usize,
     len: usize,
@@ -171,11 +172,11 @@ unsafe fn count_lw_c_scalar_tail(
     data: &[u8],
 ) -> (u64, u64, bool, bool) {
     while i < len {
-        let b = *ptr.add(i);
+        let b = unsafe { *ptr.add(i) };
         if b == b'\n' {
             total_lines += 1;
             prev_in_word = false;
-        } else if *BYTE_CLASS_C.get_unchecked(b as usize) == 1 {
+        } else if unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) } == 1 {
             prev_in_word = false;
         } else if !prev_in_word {
             total_words += 1;
