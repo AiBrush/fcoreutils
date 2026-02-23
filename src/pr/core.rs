@@ -220,6 +220,18 @@ fn has_explicit_separator(config: &PrConfig) -> bool {
 /// Static spaces buffer for padding without allocation.
 const SPACES: [u8; 256] = [b' '; 256];
 
+/// Write `n` spaces to output using the static SPACES buffer.
+#[inline]
+fn write_spaces<W: Write>(output: &mut W, n: usize) -> io::Result<()> {
+    let mut remaining = n;
+    while remaining > 0 {
+        let chunk = remaining.min(SPACES.len());
+        output.write_all(&SPACES[..chunk])?;
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
 fn write_column_padding<W: Write>(output: &mut W, abs_pos: usize, target_abs_pos: usize) -> io::Result<()> {
     let tab_size = 8;
     let mut pos = abs_pos;
@@ -243,6 +255,42 @@ fn write_column_padding<W: Write>(output: &mut W, abs_pos: usize, target_abs_pos
     Ok(())
 }
 
+/// Paginate raw byte data — fast path that avoids per-line String allocation.
+/// When no tab expansion or control char processing is needed, lines are
+/// extracted as &str slices directly from the input buffer (zero-copy).
+pub fn pr_data<W: Write>(
+    data: &[u8],
+    output: &mut W,
+    config: &PrConfig,
+    filename: &str,
+    file_date: Option<SystemTime>,
+) -> io::Result<()> {
+    let needs_transform = config.expand_tabs.is_some()
+        || config.show_control_chars
+        || config.show_nonprinting;
+
+    if needs_transform {
+        // Fall back to the String-based path for transforms
+        let reader = io::Cursor::new(data);
+        return pr_file(reader, output, config, filename, file_date);
+    }
+
+    // Fast path: zero-copy line extraction from byte data
+    let text = String::from_utf8_lossy(data);
+    // Split into lines without trailing newlines (matching BufRead::lines behavior)
+    let all_lines: Vec<&str> = text.split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
+    // Remove trailing empty line from final newline (matching lines() behavior)
+    let all_lines = if all_lines.last() == Some(&"") {
+        &all_lines[..all_lines.len() - 1]
+    } else {
+        &all_lines[..]
+    };
+
+    pr_lines_generic(all_lines, output, config, filename, file_date)
+}
+
 /// Paginate a single file and write output.
 pub fn pr_file<R: BufRead, W: Write>(
     input: R,
@@ -251,9 +299,7 @@ pub fn pr_file<R: BufRead, W: Write>(
     filename: &str,
     file_date: Option<SystemTime>,
 ) -> io::Result<()> {
-    let date = file_date.unwrap_or_else(SystemTime::now);
-
-    // Read all lines
+    // Read all lines with transforms applied
     let mut all_lines: Vec<String> = Vec::new();
     for line_result in input.lines() {
         let line = line_result?;
@@ -271,6 +317,21 @@ pub fn pr_file<R: BufRead, W: Write>(
 
         all_lines.push(line);
     }
+
+    // Convert to &str slice for the generic paginator
+    let refs: Vec<&str> = all_lines.iter().map(|s| s.as_str()).collect();
+    pr_lines_generic(&refs, output, config, filename, file_date)
+}
+
+/// Core paginator that works on a slice of string references.
+fn pr_lines_generic<W: Write>(
+    all_lines: &[&str],
+    output: &mut W,
+    config: &PrConfig,
+    filename: &str,
+    file_date: Option<SystemTime>,
+) -> io::Result<()> {
+    let date = file_date.unwrap_or_else(SystemTime::now);
 
     let header_str = config.header.as_deref().unwrap_or(filename);
     let date_str = format_header_date(&date, &config.date_format);
@@ -541,60 +602,76 @@ fn write_header<W: Write>(
     config: &PrConfig,
 ) -> io::Result<()> {
     // 2 blank lines
-    writeln!(output)?;
-    writeln!(output)?;
+    output.write_all(b"\n\n")?;
 
     // Header line: date is left-aligned, header is centered, Page N is right-aligned.
-    // Total width is page_width (default 72).
-    let page_str = format!("Page {}", page_num);
     let line_width = config.page_width;
 
     let left = date_str;
-    let right = &page_str;
     let center = header;
-
-    // Available space for center text between left and right.
     let left_len = left.len();
-    let right_len = right.len();
     let center_len = center.len();
 
+    // Format "Page N" without allocation for small page numbers
+    let mut page_buf = [0u8; 32];
+    let page_str = format_page_number(page_num, &mut page_buf);
+    let right_len = page_str.len();
+
     // GNU pr centers the header title within the line.
-    // The layout is: LEFT + spaces + CENTER + spaces + RIGHT
-    // where the total is exactly line_width characters.
     if left_len + center_len + right_len + 2 >= line_width {
-        // Not enough space to center; just concatenate.
-        writeln!(output, "{} {} {}", left, center, right)?;
+        output.write_all(left.as_bytes())?;
+        output.write_all(b" ")?;
+        output.write_all(center.as_bytes())?;
+        output.write_all(b" ")?;
+        output.write_all(page_str)?;
+        output.write_all(b"\n")?;
     } else {
         let total_spaces = line_width - left_len - center_len - right_len;
-        // Distribute spaces evenly around the center text.
         let left_spaces = total_spaces / 2;
         let right_spaces = total_spaces - left_spaces;
-        writeln!(
-            output,
-            "{}{}{}{}{}",
-            left,
-            " ".repeat(left_spaces),
-            center,
-            " ".repeat(right_spaces),
-            right
-        )?;
+        output.write_all(left.as_bytes())?;
+        write_spaces(output, left_spaces)?;
+        output.write_all(center.as_bytes())?;
+        write_spaces(output, right_spaces)?;
+        output.write_all(page_str)?;
+        output.write_all(b"\n")?;
     }
 
     // 2 blank lines
-    writeln!(output)?;
-    writeln!(output)?;
+    output.write_all(b"\n\n")?;
 
     Ok(())
+}
+
+/// Format "Page N" into a stack buffer, returning the used slice.
+#[inline]
+fn format_page_number(page_num: usize, buf: &mut [u8; 32]) -> &[u8] {
+    const PREFIX: &[u8] = b"Page ";
+    let prefix_len = PREFIX.len();
+    buf[..prefix_len].copy_from_slice(PREFIX);
+    // Format number into a separate stack buffer to avoid overlapping borrow
+    let mut num_buf = [0u8; 20];
+    let mut n = page_num;
+    let mut pos = 19;
+    loop {
+        num_buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+        pos -= 1;
+    }
+    let num_len = 20 - pos;
+    buf[prefix_len..prefix_len + num_len].copy_from_slice(&num_buf[pos..20]);
+    &buf[..prefix_len + num_len]
 }
 
 /// Write page footer: 5 blank lines (or form feed).
 fn write_footer<W: Write>(output: &mut W, config: &PrConfig) -> io::Result<()> {
     if config.form_feed {
-        write!(output, "\x0c")?;
+        output.write_all(b"\x0c")?;
     } else {
-        for _ in 0..FOOTER_LINES {
-            writeln!(output)?;
-        }
+        output.write_all(b"\n\n\n\n\n")?;
     }
     Ok(())
 }
@@ -602,7 +679,7 @@ fn write_footer<W: Write>(output: &mut W, config: &PrConfig) -> io::Result<()> {
 /// Write body for single column mode.
 fn write_single_column_body<W: Write>(
     output: &mut W,
-    lines: &[String],
+    lines: &[&str],
     config: &PrConfig,
     line_number: &mut usize,
     body_lines_per_page: usize,
@@ -610,12 +687,16 @@ fn write_single_column_body<W: Write>(
     let indent_str = " ".repeat(config.indent);
     let content_width = if config.truncate_lines { compute_content_width(config) } else { 0 };
     let mut body_lines_written = 0;
+    // Pre-allocate line number buffer to avoid per-line write! formatting
+    let mut num_buf = [0u8; 32];
 
     for line in lines.iter() {
         output.write_all(indent_str.as_bytes())?;
 
         if let Some((sep, digits)) = config.number_lines {
-            write!(output, "{:>width$}{}", line_number, sep, width = digits)?;
+            // Format line number directly into buffer, avoiding write! overhead
+            let num_str = format_line_number(*line_number, sep, digits, &mut num_buf);
+            output.write_all(num_str)?;
             *line_number += 1;
         }
 
@@ -623,13 +704,15 @@ fn write_single_column_body<W: Write>(
             if line.len() > content_width {
                 &line[..content_width]
             } else {
-                line.as_str()
+                line
             }
         } else {
-            line.as_str()
+            line
         };
 
-        writeln!(output, "{}", content)?;
+        // Direct write_all avoids std::fmt Display dispatch overhead
+        output.write_all(content.as_bytes())?;
+        output.write_all(b"\n")?;
         body_lines_written += 1;
         if body_lines_written >= body_lines_per_page {
             break;
@@ -637,7 +720,7 @@ fn write_single_column_body<W: Write>(
 
         // Double-space: write blank line AFTER each content line
         if config.double_space {
-            writeln!(output)?;
+            output.write_all(b"\n")?;
             body_lines_written += 1;
             if body_lines_written >= body_lines_per_page {
                 break;
@@ -648,12 +731,55 @@ fn write_single_column_body<W: Write>(
     // Pad remaining body lines if not omitting headers
     if !config.omit_header && !config.omit_pagination {
         while body_lines_written < body_lines_per_page {
-            writeln!(output)?;
+            output.write_all(b"\n")?;
             body_lines_written += 1;
         }
     }
 
     Ok(())
+}
+
+/// Format a line number with right-aligned padding and separator into a stack buffer.
+/// Returns the formatted slice. Avoids write!() per-line overhead.
+#[inline]
+fn format_line_number(num: usize, sep: char, digits: usize, buf: &mut [u8; 32]) -> &[u8] {
+    // Format the number
+    let mut n = num;
+    let mut pos = 31;
+    loop {
+        buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 || pos == 0 {
+            break;
+        }
+        pos -= 1;
+    }
+    let num_digits = 32 - pos;
+    // Build the output: spaces for padding + number + separator
+    let padding = if digits > num_digits { digits - num_digits } else { 0 };
+    let total_len = padding + num_digits + sep.len_utf8();
+    // We need a separate output buffer since we're using buf for the number
+    // Just use the write_all approach with two calls for simplicity
+    let start = 32 - num_digits;
+    // Return just the number portion; caller handles padding via spaces
+    // Actually, let's format properly into a contiguous buffer
+    let sep_byte = sep as u8; // ASCII separator assumed
+    let out_start = 32usize.saturating_sub(total_len);
+    // Fill padding
+    for i in out_start..out_start + padding {
+        buf[i] = b' ';
+    }
+    // Number is already at positions [start..32], shift if needed
+    if out_start + padding != start {
+        let src = start;
+        let dst = out_start + padding;
+        for i in 0..num_digits {
+            buf[dst + i] = buf[src + i];
+        }
+    }
+    // Add separator
+    buf[out_start + padding + num_digits] = sep_byte;
+    &buf[out_start..out_start + total_len]
 }
 
 /// Compute available content width after accounting for numbering and indent.
@@ -669,7 +795,7 @@ fn compute_content_width(config: &PrConfig) -> usize {
 /// Write body for multi-column mode.
 fn write_multicolumn_body<W: Write>(
     output: &mut W,
-    lines: &[String],
+    lines: &[&str],
     config: &PrConfig,
     columns: usize,
     line_number: &mut usize,
@@ -731,13 +857,13 @@ fn write_multicolumn_body<W: Write>(
                         abs_pos += digits + 1;
                         *line_number += 1;
                     }
-                    let content = &lines[li];
+                    let content = lines[li];
                     let truncated = if config.truncate_lines && content.len() > col_width {
                         &content[..col_width]
                     } else {
-                        content.as_str()
+                        content
                     };
-                    write!(output, "{}", truncated)?;
+                    output.write_all(truncated.as_bytes())?;
                     abs_pos += truncated.len();
                     if col < last_data_col && !explicit_sep {
                         let target = (col + 1) * col_width + config.indent;
@@ -746,7 +872,7 @@ fn write_multicolumn_body<W: Write>(
                     }
                 }
             }
-            writeln!(output)?;
+            output.write_all(b"\n")?;
             body_lines_written += 1;
             i += columns;
         }
@@ -802,13 +928,13 @@ fn write_multicolumn_body<W: Write>(
                         write!(output, "{:>width$}{}", num, sep, width = digits)?;
                         abs_pos += digits + 1;
                     }
-                    let content = &lines[li];
+                    let content = lines[li];
                     let truncated = if config.truncate_lines && content.len() > col_width {
                         &content[..col_width]
                     } else {
-                        content.as_str()
+                        content
                     };
-                    write!(output, "{}", truncated)?;
+                    output.write_all(truncated.as_bytes())?;
                     abs_pos += truncated.len();
                     if col < last_data_col && !explicit_sep {
                         // Not the last column with data: pad to next column boundary
@@ -832,7 +958,7 @@ fn write_multicolumn_body<W: Write>(
                 }
                 // Empty columns after last data column: skip entirely
             }
-            writeln!(output)?;
+            output.write_all(b"\n")?;
             body_lines_written += 1;
         }
         // Update line_number for the lines we processed
@@ -844,7 +970,7 @@ fn write_multicolumn_body<W: Write>(
     // Pad remaining body lines
     if !config.omit_header && !config.omit_pagination {
         while body_lines_written < body_lines_per_page {
-            writeln!(output)?;
+            output.write_all(b"\n")?;
             body_lines_written += 1;
         }
     }

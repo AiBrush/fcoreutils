@@ -136,23 +136,63 @@ fn fold_byte_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &mut
 
 /// Fold by column count (default mode, handles tabs and backspaces).
 fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
-    let mut col: usize = 0;
-    let mut last_space_out_pos: Option<usize> = None;
+    let mut pos = 0;
 
-    for &byte in data {
-        if byte == b'\n' {
-            output.push(b'\n');
-            col = 0;
-            last_space_out_pos = None;
+    while pos < data.len() {
+        // Find the next newline using SIMD
+        let remaining = &data[pos..];
+        let line_end = memchr::memchr(b'\n', remaining).map(|p| pos + p);
+        let line_data = match line_end {
+            Some(nl) => &data[pos..nl],
+            None => &data[pos..],
+        };
+
+        // Fast path: if the line has no tabs/backspaces and is <= width, copy verbatim
+        if line_data.len() <= width && !has_special_bytes(line_data) {
+            output.extend_from_slice(line_data);
+            if let Some(nl) = line_end {
+                output.push(b'\n');
+                pos = nl + 1;
+            } else {
+                break;
+            }
             continue;
         }
 
+        // Slow path: process character by character for this line
+        fold_one_line_column(line_data, width, break_at_spaces, output);
+        if let Some(nl) = line_end {
+            output.push(b'\n');
+            pos = nl + 1;
+        } else {
+            break;
+        }
+    }
+}
+
+/// Check if a line contains tab or backspace (bytes that affect column counting).
+#[inline]
+fn has_special_bytes(data: &[u8]) -> bool {
+    // memchr2 finds tab or backspace efficiently via SIMD
+    memchr::memchr2(b'\t', b'\x08', data).is_some()
+}
+
+/// Process a single line (no newlines) in column mode, writing to output.
+fn fold_one_line_column(
+    line: &[u8],
+    width: usize,
+    break_at_spaces: bool,
+    output: &mut Vec<u8>,
+) {
+    let mut col: usize = 0;
+    let mut last_space_out_pos: Option<usize> = None;
+
+    for &byte in line {
         // Calculate display width of this byte
         let char_width = if byte == b'\t' {
             let next_stop = ((col / 8) + 1) * 8;
             next_stop - col
         } else if byte == b'\x08' || byte < 0x20 || byte == 0x7f {
-            // Backspace and other control chars: 0 width
             0
         } else {
             1

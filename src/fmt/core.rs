@@ -71,7 +71,7 @@ fn fmt_str(text: &str, output: &mut impl Write, config: &FmtConfig) -> io::Resul
 
     // Scan through the text finding paragraph boundaries
     let mut i = 0;
-    let mut para_lines_start = 0; // byte offset where current paragraph starts
+    let _para_lines_start = 0; // byte offset where current paragraph starts
 
     while i < bytes.len() {
         // Find end of current line

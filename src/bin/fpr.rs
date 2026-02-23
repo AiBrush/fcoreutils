@@ -9,10 +9,14 @@ use std::fs;
 #[cfg(unix)]
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 #[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
 use std::process;
 #[cfg(unix)]
 use std::time::SystemTime;
 
+#[cfg(unix)]
+use coreutils_rs::common::io::{read_file_mmap, read_stdin, FileData};
 #[cfg(unix)]
 use coreutils_rs::common::{io_error_msg, reset_sigpipe};
 #[cfg(unix)]
@@ -395,39 +399,42 @@ fn main() {
         }
     } else {
         for filename in &files {
-            if filename == "-" {
-                let stdin = io::stdin();
-                let reader = BufReader::new(stdin.lock());
-                let date = SystemTime::now();
-                if let Err(e) = pr::pr_file(reader, &mut out, &cli.config, "", Some(date)) {
-                    if e.kind() == io::ErrorKind::BrokenPipe {
-                        let _ = out.flush();
-                        process::exit(0);
+            let data: FileData = if filename == "-" {
+                match read_stdin() {
+                    Ok(d) => FileData::Owned(d),
+                    Err(e) => {
+                        eprintln!("pr: standard input: {}", io_error_msg(&e));
+                        had_error = true;
+                        continue;
                     }
-                    eprintln!("pr: write error: {}", io_error_msg(&e));
-                    had_error = true;
                 }
             } else {
-                match fs::File::open(filename) {
-                    Ok(f) => {
-                        let reader = BufReader::new(f);
-                        let date = file_mod_time(filename);
-                        if let Err(e) = pr::pr_file(reader, &mut out, &cli.config, filename, date) {
-                            if e.kind() == io::ErrorKind::BrokenPipe {
-                                let _ = out.flush();
-                                process::exit(0);
-                            }
-                            eprintln!("pr: write error: {}", io_error_msg(&e));
-                            had_error = true;
-                        }
-                    }
+                match read_file_mmap(Path::new(filename)) {
+                    Ok(d) => d,
                     Err(e) => {
                         if !cli.config.no_file_warnings {
                             eprintln!("pr: {}: {}", filename, io_error_msg(&e));
                         }
                         had_error = true;
+                        continue;
                     }
                 }
+            };
+
+            let date = if filename == "-" {
+                Some(SystemTime::now())
+            } else {
+                file_mod_time(filename)
+            };
+            let display_name = if filename == "-" { "" } else { filename.as_str() };
+
+            if let Err(e) = pr::pr_data(&data, &mut out, &cli.config, display_name, date) {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    let _ = out.flush();
+                    process::exit(0);
+                }
+                eprintln!("pr: write error: {}", io_error_msg(&e));
+                had_error = true;
             }
         }
     }

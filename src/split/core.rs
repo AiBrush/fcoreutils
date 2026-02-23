@@ -292,29 +292,25 @@ fn split_by_lines(
 
             // How many lines left before we need a new chunk?
             let lines_needed = lines_per_chunk - lines_in_chunk;
-
-            // Scan for separator positions in the remaining buffer
             let slice = &available[pos..];
-            let mut found = 0u64;
-            let mut scan_pos = 0;
-            let mut last_sep_pos = 0; // position after last separator found
 
-            // Count up to lines_needed separators
-            while found < lines_needed {
-                match memchr::memchr(sep, &slice[scan_pos..]) {
-                    Some(offset) => {
-                        found += 1;
-                        last_sep_pos = scan_pos + offset + 1;
-                        scan_pos = last_sep_pos;
-                    }
-                    None => break,
+            // Use memchr_iter for bulk SIMD scanning — finds all separator
+            // positions in one pass instead of N individual memchr calls.
+            let mut found = 0u64;
+            let mut last_sep_end = 0;
+
+            for offset in memchr::memchr_iter(sep, slice) {
+                found += 1;
+                last_sep_end = offset + 1;
+                if found >= lines_needed {
+                    break;
                 }
             }
 
             if found >= lines_needed {
                 // We found enough lines - write the contiguous slice
-                writer.as_mut().unwrap().write_all(&slice[..last_sep_pos])?;
-                pos += last_sep_pos;
+                writer.as_mut().unwrap().write_all(&slice[..last_sep_end])?;
+                pos += last_sep_end;
                 // Close this chunk
                 writer.as_mut().unwrap().finish()?;
                 writer = None;
@@ -573,7 +569,7 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
 
     match config.mode {
         SplitMode::Lines(n) => {
-            let mut buf_reader = BufReader::with_capacity(256 * 1024, reader);
+            let mut buf_reader = BufReader::with_capacity(1024 * 1024, reader);
             split_by_lines(&mut buf_reader, config, n)
         }
         SplitMode::Bytes(n) => {
@@ -581,7 +577,7 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
             split_by_bytes(&mut reader, config, n)
         }
         SplitMode::LineBytes(n) => {
-            let mut buf_reader = BufReader::with_capacity(256 * 1024, reader);
+            let mut buf_reader = BufReader::with_capacity(1024 * 1024, reader);
             split_by_line_bytes(&mut buf_reader, config, n)
         }
         SplitMode::Number(_) => unreachable!(),
