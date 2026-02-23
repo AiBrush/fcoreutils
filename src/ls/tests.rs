@@ -20,10 +20,11 @@ fn setup_dir() -> TempDir {
 }
 
 fn default_config() -> LsConfig {
-    let mut cfg = LsConfig::default();
-    cfg.format = OutputFormat::SingleColumn;
-    cfg.width = 80;
-    cfg
+    LsConfig {
+        format: OutputFormat::SingleColumn,
+        width: 80,
+        ..LsConfig::default()
+    }
 }
 
 /// Get the path to a built binary. Works in both lib tests and integration tests.

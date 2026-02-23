@@ -220,7 +220,7 @@ fn test_escape_carriage_return() {
         interpret_escapes: true,
     };
     let output = echo_output(&args, &config);
-    assert_eq!(output, &[b'\r']);
+    assert_eq!(output, b"\r");
 }
 
 #[test]

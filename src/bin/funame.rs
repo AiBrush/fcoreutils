@@ -253,7 +253,7 @@ mod tests {
         let output = cmd().arg("-a").output().unwrap();
         assert_eq!(output.status.code(), Some(0));
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
         assert!(
             parts.len() >= 5,
             "uname -a should have multiple fields, got: {:?}",
@@ -276,7 +276,7 @@ mod tests {
         let output = cmd().arg("-sr").output().unwrap();
         assert_eq!(output.status.code(), Some(0));
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
         assert_eq!(parts.len(), 2, "uname -sr should have 2 fields");
     }
 

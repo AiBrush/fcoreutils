@@ -23,21 +23,21 @@ fn create_test_tree() -> TempDir {
 
     // file1.txt
     let mut f1 = fs::File::create(root.join("file1.txt")).unwrap();
-    f1.write_all(&vec![b'A'; 100]).unwrap();
+    f1.write_all(&[b'A'; 100]).unwrap();
 
     // subdir/file2.txt
     fs::create_dir(root.join("subdir")).unwrap();
     let mut f2 = fs::File::create(root.join("subdir").join("file2.txt")).unwrap();
-    f2.write_all(&vec![b'B'; 200]).unwrap();
+    f2.write_all(&[b'B'; 200]).unwrap();
 
     // subdir/nested/file3.txt
     fs::create_dir(root.join("subdir").join("nested")).unwrap();
     let mut f3 = fs::File::create(root.join("subdir").join("nested").join("file3.txt")).unwrap();
-    f3.write_all(&vec![b'C'; 50]).unwrap();
+    f3.write_all(&[b'C'; 50]).unwrap();
 
     // excluded.log
     let mut f4 = fs::File::create(root.join("excluded.log")).unwrap();
-    f4.write_all(&vec![b'D'; 75]).unwrap();
+    f4.write_all(&[b'D'; 75]).unwrap();
 
     tmp
 }

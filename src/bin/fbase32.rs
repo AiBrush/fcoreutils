@@ -193,7 +193,11 @@ fn base32_encode(data: &[u8]) -> Vec<u8> {
         let chunk = &data[full_end..];
         let mut buf = [0u8; 5];
         buf[..chunk.len()].copy_from_slice(chunk);
-        let b0 = buf[0]; let b1 = buf[1]; let b2 = buf[2]; let b3 = buf[3]; let b4 = buf[4];
+        let b0 = buf[0];
+        let b1 = buf[1];
+        let b2 = buf[2];
+        let b3 = buf[3];
+        let b4 = buf[4];
 
         result.push(BASE32_ALPHABET[(b0 >> 3) as usize]);
         result.push(BASE32_ALPHABET[((b0 & 0x07) << 2 | b1 >> 6) as usize]);
@@ -230,7 +234,7 @@ fn base32_encode(data: &[u8]) -> Vec<u8> {
 fn base32_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
     let mut result = Vec::with_capacity(input.len() * 5 / 8 + 5);
     let mut vals = [0u8; 8];
-    let mut n = 0usize;   // valid (non-padding) chars in current group
+    let mut n = 0usize; // valid (non-padding) chars in current group
     let mut pos = 0usize; // total position in group (valid + padding)
     let mut i = 0usize;
 
@@ -264,14 +268,24 @@ fn base32_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
         let b = input[i];
         i += 1;
 
-        if b == b'\n' || b == b'\r' { continue; }
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
         if b == b'=' {
             pos += 1;
             if pos == 8 {
-                if n >= 2 { result.push((vals[0] << 3) | (vals[1] >> 2)); }
-                if n >= 4 { result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4)); }
-                if n >= 5 { result.push((vals[3] << 4) | (vals[4] >> 1)); }
-                if n >= 7 { result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3)); }
+                if n >= 2 {
+                    result.push((vals[0] << 3) | (vals[1] >> 2));
+                }
+                if n >= 4 {
+                    result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
+                }
+                if n >= 5 {
+                    result.push((vals[3] << 4) | (vals[4] >> 1));
+                }
+                if n >= 7 {
+                    result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
+                }
                 n = 0;
                 pos = 0;
             }
@@ -301,11 +315,21 @@ fn base32_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
     }
 
     // Trailing partial group
-    if n >= 2 { result.push((vals[0] << 3) | (vals[1] >> 2)); }
-    if n >= 4 { result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4)); }
-    if n >= 5 { result.push((vals[3] << 4) | (vals[4] >> 1)); }
-    if n >= 7 { result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3)); }
-    if n >= 8 { result.push((vals[6] << 5) | vals[7]); }
+    if n >= 2 {
+        result.push((vals[0] << 3) | (vals[1] >> 2));
+    }
+    if n >= 4 {
+        result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
+    }
+    if n >= 5 {
+        result.push((vals[3] << 4) | (vals[4] >> 1));
+    }
+    if n >= 7 {
+        result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
+    }
+    if n >= 8 {
+        result.push((vals[6] << 5) | vals[7]);
+    }
 
     Ok(result)
 }

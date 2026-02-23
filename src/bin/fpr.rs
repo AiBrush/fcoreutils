@@ -16,7 +16,7 @@ use std::process;
 use std::time::SystemTime;
 
 #[cfg(unix)]
-use coreutils_rs::common::io::{read_file_mmap, read_stdin, FileData};
+use coreutils_rs::common::io::{FileData, read_file_mmap, read_stdin};
 #[cfg(unix)]
 use coreutils_rs::common::{io_error_msg, reset_sigpipe};
 #[cfg(unix)]
@@ -426,7 +426,11 @@ fn main() {
             } else {
                 file_mod_time(filename)
             };
-            let display_name = if filename == "-" { "" } else { filename.as_str() };
+            let display_name = if filename == "-" {
+                ""
+            } else {
+                filename.as_str()
+            };
 
             if let Err(e) = pr::pr_data(&data, &mut out, &cli.config, display_name, date) {
                 if e.kind() == io::ErrorKind::BrokenPipe {

@@ -197,12 +197,18 @@ fn base64_decode(
     let mut pos = 0usize;
 
     for &b in input {
-        if b == b'\n' || b == b'\r' { continue; }
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
         if b == b'=' {
             pos += 1;
             if pos == 4 {
-                if n >= 2 { result.push((vals[0] << 2) | (vals[1] >> 4)); }
-                if n >= 3 { result.push((vals[1] << 4) | (vals[2] >> 2)); }
+                if n >= 2 {
+                    result.push((vals[0] << 2) | (vals[1] >> 4));
+                }
+                if n >= 3 {
+                    result.push((vals[1] << 4) | (vals[2] >> 2));
+                }
                 n = 0;
                 pos = 0;
             }
@@ -229,9 +235,15 @@ fn base64_decode(
         }
     }
 
-    if n >= 2 { result.push((vals[0] << 2) | (vals[1] >> 4)); }
-    if n >= 3 { result.push((vals[1] << 4) | (vals[2] >> 2)); }
-    if n >= 4 { result.push((vals[2] << 6) | vals[3]); }
+    if n >= 2 {
+        result.push((vals[0] << 2) | (vals[1] >> 4));
+    }
+    if n >= 3 {
+        result.push((vals[1] << 4) | (vals[2] >> 2));
+    }
+    if n >= 4 {
+        result.push((vals[2] << 6) | vals[3]);
+    }
 
     Ok(result)
 }
@@ -298,14 +310,24 @@ fn base32_decode(
         let b = input[i];
         i += 1;
 
-        if b == b'\n' || b == b'\r' { continue; }
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
         if b == b'=' {
             pos += 1;
             if pos == 8 {
-                if n >= 2 { result.push((vals[0] << 3) | (vals[1] >> 2)); }
-                if n >= 4 { result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4)); }
-                if n >= 5 { result.push((vals[3] << 4) | (vals[4] >> 1)); }
-                if n >= 7 { result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3)); }
+                if n >= 2 {
+                    result.push((vals[0] << 3) | (vals[1] >> 2));
+                }
+                if n >= 4 {
+                    result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
+                }
+                if n >= 5 {
+                    result.push((vals[3] << 4) | (vals[4] >> 1));
+                }
+                if n >= 7 {
+                    result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
+                }
                 n = 0;
                 pos = 0;
             }
@@ -334,11 +356,21 @@ fn base32_decode(
         }
     }
 
-    if n >= 2 { result.push((vals[0] << 3) | (vals[1] >> 2)); }
-    if n >= 4 { result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4)); }
-    if n >= 5 { result.push((vals[3] << 4) | (vals[4] >> 1)); }
-    if n >= 7 { result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3)); }
-    if n >= 8 { result.push((vals[6] << 5) | vals[7]); }
+    if n >= 2 {
+        result.push((vals[0] << 3) | (vals[1] >> 2));
+    }
+    if n >= 4 {
+        result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
+    }
+    if n >= 5 {
+        result.push((vals[3] << 4) | (vals[4] >> 1));
+    }
+    if n >= 7 {
+        result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
+    }
+    if n >= 8 {
+        result.push((vals[6] << 5) | vals[7]);
+    }
 
     Ok(result)
 }
@@ -356,7 +388,9 @@ fn base16_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
     let mut pending: i16 = -1;
 
     for &b in input {
-        if b == b'\n' || b == b'\r' { continue; }
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
         let v = hex_val(b);
         if v == 0xFF {
             if !ignore_garbage {
@@ -402,7 +436,9 @@ fn base2msbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, Strin
     let mut bits = 0u8;
 
     for &b in input {
-        if b == b'\n' || b == b'\r' { continue; }
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
         if b != b'0' && b != b'1' {
             if !ignore_garbage {
                 return Err(format!("{}: invalid input", TOOL_NAME));
@@ -437,7 +473,9 @@ fn base2lsbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, Strin
     let mut bits = 0u8;
 
     for &b in input {
-        if b == b'\n' || b == b'\r' { continue; }
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
         if b != b'0' && b != b'1' {
             if !ignore_garbage {
                 return Err(format!("{}: invalid input", TOOL_NAME));
@@ -491,7 +529,9 @@ fn z85_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
     let mut count = 0u8;
 
     for &b in input {
-        if b == b'\n' || b == b'\r' { continue; }
+        if b == b'\n' || b == b'\r' {
+            continue;
+        }
         let v = Z85_DECODE_TABLE[b as usize];
         if v == 0xFF {
             if !ignore_garbage {
@@ -608,7 +648,9 @@ fn base64_encode_bytes(data: &[u8], alphabet: &[u8; 64]) -> Vec<u8> {
 
     // Full 3-byte chunks: no padding, no branches
     for chunk in data[..full_end].chunks_exact(3) {
-        let b0 = chunk[0]; let b1 = chunk[1]; let b2 = chunk[2];
+        let b0 = chunk[0];
+        let b1 = chunk[1];
+        let b2 = chunk[2];
         result.extend_from_slice(&[
             alphabet[(b0 >> 2) as usize],
             alphabet[((b0 & 0x03) << 4 | b1 >> 4) as usize],
@@ -624,10 +666,12 @@ fn base64_encode_bytes(data: &[u8], alphabet: &[u8; 64]) -> Vec<u8> {
         result.extend_from_slice(&[
             alphabet[(b0 >> 2) as usize],
             alphabet[((b0 & 0x03) << 4) as usize],
-            b'=', b'=',
+            b'=',
+            b'=',
         ]);
     } else if remainder == 2 {
-        let b0 = data[full_end]; let b1 = data[full_end + 1];
+        let b0 = data[full_end];
+        let b1 = data[full_end + 1];
         result.extend_from_slice(&[
             alphabet[(b0 >> 2) as usize],
             alphabet[((b0 & 0x03) << 4 | b1 >> 4) as usize],
@@ -649,7 +693,11 @@ fn base32_encode_bytes(data: &[u8], alphabet: &[u8; 32]) -> Vec<u8> {
 
     // Full 5-byte chunks: no padding, no branches
     for chunk in data[..full_end].chunks_exact(5) {
-        let b0 = chunk[0]; let b1 = chunk[1]; let b2 = chunk[2]; let b3 = chunk[3]; let b4 = chunk[4];
+        let b0 = chunk[0];
+        let b1 = chunk[1];
+        let b2 = chunk[2];
+        let b3 = chunk[3];
+        let b4 = chunk[4];
         result.extend_from_slice(&[
             alphabet[(b0 >> 3) as usize],
             alphabet[((b0 & 0x07) << 2 | b1 >> 6) as usize],
@@ -668,7 +716,11 @@ fn base32_encode_bytes(data: &[u8], alphabet: &[u8; 32]) -> Vec<u8> {
         let chunk = &data[full_end..];
         let mut buf = [0u8; 5];
         buf[..chunk.len()].copy_from_slice(chunk);
-        let b0 = buf[0]; let b1 = buf[1]; let b2 = buf[2]; let b3 = buf[3]; let b4 = buf[4];
+        let b0 = buf[0];
+        let b1 = buf[1];
+        let b2 = buf[2];
+        let b3 = buf[3];
+        let b4 = buf[4];
         result.push(alphabet[(b0 >> 3) as usize]);
         result.push(alphabet[((b0 & 0x07) << 2 | b1 >> 6) as usize]);
         match remainder {

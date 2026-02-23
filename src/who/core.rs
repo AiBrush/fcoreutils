@@ -76,10 +76,7 @@ fn guess_pty_name(uid: u32, start_us: u64) -> Option<String> {
         }
 
         // Is this the best (earliest) candidate so far?
-        if best_name.is_none()
-            || ct_sec < best_sec
-            || (ct_sec == best_sec && ct_nsec < best_nsec)
-        {
+        if best_name.is_none() || ct_sec < best_sec || (ct_sec == best_sec && ct_nsec < best_nsec) {
             best_name = Some(format!("pts/{}", name_str));
             best_sec = ct_sec;
             best_nsec = ct_nsec;
@@ -88,9 +85,7 @@ fn guess_pty_name(uid: u32, start_us: u64) -> Option<String> {
 
     // Must be within 5 seconds of the start time
     if let Some(ref _name) = best_name {
-        if best_sec > start_sec + 5
-            || (best_sec == start_sec + 5 && best_nsec > start_nsec)
-        {
+        if best_sec > start_sec + 5 || (best_sec == start_sec + 5 && best_nsec > start_nsec) {
             return None;
         }
     }

@@ -1805,7 +1805,9 @@ fn decode_clean_slice(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
                 let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
                 padded.extend_from_slice(data);
                 padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
-                if let Ok(decoded) = BASE64_ENGINE.decode_inplace(&mut padded) { return out.write_all(decoded) }
+                if let Ok(decoded) = BASE64_ENGINE.decode_inplace(&mut padded) {
+                    return out.write_all(decoded);
+                }
             }
             decode_error()
         }
@@ -1831,7 +1833,9 @@ fn decode_inplace_with_padding(data: &mut [u8], out: &mut impl Write) -> io::Res
                 let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
                 padded.extend_from_slice(data);
                 padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
-                if let Ok(decoded) = BASE64_ENGINE.decode_inplace(&mut padded) { return out.write_all(decoded) }
+                if let Ok(decoded) = BASE64_ENGINE.decode_inplace(&mut padded) {
+                    return out.write_all(decoded);
+                }
             }
             decode_error()
         }

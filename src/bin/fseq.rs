@@ -516,7 +516,9 @@ fn main() {
 
         // Try to enlarge pipe buffer for higher throughput
         #[cfg(target_os = "linux")]
-        unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, 1024 * 1024); }
+        unsafe {
+            libc::fcntl(1, libc::F_SETPIPE_SZ, 1024 * 1024);
+        }
 
         let mut current = first_i;
         if inc_i == 1 && first_i >= 0 && sep_is_newline {
@@ -614,8 +616,12 @@ fn main() {
                 }
                 current += inc_i;
             }
-            if !is_first { vbuf.push(b'\n'); }
-            if !vbuf.is_empty() { write_all_fd1(&vbuf); }
+            if !is_first {
+                vbuf.push(b'\n');
+            }
+            if !vbuf.is_empty() {
+                write_all_fd1(&vbuf);
+            }
         } else {
             let mut vbuf = Vec::with_capacity(BUF_SIZE);
             let mut itoa_buf2 = itoa::Buffer::new();
@@ -632,8 +638,12 @@ fn main() {
                 }
                 current += inc_i;
             }
-            if !is_first { vbuf.push(b'\n'); }
-            if !vbuf.is_empty() { write_all_fd1(&vbuf); }
+            if !is_first {
+                vbuf.push(b'\n');
+            }
+            if !vbuf.is_empty() {
+                write_all_fd1(&vbuf);
+            }
         }
     } else if use_int && !fmt.is_empty() {
         // Integer values with format string (e.g., equal-width)

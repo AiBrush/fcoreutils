@@ -191,7 +191,7 @@ fn test_stat_terse() {
     let result = stat_file(path_str, &config).unwrap();
 
     // Terse format: name size blocks mode uid gid dev ino nlink rmaj rmin atime mtime ctime atime blksize
-    let fields: Vec<&str> = result.trim().split_whitespace().collect();
+    let fields: Vec<&str> = result.split_whitespace().collect();
     assert_eq!(
         fields.len(),
         16,
@@ -743,7 +743,7 @@ fn test_stat_filesystem_terse() {
     };
     let result = stat_file("/", &config).unwrap();
 
-    let fields: Vec<&str> = result.trim().split_whitespace().collect();
+    let fields: Vec<&str> = result.split_whitespace().collect();
     assert_eq!(
         fields.len(),
         12,

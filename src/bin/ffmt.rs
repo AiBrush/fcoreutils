@@ -6,7 +6,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{read_file_mmap, read_stdin, FileData};
+use coreutils_rs::common::io::{FileData, read_file_mmap, read_stdin};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::fmt::{FmtConfig, fmt_data};
 

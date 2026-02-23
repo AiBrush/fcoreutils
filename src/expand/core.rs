@@ -263,7 +263,12 @@ pub fn unexpand_bytes(
 /// Matches GNU unexpand behavior: a single blank at a tab stop is only converted
 /// to a tab if more blanks follow, otherwise it stays as a space.
 #[inline]
-fn emit_blanks(out: &mut impl Write, start_col: usize, count: usize, tab_size: usize) -> std::io::Result<()> {
+fn emit_blanks(
+    out: &mut impl Write,
+    start_col: usize,
+    count: usize,
+    tab_size: usize,
+) -> std::io::Result<()> {
     if count == 0 {
         return Ok(());
     }
@@ -468,7 +473,12 @@ fn unexpand_generic(
 
 /// Emit blanks using a tab list (non-regular tab stops).
 /// After the last defined tab stop, only spaces are emitted (no more tabs).
-fn emit_blanks_tablist(out: &mut impl Write, start_col: usize, count: usize, tabs: &TabStops) -> std::io::Result<()> {
+fn emit_blanks_tablist(
+    out: &mut impl Write,
+    start_col: usize,
+    count: usize,
+    tabs: &TabStops,
+) -> std::io::Result<()> {
     if count == 0 {
         return Ok(());
     }

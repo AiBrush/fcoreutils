@@ -91,105 +91,135 @@ fn posix_cksum(data: &[u8]) -> u32 {
 #[target_feature(enable = "sse2,ssse3,pclmulqdq")]
 unsafe fn cksum_pclmul_chunk(buf: &mut [u8], mut crc: u32) -> u32 {
     unsafe {
-    use core::arch::x86_64::*;
+        use core::arch::x86_64::*;
 
-    // Constants from Intel whitepaper for POSIX CRC polynomial 0x04C11DB7
-    let single_mult = _mm_set_epi64x(0xC5B9CD4Cu64 as i64, 0xE8A45605u64 as i64);
-    let four_mult = _mm_set_epi64x(0x8833794Cu64 as i64, 0xE6228B11u64 as i64);
-    // Byte-reverse constant (POSIX CRC is big-endian, SSE is little-endian)
-    let shuffle = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        // Constants from Intel whitepaper for POSIX CRC polynomial 0x04C11DB7
+        let single_mult = _mm_set_epi64x(0xC5B9CD4Cu64 as i64, 0xE8A45605u64 as i64);
+        let four_mult = _mm_set_epi64x(0x8833794Cu64 as i64, 0xE6228B11u64 as i64);
+        // Byte-reverse constant (POSIX CRC is big-endian, SSE is little-endian)
+        let shuffle = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
 
-    let ptr = buf.as_mut_ptr();
-    let mut pos: usize = 0;
-    let len = buf.len();
+        let ptr = buf.as_mut_ptr();
+        let mut pos: usize = 0;
+        let len = buf.len();
 
-    // Phase 1: Four-way parallel fold (processes 64 bytes per iteration)
-    if len >= 128 {
-        let mut data = _mm_shuffle_epi8(_mm_loadu_si128(ptr as *const __m128i), shuffle);
-        let xor_crc = _mm_set_epi32(crc as i32, 0, 0, 0);
-        crc = 0;
-        data = _mm_xor_si128(data, xor_crc);
-        let mut data3 = _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(16) as *const __m128i), shuffle);
-        let mut data5 = _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(32) as *const __m128i), shuffle);
-        let mut data7 = _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(48) as *const __m128i), shuffle);
+        // Phase 1: Four-way parallel fold (processes 64 bytes per iteration)
+        if len >= 128 {
+            let mut data = _mm_shuffle_epi8(_mm_loadu_si128(ptr as *const __m128i), shuffle);
+            let xor_crc = _mm_set_epi32(crc as i32, 0, 0, 0);
+            crc = 0;
+            data = _mm_xor_si128(data, xor_crc);
+            let mut data3 =
+                _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(16) as *const __m128i), shuffle);
+            let mut data5 =
+                _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(32) as *const __m128i), shuffle);
+            let mut data7 =
+                _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(48) as *const __m128i), shuffle);
 
-        pos = 64;
-        let mut remaining = len;
+            pos = 64;
+            let mut remaining = len;
 
-        while remaining >= 128 {
-            let data2 = _mm_clmulepi64_si128(data, four_mult, 0x00);
-            data = _mm_clmulepi64_si128(data, four_mult, 0x11);
-            let data4 = _mm_clmulepi64_si128(data3, four_mult, 0x00);
-            data3 = _mm_clmulepi64_si128(data3, four_mult, 0x11);
-            let data6 = _mm_clmulepi64_si128(data5, four_mult, 0x00);
-            data5 = _mm_clmulepi64_si128(data5, four_mult, 0x11);
-            let data8 = _mm_clmulepi64_si128(data7, four_mult, 0x00);
-            data7 = _mm_clmulepi64_si128(data7, four_mult, 0x11);
+            while remaining >= 128 {
+                let data2 = _mm_clmulepi64_si128(data, four_mult, 0x00);
+                data = _mm_clmulepi64_si128(data, four_mult, 0x11);
+                let data4 = _mm_clmulepi64_si128(data3, four_mult, 0x00);
+                data3 = _mm_clmulepi64_si128(data3, four_mult, 0x11);
+                let data6 = _mm_clmulepi64_si128(data5, four_mult, 0x00);
+                data5 = _mm_clmulepi64_si128(data5, four_mult, 0x11);
+                let data8 = _mm_clmulepi64_si128(data7, four_mult, 0x00);
+                data7 = _mm_clmulepi64_si128(data7, four_mult, 0x11);
 
-            data = _mm_xor_si128(data, data2);
-            data = _mm_xor_si128(data, _mm_shuffle_epi8(
-                _mm_loadu_si128(ptr.add(pos) as *const __m128i), shuffle));
-            data3 = _mm_xor_si128(data3, data4);
-            data3 = _mm_xor_si128(data3, _mm_shuffle_epi8(
-                _mm_loadu_si128(ptr.add(pos + 16) as *const __m128i), shuffle));
-            data5 = _mm_xor_si128(data5, data6);
-            data5 = _mm_xor_si128(data5, _mm_shuffle_epi8(
-                _mm_loadu_si128(ptr.add(pos + 32) as *const __m128i), shuffle));
-            data7 = _mm_xor_si128(data7, data8);
-            data7 = _mm_xor_si128(data7, _mm_shuffle_epi8(
-                _mm_loadu_si128(ptr.add(pos + 48) as *const __m128i), shuffle));
+                data = _mm_xor_si128(data, data2);
+                data = _mm_xor_si128(
+                    data,
+                    _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(pos) as *const __m128i), shuffle),
+                );
+                data3 = _mm_xor_si128(data3, data4);
+                data3 = _mm_xor_si128(
+                    data3,
+                    _mm_shuffle_epi8(
+                        _mm_loadu_si128(ptr.add(pos + 16) as *const __m128i),
+                        shuffle,
+                    ),
+                );
+                data5 = _mm_xor_si128(data5, data6);
+                data5 = _mm_xor_si128(
+                    data5,
+                    _mm_shuffle_epi8(
+                        _mm_loadu_si128(ptr.add(pos + 32) as *const __m128i),
+                        shuffle,
+                    ),
+                );
+                data7 = _mm_xor_si128(data7, data8);
+                data7 = _mm_xor_si128(
+                    data7,
+                    _mm_shuffle_epi8(
+                        _mm_loadu_si128(ptr.add(pos + 48) as *const __m128i),
+                        shuffle,
+                    ),
+                );
 
-            pos += 64;
-            remaining -= 64;
+                pos += 64;
+                remaining -= 64;
+            }
+
+            // Store folded results back into buffer (byte-swapped to native order)
+            let store_pos = pos - 64;
+            _mm_storeu_si128(
+                ptr.add(store_pos) as *mut __m128i,
+                _mm_shuffle_epi8(data, shuffle),
+            );
+            _mm_storeu_si128(
+                ptr.add(store_pos + 16) as *mut __m128i,
+                _mm_shuffle_epi8(data3, shuffle),
+            );
+            _mm_storeu_si128(
+                ptr.add(store_pos + 32) as *mut __m128i,
+                _mm_shuffle_epi8(data5, shuffle),
+            );
+            _mm_storeu_si128(
+                ptr.add(store_pos + 48) as *mut __m128i,
+                _mm_shuffle_epi8(data7, shuffle),
+            );
+            pos = store_pos;
         }
 
-        // Store folded results back into buffer (byte-swapped to native order)
-        let store_pos = pos - 64;
-        _mm_storeu_si128(ptr.add(store_pos) as *mut __m128i,
-            _mm_shuffle_epi8(data, shuffle));
-        _mm_storeu_si128(ptr.add(store_pos + 16) as *mut __m128i,
-            _mm_shuffle_epi8(data3, shuffle));
-        _mm_storeu_si128(ptr.add(store_pos + 32) as *mut __m128i,
-            _mm_shuffle_epi8(data5, shuffle));
-        _mm_storeu_si128(ptr.add(store_pos + 48) as *mut __m128i,
-            _mm_shuffle_epi8(data7, shuffle));
-        pos = store_pos;
-    }
-
-    // Phase 2: Single fold (processes 16 bytes per iteration)
-    let remaining = len - pos;
-    if remaining >= 32 {
-        let mut data = _mm_shuffle_epi8(
-            _mm_loadu_si128(ptr.add(pos) as *const __m128i), shuffle);
-        let xor_crc = _mm_set_epi32(crc as i32, 0, 0, 0);
-        crc = 0;
-        data = _mm_xor_si128(data, xor_crc);
-        pos += 16;
-
-        let mut rem = len - pos;
-        while rem >= 16 {
-            let data2 = _mm_clmulepi64_si128(data, single_mult, 0x00);
-            data = _mm_clmulepi64_si128(data, single_mult, 0x11);
-            let fold_data = _mm_shuffle_epi8(
-                _mm_loadu_si128(ptr.add(pos) as *const __m128i), shuffle);
-            data = _mm_xor_si128(data, data2);
-            data = _mm_xor_si128(data, fold_data);
+        // Phase 2: Single fold (processes 16 bytes per iteration)
+        let remaining = len - pos;
+        if remaining >= 32 {
+            let mut data =
+                _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(pos) as *const __m128i), shuffle);
+            let xor_crc = _mm_set_epi32(crc as i32, 0, 0, 0);
+            crc = 0;
+            data = _mm_xor_si128(data, xor_crc);
             pos += 16;
-            rem -= 16;
+
+            let mut rem = len - pos;
+            while rem >= 16 {
+                let data2 = _mm_clmulepi64_si128(data, single_mult, 0x00);
+                data = _mm_clmulepi64_si128(data, single_mult, 0x11);
+                let fold_data =
+                    _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(pos) as *const __m128i), shuffle);
+                data = _mm_xor_si128(data, data2);
+                data = _mm_xor_si128(data, fold_data);
+                pos += 16;
+                rem -= 16;
+            }
+
+            // Store back (byte-swapped)
+            _mm_storeu_si128(
+                ptr.add(pos - 16) as *mut __m128i,
+                _mm_shuffle_epi8(data, shuffle),
+            );
+            pos -= 16;
         }
 
-        // Store back (byte-swapped)
-        _mm_storeu_si128(ptr.add(pos - 16) as *mut __m128i,
-            _mm_shuffle_epi8(data, shuffle));
-        pos -= 16;
-    }
+        // Phase 3: Byte-by-byte for remaining 0-31 bytes
+        for i in pos..len {
+            crc = (crc << 8) ^ CRC_TABLES[0][((crc >> 24) ^ u32::from(buf[i])) as usize];
+        }
 
-    // Phase 3: Byte-by-byte for remaining 0-31 bytes
-    for i in pos..len {
-        crc = (crc << 8) ^ CRC_TABLES[0][((crc >> 24) ^ u32::from(buf[i])) as usize];
-    }
-
-    crc
+        crc
     } // unsafe
 }
 

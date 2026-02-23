@@ -415,11 +415,11 @@ fn test_numfmt_zero_terminated() {
         ..default_config()
     };
 
-    let input = "1K\02M\0";
+    let input = "1K\x002M\x00";
     let mut output = Vec::new();
     run_numfmt(input.as_bytes(), &mut output, &config).unwrap();
     let result = String::from_utf8(output).unwrap();
-    assert_eq!(result, "1000\02000000\0");
+    assert_eq!(result, "1000\x002000000\x00");
 }
 
 // ──────────────────────────────────────────────────

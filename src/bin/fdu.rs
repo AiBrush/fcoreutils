@@ -11,7 +11,8 @@ use std::process;
 
 #[cfg(unix)]
 use coreutils_rs::du::{
-    DuConfig, DuEntry, du_path_with_seen, parse_block_size, parse_threshold, print_entry, read_exclude_file,
+    DuConfig, DuEntry, du_path_with_seen, parse_block_size, parse_threshold, print_entry,
+    read_exclude_file,
 };
 
 #[cfg(unix)]

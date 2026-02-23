@@ -178,12 +178,7 @@ fn has_special_bytes(data: &[u8]) -> bool {
 }
 
 /// Process a single line (no newlines) in column mode, writing to output.
-fn fold_one_line_column(
-    line: &[u8],
-    width: usize,
-    break_at_spaces: bool,
-    output: &mut Vec<u8>,
-) {
+fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
     let mut col: usize = 0;
     let mut last_space_out_pos: Option<usize> = None;
 
