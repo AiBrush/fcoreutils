@@ -38,9 +38,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-v2-${{ matrix.os }}
-      - name: Install nasm (Linux x86_64 only)
+      - name: Install nasm and libssl-dev (Linux only)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get install -y --no-install-recommends nasm
+        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Build binaries
         run: cargo build --release
       - name: Run tests
