@@ -183,7 +183,7 @@ fn single_file_fast(path: &Path) -> ! {
                 pos += 1;
                 // Single write syscall for entire output
                 unsafe {
-                    libc::write(1, out_buf.as_ptr() as *const libc::c_void, pos);
+                    libc::write(1, out_buf.as_ptr() as *const libc::c_void, pos as _);
                 }
             } else {
                 // Filename too long for stack buffer — fallback to heap
@@ -192,7 +192,7 @@ fn single_file_fast(path: &Path) -> ! {
                 v.extend_from_slice(name_bytes);
                 v.push(b'\n');
                 unsafe {
-                    libc::write(1, v.as_ptr() as *const libc::c_void, v.len());
+                    libc::write(1, v.as_ptr() as *const libc::c_void, v.len() as _);
                 }
             }
             process::exit(0);

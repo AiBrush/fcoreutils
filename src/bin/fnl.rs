@@ -464,7 +464,7 @@ fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
             libc::write(
                 1,
                 data[written..].as_ptr() as *const libc::c_void,
-                data.len() - written,
+                (data.len() - written) as _,
             )
         };
         if ret > 0 {

@@ -132,7 +132,7 @@ fn main() {
             libc::write(
                 1,
                 buf.as_ptr() as *const libc::c_void,
-                buf.len(),
+                buf.len() as _,
             )
         };
         if ret <= 0 {
