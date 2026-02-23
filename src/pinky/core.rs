@@ -93,7 +93,11 @@ pub fn get_user_info(username: &str) -> Option<UserInfo> {
 /// Returns "." if active within the last minute, or "HH:MM" otherwise.
 fn idle_str(line: &str) -> String {
     if line.is_empty() {
-        return "?".to_string();
+        return "?????".to_string();
+    }
+    // Lines starting with '?' have no real TTY (e.g. systemd/ssh sessions)
+    if line.starts_with('?') {
+        return "?????".to_string();
     }
     let dev_path = if line.starts_with('/') {
         line.to_string()
@@ -105,7 +109,7 @@ fn idle_str(line: &str) -> String {
     let c_path = std::ffi::CString::new(dev_path).unwrap_or_default();
     let rc = unsafe { libc::stat(c_path.as_ptr(), &mut stat_buf) };
     if rc != 0 {
-        return "?".to_string();
+        return "?????".to_string();
     }
 
     let now = unsafe { libc::time(std::ptr::null_mut()) };
@@ -121,7 +125,7 @@ fn idle_str(line: &str) -> String {
     }
 }
 
-/// Format a Unix timestamp as "Mon DD HH:MM" (short format).
+/// Format a Unix timestamp as "YYYY-MM-DD HH:MM" (ISO short format, matches GNU coreutils 9.7+).
 fn format_time_short(tv_sec: i64) -> String {
     if tv_sec == 0 {
         return String::new();
@@ -132,17 +136,13 @@ fn format_time_short(tv_sec: i64) -> String {
         libc::localtime_r(&t, &mut tm);
         tm
     };
-    let months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let mon = if tm.tm_mon >= 0 && tm.tm_mon <= 11 {
-        months[tm.tm_mon as usize]
-    } else {
-        "???"
-    };
     format!(
-        "{} {:2} {:02}:{:02}",
-        mon, tm.tm_mday, tm.tm_hour, tm.tm_min
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
     )
 }
 
@@ -194,18 +194,18 @@ pub fn format_short_entry(entry: &who::UtmpxEntry, config: &PinkyConfig) -> Stri
         let _ = write!(out, " {:<20}", display_name);
     }
 
-    // Tty
+    // Tty (GNU pinky data rows omit the leading space before TTY, unlike the header)
     let tty = entry
         .ut_line
         .strip_prefix("pts/")
         .map(|s| format!("pts/{}", s))
         .unwrap_or_else(|| entry.ut_line.clone());
-    let _ = write!(out, " {:<9}", tty);
+    let _ = write!(out, "{:<9}", tty);
 
-    // Idle time
+    // Idle time (GNU pinky data rows add a leading space before idle, unlike the header)
     if !config.omit_fullname_host_idle {
         let idle = idle_str(&entry.ut_line);
-        let _ = write!(out, "{:<7}", idle);
+        let _ = write!(out, " {:<7}", idle);
     }
 
     // When (login time)
@@ -274,7 +274,7 @@ pub fn format_long_entry(username: &str, config: &PinkyConfig) -> String {
         }
     }
 
-    // Remove trailing newline for consistency
+    // Remove trailing newline for consistency - caller adds blank line separator
     if out.ends_with('\n') {
         out.pop();
     }
@@ -290,7 +290,7 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
         // Long format: show detailed info for each specified user
         let users = if config.users.is_empty() {
             // If no users specified in long mode, show logged-in users
-            let entries = who::read_utmpx();
+            let entries = who::read_utmpx_with_systemd_fallback();
             let mut names: Vec<String> = entries
                 .iter()
                 .filter(|e| e.ut_type == 7) // USER_PROCESS
@@ -303,15 +303,13 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
             config.users.clone()
         };
 
-        for (i, user) in users.iter().enumerate() {
-            if i > 0 {
-                let _ = writeln!(output);
-            }
-            let _ = write!(output, "{}", format_long_entry(user, config));
+        for user in users.iter() {
+            // Write entry then blank line (GNU pinky separates entries with blank lines)
+            let _ = writeln!(output, "{}", format_long_entry(user, config));
         }
     } else {
         // Short format (default)
-        let entries = who::read_utmpx();
+        let entries = who::read_utmpx_with_systemd_fallback();
 
         if !config.omit_heading {
             let _ = writeln!(output, "{}", format_short_heading(config));
@@ -334,8 +332,9 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
         }
     }
 
-    // Remove trailing newline for consistency
-    if output.ends_with('\n') {
+    // Short format: remove trailing newline (fpinky uses println! which adds one)
+    // Long format: keep trailing newline so fpinky's println! creates the blank separator
+    if !config.long_format && output.ends_with('\n') {
         output.pop();
     }
 

@@ -710,6 +710,19 @@ fn write_all_vectored_sort(writer: &mut SortOutput, slices: &[io::IoSlice<'_>]) 
 }
 
 /// Software prefetch a cache line for reading.
+/// Returns true if LC_COLLATE is C or POSIX (byte comparison equals strcoll).
+/// When false, the raw-byte fast path must be disabled to use locale-aware strcoll.
+fn is_c_locale() -> bool {
+    unsafe {
+        let lc = libc::setlocale(libc::LC_COLLATE, std::ptr::null());
+        if lc.is_null() {
+            return true;
+        }
+        let name = std::ffi::CStr::from_ptr(lc).to_string_lossy();
+        name == "C" || name == "POSIX"
+    }
+}
+
 /// Hides memory latency by loading data into L1 cache before it's needed.
 #[inline(always)]
 fn prefetch_read(ptr: *const u8) {
@@ -2363,7 +2376,8 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 || opts.ignore_case
                 || opts.ignore_nonprinting
                 || opts.ignore_leading_blanks
-                || opts.has_sort_type();
+                || opts.has_sort_type()
+                || !is_c_locale();
 
             if !has_flags {
                 // Already-sorted check for single-key lexicographic path.

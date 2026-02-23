@@ -308,7 +308,7 @@ fn main() {
 
     for file in &files {
         let path = std::path::Path::new(file);
-        match du_path_with_seen(path, &config, &mut seen_inodes) {
+        match du_path_with_seen(path, &config, &mut seen_inodes, &mut had_error) {
             Ok(entries) => {
                 for entry in &entries {
                     if let Err(e) = print_entry(&mut out, entry, &config) {

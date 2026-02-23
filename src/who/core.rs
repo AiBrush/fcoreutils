@@ -27,6 +27,85 @@ pub struct UtmpxEntry {
     pub ut_tv_sec: i64,
 }
 
+/// Read session entries from systemd-logind session files.
+/// Used as a fallback when the traditional utmpx database is empty.
+/// Parses /run/systemd/sessions/ files for active user sessions.
+fn read_systemd_sessions() -> Vec<UtmpxEntry> {
+    let sessions_dir = std::path::Path::new("/run/systemd/sessions");
+    if !sessions_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut entries = Vec::new();
+
+    let dir = match std::fs::read_dir(sessions_dir) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+
+    for entry in dir.flatten() {
+        let path = entry.path();
+        // Skip .ref files and other non-session files
+        if path.extension().is_some() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let mut user = String::new();
+        let mut remote_host = String::new();
+        let mut service = String::new();
+        let mut realtime_us: u64 = 0;
+        let mut active = false;
+        let mut is_user_class = false;
+
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("USER=") {
+                user = val.to_string();
+            } else if let Some(val) = line.strip_prefix("REMOTE_HOST=") {
+                remote_host = val.to_string();
+            } else if let Some(val) = line.strip_prefix("SERVICE=") {
+                service = val.to_string();
+            } else if let Some(val) = line.strip_prefix("REALTIME=") {
+                realtime_us = val.parse().unwrap_or(0);
+            } else if line == "ACTIVE=1" {
+                active = true;
+            } else if line == "CLASS=user" {
+                is_user_class = true;
+            }
+        }
+
+        if !active || !is_user_class || user.is_empty() {
+            continue;
+        }
+
+        // TTY format: '?' + service name (e.g., "?sshd")
+        let tty = if service.is_empty() {
+            "?".to_string()
+        } else {
+            format!("?{}", service)
+        };
+
+        let tv_sec = (realtime_us / 1_000_000) as i64;
+
+        entries.push(UtmpxEntry {
+            ut_type: USER_PROCESS,
+            ut_pid: 0,
+            ut_line: tty,
+            ut_id: String::new(),
+            ut_user: user,
+            ut_host: remote_host,
+            ut_tv_sec: tv_sec,
+        });
+    }
+
+    // Sort by realtime for consistent ordering
+    entries.sort_by_key(|e| e.ut_tv_sec);
+    entries
+}
+
 /// Read all utmpx entries from the system database.
 ///
 /// # Safety
@@ -65,6 +144,18 @@ pub fn read_utmpx() -> Vec<UtmpxEntry> {
     }
 
     entries
+}
+
+/// Read utmpx entries, falling back to systemd sessions if the database is empty.
+/// Used by pinky (which, like GNU pinky, reads systemd-logind when utmpx is unavailable).
+/// GNU who does NOT do this fallback, so `read_utmpx()` does not include it.
+pub fn read_utmpx_with_systemd_fallback() -> Vec<UtmpxEntry> {
+    let entries = read_utmpx();
+    if entries.is_empty() {
+        read_systemd_sessions()
+    } else {
+        entries
+    }
 }
 
 /// Extract a Rust String from a fixed-size C char buffer.

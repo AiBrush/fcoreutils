@@ -338,6 +338,12 @@ fn parse_args() -> Cli {
 }
 
 fn main() {
+    // Initialize locale from environment (LC_COLLATE, LANG, etc.) so that
+    // strcoll-based comparisons respect the user's locale, matching GNU sort.
+    unsafe {
+        libc::setlocale(libc::LC_ALL, b"\0".as_ptr() as *const libc::c_char);
+    }
+
     // Reset SIGPIPE to default so the process is killed silently by the signal
     // when a downstream reader (e.g. head) closes the pipe early, matching GNU
     // sort's behavior of exiting without error messages.

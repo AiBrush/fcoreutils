@@ -82,17 +82,20 @@ pub struct DuEntry {
 /// Traverse `path` and collect `DuEntry` results according to `config`.
 pub fn du_path(path: &Path, config: &DuConfig) -> io::Result<Vec<DuEntry>> {
     let mut seen_inodes: HashSet<(u64, u64)> = HashSet::new();
-    du_path_with_seen(path, config, &mut seen_inodes)
+    let mut had_error = false;
+    du_path_with_seen(path, config, &mut seen_inodes, &mut had_error)
 }
 
 /// Traverse `path` with a shared inode set (for deduplication across multiple arguments).
+/// Sets `had_error` to true if any permission or access errors are encountered.
 pub fn du_path_with_seen(
     path: &Path,
     config: &DuConfig,
     seen_inodes: &mut HashSet<(u64, u64)>,
+    had_error: &mut bool,
 ) -> io::Result<Vec<DuEntry>> {
     let mut entries = Vec::new();
-    du_recursive(path, config, seen_inodes, &mut entries, 0, None)?;
+    du_recursive(path, config, seen_inodes, &mut entries, 0, None, had_error)?;
     Ok(entries)
 }
 
@@ -104,6 +107,7 @@ fn du_recursive(
     entries: &mut Vec<DuEntry>,
     depth: usize,
     root_dev: Option<u64>,
+    had_error: &mut bool,
 ) -> io::Result<u64> {
     let meta = if config.dereference {
         std::fs::metadata(path)?
@@ -129,7 +133,9 @@ fn du_recursive(
     let size = if config.inodes {
         1
     } else if config.apparent_size {
-        meta.len()
+        // GNU du uses 0 for directory entries themselves in apparent-size mode;
+        // only file content sizes are counted.
+        if meta.is_dir() { 0 } else { meta.len() }
     } else {
         meta.blocks() * 512
     };
@@ -151,6 +157,7 @@ fn du_recursive(
                     path.display(),
                     format_io_error(&e)
                 );
+                *had_error = true;
                 // Still report what we can for this directory.
                 if should_report_dir(config, depth) {
                     entries.push(DuEntry {
@@ -172,6 +179,7 @@ fn du_recursive(
                         path.display(),
                         format_io_error(&e)
                     );
+                    *had_error = true;
                     continue;
                 }
             };
@@ -199,6 +207,7 @@ fn du_recursive(
                 entries,
                 depth + 1,
                 Some(root_dev.unwrap_or(meta.dev())),
+                had_error,
             )?;
             subtree_size += child_size;
             if config.separate_dirs && child_is_dir {

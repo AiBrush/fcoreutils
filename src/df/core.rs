@@ -191,8 +191,10 @@ fn statvfs_info(mount: &MountEntry) -> Option<FsInfo> {
     let available = stat.f_bavail as u64 * block_size;
     let used = total.saturating_sub(free);
 
+    // Use -1.0 as sentinel for "no percentage" (shown as "-" in output),
+    // matching GNU df's behavior for pseudo-filesystems with 0 total blocks.
     let use_percent = if total == 0 {
-        0.0
+        -1.0
     } else {
         // GNU df calculates use% as: used / (used + available) * 100
         let denom = used + available;
@@ -207,7 +209,7 @@ fn statvfs_info(mount: &MountEntry) -> Option<FsInfo> {
     let ifree = stat.f_ffree as u64;
     let iused = itotal.saturating_sub(ifree);
     let iuse_percent = if itotal == 0 {
-        0.0
+        -1.0
     } else {
         (iused as f64 / itotal as f64) * 100.0
     };
@@ -404,12 +406,17 @@ pub fn format_size(bytes: u64, config: &DfConfig) -> String {
     } else if config.si {
         human_readable_1000(bytes)
     } else {
-        format!("{}", bytes / config.block_size)
+        // GNU df uses ceiling division for block counts (matches GNU coreutils behavior).
+        format!("{}", (bytes + config.block_size - 1) / config.block_size)
     }
 }
 
 /// Format a percentage for display.
+/// Returns "-" when pct < 0.0 (sentinel for pseudo-filesystems with 0 blocks).
 fn format_percent(pct: f64) -> String {
+    if pct < 0.0 {
+        return "-".to_string();
+    }
     if pct == 0.0 {
         return "0%".to_string();
     }
@@ -699,14 +706,29 @@ fn get_col_alignments(config: &DfConfig, num_cols: usize) -> Vec<ColAlign> {
     }
     let mut aligns = Vec::with_capacity(num_cols);
 
+    // Numeric --output fields that should be right-aligned even as the last column.
+    const NUMERIC_OUTPUT_FIELDS: &[&str] = &[
+        "itotal", "iused", "iavail", "ipcent", "size", "used", "avail", "pcent",
+    ];
     if config.output_fields.is_some() {
-        // For --output, first column is left-aligned, rest right-aligned, last is no-pad.
+        // For --output, first column is left-aligned, rest right-aligned.
+        // Last column is right-aligned for numeric fields, no-pad for strings.
         aligns.push(ColAlign::Left);
         for _ in 1..num_cols.saturating_sub(1) {
             aligns.push(ColAlign::Right);
         }
         if num_cols > 1 {
-            aligns.push(ColAlign::None);
+            let last_field = config
+                .output_fields
+                .as_ref()
+                .and_then(|f| f.last())
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            if NUMERIC_OUTPUT_FIELDS.contains(&last_field) {
+                aligns.push(ColAlign::Right);
+            } else {
+                aligns.push(ColAlign::None);
+            }
         }
     } else if config.print_type {
         // Filesystem(left) Type(left) Size(right) Used(right) Avail(right) Use%(right) Mounted(none)
@@ -757,9 +779,17 @@ fn print_table(
         }
     }
 
-    // GNU df applies minimum column widths for numeric size columns in human-readable mode.
-    // In -h/--si mode, the Size/Used/Avail columns have a minimum width of 5.
-    if (config.human_readable || config.si) && config.output_fields.is_none() {
+    // GNU df applies minimum column width of 14 for the Filesystem (source) column
+    // in standard output format. This ensures short sources like "tmpfs" align
+    // with typical long device paths like "/dev/mmcblk0p2".
+    if config.output_fields.is_none() && !widths.is_empty() {
+        widths[0] = widths[0].max(14);
+    }
+
+    // GNU df applies minimum column widths of 5 for numeric size columns
+    // (Size/Used/Avail). This matters for pseudo-filesystems like /proc with 0 blocks,
+    // where the data is shorter than the header minimum.
+    if config.output_fields.is_none() {
         // For standard layout: [Filesystem, Size, Used, Avail, Use%, Mounted on]
         // Minimum width of 5 for Size, Used, Avail columns (not Use% or Mounted on)
         let start_col = if config.print_type { 2 } else { 1 };
