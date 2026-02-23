@@ -1,0 +1,43 @@
+name: CodeQL Analysis
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+# No cargo build needed — CodeQL scans Actions YAML and Python source only.
+# Rust is not a CodeQL-supported language; the existing test.yml handles
+# Rust compilation, clippy, and cargo test on all three platforms.
+
+concurrency:
+  group: codeql-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, python]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
