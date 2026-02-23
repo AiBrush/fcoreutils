@@ -280,7 +280,7 @@ fn is_scale_suffix(c: char) -> bool {
 
 fn find_si_multiplier(c: char) -> Result<f64, String> {
     for &(suffix, mult) in SI_SUFFIXES {
-        if suffix == c || suffix.eq_ignore_ascii_case(&c) {
+        if suffix.eq_ignore_ascii_case(&c) {
             return Ok(mult);
         }
     }
