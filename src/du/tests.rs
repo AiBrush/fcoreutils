@@ -123,7 +123,7 @@ fn test_du_human() {
                 ..default_config()
             }
         ),
-        "1K"
+        "1.0K"
     );
 
     let large = 1024 * 1024 * 5;
@@ -420,6 +420,6 @@ fn test_format_size_si() {
         si: true,
         ..default_config()
     };
-    assert_eq!(format_size(1000, &config), "1k");
+    assert_eq!(format_size(1000, &config), "1.0k");
     assert_eq!(format_size(500, &config), "500");
 }

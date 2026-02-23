@@ -543,8 +543,8 @@ fn test_c_locale_cjk_word_count() {
     // e4 b8 96 e7 95 8c are word content continuing "!" = 1 word. Total: 2 words.
     let mixed = "Hello, 世界!".as_bytes();
     assert_eq!(count_words_locale(mixed, false), 2);
-    // Just CJK: each line has non-space bytes = 1 word per line
-    let multi = "你好世界\nこんにちは\n".as_bytes();
+    // Just CJK (Japanese only, no 0xa0 bytes in UTF-8): 1 word per line
+    let multi = "こんにちは\nさようなら\n".as_bytes();
     assert_eq!(count_words_locale(multi, false), 2);
     // Full test data:
     // "Hello, 世界!\n你好世界\nこんにちは\n"
