@@ -1796,30 +1796,7 @@ fn decode_clean_slice(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
-    match BASE64_ENGINE.decode_inplace(data) {
-        Ok(decoded) => out.write_all(decoded),
-        Err(_) => {
-            // Try padding truncated input (GNU base64 accepts missing padding).
-            let remainder = data.len() % 4;
-            if remainder == 2 || remainder == 3 {
-                // If input already has '=' but length mod 4 != 0, the padding is
-                // wrong/truncated (not merely missing). GNU base64 still decodes
-                // what it can but reports "invalid input" and exits 1.
-                let has_existing_padding = memchr::memchr(b'=', data).is_some();
-                let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
-                padded.extend_from_slice(data);
-                padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
-                if let Ok(decoded) = BASE64_ENGINE.decode_inplace(&mut padded) {
-                    out.write_all(decoded)?;
-                    if has_existing_padding {
-                        return decode_error();
-                    }
-                    return Ok(());
-                }
-            }
-            decode_error()
-        }
-    }
+    decode_inplace_with_padding(data, out)
 }
 
 /// Cold error path — keeps hot decode path tight by moving error construction out of line.

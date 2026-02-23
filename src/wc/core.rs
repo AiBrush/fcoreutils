@@ -265,9 +265,8 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
     count_lw_c_scalar_tail(ptr, i, len, total_lines, total_words, prev_in_word, data)
 }
 
-/// SSE2-accelerated fused line+word counter for C locale chunks.
-/// Same 2-state algorithm as AVX2 but processes 16 bytes per iteration.
-/// Word content: 0x21-0x7E only (signed: b > 0x20 AND b < 0x7F).
+/// SSE2 variant of count_lw_c_chunk_avx2 — processes 16 bytes per iteration.
+/// See AVX2 function above for algorithm details and signed comparison notes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
@@ -284,10 +283,8 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        // Word content = 0x21-0x7E only (printable ASCII).
-        // Signed comparison: b > 0x20 (32) AND b < 0x7F (127).
-        let lo = _mm_set1_epi8(0x20i8); // 32
-        let hi = _mm_set1_epi8(0x7Fi8); // 127
+        let lo = _mm_set1_epi8(0x20i8);
+        let hi = _mm_set1_epi8(0x7Fi8);
 
         let mut line_acc = _mm_setzero_si128();
         let mut batch = 0u32;
@@ -297,7 +294,6 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            // Word content: b > 0x20 AND b < 0x7F (signed; only 16 bits relevant)
             let gt_lo = _mm_cmpgt_epi8(v, lo);
             let lt_hi = _mm_cmpgt_epi8(hi, v);
             let is_word = _mm_and_si128(gt_lo, lt_hi);
