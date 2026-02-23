@@ -97,8 +97,7 @@ fn send_signal(pid: i32, _signal: i32) -> Result<(), std::io::Error> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        Err(std::io::Error::other(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ))
     }
