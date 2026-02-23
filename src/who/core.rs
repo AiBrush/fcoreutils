@@ -561,7 +561,7 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
             USER_PROCESS => {
                 let idle = idle_str(&entry.ut_line);
                 let _ = write!(out, " {:>5}", idle);
-                let _ = write!(out, " {:>10}", entry.ut_pid);
+                let _ = write!(out, " {:>11}", entry.ut_pid);
             }
             LOGIN_PROCESS => {
                 let _ = write!(out, "   ?  {:>10}", entry.ut_pid);
@@ -696,6 +696,9 @@ pub fn run_who(config: &WhoConfig) -> String {
             });
         }
     }
+
+    // Sort entries by time (oldest first) to match utmpx file order (boot before sessions).
+    entries.sort_by_key(|e| e.ut_tv_sec);
 
     let mut output = String::new();
 
