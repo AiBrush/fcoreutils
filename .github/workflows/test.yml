@@ -1,12 +1,6 @@
 name: Test
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.github/workflows/update-readme.yml'
   pull_request:
   merge_group:
   workflow_dispatch:
@@ -20,13 +14,32 @@ permissions:
   contents: read
 
 jobs:
-  test-rust:
+  # Lint runs once on ubuntu — platform-independent checks
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint-v1
+      - name: Install nasm and libssl-dev
+        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  # Build + test on all platforms. Clippy/fmt handled by lint job above.
+  test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
       # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
       # when rust-cache provides artifacts from runners with different CPUs.
-      # Setting RUSTFLAGS replaces (not adds to) config.toml's build.rustflags.
       RUSTFLAGS: ""
     strategy:
       fail-fast: false
@@ -37,6 +50,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          # Shared cache key — benchmarks reuse this cache to avoid a redundant build
           key: test-v2-${{ matrix.os }}
       - name: Install nasm and libssl-dev (Linux only)
         if: matrix.os == 'ubuntu-latest'
@@ -45,10 +59,6 @@ jobs:
         run: cargo build --release
       - name: Run tests
         run: cargo test --release
-      - name: Clippy
-        run: cargo clippy -- -D warnings
-      - name: Check formatting
-        run: cargo fmt -- --check
       - name: Build and test assembly fyes (Linux x86_64 only)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -68,19 +78,15 @@ jobs:
           chmod +x /tmp/fyes_arm64
       - name: Smoke-test ARM64 assembly fyes
         run: |
-          # Default output
           /tmp/fyes_arm64 | head -5
-          # Custom arg
           /tmp/fyes_arm64 hello | head -3
-          # --help exits 0
           /tmp/fyes_arm64 --help
-          # --version exits 0
           /tmp/fyes_arm64 --version
           echo "All ARM64 assembly fyes smoke tests passed."
 
   benchmarks:
     name: Benchmarks
-    needs: [test-rust]
+    needs: [test]
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: ""
@@ -89,7 +95,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: bench-v2
+          # Reuse the same cache as the ubuntu test job — avoids a full rebuild
+          key: test-v2-ubuntu-latest
+      - name: Install nasm and libssl-dev
+        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Run benchmarks
         run: cargo bench --bench wc_benchmark 2>&1 | tee bench_output.txt
       - name: Upload results
