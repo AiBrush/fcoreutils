@@ -344,10 +344,9 @@ fn main() {
         libc::setlocale(libc::LC_ALL, c"".as_ptr());
     }
 
-    // Reset SIGPIPE to default so the process is killed silently by the signal
-    // when a downstream reader (e.g. head) closes the pipe early, matching GNU
-    // sort's behavior of exiting without error messages.
-    coreutils_rs::common::reset_sigpipe();
+    // Do NOT reset SIGPIPE: keep Rust's default SIG_IGN so write errors
+    // propagate as EPIPE/BrokenPipe instead of killing the process.
+    // GNU sort catches write errors, prints diagnostic messages, and exits 2.
 
     // Enlarge pipe buffers on Linux for higher throughput.
     #[cfg(target_os = "linux")]
@@ -456,8 +455,9 @@ fn main() {
 
     if let Err(e) = sort_and_output(&inputs, &config) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
-            // With SIGPIPE reset, we normally get killed by the signal before
-            // reaching here. If we do reach here, exit silently like GNU sort.
+            // GNU sort prints these two diagnostic messages on EPIPE, then exits 2.
+            eprintln!("sort: write failed: 'standard output': Broken pipe");
+            eprintln!("sort: write error");
             process::exit(2);
         }
         eprintln!("sort: {}", io_error_msg(&e));
