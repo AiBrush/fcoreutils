@@ -272,7 +272,7 @@ fn split_by_lines(
 
     loop {
         let available = match reader.fill_buf() {
-            Ok(b) if b.is_empty() => break,
+            Ok([]) => break,
             Ok(b) => b,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),

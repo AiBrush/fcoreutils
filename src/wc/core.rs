@@ -82,6 +82,7 @@ fn is_unicode_space(cp: u32) -> bool {
 /// C1 control characters (U+0080-U+009F) are not printable.
 /// Most characters >= U+00A0 are printable.
 #[inline]
+#[allow(dead_code)]
 fn is_unicode_printable(cp: u32) -> bool {
     cp >= 0xA0
 }
@@ -323,11 +324,9 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
                 prev_in_word = false;
             } else if *BYTE_CLASS_C.get_unchecked(b as usize) == 1 {
                 prev_in_word = false;
-            } else {
-                if !prev_in_word {
-                    total_words += 1;
-                    prev_in_word = true;
-                }
+            } else if !prev_in_word {
+                total_words += 1;
+                prev_in_word = true;
             }
             i += 1;
         }
@@ -411,11 +410,9 @@ fn count_words_utf8(data: &[u8]) -> u64 {
             let class = unsafe { *BYTE_CLASS_UTF8.get_unchecked(b as usize) };
             if class == 1 {
                 in_word = false;
-            } else {
-                if !in_word {
-                    in_word = true;
-                    words += 1;
-                }
+            } else if !in_word {
+                in_word = true;
+                words += 1;
             }
             i += 1;
         } else if b < 0xC2 {
@@ -431,11 +428,9 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                     | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 2;
             } else {
@@ -456,11 +451,9 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                     | (unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 3;
             } else {
@@ -482,11 +475,9 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                     | (unsafe { *data.get_unchecked(i + 3) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 4;
             } else {
@@ -543,11 +534,9 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
             let class = unsafe { *BYTE_CLASS_UTF8.get_unchecked(b as usize) };
             if class == 1 {
                 in_word = false;
-            } else {
-                if !in_word {
-                    in_word = true;
-                    words += 1;
-                }
+            } else if !in_word {
+                in_word = true;
+                words += 1;
             }
             i += 1;
         } else if b < 0xC2 {
@@ -563,11 +552,9 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                     | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 2;
             } else {
@@ -587,11 +574,9 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                     | (unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 3;
             } else {
@@ -613,11 +598,9 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                     | (unsafe { *data.get_unchecked(i + 3) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 4;
             } else {

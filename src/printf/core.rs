@@ -11,7 +11,7 @@ use std::cell::Cell;
 
 thread_local! {
     /// Set to true when a numeric conversion warning occurs (invalid argument).
-    static CONV_ERROR: Cell<bool> = Cell::new(false);
+    static CONV_ERROR: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Reset conversion error flag. Call before processing a format string.

@@ -1685,7 +1685,9 @@ pub fn ls_dir(
 /// Returns `true` if all operations succeeded.
 pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
     let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(64 * 1024, stdout.lock());
+    // Use a modest buffer that still gives performance benefits while ensuring
+    // SIGPIPE is delivered when output is piped to a program that exits early.
+    let mut out = BufWriter::with_capacity(4 * 1024, stdout.lock());
 
     let color_db = match config.color {
         ColorMode::Always => Some(ColorDb::from_env()),
@@ -1772,6 +1774,7 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
         }
         match ls_dir(&mut out, dir, config, color_db.as_ref(), show_header) {
             Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Err(e),
             Err(e) => {
                 eprintln!(
                     "ls: cannot open directory '{}': {}",

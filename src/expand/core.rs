@@ -396,7 +396,7 @@ fn unexpand_generic(
         match byte {
             b' ' => {
                 if !all && !in_initial {
-                    out.write_all(&[b' '])?;
+                    out.write_all(b" ")?;
                     column += 1;
                 } else {
                     if space_start_col.is_none() {
@@ -439,7 +439,7 @@ fn unexpand_generic(
                     column = 0;
                     in_initial = true;
                 } else if byte == b'\x08' {
-                    out.write_all(&[b'\x08'])?;
+                    out.write_all(b"\x08")?;
                     if column > 0 {
                         column -= 1;
                     }

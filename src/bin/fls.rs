@@ -538,12 +538,9 @@ fn main() {
         Ok(false) => process::exit(2),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::BrokenPipe {
-                // Re-raise SIGPIPE so the process exits with signal code 141,
-                // matching GNU coreutils behavior.
-                unsafe {
-                    libc::raise(libc::SIGPIPE);
-                }
-                process::exit(0);
+                // Exit with 141 (128 + SIGPIPE) to match GNU coreutils behavior
+                // when output is piped to a reader that closes early.
+                process::exit(141);
             }
             eprintln!("ls: {}", e);
             process::exit(2);
