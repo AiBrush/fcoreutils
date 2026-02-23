@@ -27,10 +27,85 @@ pub struct UtmpxEntry {
     pub ut_tv_sec: i64,
 }
 
+/// Guess the pty name that was opened for a given UID right after the given
+/// start time (in microseconds since epoch). Matches the GNU coreutils
+/// `guess_pty_name()` algorithm: scan `/dev/pts/`, find the entry owned by
+/// `uid` whose ctime is >= start_time and closest to it (within 5 seconds).
+/// Returns e.g. "pts/0".
+fn guess_pty_name(uid: u32, start_us: u64) -> Option<String> {
+    let start_sec = (start_us / 1_000_000) as i64;
+    let start_nsec = ((start_us % 1_000_000) * 1000) as i64;
+
+    let dir = std::fs::read_dir("/dev/pts").ok()?;
+
+    let mut best_name: Option<String> = None;
+    let mut best_sec: i64 = 0;
+    let mut best_nsec: i64 = 0;
+
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Skip . entries and ptmx
+        if name_str.starts_with('.') || name_str == "ptmx" {
+            continue;
+        }
+
+        let path = format!("/dev/pts/{}", name_str);
+        let c_path = match std::ffi::CString::new(path.as_str()) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::stat(c_path.as_ptr(), &mut stat_buf) };
+        if rc != 0 {
+            continue;
+        }
+
+        // Must be owned by the session's UID
+        if stat_buf.st_uid != uid {
+            continue;
+        }
+
+        let ct_sec = stat_buf.st_ctime;
+        let ct_nsec = stat_buf.st_ctime_nsec;
+
+        // ctime must be >= start_time
+        if ct_sec < start_sec || (ct_sec == start_sec && ct_nsec < start_nsec) {
+            continue;
+        }
+
+        // Is this the best (earliest) candidate so far?
+        if best_name.is_none()
+            || ct_sec < best_sec
+            || (ct_sec == best_sec && ct_nsec < best_nsec)
+        {
+            best_name = Some(format!("pts/{}", name_str));
+            best_sec = ct_sec;
+            best_nsec = ct_nsec;
+        }
+    }
+
+    // Must be within 5 seconds of the start time
+    if let Some(ref _name) = best_name {
+        if best_sec > start_sec + 5
+            || (best_sec == start_sec + 5 && best_nsec > start_nsec)
+        {
+            return None;
+        }
+    }
+
+    best_name
+}
+
 /// Read session entries from systemd-logind session files.
-/// Used as a fallback when the traditional utmpx database is empty.
-/// Parses /run/systemd/sessions/ files for active user sessions.
-fn read_systemd_sessions() -> Vec<UtmpxEntry> {
+/// Used as a fallback when the traditional utmpx database has no USER_PROCESS
+/// entries. Implements the same algorithm as GNU coreutils' read_utmp_from_systemd().
+///
+/// If `check_pids` is true (used by who/users), filter out entries whose
+/// leader PID is no longer alive. If false (used by pinky), include all
+/// active sessions regardless of PID state.
+fn read_systemd_sessions(check_pids: bool) -> Vec<UtmpxEntry> {
     let sessions_dir = std::path::Path::new("/run/systemd/sessions");
     if !sessions_dir.exists() {
         return Vec::new();
@@ -58,8 +133,17 @@ fn read_systemd_sessions() -> Vec<UtmpxEntry> {
         let mut remote_host = String::new();
         let mut service = String::new();
         let mut realtime_us: u64 = 0;
+        let mut uid: u32 = 0;
+        let mut leader_pid: i32 = 0;
         let mut active = false;
-        let mut is_user_class = false;
+        let mut session_type = String::new();
+        let mut session_class = String::new();
+        let mut session_id = String::new();
+
+        // Use filename as session ID
+        if let Some(fname) = path.file_name() {
+            session_id = fname.to_string_lossy().into_owned();
+        }
 
         for line in content.lines() {
             if let Some(val) = line.strip_prefix("USER=") {
@@ -70,31 +154,74 @@ fn read_systemd_sessions() -> Vec<UtmpxEntry> {
                 service = val.to_string();
             } else if let Some(val) = line.strip_prefix("REALTIME=") {
                 realtime_us = val.parse().unwrap_or(0);
+            } else if let Some(val) = line.strip_prefix("UID=") {
+                uid = val.parse().unwrap_or(0);
+            } else if let Some(val) = line.strip_prefix("LEADER=") {
+                leader_pid = val.parse().unwrap_or(0);
             } else if line == "ACTIVE=1" {
                 active = true;
-            } else if line == "CLASS=user" {
-                is_user_class = true;
+            } else if let Some(val) = line.strip_prefix("TYPE=") {
+                session_type = val.to_string();
+            } else if let Some(val) = line.strip_prefix("CLASS=") {
+                session_class = val.to_string();
             }
         }
 
-        if !active || !is_user_class || user.is_empty() {
+        // Skip inactive sessions
+        if !active || user.is_empty() {
             continue;
         }
 
-        // TTY format: '?' + service name (e.g., "?sshd")
-        let tty = if service.is_empty() {
-            "?".to_string()
+        // When check_pids is set (who/users), verify the leader PID is alive
+        // This matches GNU's READ_UTMP_CHECK_PIDS behavior
+        if check_pids && leader_pid > 0 {
+            let pid_alive = unsafe { libc::kill(leader_pid, 0) };
+            if pid_alive < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::ESRCH) {
+                    continue; // Process does not exist
+                }
+            }
+        }
+
+        // Determine entry type: "manager" class → LOGIN_PROCESS, else USER_PROCESS
+        let entry_type = if session_class.starts_with("manager") {
+            LOGIN_PROCESS
         } else {
-            format!("?{}", service)
+            USER_PROCESS
+        };
+
+        // Skip non-user, non-manager classes
+        if session_class != "user" && !session_class.starts_with("manager") {
+            continue;
+        }
+
+        // Determine TTY line (matching GNU coreutils algorithm)
+        let tty = if session_type == "tty" {
+            // Try to guess the pty device from /dev/pts/
+            let pty = guess_pty_name(uid, realtime_us);
+            match (service.is_empty(), pty) {
+                (false, Some(pty_name)) => format!("{} {}", service, pty_name),
+                (false, None) => service.clone(),
+                (true, Some(pty_name)) => pty_name,
+                (true, None) => continue, // No seat and no tty, skip
+            }
+        } else if session_type == "web" {
+            if service.is_empty() {
+                continue;
+            }
+            service.clone()
+        } else {
+            continue; // Unrecognized session type
         };
 
         let tv_sec = (realtime_us / 1_000_000) as i64;
 
         entries.push(UtmpxEntry {
-            ut_type: USER_PROCESS,
-            ut_pid: 0,
+            ut_type: entry_type,
+            ut_pid: leader_pid,
             ut_line: tty,
-            ut_id: String::new(),
+            ut_id: session_id,
             ut_user: user,
             ut_host: remote_host,
             ut_tv_sec: tv_sec,
@@ -146,16 +273,48 @@ pub fn read_utmpx() -> Vec<UtmpxEntry> {
     entries
 }
 
-/// Read utmpx entries, falling back to systemd sessions if the database is empty.
-/// Used by pinky (which, like GNU pinky, reads systemd-logind when utmpx is unavailable).
-/// GNU who does NOT do this fallback, so `read_utmpx()` does not include it.
-pub fn read_utmpx_with_systemd_fallback() -> Vec<UtmpxEntry> {
-    let entries = read_utmpx();
-    if entries.is_empty() {
-        read_systemd_sessions()
-    } else {
-        entries
+/// Read utmpx entries, falling back to systemd sessions if the utmpx database
+/// has no USER_PROCESS entries. This matches GNU coreutils behavior: when
+/// /var/run/utmp is absent or empty, use systemd-logind session files.
+///
+/// If `check_pids` is true (who/users), filter out entries whose leader PID
+/// is dead (matches GNU's READ_UTMP_CHECK_PIDS). If false (pinky), include
+/// all active sessions.
+pub fn read_utmpx_with_systemd_fallback_ex(check_pids: bool) -> Vec<UtmpxEntry> {
+    let mut entries = read_utmpx();
+
+    // If check_pids is set, filter traditional utmpx entries by PID too
+    if check_pids {
+        entries.retain(|e| {
+            if e.ut_type == USER_PROCESS && e.ut_pid > 0 {
+                let rc = unsafe { libc::kill(e.ut_pid, 0) };
+                if rc < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::ESRCH) {
+                        return false;
+                    }
+                }
+            }
+            true
+        });
     }
+
+    let has_user_entries = entries.iter().any(|e| e.ut_type == USER_PROCESS);
+    if !has_user_entries {
+        let systemd_entries = read_systemd_sessions(check_pids);
+        entries.extend(systemd_entries);
+    }
+    entries
+}
+
+/// Read utmpx with systemd fallback, checking PIDs (for who/users).
+pub fn read_utmpx_with_systemd_fallback() -> Vec<UtmpxEntry> {
+    read_utmpx_with_systemd_fallback_ex(true)
+}
+
+/// Read utmpx with systemd fallback, without PID checking (for pinky).
+pub fn read_utmpx_with_systemd_fallback_no_pid_check() -> Vec<UtmpxEntry> {
+    read_utmpx_with_systemd_fallback_ex(false)
 }
 
 /// Extract a Rust String from a fixed-size C char buffer.
@@ -234,16 +393,36 @@ pub fn format_time(tv_sec: i64) -> String {
     )
 }
 
+/// Extract the actual device path from a ut_line field.
+/// For systemd-logind entries, ut_line may be "sshd pts/0" (service + space + tty).
+/// For traditional utmpx entries, it's just "pts/0" or "tty1".
+fn extract_device_path(line: &str) -> Option<String> {
+    if line.is_empty() {
+        return None;
+    }
+    // For lines like "sshd pts/0", extract "pts/0"
+    let tty_part = if let Some(idx) = line.find("pts/") {
+        &line[idx..]
+    } else if let Some(idx) = line.find("tty") {
+        &line[idx..]
+    } else if line.starts_with('/') {
+        return Some(line.to_string());
+    } else {
+        line
+    };
+    if tty_part.starts_with('/') {
+        Some(tty_part.to_string())
+    } else {
+        Some(format!("/dev/{}", tty_part))
+    }
+}
+
 /// Determine the message status character for a terminal line.
 /// '+' means writable (mesg y), '-' means not writable (mesg n), '?' means unknown.
 fn mesg_status(line: &str) -> char {
-    if line.is_empty() {
-        return '?';
-    }
-    let dev_path = if line.starts_with('/') {
-        line.to_string()
-    } else {
-        format!("/dev/{}", line)
+    let dev_path = match extract_device_path(line) {
+        Some(p) => p,
+        None => return '?',
     };
 
     let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
@@ -263,13 +442,9 @@ fn mesg_status(line: &str) -> char {
 /// Returns "." if active within the last minute, "old" if more than 24h,
 /// or "HH:MM" otherwise.
 fn idle_str(line: &str) -> String {
-    if line.is_empty() {
-        return "?".to_string();
-    }
-    let dev_path = if line.starts_with('/') {
-        line.to_string()
-    } else {
-        format!("/dev/{}", line)
+    let dev_path = match extract_device_path(line) {
+        Some(p) => p,
+        None => return "?".to_string(),
     };
 
     let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
@@ -313,7 +488,9 @@ pub fn should_show(entry: &UtmpxEntry, config: &WhoConfig) -> bool {
     if config.am_i || config.only_current {
         // Only show entries matching the current terminal
         if let Some(tty) = current_tty() {
-            return entry.ut_type == USER_PROCESS && entry.ut_line == tty;
+            // For systemd entries, ut_line may be "sshd pts/0" — match if it contains the tty
+            return entry.ut_type == USER_PROCESS
+                && (entry.ut_line == tty || entry.ut_line.ends_with(&format!(" {}", tty)));
         }
         return false;
     }
@@ -502,7 +679,7 @@ fn read_boot_time_from_proc() -> Option<i64> {
 
 /// Run the who command and return the formatted output.
 pub fn run_who(config: &WhoConfig) -> String {
-    let mut entries = read_utmpx();
+    let mut entries = read_utmpx_with_systemd_fallback();
 
     // If no BOOT_TIME entry was found in utmpx (common in containers and some
     // Linux configurations), synthesize one from /proc/stat btime.

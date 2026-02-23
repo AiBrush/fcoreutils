@@ -95,12 +95,13 @@ fn idle_str(line: &str) -> String {
     if line.is_empty() {
         return "?????".to_string();
     }
-    // Lines starting with '?' have no real TTY (e.g. systemd/ssh sessions)
-    if line.starts_with('?') {
-        return "?????".to_string();
-    }
+    // Extract the actual device path from lines like "sshd pts/0"
     let dev_path = if line.starts_with('/') {
         line.to_string()
+    } else if let Some(idx) = line.find("pts/") {
+        format!("/dev/{}", &line[idx..])
+    } else if let Some(idx) = line.find("tty") {
+        format!("/dev/{}", &line[idx..])
     } else {
         format!("/dev/{}", line)
     };
@@ -160,62 +161,106 @@ fn read_file_contents(path: &PathBuf) -> String {
 }
 
 /// Format the short-format heading line (matches GNU pinky column widths).
+/// GNU format: %-8s "Login" | " %-19s" "Name" | " %-9s" " TTY" | " %-6s" "Idle" | " %-16s" "When" | " %s" "Where"
 pub fn format_short_heading(config: &PinkyConfig) -> String {
     let mut out = String::new();
     let _ = write!(out, "{:<8}", "Login");
     if !config.omit_fullname && !config.omit_fullname_host && !config.omit_fullname_host_idle {
-        let _ = write!(out, " {:<20}", "Name");
+        let _ = write!(out, " {:<19}", "Name");
     }
-    let _ = write!(out, " {:<9}", "TTY");
+    // GNU uses " %-9s" with " TTY" (note leading space in argument = 4 chars padded to 9)
+    let _ = write!(out, " {:<9}", " TTY");
     if !config.omit_fullname_host_idle {
-        let _ = write!(out, "{:<7}", "Idle");
+        let _ = write!(out, " {:<6}", "Idle");
     }
-    let _ = write!(out, "{:<17}", "When");
+    let _ = write!(out, " {:<16}", "When");
     if !config.omit_fullname_host && !config.omit_fullname_host_idle {
-        let _ = write!(out, "{}", "Where");
+        let _ = write!(out, " {}", "Where");
     }
     out
 }
 
-/// Format a single entry in short format.
+/// Determine the message status character for a terminal line (pinky format).
+/// ' ' means writable (mesg y), '*' means not writable (mesg n), '?' means unknown.
+fn pinky_mesg_status(line: &str) -> char {
+    // Extract the device part: for "sshd pts/0", extract "pts/0"
+    let dev_part = if let Some(space_idx) = line.find(' ') {
+        &line[space_idx + 1..]
+    } else {
+        line
+    };
+
+    if dev_part.is_empty() {
+        return '?';
+    }
+
+    let dev_path = if dev_part.starts_with('/') {
+        dev_part.to_string()
+    } else {
+        format!("/dev/{}", dev_part)
+    };
+
+    let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+    let c_path = std::ffi::CString::new(dev_path).unwrap_or_default();
+    let rc = unsafe { libc::stat(c_path.as_ptr(), &mut stat_buf) };
+    if rc != 0 {
+        return '?';
+    }
+    if stat_buf.st_mode & libc::S_IWGRP != 0 {
+        ' '
+    } else {
+        '*'
+    }
+}
+
+/// Format a single entry in short format (matches GNU pinky format exactly).
 pub fn format_short_entry(entry: &who::UtmpxEntry, config: &PinkyConfig) -> String {
     let mut out = String::new();
 
-    // Login name
-    let _ = write!(out, "{:<8}", entry.ut_user);
+    // Login name: %-8s
+    let user = &entry.ut_user;
+    if user.len() < 8 {
+        let _ = write!(out, "{:<8}", user);
+    } else {
+        let _ = write!(out, "{}", user);
+    }
 
-    // Full name
+    // Full name: " %-19.19s"
     if !config.omit_fullname && !config.omit_fullname_host && !config.omit_fullname_host_idle {
         let fullname = get_user_info(&entry.ut_user)
             .map(|u| u.fullname)
             .unwrap_or_default();
-        // Truncate full name to 20 chars for alignment
-        let display_name: String = fullname.chars().take(20).collect();
-        let _ = write!(out, " {:<20}", display_name);
+        // Truncate full name to 19 chars for alignment (GNU uses %-19.19s)
+        let display_name: String = fullname.chars().take(19).collect();
+        let _ = write!(out, " {:<19}", display_name);
     }
 
-    // Tty (GNU pinky data rows omit the leading space before TTY, unlike the header)
-    let tty = entry
-        .ut_line
-        .strip_prefix("pts/")
-        .map(|s| format!("pts/{}", s))
-        .unwrap_or_else(|| entry.ut_line.clone());
-    let _ = write!(out, "{:<9}", tty);
+    // Mesg status: space + mesg_char (GNU: fputc(' '), fputc(mesg))
+    let mesg = pinky_mesg_status(&entry.ut_line);
+    let _ = write!(out, " {}", mesg);
 
-    // Idle time (GNU pinky data rows add a leading space before idle, unlike the header)
+    // TTY line: %-8s (may overflow for long lines like "sshd pts/0")
+    let line = &entry.ut_line;
+    if line.len() < 8 {
+        let _ = write!(out, "{:<8}", line);
+    } else {
+        let _ = write!(out, "{}", line);
+    }
+
+    // Idle time: " %-6s"
     if !config.omit_fullname_host_idle {
         let idle = idle_str(&entry.ut_line);
-        let _ = write!(out, " {:<7}", idle);
+        let _ = write!(out, " {:<6}", idle);
     }
 
-    // When (login time)
+    // When (login time): " %s"
     let time_str = format_time_short(entry.ut_tv_sec);
-    let _ = write!(out, "{:<17}", time_str);
+    let _ = write!(out, " {}", time_str);
 
     // Where (remote host)
     if !config.omit_fullname_host && !config.omit_fullname_host_idle {
         if !entry.ut_host.is_empty() {
-            let _ = write!(out, "{}", entry.ut_host);
+            let _ = write!(out, " {}", entry.ut_host);
         }
     }
 
@@ -290,7 +335,7 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
         // Long format: show detailed info for each specified user
         let users = if config.users.is_empty() {
             // If no users specified in long mode, show logged-in users
-            let entries = who::read_utmpx_with_systemd_fallback();
+            let entries = who::read_utmpx_with_systemd_fallback_no_pid_check();
             let mut names: Vec<String> = entries
                 .iter()
                 .filter(|e| e.ut_type == 7) // USER_PROCESS
@@ -309,7 +354,7 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
         }
     } else {
         // Short format (default)
-        let entries = who::read_utmpx_with_systemd_fallback();
+        let entries = who::read_utmpx_with_systemd_fallback_no_pid_check();
 
         if !config.omit_heading {
             let _ = writeln!(output, "{}", format_short_heading(config));
