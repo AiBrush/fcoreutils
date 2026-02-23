@@ -7,6 +7,28 @@
 /// Sentinel returned inside `process_format_string` when `\c` is encountered.
 const STOP_OUTPUT: u8 = 0xFF;
 
+use std::cell::Cell;
+
+thread_local! {
+    /// Set to true when a numeric conversion warning occurs (invalid argument).
+    static CONV_ERROR: Cell<bool> = Cell::new(false);
+}
+
+/// Reset conversion error flag. Call before processing a format string.
+pub fn reset_conv_error() {
+    CONV_ERROR.with(|c| c.set(false));
+}
+
+/// Returns true if a conversion warning occurred since last reset.
+pub fn had_conv_error() -> bool {
+    CONV_ERROR.with(|c| c.get())
+}
+
+fn mark_conv_error(s: &str) {
+    eprintln!("printf: '{}': expected a numeric value", s);
+    CONV_ERROR.with(|c| c.set(true));
+}
+
 /// Process a printf format string with the given arguments, returning raw bytes.
 ///
 /// The format string repeats if there are more arguments than one pass consumes.
@@ -517,19 +539,25 @@ fn parse_integer(s: &str) -> i64 {
         (false, s)
     };
 
+    // digits must be non-empty and parseable
+    if digits.is_empty() {
+        mark_conv_error(s);
+        return 0;
+    }
+
     let magnitude = if let Some(hex) = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        u64::from_str_radix(hex, 16).unwrap_or(0)
+        u64::from_str_radix(hex, 16).unwrap_or_else(|_| { mark_conv_error(s); 0 })
     } else if let Some(oct) = digits.strip_prefix('0') {
         if oct.is_empty() {
             0
         } else {
-            u64::from_str_radix(oct, 8).unwrap_or(0)
+            u64::from_str_radix(oct, 8).unwrap_or_else(|_| { mark_conv_error(s); 0 })
         }
     } else {
-        digits.parse::<u64>().unwrap_or(0)
+        digits.parse::<u64>().unwrap_or_else(|_| { mark_conv_error(s); 0 })
     };
 
     if negative {
@@ -560,19 +588,25 @@ fn parse_unsigned(s: &str) -> u64 {
         (false, s)
     };
 
+    // digits must be non-empty and parseable
+    if digits.is_empty() {
+        mark_conv_error(s);
+        return 0;
+    }
+
     let magnitude = if let Some(hex) = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        u64::from_str_radix(hex, 16).unwrap_or(0)
+        u64::from_str_radix(hex, 16).unwrap_or_else(|_| { mark_conv_error(s); 0 })
     } else if let Some(oct) = digits.strip_prefix('0') {
         if oct.is_empty() {
             0
         } else {
-            u64::from_str_radix(oct, 8).unwrap_or(0)
+            u64::from_str_radix(oct, 8).unwrap_or_else(|_| { mark_conv_error(s); 0 })
         }
     } else {
-        digits.parse::<u64>().unwrap_or(0)
+        digits.parse::<u64>().unwrap_or_else(|_| { mark_conv_error(s); 0 })
     };
 
     if negative {

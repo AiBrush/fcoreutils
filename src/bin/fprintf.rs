@@ -73,16 +73,12 @@ fn main() {
     }
 
     let format = &args[0];
-    // Strip `--` separator if present; it should not be passed as a format argument.
     let remaining = &args[1..];
-    let remaining = if remaining.first().map(|s| s.as_str()) == Some("--") {
-        &remaining[1..]
-    } else {
-        remaining
-    };
     let arg_strs: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
 
+    coreutils_rs::printf::reset_conv_error();
     let output = coreutils_rs::printf::process_format_string(format, &arg_strs);
+    let had_error = coreutils_rs::printf::had_conv_error();
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
@@ -91,6 +87,10 @@ fn main() {
             process::exit(0);
         }
         eprintln!("{}: write error: {}", TOOL_NAME, e);
+        process::exit(1);
+    }
+
+    if had_error {
         process::exit(1);
     }
 }
