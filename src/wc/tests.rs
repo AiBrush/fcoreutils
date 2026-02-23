@@ -127,9 +127,9 @@ fn test_count_words_crlf_separated() {
 }
 
 #[test]
-fn test_count_words_binary_data_word_content() {
-    // NUL bytes are non-space → word content (2-state logic)
-    // They do NOT break words — "hello" and "world" merge into 1 word
+fn test_count_words_binary_data_nul_word_content() {
+    // NUL bytes are word content (not whitespace) — verified: printf '\x00hello\x00world' | wc -w = 1
+    // NUL does NOT break words — "hello" and "world" merge into 1 word
     assert_eq!(count_words(b"\x00hello\x00world"), 1);
 }
 
@@ -157,7 +157,7 @@ fn test_count_words_all_whitespace_types() {
 
 #[test]
 fn test_2state_nul_is_word_content() {
-    // NUL alone: word content → 1 word (matches GNU wc)
+    // NUL alone: word content → 1 word — verified: printf '\x00\x00' | wc -w = 1
     assert_eq!(count_words(b"\x00"), 1);
 }
 
@@ -173,7 +173,7 @@ fn test_2state_control_chars_are_word_content() {
 
 #[test]
 fn test_2state_nonspace_doesnt_break_words() {
-    // Non-space bytes between printable chars don't break words
+    // Non-space bytes (including NUL) between printable chars don't break words
     assert_eq!(count_words(b"hello\x01world"), 1);
     assert_eq!(count_words(b"hello\x7fworld"), 1);
     assert_eq!(count_words(b"hello\x00world"), 1);
@@ -181,9 +181,9 @@ fn test_2state_nonspace_doesnt_break_words() {
 
 #[test]
 fn test_2state_nonspace_starts_words() {
-    // Non-space bytes at start DO start a word (matches GNU wc)
+    // NUL is word content, so \x00\x01\x02 is 1 continuous word
     assert_eq!(count_words(b"\x00\x01\x02"), 1);
-    // Non-space at start, then printable: still 1 word (continuous)
+    // NUL at start is word content, "hello" continues the same word
     assert_eq!(count_words(b"\x00hello"), 1);
 }
 
@@ -514,8 +514,8 @@ fn test_gnu_trailing_newline() {
 
 #[test]
 fn test_gnu_word_definition() {
-    // GNU wc 2-state: non-space bytes are word content (matches GNU wc behavior)
-    assert_eq!(count_words(b"\x00"), 1); // NUL: word content
+    // GNU wc 2-state: NUL and all non-space bytes are word content
+    assert_eq!(count_words(b"\x00"), 1); // NUL: word content (verified: printf '\x00' | wc -w = 1)
     assert_eq!(count_words(b"\x01"), 1); // SOH: word content
     assert_eq!(count_words(b"\x7f"), 1); // DEL: word content
     // Printable ASCII is always word content
