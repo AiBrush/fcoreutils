@@ -24,8 +24,8 @@ pub struct WcCounts {
 //   0 = word content: starts or continues a word (any non-whitespace byte)
 //   1 = space (word break): ends any current word
 //
-// Whitespace bytes: 0x09 TAB, 0x0A LF, 0x0B VT, 0x0C FF, 0x0D CR, 0x20 SPACE.
-// Everything else (including NUL, control chars, high bytes 0x80-0xFF) is word content.
+// Whitespace bytes: 0x00 NUL, 0x09 TAB, 0x0A LF, 0x0B VT, 0x0C FF, 0x0D CR, 0x20 SPACE, 0xA0.
+// Everything else (control chars, high bytes 0x80-0xFF except 0xA0) is word content.
 
 /// Byte classification for C/POSIX locale word counting.
 /// GNU wc treats whitespace as word breaks and everything else as word content.
@@ -123,8 +123,8 @@ pub fn count_words_locale(data: &[u8], utf8: bool) -> u64 {
 
 /// Count words in C/POSIX locale using 2-state logic matching GNU wc.
 /// GNU wc treats bytes as either whitespace (word break) or word content.
-/// Whitespace: 0x09-0x0D, 0x20.
-/// Everything else (including NUL, control chars, high bytes) is word content.
+/// Whitespace: 0x00 NUL, 0x09-0x0D, 0x20, 0xA0.
+/// Everything else (control chars, high bytes except 0xA0) is word content.
 fn count_words_c(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;
@@ -149,7 +149,7 @@ fn count_words_c(data: &[u8]) -> u64 {
 
 /// AVX2-accelerated fused line+word counter for C locale chunks.
 /// Processes 32 bytes per iteration using 2-state logic:
-///   - Space bytes (0x09-0x0D, 0x20, 0xA0): word breaks
+///   - Space bytes (0x00, 0x09-0x0D, 0x20, 0xA0): word breaks
 ///   - Everything else: word content (starts/continues words)
 /// Word transitions detected via bitmask: word_content_mask & ~prev_word_content_mask.
 #[cfg(target_arch = "x86_64")]
@@ -252,7 +252,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
 
 /// SSE2-accelerated fused line+word counter for C locale chunks.
 /// Same 2-state algorithm as AVX2 but processes 16 bytes per iteration.
-/// Space bytes: 0x09-0x0D, 0x20, 0xA0. Available on all x86_64 CPUs.
+/// Space bytes: 0x00, 0x09-0x0D, 0x20, 0xA0. Available on all x86_64 CPUs.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {

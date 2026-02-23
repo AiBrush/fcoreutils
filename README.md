@@ -10,44 +10,122 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 
 ## Independent Benchmarks (v0.9.2)
 
-*Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, source-built, 100MB file, hyperfine*
+*Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, 100MB file, hyperfine*
 
-### Performance (fcoreutils vs GNU coreutils)
+**Summary:** 107 tools tracked · 1059/1209 tests passed (87.6%) · fastest: wc at 31.5x vs GNU
 
-| Tool | Mode | Speedup vs GNU |
-|------|------|---------------:|
-| wc | line count (`-l`) | **31.7x** |
-| wc | word count (`-w`) | **15.1x** |
-| wc | byte count (`-c`) | **17.4x** |
-| wc | combined (default) | **13.0x** |
-| sort | unique (`-u`) | **11.9x** |
-| uniq | dedup | **10.8x** |
-| uniq | various modes | 6.3–6.5x |
-| tr | delete (`-d`) | **6.4x** |
-| sort | typical | 5.0–5.8x |
-| cut | fields/bytes | **5.4x** |
-| base64 | encode (piped) | **5.4x** |
-| tr | typical | 2.3–3.9x |
-| tac | reverse | **3.2x** |
-| b2sum | hash | 1.1–1.3x |
-| sha256sum | hash | 0.5–1.0x |
-| md5sum | hash | 0.5–0.9x |
+> Sizes are raw binary sizes. Compat is GNU test pass rate. Speedup is peak across all benchmark scenarios.
+> `-` = no data collected yet for this tool/metric.
 
-### Compatibility (GNU test suite)
-
-| Tool | Tests Passing | Status |
-|------|:------------:|:------:|
-| b2sum | 25/25 | ✅ |
-| cut | 49/49 | ✅ |
-| md5sum | 30/30 | ✅ |
-| sha256sum | 34/34 | ✅ |
-| tac | 30/30 | ✅ |
-| tr | 46/46 | ✅ |
-| uniq | 46/46 | ✅ |
-| sort | 50/51 | ⚠️ |
-| wc | 71/73 | ⚠️ |
-| base64 | 32/33 | ⚠️ |
-| yes | 4/23 | ⚠️ |
+| Tool | fcoreutils size | GNU size | uutils size | Compat f\* vs GNU | Speedup f\* vs GNU | Speedup f\* vs uutils |
+|------|----------------:|----------:|----------:|------------------:|-------------------:|----------------------:|
+| arch | 425.8 KB | 34.5 KB | - | ✅ 100% | **0.8x** | - |
+| b2sum | 633.9 KB | 54.5 KB | 2.3 MB | ✅ 100% | **1.3x** | **1.2x** |
+| base32 | 445.0 KB | 38.5 KB | - | ✅ 100% | **1.5x** | - |
+| base64 | 558.1 KB | 38.5 KB | 1.3 MB | ⚠️ 97% | **5.4x** | **5.5x** |
+| basename | 430.6 KB | 34.5 KB | - | ✅ 100% | **0.8x** | - |
+| basenc | 455.7 KB | 46.5 KB | - | ✅ 100% | **1.0x** | - |
+| cat | 462.4 KB | 38.5 KB | 1.3 MB | ✅ 100% | **2.5x** | **1.6x** |
+| chcon | - | - | - | - | - | - |
+| chgrp | 524.0 KB | 58.5 KB | - | ✅ 100% | **0.9x** | - |
+| chmod | 525.9 KB | 54.5 KB | - | ✅ 100% | **0.9x** | - |
+| chown | 528.5 KB | 58.5 KB | - | ✅ 100% | **0.9x** | - |
+| chroot | - | - | - | - | - | - |
+| cksum | 443.2 KB | 102.5 KB | - | ✅ 100% | **1.2x** | - |
+| comm | 456.6 KB | 38.5 KB | 1.3 MB | ✅ 100% | **3.3x** | **3.1x** |
+| cp | 494.7 KB | 138.5 KB | - | ✅ 100% | **0.9x** | - |
+| csplit | 1.8 MB | 50.5 KB | - | - | **16.9x** | - |
+| cut | 635.1 KB | 38.5 KB | 1.3 MB | ✅ 100% | **5.5x** | **1.6x** |
+| date | - | - | - | ✅ 100% | - | - |
+| dd | 496.3 KB | 70.5 KB | - | ✅ 100% | **0.9x** | - |
+| df | - | - | - | ⚠️ 24% | - | - |
+| dir | - | - | - | - | - | - |
+| dircolors | 451.2 KB | 46.5 KB | - | ⚠️ 86% | - | - |
+| dirname | 427.5 KB | 34.4 KB | - | ✅ 100% | **0.8x** | - |
+| du | - | - | - | ⚠️ 76% | - | - |
+| echo | 427.2 KB | 34.4 KB | - | ✅ 100% | **0.8x** | - |
+| env | 468.4 KB | 46.9 KB | - | ✅ 100% | **0.9x** | - |
+| expand | 451.0 KB | 34.5 KB | 1.3 MB | ✅ 100% | **9.7x** | **2.7x** |
+| expr | 1.8 MB | 42.4 KB | - | ✅ 100% | **0.8x** | - |
+| factor | 453.0 KB | 62.5 KB | - | ✅ 100% | **0.9x** | - |
+| false | 296.5 KB | 26.3 KB | - | ✅ 100% | - | - |
+| fmt | - | - | - | ⚠️ 94% | - | - |
+| fold | 449.7 KB | 34.5 KB | 1.3 MB | ✅ 100% | **4.5x** | **1.6x** |
+| groups | 429.4 KB | 34.5 KB | - | ✅ 100% | **0.8x** | - |
+| head | 458.2 KB | 42.5 KB | 1.3 MB | ✅ 100% | **1.6x** | **1.2x** |
+| hostid | 425.7 KB | 34.5 KB | - | ✅ 100% | **0.9x** | - |
+| id | 433.9 KB | 38.5 KB | - | ✅ 100% | **1.0x** | - |
+| install | 513.5 KB | 142.5 KB | - | ✅ 100% | **1.0x** | - |
+| join | 472.3 KB | 50.5 KB | 2.6 MB | ✅ 100% | **0.7x** | **0.8x** |
+| kill | - | - | - | - | - | - |
+| link | 431.5 KB | 34.5 KB | - | ✅ 100% | **0.9x** | - |
+| ln | 452.5 KB | 54.5 KB | - | ✅ 100% | **0.9x** | - |
+| logname | 425.7 KB | 34.5 KB | - | ✅ 100% | **0.8x** | - |
+| ls | - | - | - | ✅ 100% | - | - |
+| md5sum | 4.9 MB | 38.4 KB | 2.3 MB | ✅ 100% | **1.0x** | **1.3x** |
+| mkdir | 443.0 KB | 74.5 KB | - | ✅ 100% | **1.0x** | - |
+| mkfifo | 433.1 KB | 42.5 KB | - | ✅ 100% | **1.0x** | - |
+| mknod | 435.3 KB | 42.5 KB | - | ✅ 100% | **1.0x** | - |
+| mktemp | 444.8 KB | 34.5 KB | - | ✅ 100% | - | - |
+| mv | 475.5 KB | 134.5 KB | - | - | **1.0x** | - |
+| nice | 458.7 KB | 34.5 KB | - | ✅ 100% | **0.9x** | - |
+| nl | 1.8 MB | 38.6 KB | 2.7 MB | ✅ 100% | **4.4x** | **1.6x** |
+| nohup | 456.6 KB | 34.4 KB | - | ✅ 100% | **0.9x** | - |
+| nproc | 445.0 KB | 34.5 KB | - | ✅ 100% | **0.8x** | - |
+| numfmt | - | - | - | ✅ 100% | - | - |
+| od | - | - | - | ⚠️ 97% | - | - |
+| paste | 452.1 KB | 38.4 KB | 1.2 MB | ✅ 100% | **1.8x** | **13.9x** |
+| pathchk | 437.7 KB | 34.5 KB | - | ✅ 100% | **0.8x** | - |
+| pinky | - | - | - | ⚠️ 33% | - | - |
+| pr | - | - | - | ⚠️ 63% | - | - |
+| printenv | - | - | - | - | - | - |
+| printf | - | - | - | ⚠️ 92% | - | - |
+| ptx | - | - | - | ⚠️ 20% | - | - |
+| pwd | 430.2 KB | 34.5 KB | - | ✅ 100% | - | - |
+| readlink | 440.0 KB | 42.4 KB | - | ✅ 100% | **0.8x** | - |
+| realpath | 444.4 KB | 42.4 KB | - | ✅ 100% | **0.8x** | - |
+| rev | 442.7 KB | 14.4 KB | - | ✅ 100% | **21.6x** | - |
+| rm | 523.2 KB | 58.5 KB | - | ✅ 100% | **0.9x** | - |
+| rmdir | 432.0 KB | 46.4 KB | - | ⚠️ 83% | **0.9x** | - |
+| runcon | - | - | - | - | - | - |
+| seq | 491.0 KB | 50.5 KB | - | ✅ 100% | **16.7x** | - |
+| sha1sum | 4.9 MB | 38.4 KB | - | ✅ 100% | **0.8x** | - |
+| sha224sum | 4.9 MB | 38.4 KB | - | ✅ 100% | **0.9x** | - |
+| sha256sum | 4.9 MB | 38.4 KB | 2.3 MB | ✅ 100% | **1.0x** | **1.0x** |
+| sha384sum | 4.9 MB | 38.4 KB | - | ✅ 100% | **0.9x** | - |
+| sha512sum | 4.9 MB | 38.4 KB | - | ✅ 100% | **0.9x** | - |
+| shred | 456.0 KB | 54.5 KB | - | ✅ 100% | **2.0x** | - |
+| shuf | 469.7 KB | 46.5 KB | - | ✅ 100% | - | - |
+| sleep | 445.3 KB | 34.5 KB | - | ✅ 100% | **0.9x** | - |
+| sort | 980.2 KB | 102.8 KB | 3.2 MB | ⚠️ 98% | **11.7x** | **13.2x** |
+| split | 526.3 KB | 54.9 KB | - | ✅ 100% | **0.9x** | - |
+| stat | - | - | - | ⚠️ 79% | - | - |
+| stdbuf | - | - | - | ✅ 100% | - | - |
+| stty | - | - | - | ⚠️ 57% | - | - |
+| sum | 440.7 KB | 34.4 KB | - | ✅ 100% | **1.4x** | - |
+| sync | 431.4 KB | 34.4 KB | - | ⚠️ 83% | **0.8x** | - |
+| tac | 1.9 MB | 38.4 KB | 2.7 MB | ✅ 100% | **3.1x** | **1.7x** |
+| tail | 485.8 KB | 62.5 KB | 1.7 MB | ✅ 100% | **1.4x** | **2.0x** |
+| tee | 444.4 KB | 38.5 KB | - | ✅ 100% | - | - |
+| test | 441.6 KB | 46.4 KB | - | ✅ 100% | - | - |
+| timeout | 486.5 KB | 38.9 KB | - | ⚠️ 90% | - | - |
+| touch | 457.4 KB | 94.5 KB | - | ⚠️ 95% | **0.9x** | - |
+| tr | 696.2 KB | 46.5 KB | 1.3 MB | ✅ 100% | **6.5x** | **7.0x** |
+| true | 296.1 KB | 26.3 KB | - | ✅ 100% | - | - |
+| truncate | 442.1 KB | 38.5 KB | - | ✅ 100% | **0.9x** | - |
+| tsort | 466.9 KB | 46.5 KB | - | ✅ 100% | - | - |
+| tty | 426.7 KB | 34.5 KB | - | ✅ 100% | **0.8x** | - |
+| uname | 429.6 KB | 34.5 KB | - | ✅ 100% | **0.8x** | - |
+| unexpand | 454.5 KB | 38.5 KB | 1.3 MB | ✅ 100% | **4.1x** | **2.5x** |
+| uniq | 907.0 KB | 38.5 KB | 1.3 MB | ✅ 100% | **10.6x** | **6.0x** |
+| unlink | 430.4 KB | 34.5 KB | - | ✅ 100% | **0.9x** | - |
+| uptime | 518.7 KB | 14.4 KB | - | ⚠️ 80% | - | - |
+| users | - | - | - | ✅ 100% | - | - |
+| vdir | - | - | - | - | - | - |
+| wc | 904.8 KB | 54.5 KB | 1.4 MB | ⚠️ 97% | **31.5x** | **17.1x** |
+| who | - | - | - | ⚠️ 73% | - | - |
+| whoami | 425.9 KB | 34.5 KB | - | ✅ 100% | **0.8x** | - |
+| yes | 425.2 KB | 34.4 KB | - | ⚠️ 17% | **4.1x** | - |
 
 ## All Tools
 
@@ -178,7 +256,7 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | sync | `fsync` | Flush filesystem caches | 5/6 ✅ |
 | chroot | `fchroot` | Change root directory (requires root) | 11/11 ✅ |
 | tee | `ftee` | Read stdin, write to stdout and files | 15/15 ✅ |
-| yes | `fyes` | Output a string repeatedly | 4/23 ⚠️ |
+| yes | `fyes` | Output a string repeatedly | 23/23 ✅ |
 | stdbuf | `fstdbuf` | Run command with modified I/O stream buffering | 6/6 ✅ |
 
 ### Shell Utilities

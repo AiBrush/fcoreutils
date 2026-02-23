@@ -386,10 +386,10 @@ mod tests {
         drop(stdout);
 
         let mut stderr = child.stderr.take().unwrap();
-        let status = child.wait().unwrap();
-
         let mut stderr_output = String::new();
         let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_output);
+
+        let status = child.wait().unwrap();
 
         assert_eq!(
             status.code(),
