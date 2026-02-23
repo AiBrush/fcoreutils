@@ -19,7 +19,8 @@ fn extract_fsid(fsid: &libc::fsid_t) -> u64 {
     // Interpret as two u32 values in native endian (matching __val[0] and __val[1])
     let val0 = u32::from_ne_bytes(bytes[0..4].try_into().unwrap()) as u64;
     let val1 = u32::from_ne_bytes(bytes[4..8].try_into().unwrap()) as u64;
-    (val1 << 32) | val0
+    // GNU stat formats as val[0] in high bits, val[1] in low bits
+    (val0 << 32) | val1
 }
 
 /// Perform a libc stat/lstat call and return the raw `libc::stat` structure.
@@ -90,7 +91,7 @@ fn stat_regular(path: &str, config: &StatConfig) -> Result<String, io::Error> {
     }
 
     if config.terse {
-        return Ok(format_file_terse(path, &meta, &st));
+        return Ok(format_file_terse(path, &meta, &st, config.dereference));
     }
 
     Ok(format_file_default(path, &meta, &st, config.dereference))
@@ -199,10 +200,13 @@ fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat, de
 // Terse file format
 // ──────────────────────────────────────────────────
 
-fn format_file_terse(path: &str, meta: &std::fs::Metadata, st: &libc::stat) -> String {
+fn format_file_terse(path: &str, meta: &std::fs::Metadata, st: &libc::stat, dereference: bool) -> String {
     let dev = meta.dev();
+    let birth_secs = get_birth_time(path, dereference)
+        .map(|(s, _)| s)
+        .unwrap_or(0);
     format!(
-        "{} {} {} {:x} {} {} {:x} {} {} {:x} {:x} {} {} {} 0 {}\n",
+        "{} {} {} {:x} {} {} {:x} {} {} {:x} {:x} {} {} {} {} {}\n",
         path,
         meta.size(),
         meta.blocks(),
@@ -217,6 +221,7 @@ fn format_file_terse(path: &str, meta: &std::fs::Metadata, st: &libc::stat) -> S
         st.st_atime,
         st.st_mtime,
         st.st_ctime,
+        birth_secs,
         meta.blksize()
     )
 }
@@ -245,7 +250,7 @@ fn format_fs_default(path: &str, sfs: &libc::statfs) -> String {
     let frsize = sfs.f_bsize as u64; // fallback to bsize
 
     format!(
-        "  File: \"{}\"\n    ID: {:x} Namelen: {}     Type: {}\nBlock size: {:<10} Fundamental block size: {}\nBlocks: Total: {:<10} Free: {:<10} Available: {}\nInodes: Total: {:<10} Free: {}\n",
+        "  File: \"{}\"\n    ID: {:016x} Namelen: {}     Type: {}\nBlock size: {:<10} Fundamental block size: {}\nBlocks: Total: {:<10} Free: {:<10} Available: {}\nInodes: Total: {:<10} Free: {}\n",
         path,
         fsid_val,
         namelen,

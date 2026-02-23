@@ -1,5 +1,4 @@
 /// Comparison functions for different sort modes.
-/// All comparison functions are allocation-free for maximum sort performance.
 use std::cmp::Ordering;
 
 use super::key::KeyOpts;
@@ -14,6 +13,27 @@ pub fn skip_leading_blanks(s: &[u8]) -> &[u8] {
         i += 1;
     }
     &s[i..]
+}
+
+/// Compare two byte slices using locale-aware collation (strcoll).
+/// Falls back to byte comparison if the input is not valid UTF-8 or strcoll fails.
+#[inline]
+pub fn compare_locale(a: &[u8], b: &[u8]) -> Ordering {
+    use std::ffi::CString;
+    // Fast path: try to create null-terminated strings and use strcoll
+    // strcoll respects LC_COLLATE for locale-aware ordering
+    if let (Ok(ca), Ok(cb)) = (CString::new(a), CString::new(b)) {
+        let result = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
+        if result < 0 {
+            return Ordering::Less;
+        } else if result > 0 {
+            return Ordering::Greater;
+        } else {
+            return Ordering::Equal;
+        }
+    }
+    // Fallback: byte comparison
+    a.cmp(b)
 }
 
 /// Compare two byte slices lexicographically (default sort).
@@ -631,7 +651,7 @@ pub fn compare_with_opts(a: &[u8], b: &[u8], opts: &KeyOpts, random_seed: u64) -
         compare_version(a, b)
     } else if opts.random {
         compare_random(a, b, random_seed)
-    } else {
+    } else if opts.dictionary_order || opts.ignore_nonprinting || opts.ignore_case {
         compare_text_filtered(
             a,
             b,
@@ -639,6 +659,9 @@ pub fn compare_with_opts(a: &[u8], b: &[u8], opts: &KeyOpts, random_seed: u64) -
             opts.ignore_nonprinting,
             opts.ignore_case,
         )
+    } else {
+        // Default: locale-aware comparison matching GNU sort's LC_COLLATE behavior
+        compare_locale(a, b)
     };
 
     if opts.reverse {
@@ -699,7 +722,8 @@ pub fn select_comparator(opts: &KeyOpts, random_seed: u64) -> (CompareFn, bool, 
             _ => |a: &[u8], b: &[u8]| a.cmp(b),
         }
     } else {
-        |a: &[u8], b: &[u8]| a.cmp(b)
+        // Default: locale-aware comparison matching GNU sort's LC_COLLATE behavior
+        compare_locale
     };
 
     (cmp, needs_blank, needs_reverse)

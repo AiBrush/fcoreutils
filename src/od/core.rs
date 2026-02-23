@@ -97,7 +97,7 @@ fn field_width(fmt: OutputFormat) -> usize {
         OutputFormat::SignedDec(2) => 7, // " -32768"
         OutputFormat::SignedDec(4) => 12, // " -2147483648"
         OutputFormat::SignedDec(8) => 21, // " -9223372036854775808"
-        OutputFormat::Float(4) => 15, // " -x.xxxxxxxe+xx"
+        OutputFormat::Float(4) => 16, // "   x.xxxxxxxe+xx" (3 leading spaces for positive max)
         OutputFormat::Float(8) => 25, // " -x.xxxxxxxxxxxxxxe+xxx"
         _ => 4,
     }
@@ -265,7 +265,17 @@ fn snprintf_g(v: f64, precision: usize) -> String {
 
 /// Format f32 like GNU od: uses %.8g formatting (8 significant digits).
 fn format_float_f32(v: f32) -> String {
-    snprintf_g(v as f64, 8)
+    // Use shortest decimal representation that uniquely round-trips (like Ryu / GNU od).
+    // Try increasing precisions from FLT_DIG (6) to FLT_DECIMAL_DIG (9).
+    for prec in 6usize..=9 {
+        let s = snprintf_g(v as f64, prec);
+        if let Ok(reparsed) = s.trim().parse::<f32>() {
+            if reparsed == v {
+                return s;
+            }
+        }
+    }
+    snprintf_g(v as f64, 9)
 }
 
 /// Format f64 like GNU od: uses %.17g formatting.
