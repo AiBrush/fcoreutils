@@ -964,8 +964,8 @@ mod tests {
         let gnu = Command::new("seq").arg("10").output().unwrap();
         let ours = cmd().arg("10").output().unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&ours.stdout),
-            String::from_utf8_lossy(&gnu.stdout),
+            norm(&String::from_utf8_lossy(&ours.stdout)),
+            norm(&String::from_utf8_lossy(&gnu.stdout)),
             "Output mismatch with GNU seq for 'seq 10'"
         );
     }
@@ -978,8 +978,8 @@ mod tests {
         let gnu = Command::new("seq").args(["5", "15"]).output().unwrap();
         let ours = cmd().args(["5", "15"]).output().unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&ours.stdout),
-            String::from_utf8_lossy(&gnu.stdout),
+            norm(&String::from_utf8_lossy(&ours.stdout)),
+            norm(&String::from_utf8_lossy(&gnu.stdout)),
             "Output mismatch with GNU seq for 'seq 5 15'"
         );
     }
@@ -992,8 +992,8 @@ mod tests {
         let gnu = Command::new("seq").args(["1", "3", "20"]).output().unwrap();
         let ours = cmd().args(["1", "3", "20"]).output().unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&ours.stdout),
-            String::from_utf8_lossy(&gnu.stdout),
+            norm(&String::from_utf8_lossy(&ours.stdout)),
+            norm(&String::from_utf8_lossy(&gnu.stdout)),
             "Output mismatch with GNU seq for 'seq 1 3 20'"
         );
     }
@@ -1006,8 +1006,8 @@ mod tests {
         let gnu = Command::new("seq").args(["-s", ":", "5"]).output().unwrap();
         let ours = cmd().args(["-s", ":", "5"]).output().unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&ours.stdout),
-            String::from_utf8_lossy(&gnu.stdout),
+            norm(&String::from_utf8_lossy(&ours.stdout)),
+            norm(&String::from_utf8_lossy(&gnu.stdout)),
             "Output mismatch with GNU seq for 'seq -s : 5'"
         );
     }
@@ -1023,8 +1023,8 @@ mod tests {
             .unwrap();
         let ours = cmd().args(["-w", "1", "100"]).output().unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&ours.stdout),
-            String::from_utf8_lossy(&gnu.stdout),
+            norm(&String::from_utf8_lossy(&ours.stdout)),
+            norm(&String::from_utf8_lossy(&gnu.stdout)),
             "Output mismatch with GNU seq for 'seq -w 1 100'"
         );
     }
