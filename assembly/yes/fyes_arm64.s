@@ -17,7 +17,7 @@
 //    - Unrecognized long options (--foo): error to stderr, exit 1
 //    - Invalid short options (-x): error to stderr, exit 1
 //    - Bare "-" is a literal string, not an option
-//    - SIGPIPE/EPIPE: clean exit 0
+//    - SIGPIPE/EPIPE: print error to stderr, exit 1 (GNU behavior)
 //    - EINTR on write: automatic retry
 //    - Partial writes: tracked and continued (not restarted from buffer top)
 //
@@ -84,7 +84,14 @@ err_inval_pre:
 err_suffix:
     .ascii  "'\nTry 'yes --help' for more information.\n"
     .set    err_suffix_len, . - err_suffix
+
 // @@DATA_END@@
+
+// EPIPE diagnostic message (GNU yes compatibility -- not patched by build.py)
+// "yes: standard output: Broken pipe\n"
+broken_pipe_msg:
+    .ascii  "yes: standard output: Broken pipe\n"
+    .set    broken_pipe_msg_len, . - broken_pipe_msg
 
 // ======================== Code ===============================================
     .section .text
@@ -431,13 +438,26 @@ _start:
 
     // Check for error (zero or negative = EPIPE, etc.)
     cmp     x0, #0
-    b.le    .exit_ok               // exit cleanly
+    b.le    .write_error           // error or EOF: handle below
 
     // Success: x0 = bytes written (may be partial)
     add     x26, x26, x0          // advance write pointer
     subs    x27, x27, x0          // decrease remaining
     b.gt    .write_loop            // partial write: continue
     b       .write_outer           // full buffer written: restart
+
+.write_error:
+    // Check if EPIPE (-32) for GNU-compatible diagnostic
+    cmn     x0, #32               // x0 == -32 (-EPIPE)?
+    b.ne    .exit_fail             // not EPIPE: exit 1 without diagnostic
+
+    // EPIPE: write "yes: standard output: Broken pipe\n" to stderr
+    mov     x0, #STDERR
+    adr     x1, broken_pipe_msg
+    mov     x2, #broken_pipe_msg_len
+    mov     w8, #SYS_WRITE
+    svc     #0
+    b       .exit_fail             // exit with code 1
 
 // ======================== Exit helpers =======================================
 .exit_ok:
