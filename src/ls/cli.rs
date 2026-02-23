@@ -1,26 +1,85 @@
-#[cfg(not(unix))]
-fn main() {
-    eprintln!("ls: only available on Unix");
-    std::process::exit(1);
-}
+//! Shared CLI argument parsing for ls / dir / vdir.
 
-#[cfg(unix)]
-use std::process;
+use std::io;
 
-#[cfg(unix)]
-use coreutils_rs::common::reset_sigpipe;
-#[cfg(unix)]
-use coreutils_rs::ls::{
+use super::{
     ClassifyMode, ColorMode, HyperlinkMode, IndicatorStyle, LsConfig, OutputFormat, QuotingStyle,
     SortBy, TimeField, TimeStyle, atty_stdout, ls_main,
 };
 
-#[cfg(unix)]
-fn print_help() {
+/// Which variant of ls we are running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsFlavor {
+    Ls,
+    Dir,
+    Vdir,
+}
+
+impl LsFlavor {
+    pub fn name(self) -> &'static str {
+        match self {
+            LsFlavor::Ls => "ls",
+            LsFlavor::Dir => "dir",
+            LsFlavor::Vdir => "vdir",
+        }
+    }
+}
+
+fn get_terminal_width() -> Option<usize> {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) };
+    if ret == 0 && ws.ws_col > 0 {
+        return Some(ws.ws_col as usize);
+    }
+    if let Ok(val) = std::env::var("COLUMNS") {
+        if let Ok(w) = val.parse::<usize>() {
+            return Some(w);
+        }
+    }
+    None
+}
+
+fn take_short_value(
+    bytes: &[u8],
+    pos: usize,
+    args: &mut impl Iterator<Item = std::ffi::OsString>,
+    flag: &str,
+    prog: &str,
+) -> String {
+    if pos < bytes.len() {
+        let full = String::from_utf8_lossy(bytes).into_owned();
+        full[pos..].to_string()
+    } else {
+        args.next()
+            .unwrap_or_else(|| {
+                eprintln!("{}: option requires an argument -- '{}'", prog, flag);
+                std::process::exit(2);
+            })
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn print_ls_help(flavor: LsFlavor) {
+    let name = flavor.name();
+    let desc = match flavor {
+        LsFlavor::Ls => {
+            "List information about the FILEs (the current directory by default).\n\
+                         Sort entries alphabetically if none of -cftuvSUX nor --sort is specified."
+        }
+        LsFlavor::Dir => {
+            "List directory contents.\n\
+                         Equivalent to ls -C -b (multi-column format with C-style escapes).\n\
+                         All ls options are accepted."
+        }
+        LsFlavor::Vdir => {
+            "List directory contents.\n\
+                          Equivalent to ls -l -b (long format with C-style escapes).\n\
+                          All ls options are accepted."
+        }
+    };
     print!(
-        "Usage: ls [OPTION]... [FILE]...\n\
-         List information about the FILEs (the current directory by default).\n\
-         Sort entries alphabetically if none of -cftuvSUX nor --sort is specified.\n\n\
+        "Usage: {} [OPTION]... [FILE]...\n{}\n\n\
          \x20 -a, --all                  do not ignore entries starting with .\n\
          \x20 -A, --almost-all           do not list implied . and ..\n\
          \x20 -b, --escape               print C-style escapes for nongraphic characters\n\
@@ -69,72 +128,71 @@ fn print_help() {
          \x20     --indicator-style=WORD append indicator WORD: none, slash, file-type, classify\n\
          \x20     --quoting-style=WORD   use quoting style WORD for entry names\n\
          \x20     --help                 display this help and exit\n\
-         \x20     --version              output version information and exit\n"
+         \x20     --version              output version information and exit\n",
+        name, desc
     );
 }
 
-#[cfg(unix)]
-fn get_terminal_width() -> Option<usize> {
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) };
-    if ret == 0 && ws.ws_col > 0 {
-        return Some(ws.ws_col as usize);
-    }
-    if let Ok(val) = std::env::var("COLUMNS")
-        && let Ok(w) = val.parse::<usize>()
-    {
-        return Some(w);
-    }
-    None
-}
-
-#[cfg(unix)]
-/// Take the next value for a short option: rest-of-arg or next arg.
-fn take_short_value(
-    bytes: &[u8],
-    pos: usize,
+fn next_opt_val(
+    eq_val: Option<&str>,
     args: &mut impl Iterator<Item = std::ffi::OsString>,
-    flag: &str,
+    prog: &str,
+    opt: &str,
 ) -> String {
-    if pos < bytes.len() {
-        let full = String::from_utf8_lossy(bytes).into_owned();
-        full[pos..].to_string()
-    } else {
+    eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
         args.next()
             .unwrap_or_else(|| {
-                eprintln!("ls: option requires an argument -- '{}'", flag);
-                process::exit(2);
+                eprintln!("{}: option '--{}' requires an argument", prog, opt);
+                std::process::exit(2);
             })
             .to_string_lossy()
             .into_owned()
-    }
+    })
 }
 
-#[cfg(unix)]
-fn parse_args() -> (LsConfig, Vec<String>) {
+/// Parse command-line arguments for ls / dir / vdir.
+pub fn parse_ls_args(flavor: LsFlavor) -> (LsConfig, Vec<String>) {
     let is_tty = atty_stdout();
     let mut config = LsConfig::default();
     let mut paths = Vec::new();
+    let prog = flavor.name();
 
-    // When stdout is not a tty, default to single-column, no color
-    if is_tty {
-        config.format = OutputFormat::Columns;
-        config.hide_control_chars = true;
-    } else {
-        config.format = OutputFormat::SingleColumn;
-        config.color = ColorMode::Never;
+    match flavor {
+        LsFlavor::Ls => {
+            if is_tty {
+                config.format = OutputFormat::Columns;
+                config.hide_control_chars = true;
+            } else {
+                config.format = OutputFormat::SingleColumn;
+                config.color = ColorMode::Never;
+            }
+        }
+        LsFlavor::Dir => {
+            config.format = OutputFormat::Columns;
+            config.quoting_style = QuotingStyle::Escape;
+            if !is_tty {
+                config.color = ColorMode::Never;
+            }
+        }
+        LsFlavor::Vdir => {
+            config.format = OutputFormat::Long;
+            config.long_format = true;
+            config.quoting_style = QuotingStyle::Escape;
+            if !is_tty {
+                config.color = ColorMode::Never;
+            }
+        }
     }
 
-    // Detect terminal width
-    if is_tty
-        && let Some(w) = get_terminal_width()
-        && w > 0
-    {
-        config.width = w;
+    if is_tty {
+        if let Some(w) = get_terminal_width() {
+            if w > 0 {
+                config.width = w;
+            }
+        }
     }
 
     let mut explicit_format = false;
-
     let mut args = std::env::args_os().skip(1);
     #[allow(clippy::while_let_on_iterator)]
     while let Some(arg) = args.next() {
@@ -148,21 +206,19 @@ fn parse_args() -> (LsConfig, Vec<String>) {
         if bytes.starts_with(b"--") {
             let s = arg.to_string_lossy();
             let opt = &s[2..];
-
             let (name, eq_val) = if let Some(eq) = opt.find('=') {
                 (&opt[..eq], Some(&opt[eq + 1..]))
             } else {
                 (opt, None)
             };
-
             match name {
                 "help" => {
-                    print_help();
-                    process::exit(0);
+                    print_ls_help(flavor);
+                    std::process::exit(0);
                 }
                 "version" => {
-                    println!("ls (fcoreutils) {}", env!("CARGO_PKG_VERSION"));
-                    process::exit(0);
+                    println!("{} (fcoreutils) {}", prog, env!("CARGO_PKG_VERSION"));
+                    std::process::exit(0);
                 }
                 "all" => config.all = true,
                 "almost-all" => config.almost_all = true,
@@ -182,12 +238,10 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                                 config.indicator_style = IndicatorStyle::Classify;
                             }
                         }
-                        "never" | "no" | "none" => {
-                            config.classify = ClassifyMode::Never;
-                        }
+                        "never" | "no" | "none" => config.classify = ClassifyMode::Never,
                         _ => {
-                            eprintln!("ls: invalid argument '{}' for '--classify'", mode);
-                            process::exit(2);
+                            eprintln!("{}: invalid argument '{}' for '--classify'", prog, mode);
+                            std::process::exit(2);
                         }
                     }
                 }
@@ -197,15 +251,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                 "si" => config.si = true,
                 "inode" => config.show_inode = true,
                 "ignore" => {
-                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
-                        args.next()
-                            .unwrap_or_else(|| {
-                                eprintln!("ls: option '--ignore' requires an argument");
-                                process::exit(2);
-                            })
-                            .to_string_lossy()
-                            .into_owned()
-                    });
+                    let val = next_opt_val(eq_val, &mut args, prog, "ignore");
                     config.ignore_patterns.push(val);
                 }
                 "kibibytes" => config.kibibytes = true,
@@ -234,21 +280,13 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "auto" | "tty" | "if-tty" => ColorMode::Auto,
                         "never" | "no" | "none" => ColorMode::Never,
                         _ => {
-                            eprintln!("ls: invalid argument '{}' for '--color'", val);
-                            process::exit(2);
+                            eprintln!("{}: invalid argument '{}' for '--color'", prog, val);
+                            std::process::exit(2);
                         }
                     };
                 }
                 "sort" => {
-                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
-                        args.next()
-                            .unwrap_or_else(|| {
-                                eprintln!("ls: option '--sort' requires an argument");
-                                process::exit(2);
-                            })
-                            .to_string_lossy()
-                            .into_owned()
-                    });
+                    let val = next_opt_val(eq_val, &mut args, prog, "sort");
                     config.sort_by = match val.as_str() {
                         "none" => SortBy::None,
                         "size" => SortBy::Size,
@@ -257,42 +295,26 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "extension" => SortBy::Extension,
                         "width" => SortBy::Width,
                         _ => {
-                            eprintln!("ls: invalid argument '{}' for '--sort'", val);
-                            process::exit(2);
+                            eprintln!("{}: invalid argument '{}' for '--sort'", prog, val);
+                            std::process::exit(2);
                         }
                     };
                 }
                 "time" => {
-                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
-                        args.next()
-                            .unwrap_or_else(|| {
-                                eprintln!("ls: option '--time' requires an argument");
-                                process::exit(2);
-                            })
-                            .to_string_lossy()
-                            .into_owned()
-                    });
+                    let val = next_opt_val(eq_val, &mut args, prog, "time");
                     config.time_field = match val.as_str() {
                         "atime" | "access" | "use" => TimeField::Atime,
                         "ctime" | "status" => TimeField::Ctime,
                         "birth" | "creation" => TimeField::Birth,
                         "mtime" | "modification" => TimeField::Mtime,
                         _ => {
-                            eprintln!("ls: invalid argument '{}' for '--time'", val);
-                            process::exit(2);
+                            eprintln!("{}: invalid argument '{}' for '--time'", prog, val);
+                            std::process::exit(2);
                         }
                     };
                 }
                 "time-style" => {
-                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
-                        args.next()
-                            .unwrap_or_else(|| {
-                                eprintln!("ls: option '--time-style' requires an argument");
-                                process::exit(2);
-                            })
-                            .to_string_lossy()
-                            .into_owned()
-                    });
+                    let val = next_opt_val(eq_val, &mut args, prog, "time-style");
                     config.time_style = match val.as_str() {
                         "full-iso" => TimeStyle::FullIso,
                         "long-iso" => TimeStyle::LongIso,
@@ -300,8 +322,8 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "locale" => TimeStyle::Locale,
                         s if s.starts_with('+') => TimeStyle::Custom(s[1..].to_string()),
                         _ => {
-                            eprintln!("ls: invalid argument '{}' for '--time-style'", val);
-                            process::exit(2);
+                            eprintln!("{}: invalid argument '{}' for '--time-style'", prog, val);
+                            std::process::exit(2);
                         }
                     };
                 }
@@ -312,27 +334,11 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                     config.time_style = TimeStyle::FullIso;
                 }
                 "tabsize" => {
-                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
-                        args.next()
-                            .unwrap_or_else(|| {
-                                eprintln!("ls: option '--tabsize' requires an argument");
-                                process::exit(2);
-                            })
-                            .to_string_lossy()
-                            .into_owned()
-                    });
+                    let val = next_opt_val(eq_val, &mut args, prog, "tabsize");
                     config.tab_size = val.parse().unwrap_or(8);
                 }
                 "width" => {
-                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
-                        args.next()
-                            .unwrap_or_else(|| {
-                                eprintln!("ls: option '--width' requires an argument");
-                                process::exit(2);
-                            })
-                            .to_string_lossy()
-                            .into_owned()
-                    });
+                    let val = next_opt_val(eq_val, &mut args, prog, "width");
                     config.width = val.parse().unwrap_or(80);
                 }
                 "hyperlink" => {
@@ -342,42 +348,29 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "auto" | "tty" | "if-tty" => HyperlinkMode::Auto,
                         "never" | "no" | "none" => HyperlinkMode::Never,
                         _ => {
-                            eprintln!("ls: invalid argument '{}' for '--hyperlink'", val);
-                            process::exit(2);
+                            eprintln!("{}: invalid argument '{}' for '--hyperlink'", prog, val);
+                            std::process::exit(2);
                         }
                     };
                 }
                 "indicator-style" => {
-                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
-                        args.next()
-                            .unwrap_or_else(|| {
-                                eprintln!("ls: option '--indicator-style' requires an argument");
-                                process::exit(2);
-                            })
-                            .to_string_lossy()
-                            .into_owned()
-                    });
+                    let val = next_opt_val(eq_val, &mut args, prog, "indicator-style");
                     config.indicator_style = match val.as_str() {
                         "none" => IndicatorStyle::None,
                         "slash" => IndicatorStyle::Slash,
                         "file-type" => IndicatorStyle::FileType,
                         "classify" => IndicatorStyle::Classify,
                         _ => {
-                            eprintln!("ls: invalid argument '{}' for '--indicator-style'", val);
-                            process::exit(2);
+                            eprintln!(
+                                "{}: invalid argument '{}' for '--indicator-style'",
+                                prog, val
+                            );
+                            std::process::exit(2);
                         }
                     };
                 }
                 "quoting-style" => {
-                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
-                        args.next()
-                            .unwrap_or_else(|| {
-                                eprintln!("ls: option '--quoting-style' requires an argument");
-                                process::exit(2);
-                            })
-                            .to_string_lossy()
-                            .into_owned()
-                    });
+                    let val = next_opt_val(eq_val, &mut args, prog, "quoting-style");
                     config.quoting_style = match val.as_str() {
                         "literal" => QuotingStyle::Literal,
                         "locale" => QuotingStyle::Locale,
@@ -388,15 +381,15 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "c" => QuotingStyle::C,
                         "escape" => QuotingStyle::Escape,
                         _ => {
-                            eprintln!("ls: invalid argument '{}' for '--quoting-style'", val);
-                            process::exit(2);
+                            eprintln!("{}: invalid argument '{}' for '--quoting-style'", prog, val);
+                            std::process::exit(2);
                         }
                     };
                 }
                 _ => {
-                    eprintln!("ls: unrecognized option '--{}'", name);
-                    eprintln!("Try 'ls --help' for more information.");
-                    process::exit(2);
+                    eprintln!("{}: unrecognized option '--{}'", prog, name);
+                    eprintln!("Try '{} --help' for more information.", prog);
+                    std::process::exit(2);
                 }
             }
         } else if bytes.len() > 1 && bytes[0] == b'-' {
@@ -482,30 +475,30 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         explicit_format = true;
                     }
                     b'I' => {
-                        let val = take_short_value(bytes, i + 1, &mut args, "I");
+                        let val = take_short_value(bytes, i + 1, &mut args, "I", prog);
                         config.ignore_patterns.push(val);
                         break;
                     }
                     b'w' => {
-                        let val = take_short_value(bytes, i + 1, &mut args, "w");
+                        let val = take_short_value(bytes, i + 1, &mut args, "w", prog);
                         config.width = val.parse().unwrap_or_else(|_| {
-                            eprintln!("ls: invalid line width: '{}'", val);
-                            process::exit(2);
+                            eprintln!("{}: invalid line width: '{}'", prog, val);
+                            std::process::exit(2);
                         });
                         break;
                     }
                     b'T' => {
-                        let val = take_short_value(bytes, i + 1, &mut args, "T");
+                        let val = take_short_value(bytes, i + 1, &mut args, "T", prog);
                         config.tab_size = val.parse().unwrap_or_else(|_| {
-                            eprintln!("ls: invalid tab size: '{}'", val);
-                            process::exit(2);
+                            eprintln!("{}: invalid tab size: '{}'", prog, val);
+                            std::process::exit(2);
                         });
                         break;
                     }
                     _ => {
-                        eprintln!("ls: invalid option -- '{}'", bytes[i] as char);
-                        eprintln!("Try 'ls --help' for more information.");
-                        process::exit(2);
+                        eprintln!("{}: invalid option -- '{}'", prog, bytes[i] as char);
+                        eprintln!("Try '{} --help' for more information.", prog);
+                        std::process::exit(2);
                     }
                 }
                 i += 1;
@@ -518,11 +511,10 @@ fn parse_args() -> (LsConfig, Vec<String>) {
     (config, paths)
 }
 
-#[cfg(unix)]
-fn main() {
-    reset_sigpipe();
-
-    let (config, paths) = parse_args();
+/// Run ls / dir / vdir with the given flavor.
+pub fn run_ls(flavor: LsFlavor) {
+    let (config, paths) = parse_ls_args(flavor);
+    let prog = flavor.name();
 
     let file_args: Vec<String> = if paths.is_empty() {
         vec![".".to_string()]
@@ -532,15 +524,13 @@ fn main() {
 
     match ls_main(&file_args, &config) {
         Ok(true) => {}
-        Ok(false) => process::exit(2),
+        Ok(false) => std::process::exit(2),
         Err(e) => {
-            if e.kind() == std::io::ErrorKind::BrokenPipe {
-                // Exit with 141 (128 + SIGPIPE) to match GNU coreutils behavior
-                // when output is piped to a reader that closes early.
-                process::exit(141);
+            if e.kind() == io::ErrorKind::BrokenPipe {
+                std::process::exit(141);
             }
-            eprintln!("ls: {}", e);
-            process::exit(2);
+            eprintln!("{}: {}", prog, e);
+            std::process::exit(2);
         }
     }
 }

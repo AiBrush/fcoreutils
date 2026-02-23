@@ -1,6 +1,6 @@
 use super::*;
 use std::io::Cursor;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 fn pr_helper(input: &str, config: &PrConfig) -> String {
     let reader = Cursor::new(input.as_bytes());

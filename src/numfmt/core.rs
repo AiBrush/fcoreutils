@@ -83,7 +83,7 @@ impl Default for NumfmtConfig {
 }
 
 /// SI suffix table: suffix char -> multiplier.
-/// GNU coreutils uses lowercase 'k' for SI (powers of 1000) and uppercase 'K' for IEC (powers of 1024).
+/// GNU coreutils numfmt uses lowercase 'k' for SI (powers of 1000) and uppercase 'K' for IEC (powers of 1024).
 const SI_SUFFIXES: &[(char, f64)] = &[
     ('k', 1e3),
     ('M', 1e6),
@@ -280,7 +280,7 @@ fn is_scale_suffix(c: char) -> bool {
 
 fn find_si_multiplier(c: char) -> Result<f64, String> {
     for &(suffix, mult) in SI_SUFFIXES {
-        if suffix == c || suffix.to_ascii_uppercase() == c.to_ascii_uppercase() {
+        if suffix.eq_ignore_ascii_case(&c) {
             return Ok(mult);
         }
     }

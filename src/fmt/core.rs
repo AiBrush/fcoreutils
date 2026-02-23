@@ -91,7 +91,11 @@ fn fmt_str(text: &str, output: &mut impl Write, config: &FmtConfig) -> io::Resul
                 if para_start < i {
                     format_paragraph_str(text, para_start, i, config, output)?;
                 }
-                para_start = if line_end < bytes.len() { line_end + 1 } else { bytes.len() };
+                para_start = if line_end < bytes.len() {
+                    line_end + 1
+                } else {
+                    bytes.len()
+                };
                 // Emit verbatim
                 output.write_all(line.as_bytes())?;
                 output.write_all(b"\n")?;
@@ -106,10 +110,18 @@ fn fmt_str(text: &str, output: &mut impl Write, config: &FmtConfig) -> io::Resul
                 format_paragraph_str(text, para_start, i, config, output)?;
             }
             output.write_all(b"\n")?;
-            para_start = if line_end < bytes.len() { line_end + 1 } else { bytes.len() };
+            para_start = if line_end < bytes.len() {
+                line_end + 1
+            } else {
+                bytes.len()
+            };
         }
 
-        i = if line_end < bytes.len() { line_end + 1 } else { bytes.len() };
+        i = if line_end < bytes.len() {
+            line_end + 1
+        } else {
+            bytes.len()
+        };
     }
 
     // Flush remaining paragraph
@@ -199,7 +211,14 @@ fn format_paragraph_str(
     }
 
     let pfx = prefix_str.unwrap_or("");
-    reflow_paragraph(&all_words, pfx, first_line_indent, cont_indent, config, output)
+    reflow_paragraph(
+        &all_words,
+        pfx,
+        first_line_indent,
+        cont_indent,
+        config,
+        output,
+    )
 }
 
 /// Determine the leading whitespace (indentation) of a line.
@@ -284,7 +303,11 @@ fn reflow_paragraph<W: Write>(
 
         for j in i..n {
             if j > i {
-                let sep = if uniform && unsafe { *winfo_ptr.add(j - 1) & SENT_FLAG != 0 } { 2 } else { 1 };
+                let sep = if uniform && unsafe { *winfo_ptr.add(j - 1) & SENT_FLAG != 0 } {
+                    2
+                } else {
+                    1
+                };
                 len += sep + unsafe { (*winfo_ptr.add(j) & 0xFFFF) as usize };
             }
 
@@ -294,7 +317,11 @@ fn reflow_paragraph<W: Write>(
                         0i64
                     } else {
                         let bc = if unsafe { *winfo_ptr.add(j) & SENT_FLAG != 0 } {
-                            if uniform { LINE_COST - SENTENCE_BONUS } else { LINE_COST + NOBREAK_COST }
+                            if uniform {
+                                LINE_COST - SENTENCE_BONUS
+                            } else {
+                                LINE_COST + NOBREAK_COST
+                            }
                         } else {
                             LINE_COST
                         };
@@ -325,7 +352,11 @@ fn reflow_paragraph<W: Write>(
                 0i64
             } else {
                 let bc = if unsafe { *winfo_ptr.add(j) & SENT_FLAG != 0 } {
-                    if uniform { LINE_COST - SENTENCE_BONUS } else { LINE_COST + NOBREAK_COST }
+                    if uniform {
+                        LINE_COST - SENTENCE_BONUS
+                    } else {
+                        LINE_COST + NOBREAK_COST
+                    }
                 } else {
                     LINE_COST
                 };

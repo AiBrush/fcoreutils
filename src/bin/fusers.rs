@@ -36,7 +36,10 @@ fn main() {
     }
 
     // Find the optional file argument (non-option arg)
-    let file_arg = args.iter().find(|a| !a.starts_with("--")).map(|s| s.as_str());
+    let file_arg = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .map(|s| s.as_str());
     let users = coreutils_rs::users::get_users_from(file_arg);
     let output = coreutils_rs::users::format_users(&users);
     if !output.is_empty() {

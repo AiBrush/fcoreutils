@@ -11,7 +11,7 @@ use std::cell::Cell;
 
 thread_local! {
     /// Set to true when a numeric conversion warning occurs (invalid argument).
-    static CONV_ERROR: Cell<bool> = Cell::new(false);
+    static CONV_ERROR: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Reset conversion error flag. Call before processing a format string.
@@ -549,15 +549,24 @@ fn parse_integer(s: &str) -> i64 {
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        u64::from_str_radix(hex, 16).unwrap_or_else(|_| { mark_conv_error(s); 0 })
+        u64::from_str_radix(hex, 16).unwrap_or_else(|_| {
+            mark_conv_error(s);
+            0
+        })
     } else if let Some(oct) = digits.strip_prefix('0') {
         if oct.is_empty() {
             0
         } else {
-            u64::from_str_radix(oct, 8).unwrap_or_else(|_| { mark_conv_error(s); 0 })
+            u64::from_str_radix(oct, 8).unwrap_or_else(|_| {
+                mark_conv_error(s);
+                0
+            })
         }
     } else {
-        digits.parse::<u64>().unwrap_or_else(|_| { mark_conv_error(s); 0 })
+        digits.parse::<u64>().unwrap_or_else(|_| {
+            mark_conv_error(s);
+            0
+        })
     };
 
     if negative {
@@ -598,15 +607,24 @@ fn parse_unsigned(s: &str) -> u64 {
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        u64::from_str_radix(hex, 16).unwrap_or_else(|_| { mark_conv_error(s); 0 })
+        u64::from_str_radix(hex, 16).unwrap_or_else(|_| {
+            mark_conv_error(s);
+            0
+        })
     } else if let Some(oct) = digits.strip_prefix('0') {
         if oct.is_empty() {
             0
         } else {
-            u64::from_str_radix(oct, 8).unwrap_or_else(|_| { mark_conv_error(s); 0 })
+            u64::from_str_radix(oct, 8).unwrap_or_else(|_| {
+                mark_conv_error(s);
+                0
+            })
         }
     } else {
-        digits.parse::<u64>().unwrap_or_else(|_| { mark_conv_error(s); 0 })
+        digits.parse::<u64>().unwrap_or_else(|_| {
+            mark_conv_error(s);
+            0
+        })
     };
 
     if negative {
@@ -922,9 +940,9 @@ fn shell_quote(s: &str) -> String {
         // Has single quotes but no control chars.
         // Check if safe for double-quoting (no $, `, \, !, " that would be
         // interpreted inside double quotes).
-        let unsafe_for_dquote = s.bytes().any(|b| {
-            b == b'$' || b == b'`' || b == b'\\' || b == b'!' || b == b'"'
-        });
+        let unsafe_for_dquote = s
+            .bytes()
+            .any(|b| b == b'$' || b == b'`' || b == b'\\' || b == b'!' || b == b'"');
         if !unsafe_for_dquote {
             // Safe to double-quote.
             format!("\"{}\"", s)

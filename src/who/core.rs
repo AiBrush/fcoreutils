@@ -76,10 +76,7 @@ fn guess_pty_name(uid: u32, start_us: u64) -> Option<String> {
         }
 
         // Is this the best (earliest) candidate so far?
-        if best_name.is_none()
-            || ct_sec < best_sec
-            || (ct_sec == best_sec && ct_nsec < best_nsec)
-        {
+        if best_name.is_none() || ct_sec < best_sec || (ct_sec == best_sec && ct_nsec < best_nsec) {
             best_name = Some(format!("pts/{}", name_str));
             best_sec = ct_sec;
             best_nsec = ct_nsec;
@@ -88,9 +85,7 @@ fn guess_pty_name(uid: u32, start_us: u64) -> Option<String> {
 
     // Must be within 5 seconds of the start time
     if let Some(ref _name) = best_name {
-        if best_sec > start_sec + 5
-            || (best_sec == start_sec + 5 && best_nsec > start_nsec)
-        {
+        if best_sec > start_sec + 5 || (best_sec == start_sec + 5 && best_nsec > start_nsec) {
             return None;
         }
     }
@@ -561,7 +556,7 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
             USER_PROCESS => {
                 let idle = idle_str(&entry.ut_line);
                 let _ = write!(out, " {:>5}", idle);
-                let _ = write!(out, " {:>10}", entry.ut_pid);
+                let _ = write!(out, " {:>11}", entry.ut_pid);
             }
             LOGIN_PROCESS => {
                 let _ = write!(out, "   ?  {:>10}", entry.ut_pid);
@@ -696,6 +691,9 @@ pub fn run_who(config: &WhoConfig) -> String {
             });
         }
     }
+
+    // Sort entries by time (oldest first) to match utmpx file order (boot before sessions).
+    entries.sort_by_key(|e| e.ut_tv_sec);
 
     let mut output = String::new();
 

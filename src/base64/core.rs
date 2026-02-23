@@ -962,9 +962,8 @@ pub fn decode_mmap_inplace(
                 wp += 1;
             }
         }
-        match decode_inplace_with_padding(&mut data[..wp], out) {
-            r => return r,
-        }
+        let r = decode_inplace_with_padding(&mut data[..wp], out);
+        return r;
     }
 
     // Fast path: uniform-line fused strip+decode (no intermediate buffer).
@@ -1805,12 +1804,9 @@ fn decode_clean_slice(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
             if remainder == 2 || remainder == 3 {
                 let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
                 padded.extend_from_slice(data);
-                for _ in 0..(4 - remainder) {
-                    padded.push(b'=');
-                }
-                match BASE64_ENGINE.decode_inplace(&mut padded) {
-                    Ok(decoded) => return out.write_all(decoded),
-                    Err(_) => {}
+                padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
+                if let Ok(decoded) = BASE64_ENGINE.decode_inplace(&mut padded) {
+                    return out.write_all(decoded);
                 }
             }
             decode_error()
@@ -1836,12 +1832,9 @@ fn decode_inplace_with_padding(data: &mut [u8], out: &mut impl Write) -> io::Res
             if remainder == 2 || remainder == 3 {
                 let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
                 padded.extend_from_slice(data);
-                for _ in 0..(4 - remainder) {
-                    padded.push(b'=');
-                }
-                match BASE64_ENGINE.decode_inplace(&mut padded) {
-                    Ok(decoded) => return out.write_all(decoded),
-                    Err(_) => {}
+                padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
+                if let Ok(decoded) = BASE64_ENGINE.decode_inplace(&mut padded) {
+                    return out.write_all(decoded);
                 }
             }
             decode_error()
@@ -1864,9 +1857,7 @@ fn decode_borrowed_clean(out: &mut impl Write, data: &[u8]) -> io::Result<()> {
     if remainder == 2 || remainder == 3 {
         let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
         padded.extend_from_slice(data);
-        for _ in 0..(4 - remainder) {
-            padded.push(b'=');
-        }
+        padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
         return decode_borrowed_clean(out, &padded);
     }
     // Pre-allocate exact output size to avoid decode_to_vec's reallocation.

@@ -220,7 +220,12 @@ fn skip_white_backwards(s: &str, pos: usize, start: usize) -> usize {
 ///   before   = left context nearest to keyword (up to before_max_width)
 ///   tail     = overflow from keyafter that wraps to left half
 ///   head     = overflow from before that wraps to right half
-fn format_plain(entry: &KwicEntry, config: &PtxConfig, max_word_length: usize, ref_max_width: usize) -> String {
+fn format_plain(
+    entry: &KwicEntry,
+    config: &PtxConfig,
+    max_word_length: usize,
+    ref_max_width: usize,
+) -> String {
     let ref_str = if config.auto_reference || config.references {
         &entry.reference
     } else {
@@ -317,7 +322,11 @@ fn format_plain(entry: &KwicEntry, config: &PtxConfig, max_word_length: usize, r
 
     // Skip leading whitespace from before
     before_start = skip_white(sentence, before_start);
-    let before_len = if before_end > before_start { before_end - before_start } else { 0 };
+    let before_len = if before_end > before_start {
+        before_end - before_start
+    } else {
+        0
+    };
 
     // ========== Step 3: Compute tail ==========
     // tail is the overflow from keyafter that wraps to the left half.
@@ -356,8 +365,13 @@ fn format_plain(entry: &KwicEntry, config: &PtxConfig, max_word_length: usize, r
     // ========== Step 4: Compute head ==========
     // head is the overflow from before that wraps to the right half.
     // head_max_width = keyafter_max_width - keyafter_len - gap_size
-    let keyafter_len = if keyafter_end > keyafter_start { keyafter_end - keyafter_start } else { 0 };
-    let head_max_width_raw: isize = keyafter_max_width as isize - keyafter_len as isize - gap as isize;
+    let keyafter_len = if keyafter_end > keyafter_start {
+        keyafter_end - keyafter_start
+    } else {
+        0
+    };
+    let head_max_width_raw: isize =
+        keyafter_max_width as isize - keyafter_len as isize - gap as isize;
     let mut head_start: usize = 0;
     let mut head_end: usize = 0;
     let mut head_truncation = false;
@@ -395,10 +409,26 @@ fn format_plain(entry: &KwicEntry, config: &PtxConfig, max_word_length: usize, r
 
     // ========== Step 5: Format output ==========
     // Extract the text for each field
-    let before_text = if before_len > 0 { &sentence[before_start..before_end] } else { "" };
-    let keyafter_text = if keyafter_end > keyafter_start { &sentence[keyafter_start..keyafter_end] } else { "" };
-    let tail_text = if has_tail && tail_end > tail_start { &sentence[tail_start..tail_end] } else { "" };
-    let head_text = if has_head && head_end > head_start { &sentence[head_start..head_end] } else { "" };
+    let before_text = if before_len > 0 {
+        &sentence[before_start..before_end]
+    } else {
+        ""
+    };
+    let keyafter_text = if keyafter_end > keyafter_start {
+        &sentence[keyafter_start..keyafter_end]
+    } else {
+        ""
+    };
+    let tail_text = if has_tail && tail_end > tail_start {
+        &sentence[tail_start..tail_end]
+    } else {
+        ""
+    };
+    let head_text = if has_head && head_end > head_start {
+        &sentence[head_start..head_end]
+    } else {
+        ""
+    };
 
     let before_trunc_len = if before_truncation { trunc_len } else { 0 };
     let keyafter_trunc_len = if keyafter_truncation { trunc_len } else { 0 };
@@ -448,14 +478,19 @@ fn format_plain(entry: &KwicEntry, config: &PtxConfig, max_word_length: usize, r
         // Padding between tail and before
         let tail_used = tail_text.len() + tail_trunc_len;
         let before_used = before_text.len() + before_trunc_len;
-        let padding = half_line_width.saturating_sub(gap).saturating_sub(tail_used).saturating_sub(before_used);
+        let padding = half_line_width
+            .saturating_sub(gap)
+            .saturating_sub(tail_used)
+            .saturating_sub(before_used);
         for _ in 0..padding {
             result.push(' ');
         }
     } else {
         // No tail: padding before the [before_trunc][before] block
         let before_used = before_text.len() + before_trunc_len;
-        let padding = half_line_width.saturating_sub(gap).saturating_sub(before_used);
+        let padding = half_line_width
+            .saturating_sub(gap)
+            .saturating_sub(before_used);
         for _ in 0..padding {
             result.push(' ');
         }
@@ -482,7 +517,9 @@ fn format_plain(entry: &KwicEntry, config: &PtxConfig, max_word_length: usize, r
         // Padding between keyafter and head
         let keyafter_used = keyafter_text.len() + keyafter_trunc_len;
         let head_used = head_text.len() + head_trunc_len;
-        let padding = half_line_width.saturating_sub(keyafter_used).saturating_sub(head_used);
+        let padding = half_line_width
+            .saturating_sub(keyafter_used)
+            .saturating_sub(head_used);
         for _ in 0..padding {
             result.push(' ');
         }
@@ -614,7 +651,8 @@ pub fn generate_ptx<R: BufRead, W: Write>(
 
         // Check if line ends with a sentence terminator
         let trimmed = line.trim_end();
-        let ends_with_terminator = trimmed.ends_with('.') || trimmed.ends_with('?') || trimmed.ends_with('!');
+        let ends_with_terminator =
+            trimmed.ends_with('.') || trimmed.ends_with('?') || trimmed.ends_with('!');
 
         if ends_with_terminator || line.is_empty() {
             if !current_text.trim().is_empty() {

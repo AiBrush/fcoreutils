@@ -128,13 +128,7 @@ fn main() {
 
     // Fallback: raw write(2) to fd 1
     loop {
-        let ret = unsafe {
-            libc::write(
-                1,
-                buf.as_ptr() as *const libc::c_void,
-                buf.len(),
-            )
-        };
+        let ret = unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, buf.len() as _) };
         if ret <= 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
@@ -314,9 +308,17 @@ mod tests {
     #[test]
     fn test_yes_unknown_long_option_errors() {
         let out = cmd().arg("--badopt").output().unwrap();
-        assert_ne!(out.status.code(), Some(0), "Should exit non-zero for --badopt");
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "Should exit non-zero for --badopt"
+        );
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("unrecognized option"), "Should print error: {}", stderr);
+        assert!(
+            stderr.contains("unrecognized option"),
+            "Should print error: {}",
+            stderr
+        );
     }
 
     #[test]
@@ -324,21 +326,29 @@ mod tests {
         let out = cmd().arg("-z").output().unwrap();
         assert_ne!(out.status.code(), Some(0), "Should exit non-zero for -z");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("invalid option"), "Should print error: {}", stderr);
+        assert!(
+            stderr.contains("invalid option"),
+            "Should print error: {}",
+            stderr
+        );
     }
 
     #[test]
     fn test_yes_pipe_closes() {
         // yes piped to head should terminate
-        let child = cmd().stdout(Stdio::piped()).spawn().unwrap();
+        let mut child = cmd().stdout(Stdio::piped()).spawn().unwrap();
+        let child_stdout = child.stdout.take().unwrap();
 
         let head = Command::new("head")
             .arg("-n")
             .arg("1")
-            .stdin(child.stdout.unwrap())
+            .stdin(child_stdout)
             .stdout(Stdio::piped())
             .output()
             .unwrap();
+
+        // Wait for the child process to avoid zombie
+        let _ = child.wait();
 
         assert_eq!(head.status.code(), Some(0));
         let text = String::from_utf8_lossy(&head.stdout);

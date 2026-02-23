@@ -232,7 +232,11 @@ fn write_spaces<W: Write>(output: &mut W, n: usize) -> io::Result<()> {
     Ok(())
 }
 
-fn write_column_padding<W: Write>(output: &mut W, abs_pos: usize, target_abs_pos: usize) -> io::Result<()> {
+fn write_column_padding<W: Write>(
+    output: &mut W,
+    abs_pos: usize,
+    target_abs_pos: usize,
+) -> io::Result<()> {
     let tab_size = 8;
     let mut pos = abs_pos;
     while pos < target_abs_pos {
@@ -265,9 +269,8 @@ pub fn pr_data<W: Write>(
     filename: &str,
     file_date: Option<SystemTime>,
 ) -> io::Result<()> {
-    let needs_transform = config.expand_tabs.is_some()
-        || config.show_control_chars
-        || config.show_nonprinting;
+    let needs_transform =
+        config.expand_tabs.is_some() || config.show_control_chars || config.show_nonprinting;
 
     if needs_transform {
         // Fall back to the String-based path for transforms
@@ -278,7 +281,8 @@ pub fn pr_data<W: Write>(
     // Fast path: zero-copy line extraction from byte data
     let text = String::from_utf8_lossy(data);
     // Split into lines without trailing newlines (matching BufRead::lines behavior)
-    let all_lines: Vec<&str> = text.split('\n')
+    let all_lines: Vec<&str> = text
+        .split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .collect();
     // Remove trailing empty line from final newline (matching lines() behavior)
@@ -339,7 +343,8 @@ fn pr_lines_generic<W: Write>(
     // Calculate body lines per page
     // When page_length is too small for header+footer, GNU pr suppresses
     // headers/footers and uses page_length as the body size.
-    let suppress_header = !config.omit_header && !config.omit_pagination
+    let suppress_header = !config.omit_header
+        && !config.omit_pagination
         && config.page_length <= HEADER_LINES + FOOTER_LINES;
     // When suppress_header is active, create a config view with omit_header set
     // so that sub-functions skip padding to body_lines_per_page.
@@ -466,7 +471,8 @@ pub fn pr_merge<W: Write>(
     let date_str = format_header_date(&date, &config.date_format);
     let header_str = config.header.as_deref().unwrap_or("");
 
-    let suppress_header = !config.omit_header && !config.omit_pagination
+    let suppress_header = !config.omit_header
+        && !config.omit_pagination
         && config.page_length <= HEADER_LINES + FOOTER_LINES;
     let body_lines_per_page = if config.omit_header || config.omit_pagination {
         if config.page_length > 0 {
@@ -539,7 +545,8 @@ pub fn pr_merge<W: Write>(
                     } else {
                         ""
                     };
-                    let truncated = if !explicit_sep && content.len() > col_width.saturating_sub(1) {
+                    let truncated = if !explicit_sep && content.len() > col_width.saturating_sub(1)
+                    {
                         // Non-explicit separator: always truncate, leave room for separator
                         &content[..col_width.saturating_sub(1)]
                     } else if explicit_sep && config.truncate_lines && content.len() > col_width {
@@ -685,7 +692,11 @@ fn write_single_column_body<W: Write>(
     body_lines_per_page: usize,
 ) -> io::Result<()> {
     let indent_str = " ".repeat(config.indent);
-    let content_width = if config.truncate_lines { compute_content_width(config) } else { 0 };
+    let content_width = if config.truncate_lines {
+        compute_content_width(config)
+    } else {
+        0
+    };
     let mut body_lines_written = 0;
     // Pre-allocate line number buffer to avoid per-line write! formatting
     let mut num_buf = [0u8; 32];
@@ -756,7 +767,11 @@ fn format_line_number(num: usize, sep: char, digits: usize, buf: &mut [u8; 32]) 
     }
     let num_digits = 32 - pos;
     // Build the output: spaces for padding + number + separator
-    let padding = if digits > num_digits { digits - num_digits } else { 0 };
+    let padding = if digits > num_digits {
+        digits - num_digits
+    } else {
+        0
+    };
     let total_len = padding + num_digits + sep.len_utf8();
     // We need a separate output buffer since we're using buf for the number
     // Just use the write_all approach with two calls for simplicity

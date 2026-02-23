@@ -369,10 +369,7 @@ pub fn cat_with_options(
     }
 
     // Fast path: show-all without numbering or squeeze
-    if config.show_nonprinting
-        && !config.number
-        && !config.number_nonblank
-        && !config.squeeze_blank
+    if config.show_nonprinting && !config.number && !config.number_nonblank && !config.squeeze_blank
     {
         return cat_show_all_fast(data, config.show_tabs, config.show_ends, out);
     }

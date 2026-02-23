@@ -29,12 +29,17 @@ pub struct WcCounts {
 
 /// Byte classification for C/POSIX locale word counting.
 /// GNU wc treats whitespace as word breaks and everything else as word content.
-/// In C locale, 0xa0 (non-breaking space) is also treated as whitespace.
+/// In C locale, whitespace bytes are 0x09-0x0D and 0x20 (matching POSIX isspace).
 ///   0 = word content: starts or continues a word
 ///   1 = space (word break): ends any current word
 const fn make_byte_class_c() -> [u8; 256] {
+    // GNU wc C locale: 0x09-0x0D, 0x20, AND 0xA0 break words.
+    // Verified on GNU coreutils 9.7: `printf 'a\xa0b' | env LC_ALL=C wc -w` => 2
+    // Note: `echo -e '\xe4\xbd\xa0' | LC_ALL=C wc -w` = 1 is NOT a distinguishing
+    // test (gives 1 regardless of 0xA0 treatment since nothing follows it).
+    // 0xA0 is the final byte of '你' (U+4F60 = E4 BD A0), so it splits adjacent CJK.
     let mut t = make_byte_class_utf8();
-    t[0xa0] = 1; // non-breaking space (0xa0) is whitespace in C locale
+    t[0xA0] = 1;
     t
 }
 const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
@@ -79,12 +84,6 @@ fn is_unicode_space(cp: u32) -> bool {
 
 /// Check if a Unicode codepoint (>= 0x80) is printable (matching glibc iswprint).
 /// C1 control characters (U+0080-U+009F) are not printable.
-/// Most characters >= U+00A0 are printable.
-#[inline]
-fn is_unicode_printable(cp: u32) -> bool {
-    cp >= 0xA0
-}
-
 // ──────────────────────────────────────────────────
 // Core counting functions
 // ──────────────────────────────────────────────────
@@ -122,7 +121,7 @@ pub fn count_words_locale(data: &[u8], utf8: bool) -> u64 {
 
 /// Count words in C/POSIX locale using 2-state logic matching GNU wc.
 /// GNU wc treats bytes as either whitespace (word break) or word content.
-/// Whitespace: 0x09 TAB, 0x0A LF, 0x0B VT, 0x0C FF, 0x0D CR, 0x20 SPACE.
+/// Whitespace: 0x09-0x0D, 0x20.
 /// Everything else (including NUL, control chars, high bytes) is word content.
 fn count_words_c(data: &[u8]) -> u64 {
     let mut words = 0u64;
@@ -136,12 +135,10 @@ fn count_words_c(data: &[u8]) -> u64 {
         if class == 1 {
             // Space — break word
             in_word = false;
-        } else {
+        } else if !in_word {
             // Word content (any non-space byte)
-            if !in_word {
-                in_word = true;
-                words += 1;
-            }
+            in_word = true;
+            words += 1;
         }
         i += 1;
     }
@@ -150,7 +147,7 @@ fn count_words_c(data: &[u8]) -> u64 {
 
 /// AVX2-accelerated fused line+word counter for C locale chunks.
 /// Processes 32 bytes per iteration using 2-state logic:
-///   - Space bytes (0x09-0x0D, 0x20): word breaks
+///   - Space bytes (0x09-0x0D, 0x20, 0xA0): word breaks
 ///   - Everything else: word content (starts/continues words)
 /// Word transitions detected via bitmask: word_content_mask & ~prev_word_content_mask.
 #[cfg(target_arch = "x86_64")]
@@ -169,10 +166,11 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm256_set1_epi8(b'\n' as i8);
         let zero = _mm256_setzero_si256();
         let ones = _mm256_set1_epi8(1);
-        // Space detection: 0x09-0x0D and 0x20
+        // Space detection: 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale)
         let space_char = _mm256_set1_epi8(0x20i8);
         let tab_lo = _mm256_set1_epi8(0x08i8);
         let tab_hi = _mm256_set1_epi8(0x0Ei8);
+        let nbsp_char = _mm256_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm256_setzero_si256();
         let mut batch = 0u32;
@@ -182,14 +180,13 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // is_space = (v == 0x20) | (v > 0x08 && v < 0x0E) | (v == 0xA0)
+            // is_space = (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
             let is_sp = _mm256_cmpeq_epi8(v, space_char);
+            let is_nbsp = _mm256_cmpeq_epi8(v, nbsp_char);
             let gt_08 = _mm256_cmpgt_epi8(v, tab_lo);
             let lt_0e = _mm256_cmpgt_epi8(tab_hi, v);
             let is_tab_range = _mm256_and_si256(gt_08, lt_0e);
-            let nbsp = _mm256_set1_epi8(0xa0u8 as i8);
-            let is_nbsp = _mm256_cmpeq_epi8(v, nbsp);
-            let is_space = _mm256_or_si256(_mm256_or_si256(is_sp, is_tab_range), is_nbsp);
+            let is_space = _mm256_or_si256(_mm256_or_si256(is_sp, is_nbsp), is_tab_range);
 
             let space_mask = _mm256_movemask_epi8(is_space) as u32;
             // Word content = NOT space
@@ -234,12 +231,10 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             } else if *BYTE_CLASS_C.get_unchecked(b as usize) == 1 {
                 // Other space byte
                 prev_in_word = false;
-            } else {
+            } else if !prev_in_word {
                 // Word content
-                if !prev_in_word {
-                    total_words += 1;
-                    prev_in_word = true;
-                }
+                total_words += 1;
+                prev_in_word = true;
             }
             i += 1;
         }
@@ -251,7 +246,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
 
 /// SSE2-accelerated fused line+word counter for C locale chunks.
 /// Same 2-state algorithm as AVX2 but processes 16 bytes per iteration.
-/// Available on all x86_64 CPUs (SSE2 is baseline for x86_64).
+/// Space bytes: 0x09-0x0D, 0x20, 0xA0. Available on all x86_64 CPUs.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
@@ -268,10 +263,11 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        // Space detection: 0x09-0x0D and 0x20
+        // Space detection: 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale)
         let space_char = _mm_set1_epi8(0x20i8);
         let tab_lo = _mm_set1_epi8(0x08i8);
         let tab_hi = _mm_set1_epi8(0x0Ei8);
+        let nbsp_char = _mm_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm_setzero_si128();
         let mut batch = 0u32;
@@ -281,14 +277,13 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            // is_space = (v == 0x20) | (v > 0x08 && v < 0x0E) | (v == 0xA0)
+            // is_space = (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
             let is_sp = _mm_cmpeq_epi8(v, space_char);
+            let is_nbsp = _mm_cmpeq_epi8(v, nbsp_char);
             let gt_08 = _mm_cmpgt_epi8(v, tab_lo);
             let lt_0e = _mm_cmpgt_epi8(tab_hi, v);
             let is_tab_range = _mm_and_si128(gt_08, lt_0e);
-            let nbsp = _mm_set1_epi8(0xa0u8 as i8);
-            let is_nbsp = _mm_cmpeq_epi8(v, nbsp);
-            let is_space = _mm_or_si128(_mm_or_si128(is_sp, is_tab_range), is_nbsp);
+            let is_space = _mm_or_si128(_mm_or_si128(is_sp, is_nbsp), is_tab_range);
 
             let space_mask = _mm_movemask_epi8(is_space) as u32;
             // Word content = NOT space (only 16 bits relevant)
@@ -326,11 +321,9 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
                 prev_in_word = false;
             } else if *BYTE_CLASS_C.get_unchecked(b as usize) == 1 {
                 prev_in_word = false;
-            } else {
-                if !prev_in_word {
-                    total_words += 1;
-                    prev_in_word = true;
-                }
+            } else if !prev_in_word {
+                total_words += 1;
+                prev_in_word = true;
             }
             i += 1;
         }
@@ -378,12 +371,10 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
                 lines += 1;
             }
             in_word = false;
-        } else {
+        } else if !in_word {
             // Word content (any non-space byte)
-            if !in_word {
-                in_word = true;
-                words += 1;
-            }
+            in_word = true;
+            words += 1;
         }
         i += 1;
     }
@@ -414,11 +405,9 @@ fn count_words_utf8(data: &[u8]) -> u64 {
             let class = unsafe { *BYTE_CLASS_UTF8.get_unchecked(b as usize) };
             if class == 1 {
                 in_word = false;
-            } else {
-                if !in_word {
-                    in_word = true;
-                    words += 1;
-                }
+            } else if !in_word {
+                in_word = true;
+                words += 1;
             }
             i += 1;
         } else if b < 0xC2 {
@@ -434,11 +423,9 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                     | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 2;
             } else {
@@ -459,11 +446,9 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                     | (unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 3;
             } else {
@@ -485,11 +470,9 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                     | (unsafe { *data.get_unchecked(i + 3) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 4;
             } else {
@@ -546,11 +529,9 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
             let class = unsafe { *BYTE_CLASS_UTF8.get_unchecked(b as usize) };
             if class == 1 {
                 in_word = false;
-            } else {
-                if !in_word {
-                    in_word = true;
-                    words += 1;
-                }
+            } else if !in_word {
+                in_word = true;
+                words += 1;
             }
             i += 1;
         } else if b < 0xC2 {
@@ -566,11 +547,9 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                     | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 2;
             } else {
@@ -590,11 +569,9 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                     | (unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 3;
             } else {
@@ -616,11 +593,9 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                     | (unsafe { *data.get_unchecked(i + 3) } as u32 & 0x3F);
                 if is_unicode_space(cp) {
                     in_word = false;
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        words += 1;
-                    }
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
                 }
                 i += 4;
             } else {

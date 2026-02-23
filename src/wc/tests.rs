@@ -543,17 +543,17 @@ fn test_c_locale_cjk_word_count() {
     // e4 b8 96 e7 95 8c are word content continuing "!" = 1 word. Total: 2 words.
     let mixed = "Hello, 世界!".as_bytes();
     assert_eq!(count_words_locale(mixed, false), 2);
-    // Just CJK: each line has non-space bytes = 1 word per line
-    let multi = "你好世界\nこんにちは\n".as_bytes();
+    // Just CJK (Japanese only, no 0xa0 bytes in UTF-8): 1 word per line
+    let multi = "こんにちは\nさようなら\n".as_bytes();
     assert_eq!(count_words_locale(multi, false), 2);
     // Full test data:
     // "Hello, 世界!\n你好世界\nこんにちは\n"
     // Line 1: "Hello," (word 1) + space + "世界!" (word 2) + newline
-    // Line 2: "你好世界" (word 3) + newline
-    // Line 3: "こんにちは" (word 4) + newline
-    // Total: 4 words
+    // Line 2: "你好世界": 你=E4 BD A0, A0 is separator, so E4 BD (word 3) + 好世界 (word 4)
+    // Line 3: "こんにちは" (word 5) + newline
+    // Total: 5 words. Verified: `printf 'Hello, 世界!\n你好世界\nこんにちは\n' | env LC_ALL=C wc -w` = 5
     let full = "Hello, 世界!\n你好世界\nこんにちは\n".as_bytes();
-    assert_eq!(count_words_locale(full, false), 4);
+    assert_eq!(count_words_locale(full, false), 5);
 }
 
 #[test]

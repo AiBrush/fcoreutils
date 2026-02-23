@@ -82,7 +82,13 @@ fn stat_regular(path: &str, config: &StatConfig) -> Result<String, io::Error> {
 
     if let Some(ref fmt) = config.printf_format {
         let expanded = expand_backslash_escapes(fmt);
-        return Ok(format_file_specifiers(&expanded, path, &meta, &st, config.dereference));
+        return Ok(format_file_specifiers(
+            &expanded,
+            path,
+            &meta,
+            &st,
+            config.dereference,
+        ));
     }
 
     if let Some(ref fmt) = config.format {
@@ -125,7 +131,12 @@ fn stat_filesystem(path: &str, config: &StatConfig) -> Result<String, io::Error>
 // Default file format
 // ──────────────────────────────────────────────────
 
-fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat, dereference: bool) -> String {
+fn format_file_default(
+    path: &str,
+    meta: &std::fs::Metadata,
+    st: &libc::stat,
+    dereference: bool,
+) -> String {
     let mode = meta.mode();
     let file_type_str = file_type_label(mode);
     let perms_str = mode_to_human(mode);
@@ -200,7 +211,12 @@ fn format_file_default(path: &str, meta: &std::fs::Metadata, st: &libc::stat, de
 // Terse file format
 // ──────────────────────────────────────────────────
 
-fn format_file_terse(path: &str, meta: &std::fs::Metadata, st: &libc::stat, dereference: bool) -> String {
+fn format_file_terse(
+    path: &str,
+    meta: &std::fs::Metadata,
+    st: &libc::stat,
+    dereference: bool,
+) -> String {
     let dev = meta.dev();
     let birth_secs = get_birth_time(path, dereference)
         .map(|(s, _)| s)
@@ -627,7 +643,11 @@ fn get_birth_time(path: &str, dereference: bool) -> Option<(i64, i64)> {
     let c_path = CString::new(path).ok()?;
     unsafe {
         let mut statx_buf: libc::statx = MaybeUninit::zeroed().assume_init();
-        let flags = if dereference { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
+        let flags = if dereference {
+            0
+        } else {
+            libc::AT_SYMLINK_NOFOLLOW
+        };
         let rc = libc::statx(
             libc::AT_FDCWD,
             c_path.as_ptr(),
@@ -636,7 +656,10 @@ fn get_birth_time(path: &str, dereference: bool) -> Option<(i64, i64)> {
             &mut statx_buf,
         );
         if rc == 0 && (statx_buf.stx_mask & libc::STATX_BTIME) != 0 {
-            Some((statx_buf.stx_btime.tv_sec, statx_buf.stx_btime.tv_nsec as i64))
+            Some((
+                statx_buf.stx_btime.tv_sec,
+                statx_buf.stx_btime.tv_nsec as i64,
+            ))
         } else {
             None
         }
