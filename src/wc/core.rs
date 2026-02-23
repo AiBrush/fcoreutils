@@ -80,13 +80,6 @@ fn is_unicode_space(cp: u32) -> bool {
 
 /// Check if a Unicode codepoint (>= 0x80) is printable (matching glibc iswprint).
 /// C1 control characters (U+0080-U+009F) are not printable.
-/// Most characters >= U+00A0 are printable.
-#[inline]
-#[allow(dead_code)]
-fn is_unicode_printable(cp: u32) -> bool {
-    cp >= 0xA0
-}
-
 // ──────────────────────────────────────────────────
 // Core counting functions
 // ──────────────────────────────────────────────────
@@ -138,12 +131,10 @@ fn count_words_c(data: &[u8]) -> u64 {
         if class == 1 {
             // Space — break word
             in_word = false;
-        } else {
+        } else if !in_word {
             // Word content (any non-space byte)
-            if !in_word {
-                in_word = true;
-                words += 1;
-            }
+            in_word = true;
+            words += 1;
         }
         i += 1;
     }
@@ -234,12 +225,10 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             } else if *BYTE_CLASS_C.get_unchecked(b as usize) == 1 {
                 // Other space byte
                 prev_in_word = false;
-            } else {
+            } else if !prev_in_word {
                 // Word content
-                if !prev_in_word {
-                    total_words += 1;
-                    prev_in_word = true;
-                }
+                total_words += 1;
+                prev_in_word = true;
             }
             i += 1;
         }
@@ -374,12 +363,10 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
                 lines += 1;
             }
             in_word = false;
-        } else {
+        } else if !in_word {
             // Word content (any non-space byte)
-            if !in_word {
-                in_word = true;
-                words += 1;
-            }
+            in_word = true;
+            words += 1;
         }
         i += 1;
     }

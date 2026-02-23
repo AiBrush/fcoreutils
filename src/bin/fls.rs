@@ -8,9 +8,6 @@ fn main() {
 use std::process;
 
 #[cfg(unix)]
-use libc;
-
-#[cfg(unix)]
 use coreutils_rs::common::reset_sigpipe;
 #[cfg(unix)]
 use coreutils_rs::ls::{

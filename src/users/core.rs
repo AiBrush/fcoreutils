@@ -2,7 +2,9 @@
 ///
 /// Reads utmpx records and prints a sorted, space-separated list of login names
 /// for all USER_PROCESS entries.
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
 
 use crate::who;
 
@@ -24,13 +26,13 @@ pub fn get_users() -> Vec<String> {
 }
 
 pub fn get_users_from(file: Option<&str>) -> Vec<String> {
-    if let Some(path) = file {
+    if let Some(_path) = file {
         // Reading from a specific file — use direct utmpx API
         let mut users = Vec::new();
         unsafe {
             #[cfg(target_os = "linux")]
             {
-                if let Ok(cpath) = CString::new(path) {
+                if let Ok(cpath) = CString::new(_path) {
                     utmpxname(cpath.as_ptr());
                 }
             }

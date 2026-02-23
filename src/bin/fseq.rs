@@ -572,7 +572,6 @@ fn main() {
             if offset > 0 {
                 write_all_fd1(&buf[..offset]);
             }
-            return;
         } else if inc_i > 0 && sep_is_newline {
             // Positive increment with newline separator (non-1 increment)
             let mut itoa_buf = itoa::Buffer::new();
@@ -599,7 +598,6 @@ fn main() {
             if offset > 0 {
                 write_all_fd1(&buf[..offset]);
             }
-            return;
         } else if inc_i > 0 {
             let mut vbuf = Vec::with_capacity(BUF_SIZE);
             let mut itoa_buf2 = itoa::Buffer::new();
@@ -820,11 +818,16 @@ mod tests {
         Command::new(path)
     }
 
+    /// Normalize line endings for cross-platform test compatibility.
+    fn norm(s: &str) -> String {
+        s.replace("\r\n", "\n")
+    }
+
     #[test]
     fn test_basic_1_to_10() {
         let output = cmd().arg("10").output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         let expected = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
         assert_eq!(stdout, expected);
     }
@@ -833,7 +836,7 @@ mod tests {
     fn test_first_and_last() {
         let output = cmd().args(["3", "7"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "3\n4\n5\n6\n7\n");
     }
 
@@ -841,7 +844,7 @@ mod tests {
     fn test_first_increment_last() {
         let output = cmd().args(["1", "2", "10"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "1\n3\n5\n7\n9\n");
     }
 
@@ -849,7 +852,7 @@ mod tests {
     fn test_format_f() {
         let output = cmd().args(["-f", "%03g", "5"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "001\n002\n003\n004\n005\n");
     }
 
@@ -857,7 +860,7 @@ mod tests {
     fn test_separator() {
         let output = cmd().args(["-s", ", ", "5"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "1, 2, 3, 4, 5\n");
     }
 
@@ -865,7 +868,7 @@ mod tests {
     fn test_equal_width() {
         let output = cmd().args(["-w", "1", "10"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n");
     }
 
@@ -873,7 +876,7 @@ mod tests {
     fn test_negative_numbers() {
         let output = cmd().args(["-3", "3"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "-3\n-2\n-1\n0\n1\n2\n3\n");
     }
 
@@ -881,7 +884,7 @@ mod tests {
     fn test_floating_point() {
         let output = cmd().args(["0.5", "0.5", "2.5"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "0.5\n1.0\n1.5\n2.0\n2.5\n");
     }
 
@@ -889,7 +892,7 @@ mod tests {
     fn test_countdown() {
         let output = cmd().args(["5", "-1", "1"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "5\n4\n3\n2\n1\n");
     }
 
@@ -897,7 +900,7 @@ mod tests {
     fn test_single_number() {
         let output = cmd().arg("1").output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "1\n");
     }
 
@@ -905,7 +908,7 @@ mod tests {
     fn test_large_range() {
         let output = cmd().arg("10000").output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         let lines: Vec<&str> = stdout.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 10000);
         assert_eq!(lines[0], "1");
@@ -1027,7 +1030,7 @@ mod tests {
         // When first > last with positive increment, output nothing
         let output = cmd().args(["5", "1"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "");
     }
 
@@ -1035,7 +1038,7 @@ mod tests {
     fn test_equal_width_negative() {
         let output = cmd().args(["-w", "-5", "5"]).output().unwrap();
         assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         // Should zero-pad to match widths
         assert!(stdout.contains("-5\n"));
         assert!(stdout.contains("05\n") || stdout.contains("5\n"));
