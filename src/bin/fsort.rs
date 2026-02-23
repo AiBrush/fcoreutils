@@ -21,15 +21,31 @@ use coreutils_rs::sort::{
 #[cfg(unix)]
 static SIGPIPE_WAS_IGNORED: AtomicBool = AtomicBool::new(false);
 
-/// Pre-main constructor: runs before the Rust runtime modifies SIGPIPE.
-#[cfg(unix)]
-unsafe extern "C" fn _save_sigpipe() {
-    // SAFETY: libc::signal is safe to call at process init (single-threaded).
-    // We read the current disposition by temporarily setting SIG_IGN, then restore.
+/// Pre-main constructor (Linux/glibc): `.init_array` entries receive (argc, argv, envp).
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe extern "C" fn _save_sigpipe(
+    _argc: libc::c_int,
+    _argv: *const *const libc::c_char,
+    _envp: *const *const libc::c_char,
+) {
+    // SAFETY: sigaction with null `act` reads the disposition atomically, no window.
     unsafe {
-        let prev = libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-        libc::signal(libc::SIGPIPE, prev);
-        if prev == libc::SIG_IGN {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut old);
+        if old.sa_sigaction == libc::SIG_IGN {
+            SIGPIPE_WAS_IGNORED.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Pre-main constructor (macOS): `__mod_init_func` entries receive no arguments.
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn _save_sigpipe() {
+    // SAFETY: sigaction with null `act` reads the disposition atomically, no window.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut old);
+        if old.sa_sigaction == libc::SIG_IGN {
             SIGPIPE_WAS_IGNORED.store(true, Ordering::Relaxed);
         }
     }
@@ -38,7 +54,11 @@ unsafe extern "C" fn _save_sigpipe() {
 #[cfg(all(unix, not(target_os = "macos")))]
 #[used]
 #[unsafe(link_section = ".init_array")]
-static _SAVE_SIGPIPE_INIT: unsafe extern "C" fn() = _save_sigpipe;
+static _SAVE_SIGPIPE_INIT: unsafe extern "C" fn(
+    libc::c_int,
+    *const *const libc::c_char,
+    *const *const libc::c_char,
+) = _save_sigpipe;
 
 #[cfg(target_os = "macos")]
 #[used]
