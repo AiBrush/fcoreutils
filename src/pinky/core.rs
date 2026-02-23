@@ -118,7 +118,8 @@ fn idle_str(line: &str) -> String {
     let idle_secs = now - atime;
 
     if idle_secs < 60 {
-        ".".to_string()
+        // GNU pinky shows blank (not ".") for recently active terminals
+        String::new()
     } else {
         let hours = idle_secs / 3600;
         let mins = (idle_secs % 3600) / 60;
@@ -360,7 +361,7 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
             let _ = writeln!(output, "{}", format_short_heading(config));
         }
 
-        let user_entries: Vec<&who::UtmpxEntry> = entries
+        let mut user_entries: Vec<&who::UtmpxEntry> = entries
             .iter()
             .filter(|e| e.ut_type == 7) // USER_PROCESS
             .filter(|e| {
@@ -371,6 +372,9 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
                 }
             })
             .collect();
+        // GNU pinky reads sessions from systemd-logind which returns newest first.
+        // Sort descending by login time to match that order.
+        user_entries.sort_by(|a, b| b.ut_tv_sec.cmp(&a.ut_tv_sec));
 
         for entry in &user_entries {
             let _ = writeln!(output, "{}", format_short_entry(entry, config));
