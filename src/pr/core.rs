@@ -598,15 +598,7 @@ fn write_single_column_body<W: Write>(
     let indent_str = " ".repeat(config.indent);
     let mut body_lines_written = 0;
 
-    for (i, line) in lines.iter().enumerate() {
-        if config.double_space && i > 0 {
-            writeln!(output)?;
-            body_lines_written += 1;
-            if body_lines_written >= body_lines_per_page {
-                break;
-            }
-        }
-
+    for line in lines.iter() {
         write!(output, "{}", indent_str)?;
 
         if let Some((sep, digits)) = config.number_lines {
@@ -627,6 +619,18 @@ fn write_single_column_body<W: Write>(
 
         writeln!(output, "{}", content)?;
         body_lines_written += 1;
+        if body_lines_written >= body_lines_per_page {
+            break;
+        }
+
+        // Double-space: write blank line AFTER each content line
+        if config.double_space {
+            writeln!(output)?;
+            body_lines_written += 1;
+            if body_lines_written >= body_lines_per_page {
+                break;
+            }
+        }
     }
 
     // Pad remaining body lines if not omitting headers
