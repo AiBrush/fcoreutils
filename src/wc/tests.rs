@@ -195,24 +195,30 @@ fn test_2state_space_still_breaks() {
 }
 
 #[test]
-fn test_c_locale_high_bytes_are_word_content() {
-    // In C locale, bytes >= 0x80 are word content (matches GNU wc).
-    assert_eq!(count_words_locale(b"\x80", false), 1);
-    assert_eq!(count_words_locale(b"\xFF", false), 1);
-    // High bytes between printable ASCII: word content, doesn't break word
-    assert_eq!(count_words_locale(b"hello\x80world", false), 1);
-    // High bytes alone between spaces: word content, spaces break
-    assert_eq!(count_words_locale(b"hello \x80 world", false), 3);
+fn test_c_locale_high_bytes_are_word_break() {
+    // In C locale (GNU 9.4), bytes >= 0x80 are word-BREAK, not word content.
+    assert_eq!(count_words_locale(b"\x80", false), 0);
+    assert_eq!(count_words_locale(b"\xFF", false), 0);
+    // High bytes between printable ASCII: word-break, splits the word
+    assert_eq!(count_words_locale(b"hello\x80world", false), 2);
+    // High bytes alone between spaces: still word-break
+    assert_eq!(count_words_locale(b"hello \x80 world", false), 2);
 }
 
 #[test]
 fn test_c_locale_word_counting() {
-    // In C locale, all non-space bytes are word content
+    // In C locale, only printable ASCII (0x21-0x7E) is word content
     assert_eq!(count_words_locale(b"hello", false), 1);
     assert_eq!(count_words_locale(b"hello world", false), 2);
-    // Control chars are word content in C locale (matches GNU wc)
-    assert_eq!(count_words_locale(b"\x01", false), 1);
-    assert_eq!(count_words_locale(b"\x7f", false), 1);
+    // NUL and control chars are word-BREAK in C locale (GNU 9.4)
+    assert_eq!(count_words_locale(b"\x01", false), 0);
+    assert_eq!(count_words_locale(b"\x7f", false), 0);
+    // DEL (0x7F) breaks words too
+    assert_eq!(count_words_locale(b"hello\x7fworld", false), 2);
+    // Null bytes: word-break
+    assert_eq!(count_words_locale(b"hello\x00world", false), 2);
+    // Only printable ASCII chars are word content
+    assert_eq!(count_words_locale(b"\x00\x01\x02\x80\x81\xfe\xff", false), 0);
 }
 
 #[test]
@@ -492,9 +498,9 @@ fn test_count_all_binary_data() {
     let counts = count_all(data, false);
     assert_eq!(counts.lines, 2);
     assert_eq!(counts.bytes, 7);
-    // C locale 2-state: \x00, \x01, \x02 are word content = 1 word.
-    // \n breaks. \xFF, \xFE are word content = 1 word. Total: 2 words.
-    assert_eq!(counts.words, 2);
+    // C locale (GNU 9.4): \x00, \x01, \x02 are word-break (not printable ASCII).
+    // \xFF, \xFE are also word-break. No words at all.
+    assert_eq!(counts.words, 0);
     // C locale: each byte is a char
     assert_eq!(counts.chars, 7);
 }
@@ -514,46 +520,46 @@ fn test_gnu_trailing_newline() {
 
 #[test]
 fn test_gnu_word_definition() {
-    // GNU wc 2-state: NUL and all non-space bytes are word content
-    assert_eq!(count_words(b"\x00"), 1); // NUL: word content (verified: printf '\x00' | wc -w = 1)
-    assert_eq!(count_words(b"\x01"), 1); // SOH: word content
-    assert_eq!(count_words(b"\x7f"), 1); // DEL: word content
+    // UTF-8 mode: NUL and all non-space bytes are word content
+    assert_eq!(count_words(b"\x00"), 1); // NUL: word content in UTF-8
+    assert_eq!(count_words(b"\x01"), 1); // SOH: word content in UTF-8
+    assert_eq!(count_words(b"\x7f"), 1); // DEL: word content in UTF-8
     // Printable ASCII is always word content
     assert_eq!(count_words(b"!"), 1);
     assert_eq!(count_words(b"hello"), 1);
     // In UTF-8 mode, valid multi-byte sequences (>= U+00A0) are word content
     assert_eq!(count_words("café".as_bytes()), 1);
-    // In C locale, all non-space bytes are word content (matches GNU wc).
-    assert_eq!(count_words_locale(b"\x80", false), 1); // word content
-    assert_eq!(count_words_locale(b"hello\x80world", false), 1); // doesn't break word
+    // In C locale (GNU 9.4): only 0x21-0x7E is word content
+    assert_eq!(count_words_locale(b"\x80", false), 0); // word-break
+    assert_eq!(count_words_locale(b"hello\x80world", false), 2); // breaks word
     assert_eq!(count_words_locale(b"hello", false), 1);
-    // C locale: control chars are word content (matches GNU wc)
-    assert_eq!(count_words_locale(b"\x01", false), 1);
-    assert_eq!(count_words_locale(b"\x7f", false), 1);
+    // C locale: control chars are word-break (GNU 9.4)
+    assert_eq!(count_words_locale(b"\x01", false), 0);
+    assert_eq!(count_words_locale(b"\x7f", false), 0);
 }
 
 #[test]
 fn test_c_locale_cjk_word_count() {
-    // CJK text in C locale with 2-state logic:
-    // All non-space bytes are word content (matches GNU wc).
-    // "世界" bytes: e4 b8 96 e7 95 8c — all word content, 1 word.
+    // CJK text in C locale with GNU 9.4 rules:
+    // Only printable ASCII (0x21-0x7E) is word content.
+    // "世界" bytes: e4 b8 96 e7 95 8c — all >= 0x80, all word-break. 0 words.
     let data = "世界".as_bytes();
-    assert_eq!(count_words_locale(data, false), 1);
-    // Mixed: "Hello, 世界!" — "Hello," is word content, space breaks,
-    // e4 b8 96 e7 95 8c are word content continuing "!" = 1 word. Total: 2 words.
+    assert_eq!(count_words_locale(data, false), 0);
+    // Mixed: "Hello, 世界!" — "Hello," is word 1 (printable ASCII), space breaks,
+    // CJK bytes are word-break, "!" (0x21) is word 2. Total: 2 words.
     let mixed = "Hello, 世界!".as_bytes();
     assert_eq!(count_words_locale(mixed, false), 2);
-    // Just CJK (Japanese only, no 0xa0 bytes in UTF-8): 1 word per line
+    // Just CJK (Japanese only): all bytes >= 0x80, so 0 words
     let multi = "こんにちは\nさようなら\n".as_bytes();
-    assert_eq!(count_words_locale(multi, false), 2);
+    assert_eq!(count_words_locale(multi, false), 0);
     // Full test data:
     // "Hello, 世界!\n你好世界\nこんにちは\n"
-    // Line 1: "Hello," (word 1) + space + "世界!" (word 2) + newline
-    // Line 2: "你好世界": 你=E4 BD A0, A0 is separator, so E4 BD (word 3) + 好世界 (word 4)
-    // Line 3: "こんにちは" (word 5) + newline
-    // Total: 5 words. Verified: `printf 'Hello, 世界!\n你好世界\nこんにちは\n' | env LC_ALL=C wc -w` = 5
+    // Line 1: "Hello," (word 1) + space + CJK bytes (word-break) + "!" (word 2)
+    // Line 2: all CJK bytes (word-break), 0 words
+    // Line 3: all CJK bytes (word-break), 0 words
+    // Total: 2 words. Verified against GNU wc 9.4 (Ubuntu 24.04 CI).
     let full = "Hello, 世界!\n你好世界\nこんにちは\n".as_bytes();
-    assert_eq!(count_words_locale(full, false), 5);
+    assert_eq!(count_words_locale(full, false), 2);
 }
 
 #[test]
