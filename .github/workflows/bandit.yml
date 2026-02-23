@@ -38,7 +38,6 @@ jobs:
           assembly/ tests/
           -f sarif
           -o bandit-results.sarif
-          --exit-zero
 
       - name: Upload SARIF
         if: always()

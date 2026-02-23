@@ -30,6 +30,8 @@ jobs:
             --lockfile=Cargo.lock
             --format=sarif
             --output=osv-results.sarif
+        # Non-blocking: known CVEs in transitive deps shouldn't block PRs.
+        # Findings still appear in Security tab via SARIF upload below.
         continue-on-error: true
 
       - name: Upload SARIF
