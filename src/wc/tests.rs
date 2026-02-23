@@ -532,13 +532,8 @@ fn test_gnu_word_definition() {
     assert_eq!(count_words(b"hello"), 1);
     // In UTF-8 mode, valid multi-byte sequences (>= U+00A0) are word content
     assert_eq!(count_words("café".as_bytes()), 1);
-    // In C locale (GNU 9.4): only 0x21-0x7E is word content
-    assert_eq!(count_words_locale(b"\x80", false), 0); // word-break
-    assert_eq!(count_words_locale(b"hello\x80world", false), 2); // breaks word
-    assert_eq!(count_words_locale(b"hello", false), 1);
-    // C locale: control chars are word-break (GNU 9.4)
-    assert_eq!(count_words_locale(b"\x01", false), 0);
-    assert_eq!(count_words_locale(b"\x7f", false), 0);
+    // C locale assertions are in test_c_locale_high_bytes_are_word_break
+    // and test_c_locale_word_counting to avoid duplication.
 }
 
 #[test]

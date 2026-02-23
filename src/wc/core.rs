@@ -157,6 +157,36 @@ fn count_words_c(data: &[u8]) -> u64 {
     words
 }
 
+/// Scalar tail for SIMD line+word counters: processes remaining bytes after
+/// the SIMD loop and returns final counts with boundary info.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn count_lw_c_scalar_tail(
+    ptr: *const u8,
+    mut i: usize,
+    len: usize,
+    mut total_lines: u64,
+    mut total_words: u64,
+    mut prev_in_word: bool,
+    data: &[u8],
+) -> (u64, u64, bool, bool) {
+    while i < len {
+        let b = *ptr.add(i);
+        if b == b'\n' {
+            total_lines += 1;
+            prev_in_word = false;
+        } else if *BYTE_CLASS_C.get_unchecked(b as usize) == 1 {
+            prev_in_word = false;
+        } else if !prev_in_word {
+            total_words += 1;
+            prev_in_word = true;
+        }
+        i += 1;
+    }
+    let first_is_word = !data.is_empty() && BYTE_CLASS_C[data[0] as usize] != 1;
+    (total_lines, total_words, first_is_word, prev_in_word)
+}
+
 /// AVX2-accelerated fused line+word counter for C locale chunks.
 /// Processes 32 bytes per iteration using 2-state logic:
 ///   - Word content: 0x21-0x7E (printable ASCII only; signed: b > 0x20 AND b < 0x7F)
@@ -229,27 +259,9 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let t = _mm_add_epi64(s, h64);
             total_lines += _mm_cvtsi128_si64(t) as u64;
         }
-
-        // Scalar tail using 2-state logic
-        while i < len {
-            let b = *ptr.add(i);
-            if b == b'\n' {
-                total_lines += 1;
-                prev_in_word = false;
-            } else if *BYTE_CLASS_C.get_unchecked(b as usize) == 1 {
-                // Other space byte
-                prev_in_word = false;
-            } else if !prev_in_word {
-                // Word content
-                total_words += 1;
-                prev_in_word = true;
-            }
-            i += 1;
-        }
     }
 
-    let first_is_word = !data.is_empty() && BYTE_CLASS_C[data[0] as usize] != 1;
-    (total_lines, total_words, first_is_word, prev_in_word)
+    count_lw_c_scalar_tail(ptr, i, len, total_lines, total_words, prev_in_word, data)
 }
 
 /// SSE2-accelerated fused line+word counter for C locale chunks.
@@ -313,25 +325,9 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let t = _mm_add_epi64(sad, hi);
             total_lines += _mm_cvtsi128_si64(t) as u64;
         }
-
-        // Scalar tail using 2-state logic
-        while i < len {
-            let b = *ptr.add(i);
-            if b == b'\n' {
-                total_lines += 1;
-                prev_in_word = false;
-            } else if *BYTE_CLASS_C.get_unchecked(b as usize) == 1 {
-                prev_in_word = false;
-            } else if !prev_in_word {
-                total_words += 1;
-                prev_in_word = true;
-            }
-            i += 1;
-        }
     }
 
-    let first_is_word = !data.is_empty() && BYTE_CLASS_C[data[0] as usize] != 1;
-    (total_lines, total_words, first_is_word, prev_in_word)
+    count_lw_c_scalar_tail(ptr, i, len, total_lines, total_words, prev_in_word, data)
 }
 
 /// Dispatch to AVX2, SSE2, or scalar chunk counter.
