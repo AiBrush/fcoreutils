@@ -18,6 +18,18 @@ assembly/yes/fyes_arm64.o
 # Contains mutation testing data
 **/mutants.out*/
 
+# GNU coreutils reference source and packaging artifacts
+coreutils-*/
+coreutils_*.debian.tar.xz
+coreutils_*.dsc
+coreutils_*.orig.tar.xz
+coreutils_*.orig.tar.xz.asc
+
+# Split file artifacts
+xaa
+xab
+xac
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
