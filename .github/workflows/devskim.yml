@@ -1,0 +1,37 @@
+name: DevSkim
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+# Static analysis of source files for security anti-patterns — no build required.
+
+concurrency:
+  group: devskim-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  devskim:
+    name: DevSkim Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run DevSkim
+        uses: microsoft/DevSkim-Action@v1
+        with:
+          directory-to-scan: .
+          output-filename: devskim-results.sarif
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: devskim-results.sarif
+          category: devskim

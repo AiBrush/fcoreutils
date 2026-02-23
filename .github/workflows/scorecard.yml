@@ -1,0 +1,41 @@
+name: OSSF Scorecard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+# Analyzes repository metadata and best practices — no build required.
+# Triggered on push to main and weekly schedule (not on PRs per OSSF guidance).
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+
+permissions:
+  security-events: write
+  contents: read
+  id-token: write       # needed for Scorecard publishing
+
+jobs:
+  scorecard:
+    name: OSSF Scorecard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@v2.4.0
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: scorecard-results.sarif
+          category: scorecard
