@@ -134,7 +134,7 @@ fn test_du_human() {
             ..default_config()
         },
     );
-    assert_eq!(s, "5M");
+    assert_eq!(s, "5.0M");
 }
 
 #[test]

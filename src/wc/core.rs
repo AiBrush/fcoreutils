@@ -33,9 +33,10 @@ pub struct WcCounts {
 ///   0 = word content: starts or continues a word
 ///   1 = space (word break): ends any current word
 const fn make_byte_class_c() -> [u8; 256] {
-    let mut t = make_byte_class_utf8();
-    t[0xa0] = 1; // non-breaking space (0xa0) is whitespace in C locale
-    t
+    // C/POSIX locale: only ASCII whitespace (0x09-0x0D, 0x20) breaks words.
+    // Byte 0xa0 is NOT whitespace — it appears inside UTF-8 multi-byte sequences
+    // (e.g. '你' U+4F60 = E4 BD A0) and must not split words.
+    make_byte_class_utf8()
 }
 const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
 
