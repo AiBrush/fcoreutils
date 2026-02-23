@@ -24,7 +24,7 @@ pub struct WcCounts {
 //   0 = word content: starts or continues a word (any non-whitespace byte)
 //   1 = space (word break): ends any current word
 //
-// Whitespace bytes: 0x09 TAB, 0x0A LF, 0x0B VT, 0x0C FF, 0x0D CR, 0x20 SPACE, 0xA0.
+// Whitespace bytes (C locale): 0x09 TAB, 0x0A LF, 0x0B VT, 0x0C FF, 0x0D CR, 0x20 SPACE, 0xA0.
 // Everything else (including NUL, control chars, high bytes 0x80-0xFF except 0xA0) is word content.
 
 /// Byte classification for C/POSIX locale word counting.
@@ -166,7 +166,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm256_set1_epi8(b'\n' as i8);
         let zero = _mm256_setzero_si256();
         let ones = _mm256_set1_epi8(1);
-        // Space detection: 0x00, 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale)
+        // Space detection: 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale); NUL is word content
         let space_char = _mm256_set1_epi8(0x20i8);
         let tab_lo = _mm256_set1_epi8(0x08i8);
         let tab_hi = _mm256_set1_epi8(0x0Ei8);
@@ -180,17 +180,13 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // is_space = (v == 0x00) | (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
-            let is_nul = _mm256_cmpeq_epi8(v, zero);
+            // is_space = (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
             let is_sp = _mm256_cmpeq_epi8(v, space_char);
             let is_nbsp = _mm256_cmpeq_epi8(v, nbsp_char);
             let gt_08 = _mm256_cmpgt_epi8(v, tab_lo);
             let lt_0e = _mm256_cmpgt_epi8(tab_hi, v);
             let is_tab_range = _mm256_and_si256(gt_08, lt_0e);
-            let is_space = _mm256_or_si256(
-                _mm256_or_si256(is_nul, _mm256_or_si256(is_sp, is_nbsp)),
-                is_tab_range,
-            );
+            let is_space = _mm256_or_si256(_mm256_or_si256(is_sp, is_nbsp), is_tab_range);
 
             let space_mask = _mm256_movemask_epi8(is_space) as u32;
             // Word content = NOT space
@@ -250,7 +246,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
 
 /// SSE2-accelerated fused line+word counter for C locale chunks.
 /// Same 2-state algorithm as AVX2 but processes 16 bytes per iteration.
-/// Space bytes: 0x00, 0x09-0x0D, 0x20, 0xA0. Available on all x86_64 CPUs.
+/// Space bytes: 0x09-0x0D, 0x20, 0xA0 (NUL is word content). Available on all x86_64 CPUs.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
@@ -267,7 +263,7 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        // Space detection: 0x00, 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale)
+        // Space detection: 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale); NUL is word content
         let space_char = _mm_set1_epi8(0x20i8);
         let tab_lo = _mm_set1_epi8(0x08i8);
         let tab_hi = _mm_set1_epi8(0x0Ei8);
@@ -281,17 +277,13 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            // is_space = (v == 0x00) | (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
-            let is_nul = _mm_cmpeq_epi8(v, zero);
+            // is_space = (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
             let is_sp = _mm_cmpeq_epi8(v, space_char);
             let is_nbsp = _mm_cmpeq_epi8(v, nbsp_char);
             let gt_08 = _mm_cmpgt_epi8(v, tab_lo);
             let lt_0e = _mm_cmpgt_epi8(tab_hi, v);
             let is_tab_range = _mm_and_si128(gt_08, lt_0e);
-            let is_space = _mm_or_si128(
-                _mm_or_si128(is_nul, _mm_or_si128(is_sp, is_nbsp)),
-                is_tab_range,
-            );
+            let is_space = _mm_or_si128(_mm_or_si128(is_sp, is_nbsp), is_tab_range);
 
             let space_mask = _mm_movemask_epi8(is_space) as u32;
             // Word content = NOT space (only 16 bits relevant)
