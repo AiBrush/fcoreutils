@@ -1685,9 +1685,17 @@ pub fn ls_dir(
 /// Returns `true` if all operations succeeded.
 pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
     let stdout = io::stdout();
-    // Use a modest buffer that still gives performance benefits while ensuring
-    // SIGPIPE is delivered when output is piped to a program that exits early.
-    let mut out = BufWriter::with_capacity(4 * 1024, stdout.lock());
+    let is_tty = atty_stdout();
+    // For pipes: shrink kernel pipe buffer to 4 KB so our writes block once the
+    // buffer fills, allowing SIGPIPE to be delivered when the reader closes
+    // early (e.g. `ls /big-dir | head -5` → exit 141 like GNU ls).
+    // For TTYs: use a 64 KB BufWriter for performance.
+    #[cfg(target_os = "linux")]
+    if !is_tty {
+        unsafe { libc::fcntl(1, 1031 /* F_SETPIPE_SZ */, 4096i32) };
+    }
+    let buf_cap = if is_tty { 64 * 1024 } else { 4 * 1024 };
+    let mut out = BufWriter::with_capacity(buf_cap, stdout.lock());
 
     let color_db = match config.color {
         ColorMode::Always => Some(ColorDb::from_env()),
