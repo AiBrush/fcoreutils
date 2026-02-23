@@ -528,11 +528,19 @@ fn main() {
     let parsed_date = date_str.as_deref().map(parse_date_string);
 
     if let Some(Err(_)) = &parsed_stamp {
-        eprintln!("{}: invalid date format '{}'", TOOL_NAME, stamp.as_deref().unwrap());
+        eprintln!(
+            "{}: invalid date format '{}'",
+            TOOL_NAME,
+            stamp.as_deref().unwrap()
+        );
         process::exit(1);
     }
     if let Some(Err(_)) = &parsed_date {
-        eprintln!("{}: invalid date format '{}'", TOOL_NAME, date_str.as_deref().unwrap());
+        eprintln!(
+            "{}: invalid date format '{}'",
+            TOOL_NAME,
+            date_str.as_deref().unwrap()
+        );
         process::exit(1);
     }
 

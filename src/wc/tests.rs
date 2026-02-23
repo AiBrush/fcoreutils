@@ -218,7 +218,10 @@ fn test_c_locale_word_counting() {
     // Null bytes: word-break
     assert_eq!(count_words_locale(b"hello\x00world", false), 2);
     // Only printable ASCII chars are word content
-    assert_eq!(count_words_locale(b"\x00\x01\x02\x80\x81\xfe\xff", false), 0);
+    assert_eq!(
+        count_words_locale(b"\x00\x01\x02\x80\x81\xfe\xff", false),
+        0
+    );
 }
 
 #[test]
