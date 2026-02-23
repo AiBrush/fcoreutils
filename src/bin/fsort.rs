@@ -1,69 +1,9 @@
 use std::process;
-#[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::sort::{
     CheckMode, KeyDef, KeyOpts, SortConfig, parse_buffer_size, sort_and_output,
 };
-
-// ── SIGPIPE disposition detection ────────────────────────────────────────────
-//
-// GNU sort behavior depends on the ORIGINAL SIGPIPE disposition inherited from
-// the parent process:
-//   - SIG_DFL (normal bash): sort is killed silently by SIGPIPE (exit 141)
-//   - SIG_IGN (Docker/nohup/CI): sort catches EPIPE, prints diagnostics, exits 2
-//
-// The Rust runtime sets SIGPIPE to SIG_IGN before main() runs, so we must
-// capture the original disposition in a pre-main constructor.
-
-/// Whether the parent process had SIGPIPE set to SIG_IGN.
-#[cfg(unix)]
-static SIGPIPE_WAS_IGNORED: AtomicBool = AtomicBool::new(false);
-
-/// Pre-main constructor (Linux/glibc): `.init_array` entries receive (argc, argv, envp).
-#[cfg(all(unix, not(target_os = "macos")))]
-unsafe extern "C" fn _save_sigpipe(
-    _argc: libc::c_int,
-    _argv: *const *const libc::c_char,
-    _envp: *const *const libc::c_char,
-) {
-    // SAFETY: sigaction with null `act` reads the disposition atomically, no window.
-    unsafe {
-        let mut old: libc::sigaction = std::mem::zeroed();
-        libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut old);
-        if old.sa_sigaction == libc::SIG_IGN {
-            SIGPIPE_WAS_IGNORED.store(true, Ordering::Relaxed);
-        }
-    }
-}
-
-/// Pre-main constructor (macOS): `__mod_init_func` entries receive no arguments.
-#[cfg(target_os = "macos")]
-unsafe extern "C" fn _save_sigpipe() {
-    // SAFETY: sigaction with null `act` reads the disposition atomically, no window.
-    unsafe {
-        let mut old: libc::sigaction = std::mem::zeroed();
-        libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut old);
-        if old.sa_sigaction == libc::SIG_IGN {
-            SIGPIPE_WAS_IGNORED.store(true, Ordering::Relaxed);
-        }
-    }
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-#[used]
-#[unsafe(link_section = ".init_array")]
-static _SAVE_SIGPIPE_INIT: unsafe extern "C" fn(
-    libc::c_int,
-    *const *const libc::c_char,
-    *const *const libc::c_char,
-) = _save_sigpipe;
-
-#[cfg(target_os = "macos")]
-#[used]
-#[unsafe(link_section = "__DATA,__mod_init_func")]
-static _SAVE_SIGPIPE_INIT: unsafe extern "C" fn() = _save_sigpipe;
 
 struct Cli {
     ignore_leading_blanks: bool,
@@ -404,22 +344,9 @@ fn main() {
         libc::setlocale(libc::LC_ALL, c"".as_ptr());
     }
 
-    // Restore SIGPIPE based on the original disposition saved by the pre-main
-    // constructor. Normal bash has SIG_DFL; restore it so sort is killed
-    // silently by SIGPIPE (exit 141). If SIG_IGN was inherited (Docker/nohup/CI),
-    // keep it and handle EPIPE explicitly with diagnostic messages + exit 2.
-    #[cfg(unix)]
-    let sigpipe_ignored = SIGPIPE_WAS_IGNORED.load(Ordering::Relaxed);
-    #[cfg(not(unix))]
-    let sigpipe_ignored = true;
-
-    #[cfg(unix)]
-    if !sigpipe_ignored {
-        // Normal shell: restore SIG_DFL so we are killed silently like GNU sort
-        unsafe {
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-        }
-    }
+    // Do NOT reset SIGPIPE: keep Rust's default SIG_IGN so write errors
+    // propagate as EPIPE/BrokenPipe instead of killing the process.
+    // GNU sort always catches write errors, prints diagnostic messages, and exits 2.
 
     // Enlarge pipe buffers on Linux for higher throughput.
     #[cfg(target_os = "linux")]
@@ -528,14 +455,10 @@ fn main() {
 
     if let Err(e) = sort_and_output(&inputs, &config) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
-            if sigpipe_ignored {
-                // SIG_IGN inherited: print GNU-style diagnostics before exit 2
-                let output_name = config.output_file.as_deref().unwrap_or("standard output");
-                eprintln!("sort: write failed: '{}': Broken pipe", output_name);
-                eprintln!("sort: write error");
-            }
-            // With SIG_DFL we should not reach here (killed by signal), but
-            // exit 2 as a fallback just in case.
+            // GNU sort prints these two diagnostic messages on EPIPE, then exits 2.
+            let output_name = config.output_file.as_deref().unwrap_or("standard output");
+            eprintln!("sort: write failed: '{}': Broken pipe", output_name);
+            eprintln!("sort: write error");
             process::exit(2);
         }
         eprintln!("sort: {}", io_error_msg(&e));
