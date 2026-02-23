@@ -180,31 +180,10 @@ const fn build_base64_decode_table(alphabet: &[u8; 64]) -> [u8; 256] {
 const BASE64_DECODE: [u8; 256] = build_base64_decode_table(BASE64_ALPHABET);
 const BASE64URL_DECODE: [u8; 256] = build_base64_decode_table(BASE64URL_ALPHABET);
 
+#[cfg(test)]
 fn base64_encode(data: &[u8], alphabet: &[u8; 64]) -> String {
-    if data.is_empty() {
-        return String::new();
-    }
-    let mut result = Vec::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
-
-        result.push(alphabet[(b0 >> 2) as usize]);
-        result.push(alphabet[((b0 & 0x03) << 4 | b1 >> 4) as usize]);
-        if chunk.len() > 1 {
-            result.push(alphabet[((b1 & 0x0F) << 2 | b2 >> 6) as usize]);
-        } else {
-            result.push(b'=');
-        }
-        if chunk.len() > 2 {
-            result.push(alphabet[(b2 & 0x3F) as usize]);
-        } else {
-            result.push(b'=');
-        }
-    }
-    // SAFETY: result contains only bytes from the base64 alphabet (ASCII subset), guaranteed valid UTF-8
-    unsafe { String::from_utf8_unchecked(result) }
+    // SAFETY: result contains only ASCII bytes from the base64 alphabet
+    unsafe { String::from_utf8_unchecked(base64_encode_bytes(data, alphabet)) }
 }
 
 fn base64_decode(
@@ -287,60 +266,6 @@ const fn build_base32_decode_table(alphabet: &[u8; 32]) -> [u8; 256] {
 const BASE32_DECODE: [u8; 256] = build_base32_decode_table(BASE32_ALPHABET);
 const BASE32HEX_DECODE: [u8; 256] = build_base32_decode_table(BASE32HEX_ALPHABET);
 
-fn base32_encode(data: &[u8], alphabet: &[u8; 32]) -> String {
-    if data.is_empty() {
-        return String::new();
-    }
-
-    let mut result = Vec::with_capacity(data.len().div_ceil(5) * 8);
-
-    for chunk in data.chunks(5) {
-        let mut buf = [0u8; 5];
-        buf[..chunk.len()].copy_from_slice(chunk);
-
-        let b0 = buf[0];
-        let b1 = buf[1];
-        let b2 = buf[2];
-        let b3 = buf[3];
-        let b4 = buf[4];
-
-        result.push(alphabet[(b0 >> 3) as usize]);
-        result.push(alphabet[((b0 & 0x07) << 2 | b1 >> 6) as usize]);
-
-        if chunk.len() > 1 {
-            result.push(alphabet[((b1 >> 1) & 0x1F) as usize]);
-            result.push(alphabet[((b1 & 0x01) << 4 | b2 >> 4) as usize]);
-        } else {
-            result.extend_from_slice(b"======");
-            continue;
-        }
-
-        if chunk.len() > 2 {
-            result.push(alphabet[((b2 & 0x0F) << 1 | b3 >> 7) as usize]);
-        } else {
-            result.extend_from_slice(b"====");
-            continue;
-        }
-
-        if chunk.len() > 3 {
-            result.push(alphabet[((b3 >> 2) & 0x1F) as usize]);
-            result.push(alphabet[((b3 & 0x03) << 3 | b4 >> 5) as usize]);
-        } else {
-            result.extend_from_slice(b"===");
-            continue;
-        }
-
-        if chunk.len() > 4 {
-            result.push(alphabet[(b4 & 0x1F) as usize]);
-        } else {
-            result.push(b'=');
-        }
-    }
-
-    // SAFETY: result contains only bytes from the base32 alphabet (ASCII subset), guaranteed valid UTF-8
-    unsafe { String::from_utf8_unchecked(result) }
-}
-
 fn base32_decode(
     input: &[u8],
     decode_table: &[u8; 256],
@@ -407,16 +332,10 @@ fn base32_decode(
 
 // ======================== Base16 ========================
 
-const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
-
+#[cfg(test)]
 fn base16_encode(data: &[u8]) -> String {
-    let mut result = Vec::with_capacity(data.len() * 2);
-    for &b in data {
-        result.push(HEX_CHARS[(b >> 4) as usize]);
-        result.push(HEX_CHARS[(b & 0x0F) as usize]);
-    }
-    // SAFETY: result contains only hex digit bytes ('0'-'9', 'A'-'F'), guaranteed valid UTF-8
-    unsafe { String::from_utf8_unchecked(result) }
+    // SAFETY: result contains only ASCII hex digits
+    unsafe { String::from_utf8_unchecked(base16_encode_bytes(data)) }
 }
 
 fn base16_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
@@ -461,15 +380,10 @@ fn hex_val(b: u8) -> u8 {
 
 // ======================== Base2 ========================
 
+#[cfg(test)]
 fn base2msbf_encode(data: &[u8]) -> String {
-    let mut result = Vec::with_capacity(data.len() * 8);
-    for &b in data {
-        for i in (0..8).rev() {
-            result.push(if (b >> i) & 1 == 1 { b'1' } else { b'0' });
-        }
-    }
-    // SAFETY: result contains only b'0' and b'1' bytes, guaranteed valid UTF-8
-    unsafe { String::from_utf8_unchecked(result) }
+    // SAFETY: result contains only b'0' and b'1' bytes
+    unsafe { String::from_utf8_unchecked(base2msbf_encode_bytes(data)) }
 }
 
 fn base2msbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
@@ -501,15 +415,10 @@ fn base2msbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, Strin
     Ok(result)
 }
 
+#[cfg(test)]
 fn base2lsbf_encode(data: &[u8]) -> String {
-    let mut result = Vec::with_capacity(data.len() * 8);
-    for &b in data {
-        for i in 0..8 {
-            result.push(if (b >> i) & 1 == 1 { b'1' } else { b'0' });
-        }
-    }
-    // SAFETY: result contains only b'0' and b'1' bytes, guaranteed valid UTF-8
-    unsafe { String::from_utf8_unchecked(result) }
+    // SAFETY: result contains only b'0' and b'1' bytes
+    unsafe { String::from_utf8_unchecked(base2lsbf_encode_bytes(data)) }
 }
 
 fn base2lsbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
@@ -560,32 +469,10 @@ const fn build_z85_decode_table() -> [u8; 256] {
 
 const Z85_DECODE_TABLE: [u8; 256] = build_z85_decode_table();
 
+#[cfg(test)]
 fn z85_encode(data: &[u8]) -> Result<String, String> {
-    if !data.len().is_multiple_of(4) {
-        return Err(format!(
-            "{}: invalid input (length must be a multiple of 4 for Z85 encoding)",
-            TOOL_NAME
-        ));
-    }
-
-    let mut result = Vec::with_capacity(data.len() * 5 / 4);
-
-    for chunk in data.chunks(4) {
-        let mut value = u32::from(chunk[0]) << 24
-            | u32::from(chunk[1]) << 16
-            | u32::from(chunk[2]) << 8
-            | u32::from(chunk[3]);
-
-        let mut chars = [0u8; 5];
-        for c in chars.iter_mut().rev() {
-            *c = Z85_ENCODE_TABLE[(value % 85) as usize];
-            value /= 85;
-        }
-        result.extend_from_slice(&chars);
-    }
-
-    // SAFETY: result contains only bytes from the Z85 alphabet (ASCII subset), guaranteed valid UTF-8
-    Ok(unsafe { String::from_utf8_unchecked(result) })
+    // SAFETY: result contains only ASCII bytes from the Z85 alphabet
+    Ok(unsafe { String::from_utf8_unchecked(z85_encode_bytes(data)?) })
 }
 
 fn z85_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
@@ -629,39 +516,277 @@ fn z85_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
 
 // ======================== Common ========================
 
-/// Write encoded output with line wrapping directly to writer, avoiding
-/// intermediate String allocation.
-fn write_wrapped(out: &mut impl Write, encoded: &str, wrap: usize) -> io::Result<()> {
-    if encoded.is_empty() {
+/// Encode and write with line wrapping in chunks to avoid large allocations.
+fn encode_streaming(
+    data: &[u8],
+    encoding: Encoding,
+    wrap: usize,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    if data.is_empty() {
         return Ok(());
     }
-    if wrap == 0 {
-        // GNU basenc with -w 0 does NOT add a trailing newline
-        return out.write_all(encoded.as_bytes());
+
+    // Chunk alignment: must be a multiple of the encoding's input block size
+    let block_size = match encoding {
+        Encoding::Base64 | Encoding::Base64Url => 3,
+        Encoding::Base32 | Encoding::Base32Hex => 5,
+        Encoding::Base16 | Encoding::Base2Msbf | Encoding::Base2Lsbf => 1,
+        Encoding::Z85 => 4,
+    };
+
+    // ~64KB chunks, aligned to block size
+    let chunk_size = (65536 / block_size) * block_size;
+    let mut col = 0usize;
+
+    for input_chunk in data.chunks(chunk_size) {
+        let encoded = match encode_data_bytes(input_chunk, encoding) {
+            Ok(e) => e,
+            Err(msg) => {
+                eprintln!("{}", msg);
+                process::exit(1);
+            }
+        };
+
+        if wrap == 0 {
+            out.write_all(&encoded)?;
+        } else {
+            let mut pos = 0;
+            while pos < encoded.len() {
+                let remaining_in_line = wrap - col;
+                let available = encoded.len() - pos;
+                let to_write = remaining_in_line.min(available);
+                out.write_all(&encoded[pos..pos + to_write])?;
+                pos += to_write;
+                col += to_write;
+                if col == wrap {
+                    out.write_all(b"\n")?;
+                    col = 0;
+                }
+            }
+        }
     }
 
-    let bytes = encoded.as_bytes();
-    let mut pos = 0;
-    while pos < bytes.len() {
-        let end = (pos + wrap).min(bytes.len());
-        out.write_all(&bytes[pos..end])?;
+    if wrap > 0 && col > 0 {
         out.write_all(b"\n")?;
-        pos = end;
     }
+
     Ok(())
 }
 
-fn encode_data(data: &[u8], encoding: Encoding) -> Result<String, String> {
+/// Encode data directly to bytes, avoiding String allocation.
+fn encode_data_bytes(data: &[u8], encoding: Encoding) -> Result<Vec<u8>, String> {
     match encoding {
-        Encoding::Base64 => Ok(base64_encode(data, BASE64_ALPHABET)),
-        Encoding::Base64Url => Ok(base64_encode(data, BASE64URL_ALPHABET)),
-        Encoding::Base32 => Ok(base32_encode(data, BASE32_ALPHABET)),
-        Encoding::Base32Hex => Ok(base32_encode(data, BASE32HEX_ALPHABET)),
-        Encoding::Base16 => Ok(base16_encode(data)),
-        Encoding::Base2Msbf => Ok(base2msbf_encode(data)),
-        Encoding::Base2Lsbf => Ok(base2lsbf_encode(data)),
-        Encoding::Z85 => z85_encode(data),
+        Encoding::Base64 => Ok(base64_encode_bytes(data, BASE64_ALPHABET)),
+        Encoding::Base64Url => Ok(base64_encode_bytes(data, BASE64URL_ALPHABET)),
+        Encoding::Base32 => Ok(base32_encode_bytes(data, BASE32_ALPHABET)),
+        Encoding::Base32Hex => Ok(base32_encode_bytes(data, BASE32HEX_ALPHABET)),
+        Encoding::Base16 => Ok(base16_encode_bytes(data)),
+        Encoding::Base2Msbf => Ok(base2msbf_encode_bytes(data)),
+        Encoding::Base2Lsbf => Ok(base2lsbf_encode_bytes(data)),
+        Encoding::Z85 => z85_encode_bytes(data),
     }
+}
+
+/// Encode base64 directly to bytes (no String intermediate).
+/// Optimized: branch-free processing of full 3-byte chunks.
+fn base64_encode_bytes(data: &[u8], alphabet: &[u8; 64]) -> Vec<u8> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let mut result = Vec::with_capacity(data.len().div_ceil(3) * 4);
+    let full_end = (data.len() / 3) * 3;
+
+    // Full 3-byte chunks: no padding, no branches
+    for chunk in data[..full_end].chunks_exact(3) {
+        let b0 = chunk[0]; let b1 = chunk[1]; let b2 = chunk[2];
+        result.extend_from_slice(&[
+            alphabet[(b0 >> 2) as usize],
+            alphabet[((b0 & 0x03) << 4 | b1 >> 4) as usize],
+            alphabet[((b1 & 0x0F) << 2 | b2 >> 6) as usize],
+            alphabet[(b2 & 0x3F) as usize],
+        ]);
+    }
+
+    // Handle last partial chunk with padding
+    let remainder = data.len() % 3;
+    if remainder == 1 {
+        let b0 = data[full_end];
+        result.extend_from_slice(&[
+            alphabet[(b0 >> 2) as usize],
+            alphabet[((b0 & 0x03) << 4) as usize],
+            b'=', b'=',
+        ]);
+    } else if remainder == 2 {
+        let b0 = data[full_end]; let b1 = data[full_end + 1];
+        result.extend_from_slice(&[
+            alphabet[(b0 >> 2) as usize],
+            alphabet[((b0 & 0x03) << 4 | b1 >> 4) as usize],
+            alphabet[((b1 & 0x0F) << 2) as usize],
+            b'=',
+        ]);
+    }
+    result
+}
+
+/// Encode base32 directly to bytes (no String intermediate).
+/// Optimized: branch-free processing of full 5-byte chunks.
+fn base32_encode_bytes(data: &[u8], alphabet: &[u8; 32]) -> Vec<u8> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let mut result = Vec::with_capacity(data.len().div_ceil(5) * 8);
+    let full_end = (data.len() / 5) * 5;
+
+    // Full 5-byte chunks: no padding, no branches
+    for chunk in data[..full_end].chunks_exact(5) {
+        let b0 = chunk[0]; let b1 = chunk[1]; let b2 = chunk[2]; let b3 = chunk[3]; let b4 = chunk[4];
+        result.extend_from_slice(&[
+            alphabet[(b0 >> 3) as usize],
+            alphabet[((b0 & 0x07) << 2 | b1 >> 6) as usize],
+            alphabet[((b1 >> 1) & 0x1F) as usize],
+            alphabet[((b1 & 0x01) << 4 | b2 >> 4) as usize],
+            alphabet[((b2 & 0x0F) << 1 | b3 >> 7) as usize],
+            alphabet[((b3 >> 2) & 0x1F) as usize],
+            alphabet[((b3 & 0x03) << 3 | b4 >> 5) as usize],
+            alphabet[(b4 & 0x1F) as usize],
+        ]);
+    }
+
+    // Handle last partial chunk with padding
+    let remainder = data.len() % 5;
+    if remainder > 0 {
+        let chunk = &data[full_end..];
+        let mut buf = [0u8; 5];
+        buf[..chunk.len()].copy_from_slice(chunk);
+        let b0 = buf[0]; let b1 = buf[1]; let b2 = buf[2]; let b3 = buf[3]; let b4 = buf[4];
+        result.push(alphabet[(b0 >> 3) as usize]);
+        result.push(alphabet[((b0 & 0x07) << 2 | b1 >> 6) as usize]);
+        match remainder {
+            1 => result.extend_from_slice(b"======"),
+            2 => {
+                result.push(alphabet[((b1 >> 1) & 0x1F) as usize]);
+                result.push(alphabet[((b1 & 0x01) << 4 | b2 >> 4) as usize]);
+                result.extend_from_slice(b"====");
+            }
+            3 => {
+                result.push(alphabet[((b1 >> 1) & 0x1F) as usize]);
+                result.push(alphabet[((b1 & 0x01) << 4 | b2 >> 4) as usize]);
+                result.push(alphabet[((b2 & 0x0F) << 1 | b3 >> 7) as usize]);
+                result.extend_from_slice(b"===");
+            }
+            4 => {
+                result.push(alphabet[((b1 >> 1) & 0x1F) as usize]);
+                result.push(alphabet[((b1 & 0x01) << 4 | b2 >> 4) as usize]);
+                result.push(alphabet[((b2 & 0x0F) << 1 | b3 >> 7) as usize]);
+                result.push(alphabet[((b3 >> 2) & 0x1F) as usize]);
+                result.push(alphabet[((b3 & 0x03) << 3 | b4 >> 5) as usize]);
+                result.push(b'=');
+            }
+            _ => unreachable!(),
+        }
+    }
+    result
+}
+
+/// Pre-computed hex encoding table: byte → 2 hex chars.
+const fn build_hex_table() -> [[u8; 2]; 256] {
+    let hex = b"0123456789ABCDEF";
+    let mut table = [[0u8; 2]; 256];
+    let mut i = 0u16;
+    while i < 256 {
+        table[i as usize] = [hex[(i >> 4) as usize], hex[(i & 0x0F) as usize]];
+        i += 1;
+    }
+    table
+}
+
+static HEX_TABLE: [[u8; 2]; 256] = build_hex_table();
+
+/// Encode base16 directly to bytes using lookup table.
+fn base16_encode_bytes(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len() * 2);
+    for &b in data {
+        result.extend_from_slice(&HEX_TABLE[b as usize]);
+    }
+    result
+}
+
+/// Pre-computed MSBF lookup table: byte → 8 ASCII bit characters.
+const fn build_base2_msbf_table() -> [[u8; 8]; 256] {
+    let mut table = [[0u8; 8]; 256];
+    let mut i = 0u16;
+    while i < 256 {
+        let b = i as u8;
+        let mut j = 0;
+        while j < 8 {
+            table[i as usize][j] = if (b >> (7 - j)) & 1 == 1 { b'1' } else { b'0' };
+            j += 1;
+        }
+        i += 1;
+    }
+    table
+}
+
+/// Pre-computed LSBF lookup table: byte → 8 ASCII bit characters.
+const fn build_base2_lsbf_table() -> [[u8; 8]; 256] {
+    let mut table = [[0u8; 8]; 256];
+    let mut i = 0u16;
+    while i < 256 {
+        let b = i as u8;
+        let mut j = 0;
+        while j < 8 {
+            table[i as usize][j] = if (b >> j) & 1 == 1 { b'1' } else { b'0' };
+            j += 1;
+        }
+        i += 1;
+    }
+    table
+}
+
+static BASE2_MSBF_TABLE: [[u8; 8]; 256] = build_base2_msbf_table();
+static BASE2_LSBF_TABLE: [[u8; 8]; 256] = build_base2_lsbf_table();
+
+/// Encode base2 MSBF directly to bytes using lookup table.
+fn base2msbf_encode_bytes(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len() * 8);
+    for &b in data {
+        result.extend_from_slice(&BASE2_MSBF_TABLE[b as usize]);
+    }
+    result
+}
+
+/// Encode base2 LSBF directly to bytes using lookup table.
+fn base2lsbf_encode_bytes(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len() * 8);
+    for &b in data {
+        result.extend_from_slice(&BASE2_LSBF_TABLE[b as usize]);
+    }
+    result
+}
+
+/// Encode Z85 directly to bytes.
+fn z85_encode_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    if !data.len().is_multiple_of(4) {
+        return Err(format!(
+            "{}: invalid input (length must be a multiple of 4 for Z85 encoding)",
+            TOOL_NAME
+        ));
+    }
+    let mut result = Vec::with_capacity(data.len() * 5 / 4);
+    for chunk in data.chunks(4) {
+        let mut value = u32::from(chunk[0]) << 24
+            | u32::from(chunk[1]) << 16
+            | u32::from(chunk[2]) << 8
+            | u32::from(chunk[3]);
+        let mut chars = [0u8; 5];
+        for c in chars.iter_mut().rev() {
+            *c = Z85_ENCODE_TABLE[(value % 85) as usize];
+            value /= 85;
+        }
+        result.extend_from_slice(&chars);
+    }
+    Ok(result)
 }
 
 fn decode_data(data: &[u8], encoding: Encoding, ignore_garbage: bool) -> Result<Vec<u8>, String> {
@@ -702,7 +827,7 @@ fn main() {
         buf
     } else {
         match std::fs::read(filename) {
-            Ok(data) => data,
+            Ok(d) => d,
             Err(e) => {
                 eprintln!(
                     "{}: {}: {}",
@@ -734,22 +859,13 @@ fn main() {
                 process::exit(1);
             }
         }
-    } else {
-        match encode_data(&data, encoding) {
-            Ok(encoded) => {
-                if let Err(e) = write_wrapped(&mut out, &encoded, cli.wrap) {
-                    if e.kind() == io::ErrorKind::BrokenPipe {
-                        process::exit(0);
-                    }
-                    eprintln!("{}: write error: {}", TOOL_NAME, e);
-                    process::exit(1);
-                }
-            }
-            Err(msg) => {
-                eprintln!("{}", msg);
-                process::exit(1);
-            }
+    } else if let Err(e) = encode_streaming(&data, encoding, cli.wrap, &mut out) {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            process::exit(0);
         }
+        let msg = e.to_string();
+        eprintln!("{}: {}", TOOL_NAME, msg);
+        process::exit(1);
     }
 
     if let Err(e) = out.flush()

@@ -152,71 +152,77 @@ fn parse_args() -> Cli {
     cli
 }
 
-/// Encode binary data to Base32 string.
-fn base32_encode(data: &[u8]) -> String {
+/// Encode binary data to Base32 bytes.
+/// Optimized: process full 5-byte chunks in a tight branch-free loop,
+/// then handle the last partial chunk with padding.
+fn base32_encode(data: &[u8]) -> Vec<u8> {
     if data.is_empty() {
-        return String::new();
+        return Vec::new();
     }
 
-    let mut result = Vec::with_capacity(data.len().div_ceil(5) * 8);
+    let out_len = data.len().div_ceil(5) * 8;
+    let mut result = Vec::with_capacity(out_len);
 
-    let chunks = data.chunks(5);
-    for chunk in chunks {
+    let full_chunks = data.len() / 5;
+    let remainder = data.len() % 5;
+
+    // Process all full 5-byte chunks without branch overhead
+    let full_end = full_chunks * 5;
+    let full_data = &data[..full_end];
+    for chunk in full_data.chunks_exact(5) {
+        let b0 = chunk[0];
+        let b1 = chunk[1];
+        let b2 = chunk[2];
+        let b3 = chunk[3];
+        let b4 = chunk[4];
+
+        result.extend_from_slice(&[
+            BASE32_ALPHABET[(b0 >> 3) as usize],
+            BASE32_ALPHABET[((b0 & 0x07) << 2 | b1 >> 6) as usize],
+            BASE32_ALPHABET[((b1 >> 1) & 0x1F) as usize],
+            BASE32_ALPHABET[((b1 & 0x01) << 4 | b2 >> 4) as usize],
+            BASE32_ALPHABET[((b2 & 0x0F) << 1 | b3 >> 7) as usize],
+            BASE32_ALPHABET[((b3 >> 2) & 0x1F) as usize],
+            BASE32_ALPHABET[((b3 & 0x03) << 3 | b4 >> 5) as usize],
+            BASE32_ALPHABET[(b4 & 0x1F) as usize],
+        ]);
+    }
+
+    // Handle the last partial chunk with padding
+    if remainder > 0 {
+        let chunk = &data[full_end..];
         let mut buf = [0u8; 5];
         buf[..chunk.len()].copy_from_slice(chunk);
-
-        // Each group of 5 bytes produces 8 base32 characters
-        let b0 = buf[0];
-        let b1 = buf[1];
-        let b2 = buf[2];
-        let b3 = buf[3];
-        let b4 = buf[4];
+        let b0 = buf[0]; let b1 = buf[1]; let b2 = buf[2]; let b3 = buf[3]; let b4 = buf[4];
 
         result.push(BASE32_ALPHABET[(b0 >> 3) as usize]);
         result.push(BASE32_ALPHABET[((b0 & 0x07) << 2 | b1 >> 6) as usize]);
-
-        if chunk.len() > 1 {
-            result.push(BASE32_ALPHABET[((b1 >> 1) & 0x1F) as usize]);
-            result.push(BASE32_ALPHABET[((b1 & 0x01) << 4 | b2 >> 4) as usize]);
-        } else {
-            result.push(b'=');
-            result.push(b'=');
-            result.push(b'=');
-            result.push(b'=');
-            result.push(b'=');
-            result.push(b'=');
-            continue;
-        }
-
-        if chunk.len() > 2 {
-            result.push(BASE32_ALPHABET[((b2 & 0x0F) << 1 | b3 >> 7) as usize]);
-        } else {
-            result.push(b'=');
-            result.push(b'=');
-            result.push(b'=');
-            result.push(b'=');
-            continue;
-        }
-
-        if chunk.len() > 3 {
-            result.push(BASE32_ALPHABET[((b3 >> 2) & 0x1F) as usize]);
-            result.push(BASE32_ALPHABET[((b3 & 0x03) << 3 | b4 >> 5) as usize]);
-        } else {
-            result.push(b'=');
-            result.push(b'=');
-            result.push(b'=');
-            continue;
-        }
-
-        if chunk.len() > 4 {
-            result.push(BASE32_ALPHABET[(b4 & 0x1F) as usize]);
-        } else {
-            result.push(b'=');
+        match remainder {
+            1 => result.extend_from_slice(b"======"),
+            2 => {
+                result.push(BASE32_ALPHABET[((b1 >> 1) & 0x1F) as usize]);
+                result.push(BASE32_ALPHABET[((b1 & 0x01) << 4 | b2 >> 4) as usize]);
+                result.extend_from_slice(b"====");
+            }
+            3 => {
+                result.push(BASE32_ALPHABET[((b1 >> 1) & 0x1F) as usize]);
+                result.push(BASE32_ALPHABET[((b1 & 0x01) << 4 | b2 >> 4) as usize]);
+                result.push(BASE32_ALPHABET[((b2 & 0x0F) << 1 | b3 >> 7) as usize]);
+                result.extend_from_slice(b"===");
+            }
+            4 => {
+                result.push(BASE32_ALPHABET[((b1 >> 1) & 0x1F) as usize]);
+                result.push(BASE32_ALPHABET[((b1 & 0x01) << 4 | b2 >> 4) as usize]);
+                result.push(BASE32_ALPHABET[((b2 & 0x0F) << 1 | b3 >> 7) as usize]);
+                result.push(BASE32_ALPHABET[((b3 >> 2) & 0x1F) as usize]);
+                result.push(BASE32_ALPHABET[((b3 & 0x03) << 3 | b4 >> 5) as usize]);
+                result.push(b'=');
+            }
+            _ => unreachable!(),
         }
     }
 
-    // SAFETY: BASE32_ALPHABET and '=' are all ASCII
-    unsafe { String::from_utf8_unchecked(result) }
+    result
 }
 
 /// Decode Base32 string back to binary data.
@@ -293,26 +299,45 @@ fn base32_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
     Ok(result)
 }
 
-/// Wrap encoded text at the specified column width.
-/// Write encoded output with line wrapping directly to writer, avoiding
-/// intermediate String allocation.
-fn write_wrapped(out: &mut impl Write, encoded: &str, wrap: usize) -> io::Result<()> {
-    if encoded.is_empty() {
+/// Encode and write with line wrapping in chunks to avoid large allocations.
+/// Processes input in ~64KB chunks (aligned to 5 bytes), encodes each chunk
+/// into a fixed output buffer, wraps, and writes immediately.
+fn encode_streaming(data: &[u8], wrap: usize, out: &mut impl Write) -> io::Result<()> {
+    if data.is_empty() {
         return Ok(());
     }
-    if wrap == 0 {
-        // GNU base32 with -w 0 does NOT add a trailing newline
-        return out.write_all(encoded.as_bytes());
+
+    // Process in chunks of 65535 bytes (divisible by 5)
+    const CHUNK_SIZE: usize = 65535; // 65535 / 5 = 13107 full groups
+    let mut col = 0usize;
+
+    for input_chunk in data.chunks(CHUNK_SIZE) {
+        let encoded = base32_encode(input_chunk);
+        if wrap == 0 {
+            out.write_all(&encoded)?;
+        } else {
+            // Write with wrapping, tracking column position across chunks
+            let mut pos = 0;
+            while pos < encoded.len() {
+                let remaining_in_line = wrap - col;
+                let available = encoded.len() - pos;
+                let to_write = remaining_in_line.min(available);
+                out.write_all(&encoded[pos..pos + to_write])?;
+                pos += to_write;
+                col += to_write;
+                if col == wrap {
+                    out.write_all(b"\n")?;
+                    col = 0;
+                }
+            }
+        }
     }
 
-    let bytes = encoded.as_bytes();
-    let mut pos = 0;
-    while pos < bytes.len() {
-        let end = (pos + wrap).min(bytes.len());
-        out.write_all(&bytes[pos..end])?;
+    // Final newline if there's a partial line
+    if wrap > 0 && col > 0 {
         out.write_all(b"\n")?;
-        pos = end;
     }
+
     Ok(())
 }
 
@@ -331,7 +356,7 @@ fn main() {
         buf
     } else {
         match std::fs::read(filename) {
-            Ok(data) => data,
+            Ok(d) => d,
             Err(e) => {
                 eprintln!(
                     "{}: {}: {}",
@@ -363,15 +388,12 @@ fn main() {
                 process::exit(1);
             }
         }
-    } else {
-        let encoded = base32_encode(&data);
-        if let Err(e) = write_wrapped(&mut out, &encoded, cli.wrap) {
-            if e.kind() == io::ErrorKind::BrokenPipe {
-                process::exit(0);
-            }
-            eprintln!("{}: write error: {}", TOOL_NAME, e);
-            process::exit(1);
+    } else if let Err(e) = encode_streaming(&data, cli.wrap, &mut out) {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            process::exit(0);
         }
+        eprintln!("{}: write error: {}", TOOL_NAME, e);
+        process::exit(1);
     }
 
     if let Err(e) = out.flush()
@@ -580,13 +602,13 @@ mod tests {
     #[test]
     fn test_encode_lib_function() {
         // Unit test encode directly
-        assert_eq!(base32_encode(b""), "");
-        assert_eq!(base32_encode(b"f"), "MY======");
-        assert_eq!(base32_encode(b"fo"), "MZXQ====");
-        assert_eq!(base32_encode(b"foo"), "MZXW6===");
-        assert_eq!(base32_encode(b"foob"), "MZXW6YQ=");
-        assert_eq!(base32_encode(b"fooba"), "MZXW6YTB");
-        assert_eq!(base32_encode(b"foobar"), "MZXW6YTBOI======");
+        assert_eq!(base32_encode(b""), b"");
+        assert_eq!(base32_encode(b"f"), b"MY======");
+        assert_eq!(base32_encode(b"fo"), b"MZXQ====");
+        assert_eq!(base32_encode(b"foo"), b"MZXW6===");
+        assert_eq!(base32_encode(b"foob"), b"MZXW6YQ=");
+        assert_eq!(base32_encode(b"fooba"), b"MZXW6YTB");
+        assert_eq!(base32_encode(b"foobar"), b"MZXW6YTBOI======");
     }
 
     #[test]

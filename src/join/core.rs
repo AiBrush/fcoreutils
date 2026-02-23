@@ -72,14 +72,14 @@ impl Default for JoinConfig {
 }
 
 /// Split data into lines by delimiter using SIMD scanning.
+/// Uses heuristic capacity to avoid double-scan.
 fn split_lines<'a>(data: &'a [u8], delim: u8) -> Vec<&'a [u8]> {
     if data.is_empty() {
         return Vec::new();
     }
-    let count = memchr::memchr_iter(delim, data).count();
-    let has_trailing = data.last() == Some(&delim);
-    let cap = if has_trailing { count } else { count + 1 };
-    let mut lines = Vec::with_capacity(cap);
+    // Heuristic: assume average line length of ~40 bytes
+    let est_lines = data.len() / 40 + 1;
+    let mut lines = Vec::with_capacity(est_lines);
     let mut start = 0;
     for pos in memchr::memchr_iter(delim, data) {
         lines.push(&data[start..pos]);
@@ -93,7 +93,7 @@ fn split_lines<'a>(data: &'a [u8], delim: u8) -> Vec<&'a [u8]> {
 
 /// Split a line into fields by whitespace (runs of space/tab).
 fn split_fields_whitespace<'a>(line: &'a [u8]) -> Vec<&'a [u8]> {
-    let mut fields = Vec::new();
+    let mut fields = Vec::with_capacity(8);
     let mut i = 0;
     let len = line.len();
     while i < len {
@@ -114,9 +114,9 @@ fn split_fields_whitespace<'a>(line: &'a [u8]) -> Vec<&'a [u8]> {
 }
 
 /// Split a line into fields by exact single character.
+/// Single-pass: no pre-counting scan.
 fn split_fields_char<'a>(line: &'a [u8], sep: u8) -> Vec<&'a [u8]> {
-    let count = memchr::memchr_iter(sep, line).count();
-    let mut fields = Vec::with_capacity(count + 1);
+    let mut fields = Vec::with_capacity(8);
     let mut start = 0;
     for pos in memchr::memchr_iter(sep, line) {
         fields.push(&line[start..pos]);
@@ -506,21 +506,29 @@ pub fn join(
                     i2 += 1;
                 }
 
+                // Pre-cache file2 group fields to avoid re-splitting in cross-product
+                let group2_fields: Vec<Vec<&[u8]>> = if print_paired {
+                    (group_start..i2)
+                        .map(|j| split_fields(lines2[j], config.separator))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
                 // For each file1 line with the same key, cross-product with file2 group
                 loop {
                     if print_paired {
                         let fields1 = split_fields(lines1[i1], config.separator);
                         let key = fields1.get(config.field1).copied().unwrap_or(b"");
-                        for j in group_start..i2 {
-                            let fields2 = split_fields(lines2[j], config.separator);
+                        for fields2 in &group2_fields {
                             if let Some(specs) = format {
                                 write_paired_format(
-                                    &fields1, &fields2, key, specs, empty, out_sep, delim, &mut buf,
+                                    &fields1, fields2, key, specs, empty, out_sep, delim, &mut buf,
                                 );
                             } else {
                                 write_paired_default(
                                     &fields1,
-                                    &fields2,
+                                    fields2,
                                     key,
                                     config.field1,
                                     config.field2,

@@ -39,26 +39,74 @@ impl Default for ShredConfig {
     }
 }
 
-/// Fill a buffer with random bytes from /dev/urandom.
-pub fn fill_random(buf: &mut [u8]) {
-    use std::fs::File;
-    use std::io::Read;
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        let _ = f.read_exact(buf);
-    } else {
-        // Fallback: simple PRNG seeded from the clock
-        let mut seed: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x12345678);
-        for byte in buf.iter_mut() {
-            // xorshift64
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            *byte = seed as u8;
+/// Fast userspace PRNG (xorshift128+) for shred data generation.
+/// Seeded from /dev/urandom once, then generates all random data in userspace.
+/// This is sufficient for shred's purpose (overwriting data to prevent recovery).
+struct FastRng {
+    s0: u64,
+    s1: u64,
+}
+
+impl FastRng {
+    /// Create a new PRNG seeded from /dev/urandom.
+    fn new() -> Self {
+        use std::io::Read;
+        let mut seed = [0u8; 16];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            let _ = f.read_exact(&mut seed);
+        } else {
+            // Fallback: seed from clock
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x12345678);
+            seed[..8].copy_from_slice(&t.to_le_bytes());
+            seed[8..].copy_from_slice(&(t.wrapping_mul(0x9E3779B97F4A7C15)).to_le_bytes());
+        }
+        let s0 = u64::from_le_bytes(seed[..8].try_into().unwrap());
+        let s1 = u64::from_le_bytes(seed[8..].try_into().unwrap());
+        // Ensure not all-zero state
+        Self {
+            s0: if s0 == 0 { 0x12345678 } else { s0 },
+            s1: if s1 == 0 { 0x87654321 } else { s1 },
         }
     }
+
+    #[inline]
+    fn next_u64(&mut self) -> u64 {
+        let mut s1 = self.s0;
+        let s0 = self.s1;
+        let result = s0.wrapping_add(s1);
+        self.s0 = s0;
+        s1 ^= s1 << 23;
+        self.s1 = s1 ^ s0 ^ (s1 >> 18) ^ (s0 >> 5);
+        result
+    }
+
+    /// Fill a buffer with random bytes entirely in userspace.
+    fn fill(&mut self, buf: &mut [u8]) {
+        // Fill 8 bytes at a time
+        let chunks = buf.len() / 8;
+        let ptr = buf.as_mut_ptr() as *mut u64;
+        for i in 0..chunks {
+            unsafe { ptr.add(i).write_unaligned(self.next_u64()) };
+        }
+        // Fill remaining bytes
+        let remaining = buf.len() % 8;
+        if remaining > 0 {
+            let val = self.next_u64();
+            let start = chunks * 8;
+            for j in 0..remaining {
+                buf[start + j] = (val >> (j * 8)) as u8;
+            }
+        }
+    }
+}
+
+/// Fill a buffer with random bytes using a fast userspace PRNG.
+pub fn fill_random(buf: &mut [u8]) {
+    let mut rng = FastRng::new();
+    rng.fill(buf);
 }
 
 /// Shred a single file according to the given configuration.
@@ -102,9 +150,12 @@ pub fn shred_file(path: &Path, config: &ShredConfig) -> io::Result<()> {
     };
 
     let mut file = fs::OpenOptions::new().write(true).open(path)?;
-    // Use 1MB buffer for fewer read/write syscalls (~16x fewer than 64KB)
+    // Use 1MB buffer for fewer read/write syscalls
     let buf_size = 1024 * 1024usize;
     let mut rng_buf = vec![0u8; buf_size];
+
+    // Create PRNG once and reuse across all passes (seeded from /dev/urandom)
+    let mut rng = FastRng::new();
 
     let total_passes = config.iterations + if config.zero_pass { 1 } else { 0 };
 
@@ -122,11 +173,11 @@ pub fn shred_file(path: &Path, config: &ShredConfig) -> io::Result<()> {
         let mut remaining = write_size;
         while remaining > 0 {
             let chunk = remaining.min(rng_buf.len() as u64) as usize;
-            fill_random(&mut rng_buf[..chunk]);
+            rng.fill(&mut rng_buf[..chunk]);
             file.write_all(&rng_buf[..chunk])?;
             remaining -= chunk as u64;
         }
-        file.sync_all()?;
+        file.sync_data()?;
     }
 
     // Zero pass
@@ -147,7 +198,7 @@ pub fn shred_file(path: &Path, config: &ShredConfig) -> io::Result<()> {
             file.write_all(&zeros[..chunk])?;
             remaining -= chunk as u64;
         }
-        file.sync_all()?;
+        file.sync_data()?;
     }
 
     drop(file);

@@ -4,8 +4,32 @@
 //        seq [OPTION]... FIRST LAST
 //        seq [OPTION]... FIRST INCREMENT LAST
 
-use std::io::{BufWriter, Write};
 use std::process;
+
+/// Write buffer directly to fd 1, bypassing BufWriter overhead.
+fn write_all_fd1(buf: &[u8]) {
+    let mut pos = 0;
+    while pos < buf.len() {
+        let ret = unsafe {
+            libc::write(
+                1,
+                buf[pos..].as_ptr() as *const libc::c_void,
+                buf.len() - pos,
+            )
+        };
+        if ret > 0 {
+            pos += ret as usize;
+        } else if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+}
 
 const TOOL_NAME: &str = "seq";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -475,79 +499,144 @@ fn main() {
         String::new() // Will use integer or default formatting
     };
 
-    let stdout = std::io::stdout();
-    let mut out = BufWriter::with_capacity(4 * 1024 * 1024, stdout.lock());
     let mut is_first = true;
     let sep_bytes = separator.as_bytes();
     let sep_is_newline = separator == "\n";
 
     if use_int && fmt.is_empty() {
-        // Ultra-fast integer path: use itoa + batched buffer to minimize syscalls.
-        // itoa is 3-5x faster than write!() for integer formatting.
+        // Ultra-fast integer path: write directly into fixed buffer, bypass Vec overhead.
         let first_i = first as i64;
         let inc_i = increment as i64;
         let last_i = last as i64;
 
-        let mut itoa_buf = itoa::Buffer::new();
-        // Use a 256KB internal buffer to batch output, reducing write syscalls
-        let mut buf = Vec::with_capacity(256 * 1024);
-        let flush_threshold = 240 * 1024; // Flush when buffer is ~94% full
+        const BUF_SIZE: usize = 256 * 1024;
+        const FLUSH_AT: usize = BUF_SIZE - 32; // 32 bytes margin for max i64 + newline
+        let mut buf = [0u8; BUF_SIZE];
+        let mut offset: usize = 0;
+
+        // Try to enlarge pipe buffer for higher throughput
+        #[cfg(target_os = "linux")]
+        unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, 1024 * 1024); }
 
         let mut current = first_i;
-        if inc_i > 0 && sep_is_newline {
-            // Most common case: seq 1 N with newline separator
+        if inc_i == 1 && first_i >= 0 && sep_is_newline {
+            // Ultra-fast path for the most common case: seq 1 N (increment 1, positive, newline)
+            // Use an incrementing ASCII counter to avoid all integer-to-string conversion.
+            let mut digits = [0u8; 20]; // max 20 digits for u64
+            let mut len: usize;
+
+            // Initialize with first number
+            {
+                let mut itoa_buf = itoa::Buffer::new();
+                let s = itoa_buf.format(current);
+                let bytes = s.as_bytes();
+                len = bytes.len();
+                digits[20 - len..20].copy_from_slice(bytes);
+            }
+
+            while current <= last_i {
+                // Copy current number to output buffer
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        digits.as_ptr().add(20 - len),
+                        buf.as_mut_ptr().add(offset),
+                        len,
+                    );
+                }
+                offset += len;
+                buf[offset] = b'\n';
+                offset += 1;
+                if offset >= FLUSH_AT {
+                    write_all_fd1(&buf[..offset]);
+                    offset = 0;
+                }
+                current += 1;
+
+                // Increment the ASCII counter
+                let mut pos = 19;
+                loop {
+                    if digits[pos] < b'9' {
+                        digits[pos] += 1;
+                        break;
+                    }
+                    digits[pos] = b'0';
+                    if pos == 20 - len {
+                        // Need one more digit (e.g., 999 -> 1000)
+                        len += 1;
+                        digits[20 - len] = b'1';
+                        break;
+                    }
+                    pos -= 1;
+                }
+            }
+            if offset > 0 {
+                write_all_fd1(&buf[..offset]);
+            }
+            return;
+        } else if inc_i > 0 && sep_is_newline {
+            // Positive increment with newline separator (non-1 increment)
+            let mut itoa_buf = itoa::Buffer::new();
             while current <= last_i {
                 let s = itoa_buf.format(current);
-                buf.extend_from_slice(s.as_bytes());
-                buf.push(b'\n');
-                if buf.len() >= flush_threshold {
-                    let _ = out.write_all(&buf);
-                    buf.clear();
+                let bytes = s.as_bytes();
+                let len = bytes.len();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        buf.as_mut_ptr().add(offset),
+                        len,
+                    );
+                }
+                offset += len;
+                buf[offset] = b'\n';
+                offset += 1;
+                if offset >= FLUSH_AT {
+                    write_all_fd1(&buf[..offset]);
+                    offset = 0;
                 }
                 current += inc_i;
             }
-            // For newline separator the trailing \n is included
-            if !buf.is_empty() {
-                let _ = out.write_all(&buf);
+            if offset > 0 {
+                write_all_fd1(&buf[..offset]);
             }
-            let _ = out.flush();
             return;
         } else if inc_i > 0 {
+            let mut vbuf = Vec::with_capacity(BUF_SIZE);
+            let mut itoa_buf2 = itoa::Buffer::new();
             while current <= last_i {
                 if !is_first {
-                    buf.extend_from_slice(sep_bytes);
+                    vbuf.extend_from_slice(sep_bytes);
                 }
                 is_first = false;
-                let s = itoa_buf.format(current);
-                buf.extend_from_slice(s.as_bytes());
-                if buf.len() >= flush_threshold {
-                    let _ = out.write_all(&buf);
-                    buf.clear();
+                let s = itoa_buf2.format(current);
+                vbuf.extend_from_slice(s.as_bytes());
+                if vbuf.len() >= FLUSH_AT {
+                    write_all_fd1(&vbuf);
+                    vbuf.clear();
                 }
                 current += inc_i;
             }
+            if !is_first { vbuf.push(b'\n'); }
+            if !vbuf.is_empty() { write_all_fd1(&vbuf); }
         } else {
+            let mut vbuf = Vec::with_capacity(BUF_SIZE);
+            let mut itoa_buf2 = itoa::Buffer::new();
             while current >= last_i {
                 if !is_first {
-                    buf.extend_from_slice(sep_bytes);
+                    vbuf.extend_from_slice(sep_bytes);
                 }
                 is_first = false;
-                let s = itoa_buf.format(current);
-                buf.extend_from_slice(s.as_bytes());
-                if buf.len() >= flush_threshold {
-                    let _ = out.write_all(&buf);
-                    buf.clear();
+                let s = itoa_buf2.format(current);
+                vbuf.extend_from_slice(s.as_bytes());
+                if vbuf.len() >= FLUSH_AT {
+                    write_all_fd1(&vbuf);
+                    vbuf.clear();
                 }
                 current += inc_i;
             }
+            if !is_first { vbuf.push(b'\n'); }
+            if !vbuf.is_empty() { write_all_fd1(&vbuf); }
         }
-        if !is_first {
-            buf.push(b'\n');
-        }
-        if !buf.is_empty() {
-            let _ = out.write_all(&buf);
-        }
-        let _ = out.flush();
     } else if use_int && !fmt.is_empty() {
         // Integer values with format string (e.g., equal-width)
         let first_i = first as i64;
@@ -589,7 +678,7 @@ fn main() {
                     buf.extend_from_slice(s.as_bytes());
                 }
                 if buf.len() >= flush_threshold {
-                    let _ = out.write_all(&buf);
+                    write_all_fd1(&buf);
                     buf.clear();
                 }
                 current += inc_i;
@@ -623,7 +712,7 @@ fn main() {
                     buf.extend_from_slice(s.as_bytes());
                 }
                 if buf.len() >= flush_threshold {
-                    let _ = out.write_all(&buf);
+                    write_all_fd1(&buf);
                     buf.clear();
                 }
                 current += inc_i;
@@ -633,9 +722,9 @@ fn main() {
             buf.push(b'\n');
         }
         if !buf.is_empty() {
-            let _ = out.write_all(&buf);
+            write_all_fd1(&buf);
         }
-        let _ = out.flush();
+        // output already flushed via write_all_fd1
     } else {
         // Float path
         // Use a step counter to avoid accumulation errors
@@ -660,7 +749,7 @@ fn main() {
                     buf.extend_from_slice(s.as_bytes());
                 }
                 if buf.len() >= flush_threshold {
-                    let _ = out.write_all(&buf);
+                    write_all_fd1(&buf);
                     buf.clear();
                 }
                 step += 1;
@@ -683,7 +772,7 @@ fn main() {
                     buf.extend_from_slice(s.as_bytes());
                 }
                 if buf.len() >= flush_threshold {
-                    let _ = out.write_all(&buf);
+                    write_all_fd1(&buf);
                     buf.clear();
                 }
                 step += 1;
@@ -695,9 +784,9 @@ fn main() {
             buf.push(b'\n');
         }
         if !buf.is_empty() {
-            let _ = out.write_all(&buf);
+            write_all_fd1(&buf);
         }
-        let _ = out.flush();
+        // output already flushed via write_all_fd1
     }
 }
 

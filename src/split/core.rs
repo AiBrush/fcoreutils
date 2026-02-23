@@ -257,6 +257,8 @@ fn create_writer(config: &SplitConfig, index: u64) -> io::Result<Box<dyn ChunkWr
 }
 
 /// Split input by line count.
+/// Uses bulk memchr scanning to count lines within large buffer slices,
+/// writing contiguous multi-line slices instead of copying line-by-line.
 fn split_by_lines(
     reader: &mut dyn BufRead,
     config: &SplitConfig,
@@ -264,36 +266,72 @@ fn split_by_lines(
 ) -> io::Result<()> {
     let limit = max_chunks(&config.suffix_type, config.suffix_length);
     let mut chunk_index: u64 = 0;
-    let mut line_count: u64 = 0;
+    let mut lines_in_chunk: u64 = 0;
     let mut writer: Option<Box<dyn ChunkWriter>> = None;
     let sep = config.separator;
 
-    let mut buf = Vec::with_capacity(8192);
     loop {
-        buf.clear();
-        let bytes_read = read_until_sep(reader, sep, &mut buf)?;
-        if bytes_read == 0 {
-            break;
-        }
+        let available = match reader.fill_buf() {
+            Ok(b) if b.is_empty() => break,
+            Ok(b) => b,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
 
-        if writer.is_none() {
-            if chunk_index >= limit {
-                return Err(io::Error::other("output file suffixes exhausted"));
+        let mut pos = 0;
+        let buf_len = available.len();
+
+        while pos < buf_len {
+            if writer.is_none() {
+                if chunk_index >= limit {
+                    return Err(io::Error::other("output file suffixes exhausted"));
+                }
+                writer = Some(create_writer(config, chunk_index)?);
+                lines_in_chunk = 0;
             }
-            writer = Some(create_writer(config, chunk_index)?);
+
+            // How many lines left before we need a new chunk?
+            let lines_needed = lines_per_chunk - lines_in_chunk;
+
+            // Scan for separator positions in the remaining buffer
+            let slice = &available[pos..];
+            let mut found = 0u64;
+            let mut scan_pos = 0;
+            let mut last_sep_pos = 0; // position after last separator found
+
+            // Count up to lines_needed separators
+            while found < lines_needed {
+                match memchr::memchr(sep, &slice[scan_pos..]) {
+                    Some(offset) => {
+                        found += 1;
+                        last_sep_pos = scan_pos + offset + 1;
+                        scan_pos = last_sep_pos;
+                    }
+                    None => break,
+                }
+            }
+
+            if found >= lines_needed {
+                // We found enough lines - write the contiguous slice
+                writer.as_mut().unwrap().write_all(&slice[..last_sep_pos])?;
+                pos += last_sep_pos;
+                // Close this chunk
+                writer.as_mut().unwrap().finish()?;
+                writer = None;
+                chunk_index += 1;
+            } else {
+                // Not enough lines in this buffer - write everything and get more
+                writer.as_mut().unwrap().write_all(slice)?;
+                lines_in_chunk += found;
+                pos = buf_len;
+            }
         }
 
-        writer.as_mut().unwrap().write_all(&buf)?;
-        line_count += 1;
-
-        if line_count >= lines_per_chunk {
-            writer.as_mut().unwrap().finish()?;
-            writer = None;
-            line_count = 0;
-            chunk_index += 1;
-        }
+        let consumed = buf_len;
+        reader.consume(consumed);
     }
 
+    // Handle final partial chunk (data without trailing separator)
     if let Some(ref mut w) = writer {
         w.finish()?;
     }

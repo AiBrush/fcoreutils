@@ -37,20 +37,6 @@ impl TabStops {
         }
     }
 
-    /// Check if the given column is at a tab stop position.
-    #[inline]
-    fn is_tab_stop(&self, column: usize) -> bool {
-        match self {
-            TabStops::Regular(n) => {
-                if *n == 0 {
-                    return false;
-                }
-                column.is_multiple_of(*n)
-            }
-            TabStops::List(stops) => stops.binary_search(&column).is_ok(),
-        }
-    }
-
     /// Get the next tab stop position after the given column.
     #[inline]
     fn next_tab_stop(&self, column: usize) -> usize {
@@ -162,50 +148,39 @@ pub fn expand_bytes(
 }
 
 /// Fast expand for regular tab stops without -i flag.
-/// Uses batched internal buffer to reduce write syscalls.
+/// Writes directly from source data for non-tab runs, avoiding intermediate buffer copies.
 fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
-    const FLUSH_THRESHOLD: usize = 256 * 1024;
-    let mut buf = Vec::with_capacity(data.len().min(FLUSH_THRESHOLD * 2) + data.len() / 8);
     let mut column: usize = 0;
     let mut pos: usize = 0;
 
     while pos < data.len() {
         match memchr::memchr2(b'\t', b'\n', &data[pos..]) {
             Some(offset) => {
-                // Bulk copy everything before the special byte
+                // Write non-special bytes directly from source (zero-copy)
                 if offset > 0 {
-                    buf.extend_from_slice(&data[pos..pos + offset]);
+                    out.write_all(&data[pos..pos + offset])?;
                     column += offset;
                 }
                 let byte = data[pos + offset];
                 pos += offset + 1;
 
                 if byte == b'\n' {
-                    buf.push(b'\n');
+                    out.write_all(b"\n")?;
                     column = 0;
                 } else {
-                    // Tab: push spaces to buffer
+                    // Tab: write spaces directly from const buffer
                     let spaces = tab_size - (column % tab_size);
-                    push_spaces(&mut buf, spaces);
+                    out.write_all(&SPACES[..spaces])?;
                     column += spaces;
-                }
-
-                // Flush when buffer is large enough
-                if buf.len() >= FLUSH_THRESHOLD {
-                    out.write_all(&buf)?;
-                    buf.clear();
                 }
             }
             None => {
-                buf.extend_from_slice(&data[pos..]);
+                out.write_all(&data[pos..])?;
                 break;
             }
         }
     }
 
-    if !buf.is_empty() {
-        out.write_all(&buf)?;
-    }
     Ok(())
 }
 
@@ -268,7 +243,151 @@ pub fn unexpand_bytes(
         return Ok(());
     }
 
-    let mut output = Vec::with_capacity(data.len());
+    // Fast path: no spaces or tabs → just copy through
+    if memchr::memchr2(b' ', b'\t', data).is_none() {
+        return out.write_all(data);
+    }
+
+    // For regular tab stops, use the optimized SIMD-scanning path
+    if let TabStops::Regular(tab_size) = tabs {
+        if memchr::memchr(b'\x08', data).is_none() {
+            return unexpand_regular_fast(data, *tab_size, all, out);
+        }
+    }
+
+    // Generic path for tab lists or data with backspaces
+    unexpand_generic(data, tabs, all, out)
+}
+
+/// Emit a run of blanks as the optimal combination of tabs and spaces.
+/// Matches GNU unexpand behavior: a single blank at a tab stop is only converted
+/// to a tab if more blanks follow, otherwise it stays as a space.
+#[inline]
+fn emit_blanks(out: &mut impl Write, start_col: usize, count: usize, tab_size: usize) -> std::io::Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
+    let end_col = start_col + count;
+    let mut col = start_col;
+
+    // Emit tabs for each tab stop we can reach
+    loop {
+        let next_tab = col + (tab_size - col % tab_size);
+        if next_tab > end_col {
+            break;
+        }
+        let blanks_consumed = next_tab - col;
+        if blanks_consumed >= 2 || next_tab < end_col {
+            // 2+ blanks to tab stop, OR 1 blank but more follow → emit tab
+            out.write_all(b"\t")?;
+            col = next_tab;
+        } else {
+            // 1 blank at tab stop with nothing after → keep as space
+            break;
+        }
+    }
+
+    // Emit remaining spaces
+    let remaining = end_col - col;
+    if remaining > 0 {
+        let mut r = remaining;
+        while r > 0 {
+            let chunk = r.min(SPACES.len());
+            out.write_all(&SPACES[..chunk])?;
+            r -= chunk;
+        }
+    }
+    Ok(())
+}
+
+/// Fast unexpand for regular tab stops without backspaces.
+/// Uses memchr SIMD scanning to skip non-special bytes in bulk.
+fn unexpand_regular_fast(
+    data: &[u8],
+    tab_size: usize,
+    all: bool,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    let mut column: usize = 0;
+    let mut pos: usize = 0;
+    let mut in_initial = true;
+
+    while pos < data.len() {
+        if in_initial || all {
+            // Check for blanks to convert
+            if data[pos] == b' ' || data[pos] == b'\t' {
+                // Count consecutive blanks, tracking column advancement
+                let blank_start_col = column;
+                while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
+                    if data[pos] == b'\t' {
+                        column += tab_size - column % tab_size;
+                    } else {
+                        column += 1;
+                    }
+                    pos += 1;
+                }
+                // Emit blanks as optimal tabs+spaces
+                emit_blanks(out, blank_start_col, column - blank_start_col, tab_size)?;
+                continue;
+            }
+            if data[pos] == b'\n' {
+                out.write_all(b"\n")?;
+                column = 0;
+                in_initial = true;
+                pos += 1;
+                continue;
+            }
+            // Non-blank: switch to body mode
+            in_initial = false;
+        }
+
+        // Body of line: bulk copy until next interesting byte
+        if !all {
+            // Default mode: copy everything until newline
+            match memchr::memchr(b'\n', &data[pos..]) {
+                Some(offset) => {
+                    out.write_all(&data[pos..pos + offset + 1])?;
+                    column = 0;
+                    in_initial = true;
+                    pos += offset + 1;
+                }
+                None => {
+                    out.write_all(&data[pos..])?;
+                    return Ok(());
+                }
+            }
+        } else {
+            // all=true: copy until next space, tab, or newline
+            match memchr::memchr3(b' ', b'\t', b'\n', &data[pos..]) {
+                Some(offset) => {
+                    if offset > 0 {
+                        out.write_all(&data[pos..pos + offset])?;
+                        column += offset;
+                    }
+                    pos += offset;
+                }
+                None => {
+                    out.write_all(&data[pos..])?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Generic unexpand with support for tab lists and backspaces.
+fn unexpand_generic(
+    data: &[u8],
+    tabs: &TabStops,
+    all: bool,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    let tab_size = match tabs {
+        TabStops::Regular(n) => *n,
+        TabStops::List(_) => 0, // handled by is_tab_stop/next_tab_stop
+    };
     let mut column: usize = 0;
     let mut space_start_col: Option<usize> = None;
     let mut in_initial = true;
@@ -277,57 +396,113 @@ pub fn unexpand_bytes(
         match byte {
             b' ' => {
                 if !all && !in_initial {
-                    output.push(b' ');
+                    out.write_all(&[b' '])?;
                     column += 1;
                 } else {
                     if space_start_col.is_none() {
                         space_start_col = Some(column);
                     }
                     column += 1;
-                    if tabs.is_tab_stop(column) {
-                        output.push(b'\t');
-                        space_start_col = None;
-                    }
+                    // Don't convert to tab here — wait for end of blank run
                 }
             }
             b'\t' => {
-                space_start_col = None;
-                output.push(b'\t');
-                column = tabs.next_tab_stop(column);
-            }
-            b'\n' => {
-                if let Some(start_col) = space_start_col.take() {
-                    push_spaces(&mut output, column - start_col);
-                }
-                output.push(b'\n');
-                column = 0;
-                in_initial = true;
-            }
-            b'\x08' => {
-                if let Some(start_col) = space_start_col.take() {
-                    push_spaces(&mut output, column - start_col);
-                }
-                output.push(b'\x08');
-                if column > 0 {
-                    column -= 1;
+                if !all && !in_initial {
+                    // In non-converting mode, just emit the tab
+                    if let Some(start_col) = space_start_col.take() {
+                        let n = column - start_col;
+                        out.write_all(&SPACES[..n.min(SPACES.len())])?;
+                    }
+                    out.write_all(b"\t")?;
+                    column = tabs.next_tab_stop(column);
+                } else {
+                    if space_start_col.is_none() {
+                        space_start_col = Some(column);
+                    }
+                    column = tabs.next_tab_stop(column);
                 }
             }
             _ => {
+                // Flush pending blanks
                 if let Some(start_col) = space_start_col.take() {
-                    push_spaces(&mut output, column - start_col);
+                    let count = column - start_col;
+                    if tab_size > 0 {
+                        emit_blanks(out, start_col, count, tab_size)?;
+                    } else {
+                        // Tab list: use is_tab_stop for conversion
+                        emit_blanks_tablist(out, start_col, count, tabs)?;
+                    }
                 }
-                if in_initial {
-                    in_initial = false;
+
+                if byte == b'\n' {
+                    out.write_all(b"\n")?;
+                    column = 0;
+                    in_initial = true;
+                } else if byte == b'\x08' {
+                    out.write_all(&[b'\x08'])?;
+                    if column > 0 {
+                        column -= 1;
+                    }
+                } else {
+                    if in_initial {
+                        in_initial = false;
+                    }
+                    out.write_all(&[byte])?;
+                    column += 1;
                 }
-                output.push(byte);
-                column += 1;
             }
         }
     }
 
     if let Some(start_col) = space_start_col {
-        push_spaces(&mut output, column - start_col);
+        let count = column - start_col;
+        if tab_size > 0 {
+            emit_blanks(out, start_col, count, tab_size)?;
+        } else {
+            emit_blanks_tablist(out, start_col, count, tabs)?;
+        }
     }
 
-    out.write_all(&output)
+    Ok(())
+}
+
+/// Emit blanks using a tab list (non-regular tab stops).
+/// After the last defined tab stop, only spaces are emitted (no more tabs).
+fn emit_blanks_tablist(out: &mut impl Write, start_col: usize, count: usize, tabs: &TabStops) -> std::io::Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
+    let end_col = start_col + count;
+    let mut col = start_col;
+
+    // Get the last defined tab stop to know when to stop converting to tabs
+    let last_stop = match tabs {
+        TabStops::List(stops) => stops.last().copied().unwrap_or(0),
+        TabStops::Regular(_) => usize::MAX,
+    };
+
+    while col < last_stop {
+        let next_tab = tabs.next_tab_stop(col);
+        if next_tab > end_col || next_tab > last_stop {
+            break;
+        }
+        let blanks_consumed = next_tab - col;
+        if blanks_consumed >= 2 || next_tab < end_col {
+            out.write_all(b"\t")?;
+            col = next_tab;
+        } else {
+            break;
+        }
+    }
+
+    let remaining = end_col - col;
+    if remaining > 0 {
+        let mut r = remaining;
+        while r > 0 {
+            let chunk = r.min(SPACES.len());
+            out.write_all(&SPACES[..chunk])?;
+            r -= chunk;
+        }
+    }
+    Ok(())
 }

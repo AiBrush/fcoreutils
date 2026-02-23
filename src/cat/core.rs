@@ -283,6 +283,80 @@ fn write_nonprinting(b: u8, show_tabs: bool, out: &mut Vec<u8>) {
     }
 }
 
+/// Fast path for cat -A (show-all) without line numbering or squeeze.
+/// Uses an internal buffer with bulk memcpy of printable ASCII runs.
+fn cat_show_all_fast(
+    data: &[u8],
+    show_tabs: bool,
+    show_ends: bool,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    // Internal buffer — flush every 256KB to keep memory bounded
+    const BUF_SIZE: usize = 256 * 1024;
+    // Worst case expansion: every byte → 4 chars (M-^X), so reserve proportionally
+    let cap = data.len().min(BUF_SIZE) + data.len().min(BUF_SIZE) / 2;
+    let mut buf = Vec::with_capacity(cap);
+    let mut pos = 0;
+
+    while pos < data.len() {
+        // Find the next byte that needs transformation (outside 32..=126)
+        let start = pos;
+        while pos < data.len() && data[pos].wrapping_sub(32) <= 94 {
+            pos += 1;
+        }
+        // Bulk copy printable ASCII run via memcpy
+        if pos > start {
+            buf.extend_from_slice(&data[start..pos]);
+        }
+        if pos >= data.len() {
+            break;
+        }
+        // Handle the special byte
+        let b = data[pos];
+        pos += 1;
+        match b {
+            b'\n' => {
+                if show_ends {
+                    buf.extend_from_slice(b"$\n");
+                } else {
+                    buf.push(b'\n');
+                }
+            }
+            b'\t' if show_tabs => buf.extend_from_slice(b"^I"),
+            b'\t' => buf.push(b'\t'),
+            0..=8 | 10..=31 => {
+                buf.push(b'^');
+                buf.push(b + 64);
+            }
+            127 => buf.extend_from_slice(b"^?"),
+            128..=159 => {
+                buf.push(b'M');
+                buf.push(b'-');
+                buf.push(b'^');
+                buf.push(b - 128 + 64);
+            }
+            160..=254 => {
+                buf.push(b'M');
+                buf.push(b'-');
+                buf.push(b - 128);
+            }
+            255 => buf.extend_from_slice(b"M-^?"),
+            _ => unreachable!(),
+        }
+
+        // Flush when buffer is large enough
+        if buf.len() >= BUF_SIZE {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
+    }
+
+    if !buf.is_empty() {
+        out.write_all(&buf)?;
+    }
+    Ok(())
+}
+
 /// Cat with options (numbering, show-ends, show-tabs, show-nonprinting, squeeze)
 pub fn cat_with_options(
     data: &[u8],
@@ -292,6 +366,15 @@ pub fn cat_with_options(
 ) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
+    }
+
+    // Fast path: show-all without numbering or squeeze
+    if config.show_nonprinting
+        && !config.number
+        && !config.number_nonblank
+        && !config.squeeze_blank
+    {
+        return cat_show_all_fast(data, config.show_tabs, config.show_ends, out);
     }
 
     // Pre-allocate output buffer (worst case: every byte expands to 4 chars for M-^X)

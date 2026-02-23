@@ -226,12 +226,12 @@ fn head_lines_streaming_file(
     #[cfg(not(target_os = "linux"))]
     let file = std::fs::File::open(path)?;
 
-    let mut reader = io::BufReader::with_capacity(1024 * 1024, file);
-    let mut buf = [0u8; 262144];
+    let mut file = file;
+    let mut buf = [0u8; 65536];
     let mut count = 0u64;
 
     loop {
-        let bytes_read = match reader.read(&mut buf) {
+        let bytes_read = match file.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,

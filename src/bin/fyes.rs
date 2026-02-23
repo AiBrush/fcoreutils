@@ -3,14 +3,13 @@
 // Usage: yes [STRING]...
 // Repeatedly output a line with all specified STRING(s), or 'y'.
 
-use std::io::Write;
 use std::process;
 
 const TOOL_NAME: &str = "yes";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Buffer size for bulk writes (64 KiB).
-const BUF_SIZE: usize = 64 * 1024;
+/// Buffer size for bulk writes.
+const BUF_SIZE: usize = 128 * 1024;
 
 fn main() {
     coreutils_rs::common::reset_sigpipe();
@@ -96,18 +95,54 @@ fn main() {
         buf.extend_from_slice(line_bytes);
     }
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    // Try to enlarge pipe buffer for higher throughput
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::fcntl(1, libc::F_SETPIPE_SZ, 1024 * 1024);
+    }
 
-    loop {
-        if out.write_all(&buf).is_err() {
-            // Broken pipe or other write error — exit silently.
-            break;
+    // Try vmsplice for zero-copy pipe output on Linux
+    #[cfg(target_os = "linux")]
+    {
+        let iov = libc::iovec {
+            iov_base: buf.as_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
+        };
+        // Test if stdout is a pipe that supports vmsplice
+        let ret = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+        if ret > 0 {
+            // vmsplice works - use it for maximum throughput
+            loop {
+                let ret = unsafe { libc::vmsplice(1, &iov, 1, 0) };
+                if ret <= 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            process::exit(0);
         }
     }
 
-    // Attempt flush; ignore errors (broken pipe).
-    let _ = out.flush();
+    // Fallback: raw write(2) to fd 1
+    loop {
+        let ret = unsafe {
+            libc::write(
+                1,
+                buf.as_ptr() as *const libc::c_void,
+                buf.len(),
+            )
+        };
+        if ret <= 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+    }
     process::exit(0);
 }
 
