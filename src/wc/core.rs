@@ -48,6 +48,8 @@ const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
 /// Multi-byte UTF-8 sequences are handled by the state machine separately.
 const fn make_byte_class_utf8() -> [u8; 256] {
     let mut t = [0u8; 256]; // default: word content
+    // NUL is not word content (GNU wc: file of only NUL bytes has 0 words)
+    t[0x00] = 1; // NUL — word break
     // Spaces (only these break words — everything else is word content)
     t[0x09] = 1; // \t
     t[0x0A] = 1; // \n
@@ -166,7 +168,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm256_set1_epi8(b'\n' as i8);
         let zero = _mm256_setzero_si256();
         let ones = _mm256_set1_epi8(1);
-        // Space detection: 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale)
+        // Space detection: 0x00, 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale)
         let space_char = _mm256_set1_epi8(0x20i8);
         let tab_lo = _mm256_set1_epi8(0x08i8);
         let tab_hi = _mm256_set1_epi8(0x0Ei8);
@@ -180,13 +182,17 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // is_space = (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
+            // is_space = (v == 0x00) | (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
+            let is_nul = _mm256_cmpeq_epi8(v, zero);
             let is_sp = _mm256_cmpeq_epi8(v, space_char);
             let is_nbsp = _mm256_cmpeq_epi8(v, nbsp_char);
             let gt_08 = _mm256_cmpgt_epi8(v, tab_lo);
             let lt_0e = _mm256_cmpgt_epi8(tab_hi, v);
             let is_tab_range = _mm256_and_si256(gt_08, lt_0e);
-            let is_space = _mm256_or_si256(_mm256_or_si256(is_sp, is_nbsp), is_tab_range);
+            let is_space = _mm256_or_si256(
+                _mm256_or_si256(is_nul, _mm256_or_si256(is_sp, is_nbsp)),
+                is_tab_range,
+            );
 
             let space_mask = _mm256_movemask_epi8(is_space) as u32;
             // Word content = NOT space
@@ -263,7 +269,7 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        // Space detection: 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale)
+        // Space detection: 0x00, 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale)
         let space_char = _mm_set1_epi8(0x20i8);
         let tab_lo = _mm_set1_epi8(0x08i8);
         let tab_hi = _mm_set1_epi8(0x0Ei8);
@@ -277,13 +283,17 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            // is_space = (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
+            // is_space = (v == 0x00) | (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
+            let is_nul = _mm_cmpeq_epi8(v, zero);
             let is_sp = _mm_cmpeq_epi8(v, space_char);
             let is_nbsp = _mm_cmpeq_epi8(v, nbsp_char);
             let gt_08 = _mm_cmpgt_epi8(v, tab_lo);
             let lt_0e = _mm_cmpgt_epi8(tab_hi, v);
             let is_tab_range = _mm_and_si128(gt_08, lt_0e);
-            let is_space = _mm_or_si128(_mm_or_si128(is_sp, is_nbsp), is_tab_range);
+            let is_space = _mm_or_si128(
+                _mm_or_si128(is_nul, _mm_or_si128(is_sp, is_nbsp)),
+                is_tab_range,
+            );
 
             let space_mask = _mm_movemask_epi8(is_space) as u32;
             // Word content = NOT space (only 16 bits relevant)

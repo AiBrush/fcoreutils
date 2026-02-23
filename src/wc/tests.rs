@@ -127,17 +127,17 @@ fn test_count_words_crlf_separated() {
 }
 
 #[test]
-fn test_count_words_binary_data_word_content() {
-    // NUL bytes are non-space → word content (2-state logic)
-    // They do NOT break words — "hello" and "world" merge into 1 word
-    assert_eq!(count_words(b"\x00hello\x00world"), 1);
+fn test_count_words_binary_data_nul_breaks() {
+    // NUL bytes are word breaks (matching GNU wc: file of only NUL bytes → 0 words)
+    // NUL breaks words — "hello" and "world" become 2 separate words
+    assert_eq!(count_words(b"\x00hello\x00world"), 2);
 }
 
 #[test]
 fn test_count_words_nul_between_spaces() {
-    // NUL between spaces: spaces break words, NUL is word content
-    // "hello" = word 1, " " breaks, "\x00" = word 2 (NUL is word content), " " breaks, "world" = word 3
-    assert_eq!(count_words(b"hello \x00 world"), 3);
+    // NUL between spaces: both NUL and spaces break words
+    // "hello" = word 1, " " breaks, "\x00" breaks (not word content), " " breaks, "world" = word 2
+    assert_eq!(count_words(b"hello \x00 world"), 2);
 }
 
 #[test]
@@ -156,9 +156,9 @@ fn test_count_words_all_whitespace_types() {
 // ──────────────────────────────────────────────────
 
 #[test]
-fn test_2state_nul_is_word_content() {
-    // NUL alone: word content → 1 word (matches GNU wc)
-    assert_eq!(count_words(b"\x00"), 1);
+fn test_2state_nul_is_word_break() {
+    // NUL alone: word break → 0 words (matches GNU wc: null-only file has 0 words)
+    assert_eq!(count_words(b"\x00"), 0);
 }
 
 #[test]
@@ -173,17 +173,18 @@ fn test_2state_control_chars_are_word_content() {
 
 #[test]
 fn test_2state_nonspace_doesnt_break_words() {
-    // Non-space bytes between printable chars don't break words
+    // Non-space, non-NUL bytes between printable chars don't break words
     assert_eq!(count_words(b"hello\x01world"), 1);
     assert_eq!(count_words(b"hello\x7fworld"), 1);
-    assert_eq!(count_words(b"hello\x00world"), 1);
+    // NUL DOES break words (matches GNU wc)
+    assert_eq!(count_words(b"hello\x00world"), 2);
 }
 
 #[test]
 fn test_2state_nonspace_starts_words() {
-    // Non-space bytes at start DO start a word (matches GNU wc)
+    // NUL is a word break, so \x01 starts the word
     assert_eq!(count_words(b"\x00\x01\x02"), 1);
-    // Non-space at start, then printable: still 1 word (continuous)
+    // NUL at start is skipped, "hello" starts a word
     assert_eq!(count_words(b"\x00hello"), 1);
 }
 
@@ -492,7 +493,7 @@ fn test_count_all_binary_data() {
     let counts = count_all(data, false);
     assert_eq!(counts.lines, 2);
     assert_eq!(counts.bytes, 7);
-    // C locale 2-state: \x00, \x01, \x02 are word content = 1 word.
+    // C locale: \x00 is word break, \x01+\x02 are word content = 1 word.
     // \n breaks. \xFF, \xFE are word content = 1 word. Total: 2 words.
     assert_eq!(counts.words, 2);
     // C locale: each byte is a char
@@ -514,8 +515,8 @@ fn test_gnu_trailing_newline() {
 
 #[test]
 fn test_gnu_word_definition() {
-    // GNU wc 2-state: non-space bytes are word content (matches GNU wc behavior)
-    assert_eq!(count_words(b"\x00"), 1); // NUL: word content
+    // GNU wc: NUL is not word content; other non-space bytes are word content
+    assert_eq!(count_words(b"\x00"), 0); // NUL: word break (GNU wc: null-only file has 0 words)
     assert_eq!(count_words(b"\x01"), 1); // SOH: word content
     assert_eq!(count_words(b"\x7f"), 1); // DEL: word content
     // Printable ASCII is always word content

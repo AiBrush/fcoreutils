@@ -11,8 +11,21 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Buffer size for bulk writes.
 const BUF_SIZE: usize = 128 * 1024;
 
+/// Handle write error: print message to stderr and exit with code 1.
+/// Matches GNU yes behavior: "yes: standard output: <error>"
+fn write_error_exit(err: std::io::Error) -> ! {
+    let msg = coreutils_rs::common::io_error_msg(&err);
+    eprintln!("{}: standard output: {}", TOOL_NAME, msg);
+    process::exit(1);
+}
+
 fn main() {
-    coreutils_rs::common::reset_sigpipe();
+    // Ignore SIGPIPE so write returns EPIPE instead of killing the process.
+    // This allows us to print an error message matching GNU yes behavior.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -119,10 +132,9 @@ fn main() {
                     if err.kind() == std::io::ErrorKind::Interrupted {
                         continue;
                     }
-                    break;
+                    write_error_exit(err);
                 }
             }
-            process::exit(0);
         }
     }
 
@@ -134,10 +146,9 @@ fn main() {
             if err.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            break;
+            write_error_exit(err);
         }
     }
-    process::exit(0);
 }
 
 #[cfg(test)]
@@ -348,11 +359,48 @@ mod tests {
             .unwrap();
 
         // Wait for the child process to avoid zombie
-        let _ = child.wait();
+        let status = child.wait().unwrap();
 
         assert_eq!(head.status.code(), Some(0));
         let text = String::from_utf8_lossy(&head.stdout);
         assert_eq!(text.trim(), "y");
+
+        // yes should exit with code 1 on broken pipe (matching GNU behavior)
+        assert_eq!(status.code(), Some(1), "yes should exit 1 on broken pipe");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_yes_broken_pipe_stderr() {
+        // When stdout is closed, yes should print error to stderr and exit 1
+        let mut child = cmd()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        // Read a few bytes then close stdout to trigger broken pipe
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buf = [0u8; 4];
+        let _ = std::io::Read::read(&mut stdout, &mut buf);
+        drop(stdout);
+
+        let mut stderr = child.stderr.take().unwrap();
+        let status = child.wait().unwrap();
+
+        let mut stderr_output = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_output);
+
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "yes should exit with code 1 on broken pipe"
+        );
+        assert!(
+            stderr_output.contains("yes: standard output:"),
+            "Expected 'yes: standard output:' on stderr, got: {}",
+            stderr_output
+        );
     }
 
     #[test]
