@@ -83,9 +83,9 @@ impl Default for NumfmtConfig {
 }
 
 /// SI suffix table: suffix char -> multiplier.
-/// GNU coreutils uses uppercase 'K' for both SI (powers of 1000) and IEC (powers of 1024).
+/// GNU coreutils numfmt uses lowercase 'k' for SI (powers of 1000) and uppercase 'K' for IEC (powers of 1024).
 const SI_SUFFIXES: &[(char, f64)] = &[
-    ('K', 1e3),
+    ('k', 1e3),
     ('M', 1e6),
     ('G', 1e9),
     ('T', 1e12),
