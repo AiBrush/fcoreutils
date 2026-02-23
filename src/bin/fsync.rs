@@ -97,7 +97,7 @@ fn main() {
     }
 }
 
-fn sync_file(path: &str, data_only: bool, file_system: bool) -> Result<(), std::io::Error> {
+fn sync_file(path: &str, data_only: bool, file_system: bool) -> std::io::Result<()> {
     use std::fs::File;
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;

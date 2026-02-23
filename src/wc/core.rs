@@ -24,9 +24,15 @@ pub struct WcCounts {
 //   0 = word content: starts or continues a word
 //   1 = space (word break): ends any current word
 //
-// C locale (GNU coreutils 9.4, Ubuntu 24.04): only printable ASCII 0x21-0x7E
-// is word content. All other bytes — NUL, control chars (0x00-0x1F), DEL (0x7F),
-// and high bytes (0x80-0xFF) — are word-break.
+// C locale word content depends on the glibc version:
+//   - glibc ≤2.39 (Ubuntu 24.04, GNU coreutils 9.4): isgraph() in C locale
+//     returns true only for 0x21-0x7E (printable ASCII). All other bytes are
+//     word-break.
+//   - glibc 2.41 (Debian 13, GNU coreutils 9.7): isgraph() accepts more bytes
+//     (high bytes except 0xA0), giving different word counts for non-ASCII.
+//
+// We target glibc ≤2.39 / 0x21-0x7E semantics since our CI (Ubuntu 24.04)
+// compares against GNU coreutils 9.4.
 //
 // UTF-8 locale: 0x09-0x0D, 0x20 (ASCII spaces) break words; multi-byte Unicode
 // spaces are detected via codepoint lookup. Everything else is word content.
@@ -174,7 +180,9 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let ones = _mm256_set1_epi8(1);
         // Word content = 0x21-0x7E only (printable ASCII).
         // Signed comparison: b > 0x20 (32) AND b < 0x7F (127).
-        // High bytes 0x80-0xFF are negative in signed, so they fail b > 0x20.
+        // High bytes 0x80-0xFF, when reinterpreted as i8, are negative (-128
+        // to -1). Since lo = 0x20 = 32, `cmpgt(v, lo)` (signed) is false for
+        // all negative values, correctly excluding them without a third check.
         let lo = _mm256_set1_epi8(0x20i8); // 32
         let hi = _mm256_set1_epi8(0x7Fi8); // 127
 
