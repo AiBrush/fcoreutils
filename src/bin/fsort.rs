@@ -344,9 +344,9 @@ fn main() {
         libc::setlocale(libc::LC_ALL, c"".as_ptr());
     }
 
-    // Do NOT reset SIGPIPE: keep Rust's default SIG_IGN so write errors
-    // propagate as EPIPE/BrokenPipe instead of killing the process.
-    // GNU sort always catches write errors, prints diagnostic messages, and exits 2.
+    // Keep Rust's default SIG_IGN so write errors propagate as EPIPE/BrokenPipe.
+    // GNU sort in SIG_IGN environments (Docker/CI/nohup) catches EPIPE, prints
+    // diagnostics, and exits 2. We match that behavior unconditionally.
 
     // Enlarge pipe buffers on Linux for higher throughput.
     #[cfg(target_os = "linux")]
@@ -455,7 +455,7 @@ fn main() {
 
     if let Err(e) = sort_and_output(&inputs, &config) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
-            // GNU sort prints these two diagnostic messages on EPIPE, then exits 2.
+            // GNU sort (when SIGPIPE is SIG_IGN) prints two diagnostic lines, exits 2.
             let output_name = config.output_file.as_deref().unwrap_or("standard output");
             eprintln!("sort: write failed: '{}': Broken pipe", output_name);
             eprintln!("sort: write error");
