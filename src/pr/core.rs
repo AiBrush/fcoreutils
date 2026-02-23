@@ -264,15 +264,30 @@ pub fn pr_file<R: BufRead, W: Write>(
     let date_str = format_header_date(&date, &config.date_format);
 
     // Calculate body lines per page
+    // When page_length is too small for header+footer, GNU pr suppresses
+    // headers/footers and uses page_length as the body size.
+    let suppress_header = !config.omit_header && !config.omit_pagination
+        && config.page_length <= HEADER_LINES + FOOTER_LINES;
+    // When suppress_header is active, create a config view with omit_header set
+    // so that sub-functions skip padding to body_lines_per_page.
+    let suppressed_config;
+    let effective_config = if suppress_header {
+        suppressed_config = PrConfig {
+            omit_header: true,
+            ..config.clone()
+        };
+        &suppressed_config
+    } else {
+        config
+    };
     let body_lines_per_page = if config.omit_header || config.omit_pagination {
         if config.page_length > 0 {
             config.page_length
         } else {
             DEFAULT_PAGE_LENGTH
         }
-    } else if config.page_length <= HEADER_LINES + FOOTER_LINES {
-        // If page is too small for header+footer, just use 1 body line
-        1
+    } else if suppress_header {
+        config.page_length
     } else {
         config.page_length - HEADER_LINES - FOOTER_LINES
     };
@@ -309,10 +324,10 @@ pub fn pr_file<R: BufRead, W: Write>(
             if page_num >= config.first_page
                 && (config.last_page == 0 || page_num <= config.last_page)
             {
-                if !config.omit_header && !config.omit_pagination {
+                if !config.omit_header && !config.omit_pagination && !suppress_header {
                     write_header(output, &date_str, header_str, page_num, config)?;
                 }
-                if !config.omit_header && !config.omit_pagination {
+                if !config.omit_header && !config.omit_pagination && !suppress_header {
                     write_footer(output, config)?;
                 }
             }
@@ -324,7 +339,7 @@ pub fn pr_file<R: BufRead, W: Write>(
         if page_num >= config.first_page && (config.last_page == 0 || page_num <= config.last_page)
         {
             // Write header
-            if !config.omit_header && !config.omit_pagination {
+            if !config.omit_header && !config.omit_pagination && !suppress_header {
                 write_header(output, &date_str, header_str, page_num, config)?;
             }
 
@@ -333,7 +348,7 @@ pub fn pr_file<R: BufRead, W: Write>(
                 write_multicolumn_body(
                     output,
                     &all_lines[line_idx..page_end],
-                    config,
+                    effective_config,
                     columns,
                     &mut line_number,
                     body_lines_per_page,
@@ -342,14 +357,14 @@ pub fn pr_file<R: BufRead, W: Write>(
                 write_single_column_body(
                     output,
                     &all_lines[line_idx..page_end],
-                    config,
+                    effective_config,
                     &mut line_number,
                     body_lines_per_page,
                 )?;
             }
 
             // Write footer
-            if !config.omit_header && !config.omit_pagination {
+            if !config.omit_header && !config.omit_pagination && !suppress_header {
                 write_footer(output, config)?;
             }
         }
@@ -378,14 +393,16 @@ pub fn pr_merge<W: Write>(
     let date_str = format_header_date(&date, &config.date_format);
     let header_str = config.header.as_deref().unwrap_or("");
 
+    let suppress_header = !config.omit_header && !config.omit_pagination
+        && config.page_length <= HEADER_LINES + FOOTER_LINES;
     let body_lines_per_page = if config.omit_header || config.omit_pagination {
         if config.page_length > 0 {
             config.page_length
         } else {
             DEFAULT_PAGE_LENGTH
         }
-    } else if config.page_length <= HEADER_LINES + FOOTER_LINES {
-        1
+    } else if suppress_header {
+        config.page_length
     } else {
         config.page_length - HEADER_LINES - FOOTER_LINES
     };
@@ -422,7 +439,7 @@ pub fn pr_merge<W: Write>(
 
         if page_num >= config.first_page && (config.last_page == 0 || page_num <= config.last_page)
         {
-            if !config.omit_header && !config.omit_pagination {
+            if !config.omit_header && !config.omit_pagination && !suppress_header {
                 write_header(output, &date_str, header_str, page_num, config)?;
             }
 
@@ -449,7 +466,11 @@ pub fn pr_merge<W: Write>(
                     } else {
                         ""
                     };
-                    let truncated = if config.truncate_lines && content.len() > col_width {
+                    let truncated = if !explicit_sep && content.len() > col_width.saturating_sub(1) {
+                        // Non-explicit separator: always truncate, leave room for separator
+                        &content[..col_width.saturating_sub(1)]
+                    } else if explicit_sep && config.truncate_lines && content.len() > col_width {
+                        // Explicit separator with -W: truncate to col_width
                         &content[..col_width]
                     } else {
                         content
@@ -487,7 +508,7 @@ pub fn pr_merge<W: Write>(
                 body_lines_written += 1;
             }
 
-            if !config.omit_header && !config.omit_pagination {
+            if !config.omit_header && !config.omit_pagination && !suppress_header {
                 write_footer(output, config)?;
             }
         }
