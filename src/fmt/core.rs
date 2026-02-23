@@ -256,16 +256,13 @@ fn reflow_paragraph<W: Write>(
     let goal = config.goal as i64;
     let width = config.width;
     let uniform = config.uniform_spacing;
-    // GNU fmt uses width/(width-goal) as the over-goal penalty multiplier
-    let over_goal_factor = if width > config.goal {
-        (width / (width - config.goal)) as i64
-    } else {
-        10 // fallback
-    };
 
+    // GNU fmt cost model: SHORT_COST(n) = EQUIV(n*10) = (n*10)^2 = n^2 * 100
+    // RAGGED_COST(n) = SHORT_COST(n) / 2 = n^2 * 50
+    // LINE_COST = EQUIV(70) = 4900, SENTENCE_BONUS = EQUIV(50) = 2500
+    const SHORT_FACTOR: i64 = 100;
+    const RAGGED_FACTOR: i64 = 50;
     const LINE_COST: i64 = 70 * 70;
-    #[allow(dead_code)]
-    const NOBREAK_COST: i64 = 600 * 600;
     const SENTENCE_BONUS: i64 = 50 * 50;
     const SENT_FLAG: u32 = 1 << 16;
 
@@ -329,15 +326,10 @@ fn reflow_paragraph<W: Write>(
                             LINE_COST
                         };
                         let short_n = goal - len as i64;
-                        // GNU fmt penalizes over-goal lines by factor width/(width-goal).
-                        let short_cost = if short_n < 0 {
-                            short_n * short_n * over_goal_factor
-                        } else {
-                            short_n * short_n
-                        };
+                        let short_cost = short_n * short_n * SHORT_FACTOR;
                         let ragged_cost = if unsafe { *best_ptr.add(j + 1) as usize + 1 < n } {
                             let ragged_n = len as i64 - unsafe { *line_len_ptr.add(j + 1) } as i64;
-                            ragged_n * ragged_n / 2
+                            ragged_n * ragged_n * RAGGED_FACTOR
                         } else {
                             0
                         };
@@ -360,24 +352,15 @@ fn reflow_paragraph<W: Write>(
                 0i64
             } else {
                 let bc = if unsafe { *winfo_ptr.add(j) & SENT_FLAG != 0 } {
-                    if uniform {
-                        LINE_COST - SENTENCE_BONUS
-                    } else {
-                        LINE_COST
-                    }
+                    LINE_COST - SENTENCE_BONUS
                 } else {
                     LINE_COST
                 };
                 let short_n = goal - len as i64;
-                // GNU fmt penalizes over-goal lines by factor width/(width-goal).
-                let short_cost = if short_n < 0 {
-                    short_n * short_n * over_goal_factor
-                } else {
-                    short_n * short_n
-                };
+                let short_cost = short_n * short_n * SHORT_FACTOR;
                 let ragged_cost = if unsafe { *best_ptr.add(j + 1) as usize + 1 < n } {
                     let ragged_n = len as i64 - unsafe { *line_len_ptr.add(j + 1) } as i64;
-                    ragged_n * ragged_n / 2
+                    ragged_n * ragged_n * RAGGED_FACTOR
                 } else {
                     0
                 };
@@ -451,7 +434,7 @@ fn split_long_line<W: Write>(
     let indent = leading_indent(stripped);
     let pfx = prefix.unwrap_or("");
 
-    if line.len() <= config.goal {
+    if line.len() <= config.width {
         output.write_all(line.as_bytes())?;
         output.write_all(b"\n")?;
         return Ok(());
@@ -475,7 +458,7 @@ fn split_long_line<W: Write>(
     for word in s.split_whitespace() {
         if !first_word_on_line {
             let new_len = cur_len + 1 + word.len();
-            if new_len > config.width || (new_len > config.goal && cur_len >= pfx_indent_len + 1) {
+            if new_len > config.width || (new_len > config.goal && cur_len > pfx_indent_len) {
                 output.write_all(b"\n")?;
                 output.write_all(pfx.as_bytes())?;
                 output.write_all(indent.as_bytes())?;

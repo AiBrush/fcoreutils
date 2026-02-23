@@ -517,23 +517,22 @@ fn main() {
         i += 1;
     }
 
-    // Validate timestamp/date early so errors appear before "missing file operand"
-    if let Some(ref st) = stamp {
-        if parse_touch_timestamp(st).is_err() {
-            eprintln!("{}: invalid date format '{}'", TOOL_NAME, st);
-            process::exit(1);
-        }
-    }
-    if let Some(ref d) = date_str {
-        if parse_date_string(d).is_err() {
-            eprintln!("{}: invalid date format '{}'", TOOL_NAME, d);
-            process::exit(1);
-        }
-    }
-
     if files.is_empty() {
         eprintln!("{}: missing file operand", TOOL_NAME);
         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(1);
+    }
+
+    // Parse and validate timestamps once, reusing the result below
+    let parsed_stamp = stamp.as_deref().map(parse_touch_timestamp);
+    let parsed_date = date_str.as_deref().map(parse_date_string);
+
+    if let Some(Err(_)) = &parsed_stamp {
+        eprintln!("{}: invalid date format '{}'", TOOL_NAME, stamp.as_deref().unwrap());
+        process::exit(1);
+    }
+    if let Some(Err(_)) = &parsed_date {
+        eprintln!("{}: invalid date format '{}'", TOOL_NAME, date_str.as_deref().unwrap());
         process::exit(1);
     }
 
@@ -554,22 +553,10 @@ fn main() {
                 process::exit(1);
             }
         }
-    } else if let Some(ref d) = date_str {
-        match parse_date_string(d) {
-            Ok((sec, nsec)) => (sec, nsec),
-            Err(_) => {
-                eprintln!("{}: invalid date format '{}'", TOOL_NAME, d);
-                process::exit(1);
-            }
-        }
-    } else if let Some(ref st) = stamp {
-        match parse_touch_timestamp(st) {
-            Ok((sec, nsec)) => (sec, nsec),
-            Err(_) => {
-                eprintln!("{}: invalid date format '{}'", TOOL_NAME, st);
-                process::exit(1);
-            }
-        }
+    } else if let Some(Ok((sec, nsec))) = parsed_date {
+        (sec, nsec)
+    } else if let Some(Ok((sec, nsec))) = parsed_stamp {
+        (sec, nsec)
     } else {
         current_time()
     };

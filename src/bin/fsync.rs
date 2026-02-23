@@ -62,14 +62,15 @@ fn main() {
     }
 
     if files.is_empty() {
-        if data_only {
+        if data_only || file_system {
+            let flag = if data_only { "--data" } else { "--file-system" };
             eprintln!(
-                "{}: --data needs at least one argument",
-                TOOL_NAME
+                "{}: {} requires at least one FILE argument",
+                TOOL_NAME, flag
             );
             process::exit(1);
         }
-        // sync all filesystems (--file-system without file is the same as plain sync)
+        // sync all filesystems
         #[cfg(unix)]
         unsafe {
             libc::sync();
@@ -79,11 +80,10 @@ fn main() {
         for file in &files {
             match sync_file(file, data_only, file_system) {
                 Ok(()) => {}
-                Err((phase, e)) => {
+                Err(e) => {
                     eprintln!(
-                        "{}: error {} '{}': {}",
+                        "{}: error syncing '{}': {}",
                         TOOL_NAME,
-                        phase,
                         file,
                         coreutils_rs::common::io_error_msg(&e)
                     );
@@ -97,12 +97,12 @@ fn main() {
     }
 }
 
-fn sync_file(path: &str, data_only: bool, file_system: bool) -> Result<(), (&'static str, std::io::Error)> {
+fn sync_file(path: &str, data_only: bool, file_system: bool) -> Result<(), std::io::Error> {
     use std::fs::File;
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
 
-    let file = File::open(path).map_err(|e| ("opening", e))?;
+    let file = File::open(path)?;
 
     #[cfg(unix)]
     {
@@ -134,14 +134,14 @@ fn sync_file(path: &str, data_only: bool, file_system: bool) -> Result<(), (&'st
             unsafe { libc::fsync(fd) }
         };
         if ret != 0 {
-            return Err(("syncing", std::io::Error::last_os_error()));
+            return Err(std::io::Error::last_os_error());
         }
     }
 
     #[cfg(not(unix))]
     {
         let _ = (data_only, file_system);
-        file.sync_all().map_err(|e| ("syncing", e))?;
+        file.sync_all()?;
     }
 
     Ok(())
