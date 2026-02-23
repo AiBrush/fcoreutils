@@ -5,13 +5,14 @@ WORKDIR /build
 
 # nasm  → assembly fyes build
 # python3 → build.py assembly driver
+# libssl-dev → system OpenSSL headers for hash performance (SHA-NI via OPENSSL_STATIC=1)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nasm python3 && \
+    apt-get install -y --no-install-recommends nasm python3 libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
-RUN cargo build --release
+RUN OPENSSL_STATIC=1 cargo build --release
 
 # Build hand-written assembly fyes (overwrites Rust binary if successful)
 RUN arch=$(uname -m); \

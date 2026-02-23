@@ -148,18 +148,28 @@ jobs:
               ;;
           esac
 
-      - name: Install nasm (Linux x86_64 and macOS x86_64)
-        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'x86_64-apple-darwin'
+      - name: Install nasm and libssl-dev (Linux, macOS x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-apple-darwin'
         shell: bash
         run: |
           if [[ "$OSTYPE" == "linux"* ]]; then
-            sudo apt-get install -y --no-install-recommends nasm
+            if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
+              sudo apt-get install -y --no-install-recommends nasm libssl-dev
+            else
+              sudo apt-get install -y --no-install-recommends libssl-dev
+            fi
           else
             brew install nasm || true
           fi
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          if [[ "$OSTYPE" == "linux"* ]]; then
+            OPENSSL_STATIC=1 cargo build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
 
       - name: Create release archive
         shell: bash
