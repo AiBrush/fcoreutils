@@ -149,10 +149,10 @@ fn test_date_matches_gnu_format() {
 
 #[test]
 fn test_parse_date_string_epoch() {
-    let result = parse_date_string("@0").unwrap();
+    let result = parse_date_string("@0", false).unwrap();
     assert_eq!(result, UNIX_EPOCH);
 
-    let result = parse_date_string("@1705314600").unwrap();
+    let result = parse_date_string("@1705314600", false).unwrap();
     assert_eq!(result, fixed_time());
 }
 
@@ -160,7 +160,7 @@ fn test_parse_date_string_epoch() {
 fn test_parse_date_string_relative() {
     let now = SystemTime::now();
 
-    let yesterday = parse_date_string("yesterday").unwrap();
+    let yesterday = parse_date_string("yesterday", false).unwrap();
     let expected = now - Duration::from_secs(86400);
     // Allow 2 second tolerance for timing
     let diff = yesterday
@@ -170,7 +170,7 @@ fn test_parse_date_string_relative() {
         .abs_diff(expected.duration_since(UNIX_EPOCH).unwrap().as_secs());
     assert!(diff <= 2, "yesterday should be ~24h ago, diff: {}", diff);
 
-    let tomorrow = parse_date_string("tomorrow").unwrap();
+    let tomorrow = parse_date_string("tomorrow", false).unwrap();
     let expected = now + Duration::from_secs(86400);
     let diff = tomorrow
         .duration_since(UNIX_EPOCH)
@@ -186,7 +186,7 @@ fn test_parse_date_string_relative() {
 
 #[test]
 fn test_parse_date_string_iso() {
-    let result = parse_date_string("2024-01-15 10:30:00").unwrap();
+    let result = parse_date_string("2024-01-15 10:30:00", false).unwrap();
     // We can't easily check exact value since mktime uses local timezone,
     // but it should at least parse successfully
     assert!(result > UNIX_EPOCH, "Parsed date should be after epoch");
@@ -194,10 +194,10 @@ fn test_parse_date_string_iso() {
 
 #[test]
 fn test_parse_date_string_relative_offset() {
-    let result = parse_date_string("1 day ago");
+    let result = parse_date_string("1 day ago", false);
     assert!(result.is_ok(), "Should parse '1 day ago'");
 
-    let result = parse_date_string("2 hours ago");
+    let result = parse_date_string("2 hours ago", false);
     assert!(result.is_ok(), "Should parse '2 hours ago'");
 }
 
