@@ -191,55 +191,47 @@ fn base64_decode(
     decode_table: &[u8; 256],
     ignore_garbage: bool,
 ) -> Result<Vec<u8>, String> {
-    let mut filtered = Vec::with_capacity(input.len());
+    let mut result = Vec::with_capacity(input.len() * 3 / 4 + 3);
+    let mut vals = [0u8; 4];
+    let mut n = 0usize;
+    let mut pos = 0usize;
+
     for &b in input {
-        if b == b'\n' || b == b'\r' {
-            continue;
-        }
+        if b == b'\n' || b == b'\r' { continue; }
         if b == b'=' {
-            filtered.push(b);
+            pos += 1;
+            if pos == 4 {
+                if n >= 2 { result.push((vals[0] << 2) | (vals[1] >> 4)); }
+                if n >= 3 { result.push((vals[1] << 4) | (vals[2] >> 2)); }
+                n = 0;
+                pos = 0;
+            }
             continue;
         }
-        if decode_table[b as usize] != 0xFF {
-            filtered.push(b);
-        } else if !ignore_garbage {
-            return Err(format!("{}: invalid input", TOOL_NAME));
-        }
-    }
-
-    if filtered.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut result = Vec::with_capacity(filtered.len() * 3 / 4);
-    for chunk in filtered.chunks(4) {
-        let mut buf = [b'='; 4];
-        buf[..chunk.len()].copy_from_slice(chunk);
-
-        let mut vals = [0u8; 4];
-        let mut valid_count = 0;
-        for (i, &b) in buf.iter().enumerate() {
-            if b == b'=' {
-                break;
-            }
-            let v = decode_table[b as usize];
-            if v == 0xFF {
+        let v = decode_table[b as usize];
+        if v == 0xFF {
+            if !ignore_garbage {
                 return Err(format!("{}: invalid input", TOOL_NAME));
             }
-            vals[i] = v;
-            valid_count += 1;
+            continue;
         }
-
-        if valid_count >= 2 {
-            result.push((vals[0] << 2) | (vals[1] >> 4));
-        }
-        if valid_count >= 3 {
-            result.push((vals[1] << 4) | (vals[2] >> 2));
-        }
-        if valid_count >= 4 {
-            result.push((vals[2] << 6) | vals[3]);
+        vals[pos] = v;
+        n += 1;
+        pos += 1;
+        if pos == 4 {
+            result.extend_from_slice(&[
+                (vals[0] << 2) | (vals[1] >> 4),
+                (vals[1] << 4) | (vals[2] >> 2),
+                (vals[2] << 6) | vals[3],
+            ]);
+            n = 0;
+            pos = 0;
         }
     }
+
+    if n >= 2 { result.push((vals[0] << 2) | (vals[1] >> 4)); }
+    if n >= 3 { result.push((vals[1] << 4) | (vals[2] >> 2)); }
+    if n >= 4 { result.push((vals[2] << 6) | vals[3]); }
 
     Ok(result)
 }
@@ -271,61 +263,82 @@ fn base32_decode(
     decode_table: &[u8; 256],
     ignore_garbage: bool,
 ) -> Result<Vec<u8>, String> {
-    let mut filtered = Vec::with_capacity(input.len());
-    for &b in input {
-        if b == b'\n' || b == b'\r' {
-            continue;
-        }
-        if b == b'=' {
-            filtered.push(b);
-            continue;
-        }
-        if decode_table[b as usize] != 0xFF {
-            filtered.push(b);
-        } else if !ignore_garbage {
-            return Err(format!("{}: invalid input", TOOL_NAME));
-        }
-    }
+    let mut result = Vec::with_capacity(input.len() * 5 / 8 + 5);
+    let mut vals = [0u8; 8];
+    let mut n = 0usize;
+    let mut pos = 0usize;
+    let mut i = 0usize;
 
-    if filtered.is_empty() {
-        return Ok(Vec::new());
-    }
+    while i < input.len() {
+        // Fast path: decode 8 valid chars at once when starting a new group
+        if pos == 0 && i + 8 <= input.len() {
+            let chunk = &input[i..i + 8];
+            let v0 = decode_table[chunk[0] as usize];
+            let v1 = decode_table[chunk[1] as usize];
+            let v2 = decode_table[chunk[2] as usize];
+            let v3 = decode_table[chunk[3] as usize];
+            let v4 = decode_table[chunk[4] as usize];
+            let v5 = decode_table[chunk[5] as usize];
+            let v6 = decode_table[chunk[6] as usize];
+            let v7 = decode_table[chunk[7] as usize];
 
-    let mut result = Vec::with_capacity(filtered.len() * 5 / 8);
-    for chunk in filtered.chunks(8) {
-        let mut buf = [b'='; 8];
-        buf[..chunk.len()].copy_from_slice(chunk);
-
-        let mut valid_count = 0;
-        let mut vals = [0u8; 8];
-        for (i, &b) in buf.iter().enumerate() {
-            if b == b'=' {
-                break;
+            if (v0 | v1 | v2 | v3 | v4 | v5 | v6 | v7) <= 0x1F {
+                result.extend_from_slice(&[
+                    (v0 << 3) | (v1 >> 2),
+                    (v1 << 6) | (v2 << 1) | (v3 >> 4),
+                    (v3 << 4) | (v4 >> 1),
+                    (v4 << 7) | (v5 << 2) | (v6 >> 3),
+                    (v6 << 5) | v7,
+                ]);
+                i += 8;
+                continue;
             }
-            let v = decode_table[b as usize];
-            if v == 0xFF {
+        }
+
+        let b = input[i];
+        i += 1;
+
+        if b == b'\n' || b == b'\r' { continue; }
+        if b == b'=' {
+            pos += 1;
+            if pos == 8 {
+                if n >= 2 { result.push((vals[0] << 3) | (vals[1] >> 2)); }
+                if n >= 4 { result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4)); }
+                if n >= 5 { result.push((vals[3] << 4) | (vals[4] >> 1)); }
+                if n >= 7 { result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3)); }
+                n = 0;
+                pos = 0;
+            }
+            continue;
+        }
+        let v = decode_table[b as usize];
+        if v == 0xFF {
+            if !ignore_garbage {
                 return Err(format!("{}: invalid input", TOOL_NAME));
             }
-            vals[i] = v;
-            valid_count += 1;
+            continue;
         }
-
-        if valid_count >= 2 {
-            result.push((vals[0] << 3) | (vals[1] >> 2));
-        }
-        if valid_count >= 4 {
-            result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
-        }
-        if valid_count >= 5 {
-            result.push((vals[3] << 4) | (vals[4] >> 1));
-        }
-        if valid_count >= 7 {
-            result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
-        }
-        if valid_count >= 8 {
-            result.push((vals[6] << 5) | vals[7]);
+        vals[pos] = v;
+        n += 1;
+        pos += 1;
+        if pos == 8 {
+            result.extend_from_slice(&[
+                (vals[0] << 3) | (vals[1] >> 2),
+                (vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4),
+                (vals[3] << 4) | (vals[4] >> 1),
+                (vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3),
+                (vals[6] << 5) | vals[7],
+            ]);
+            n = 0;
+            pos = 0;
         }
     }
+
+    if n >= 2 { result.push((vals[0] << 3) | (vals[1] >> 2)); }
+    if n >= 4 { result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4)); }
+    if n >= 5 { result.push((vals[3] << 4) | (vals[4] >> 1)); }
+    if n >= 7 { result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3)); }
+    if n >= 8 { result.push((vals[6] << 5) | vals[7]); }
 
     Ok(result)
 }
@@ -339,31 +352,28 @@ fn base16_encode(data: &[u8]) -> String {
 }
 
 fn base16_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
-    let mut filtered = Vec::with_capacity(input.len());
+    let mut result = Vec::with_capacity(input.len() / 2 + 1);
+    let mut pending: i16 = -1;
+
     for &b in input {
-        if b == b'\n' || b == b'\r' {
+        if b == b'\n' || b == b'\r' { continue; }
+        let v = hex_val(b);
+        if v == 0xFF {
+            if !ignore_garbage {
+                return Err(format!("{}: invalid input", TOOL_NAME));
+            }
             continue;
         }
-        let val = hex_val(b);
-        if val != 0xFF {
-            filtered.push(b);
-        } else if !ignore_garbage {
-            return Err(format!("{}: invalid input", TOOL_NAME));
+        if pending < 0 {
+            pending = v as i16;
+        } else {
+            result.push(((pending as u8) << 4) | v);
+            pending = -1;
         }
     }
 
-    if filtered.len() % 2 != 0 {
+    if pending >= 0 {
         return Err(format!("{}: invalid input", TOOL_NAME));
-    }
-
-    let mut result = Vec::with_capacity(filtered.len() / 2);
-    for pair in filtered.chunks(2) {
-        let high = hex_val(pair[0]);
-        let low = hex_val(pair[1]);
-        if high == 0xFF || low == 0xFF {
-            return Err(format!("{}: invalid input", TOOL_NAME));
-        }
-        result.push((high << 4) | low);
     }
 
     Ok(result)
@@ -387,29 +397,29 @@ fn base2msbf_encode(data: &[u8]) -> String {
 }
 
 fn base2msbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
-    let mut filtered = Vec::with_capacity(input.len());
+    let mut result = Vec::with_capacity(input.len() / 8 + 1);
+    let mut byte = 0u8;
+    let mut bits = 0u8;
+
     for &b in input {
-        if b == b'\n' || b == b'\r' {
+        if b == b'\n' || b == b'\r' { continue; }
+        if b != b'0' && b != b'1' {
+            if !ignore_garbage {
+                return Err(format!("{}: invalid input", TOOL_NAME));
+            }
             continue;
         }
-        if b == b'0' || b == b'1' {
-            filtered.push(b);
-        } else if !ignore_garbage {
-            return Err(format!("{}: invalid input", TOOL_NAME));
+        byte = (byte << 1) | (b - b'0');
+        bits += 1;
+        if bits == 8 {
+            result.push(byte);
+            byte = 0;
+            bits = 0;
         }
     }
 
-    if filtered.len() % 8 != 0 {
+    if bits != 0 {
         return Err(format!("{}: invalid input", TOOL_NAME));
-    }
-
-    let mut result = Vec::with_capacity(filtered.len() / 8);
-    for chunk in filtered.chunks(8) {
-        let mut byte = 0u8;
-        for &bit in chunk {
-            byte = (byte << 1) | (bit - b'0');
-        }
-        result.push(byte);
     }
 
     Ok(result)
@@ -422,29 +432,29 @@ fn base2lsbf_encode(data: &[u8]) -> String {
 }
 
 fn base2lsbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
-    let mut filtered = Vec::with_capacity(input.len());
+    let mut result = Vec::with_capacity(input.len() / 8 + 1);
+    let mut byte = 0u8;
+    let mut bits = 0u8;
+
     for &b in input {
-        if b == b'\n' || b == b'\r' {
+        if b == b'\n' || b == b'\r' { continue; }
+        if b != b'0' && b != b'1' {
+            if !ignore_garbage {
+                return Err(format!("{}: invalid input", TOOL_NAME));
+            }
             continue;
         }
-        if b == b'0' || b == b'1' {
-            filtered.push(b);
-        } else if !ignore_garbage {
-            return Err(format!("{}: invalid input", TOOL_NAME));
+        byte |= (b - b'0') << bits;
+        bits += 1;
+        if bits == 8 {
+            result.push(byte);
+            byte = 0;
+            bits = 0;
         }
     }
 
-    if filtered.len() % 8 != 0 {
+    if bits != 0 {
         return Err(format!("{}: invalid input", TOOL_NAME));
-    }
-
-    let mut result = Vec::with_capacity(filtered.len() / 8);
-    for chunk in filtered.chunks(8) {
-        let mut byte = 0u8;
-        for (i, &bit) in chunk.iter().enumerate() {
-            byte |= (bit - b'0') << i;
-        }
-        result.push(byte);
     }
 
     Ok(result)
@@ -476,39 +486,38 @@ fn z85_encode(data: &[u8]) -> Result<String, String> {
 }
 
 fn z85_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
-    let mut filtered = Vec::with_capacity(input.len());
+    let mut result = Vec::with_capacity(input.len() * 4 / 5 + 4);
+    let mut value: u32 = 0;
+    let mut count = 0u8;
+
     for &b in input {
-        if b == b'\n' || b == b'\r' {
+        if b == b'\n' || b == b'\r' { continue; }
+        let v = Z85_DECODE_TABLE[b as usize];
+        if v == 0xFF {
+            if !ignore_garbage {
+                return Err(format!("{}: invalid input", TOOL_NAME));
+            }
             continue;
         }
-        if Z85_DECODE_TABLE[b as usize] != 0xFF {
-            filtered.push(b);
-        } else if !ignore_garbage {
-            return Err(format!("{}: invalid input", TOOL_NAME));
+        value = value * 85 + u32::from(v);
+        count += 1;
+        if count == 5 {
+            result.extend_from_slice(&[
+                (value >> 24) as u8,
+                (value >> 16) as u8,
+                (value >> 8) as u8,
+                value as u8,
+            ]);
+            value = 0;
+            count = 0;
         }
     }
 
-    if filtered.len() % 5 != 0 {
+    if count != 0 {
         return Err(format!(
             "{}: invalid input (length must be a multiple of 5 for Z85 decoding)",
             TOOL_NAME
         ));
-    }
-
-    let mut result = Vec::with_capacity(filtered.len() * 4 / 5);
-    for chunk in filtered.chunks(5) {
-        let mut value: u32 = 0;
-        for &b in chunk {
-            let v = Z85_DECODE_TABLE[b as usize];
-            if v == 0xFF {
-                return Err(format!("{}: invalid input", TOOL_NAME));
-            }
-            value = value * 85 + u32::from(v);
-        }
-        result.push((value >> 24) as u8);
-        result.push((value >> 16) as u8);
-        result.push((value >> 8) as u8);
-        result.push(value as u8);
     }
 
     Ok(result)

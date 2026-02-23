@@ -226,75 +226,86 @@ fn base32_encode(data: &[u8]) -> Vec<u8> {
 }
 
 /// Decode Base32 string back to binary data.
-/// Returns Err on invalid input (unless ignore_garbage is set).
+/// Single-pass fused filter+decode with 8-byte-at-a-time fast path.
 fn base32_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
-    // Filter input: always skip newlines and \r; if ignore_garbage, skip all non-base32 chars
-    let mut filtered = Vec::with_capacity(input.len());
-    for &b in input {
-        if b == b'\n' || b == b'\r' {
-            continue;
-        }
-        if b == b'=' {
-            filtered.push(b);
-            continue;
-        }
-        if DECODE_TABLE[b as usize] != 0xFF {
-            filtered.push(b);
-        } else if !ignore_garbage {
-            return Err(format!("{}: invalid input", TOOL_NAME));
-        }
-    }
+    let mut result = Vec::with_capacity(input.len() * 5 / 8 + 5);
+    let mut vals = [0u8; 8];
+    let mut n = 0usize;   // valid (non-padding) chars in current group
+    let mut pos = 0usize; // total position in group (valid + padding)
+    let mut i = 0usize;
 
-    if filtered.is_empty() {
-        return Ok(Vec::new());
-    }
+    while i < input.len() {
+        // Fast path: when starting a new group, try to decode 8 valid chars at once
+        if pos == 0 && i + 8 <= input.len() {
+            let chunk = &input[i..i + 8];
+            let v0 = DECODE_TABLE[chunk[0] as usize];
+            let v1 = DECODE_TABLE[chunk[1] as usize];
+            let v2 = DECODE_TABLE[chunk[2] as usize];
+            let v3 = DECODE_TABLE[chunk[3] as usize];
+            let v4 = DECODE_TABLE[chunk[4] as usize];
+            let v5 = DECODE_TABLE[chunk[5] as usize];
+            let v6 = DECODE_TABLE[chunk[6] as usize];
+            let v7 = DECODE_TABLE[chunk[7] as usize];
 
-    let mut result = Vec::with_capacity(filtered.len() * 5 / 8);
-    let chunks = filtered.chunks(8);
-
-    for chunk in chunks {
-        // Pad chunk to 8 characters with '='
-        let mut buf = [b'='; 8];
-        buf[..chunk.len()].copy_from_slice(chunk);
-
-        // Count non-padding characters
-        let mut valid_count = 0;
-        let mut vals = [0u8; 8];
-        for (i, &b) in buf.iter().enumerate() {
-            if b == b'=' {
-                break;
+            if (v0 | v1 | v2 | v3 | v4 | v5 | v6 | v7) <= 0x1F {
+                result.extend_from_slice(&[
+                    (v0 << 3) | (v1 >> 2),
+                    (v1 << 6) | (v2 << 1) | (v3 >> 4),
+                    (v3 << 4) | (v4 >> 1),
+                    (v4 << 7) | (v5 << 2) | (v6 >> 3),
+                    (v6 << 5) | v7,
+                ]);
+                i += 8;
+                continue;
             }
-            let v = DECODE_TABLE[b as usize];
-            if v == 0xFF {
+        }
+
+        // Slow path: process byte by byte
+        let b = input[i];
+        i += 1;
+
+        if b == b'\n' || b == b'\r' { continue; }
+        if b == b'=' {
+            pos += 1;
+            if pos == 8 {
+                if n >= 2 { result.push((vals[0] << 3) | (vals[1] >> 2)); }
+                if n >= 4 { result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4)); }
+                if n >= 5 { result.push((vals[3] << 4) | (vals[4] >> 1)); }
+                if n >= 7 { result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3)); }
+                n = 0;
+                pos = 0;
+            }
+            continue;
+        }
+        let v = DECODE_TABLE[b as usize];
+        if v == 0xFF {
+            if !ignore_garbage {
                 return Err(format!("{}: invalid input", TOOL_NAME));
             }
-            vals[i] = v;
-            valid_count += 1;
-        }
-
-        if valid_count == 0 {
             continue;
         }
-
-        // Decode based on how many valid chars we have:
-        // 2 chars -> 1 byte, 4 chars -> 2 bytes, 5 chars -> 3 bytes,
-        // 7 chars -> 4 bytes, 8 chars -> 5 bytes
-        if valid_count >= 2 {
-            result.push((vals[0] << 3) | (vals[1] >> 2));
-        }
-        if valid_count >= 4 {
-            result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
-        }
-        if valid_count >= 5 {
-            result.push((vals[3] << 4) | (vals[4] >> 1));
-        }
-        if valid_count >= 7 {
-            result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
-        }
-        if valid_count >= 8 {
-            result.push((vals[6] << 5) | vals[7]);
+        vals[pos] = v;
+        n += 1;
+        pos += 1;
+        if pos == 8 {
+            result.extend_from_slice(&[
+                (vals[0] << 3) | (vals[1] >> 2),
+                (vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4),
+                (vals[3] << 4) | (vals[4] >> 1),
+                (vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3),
+                (vals[6] << 5) | vals[7],
+            ]);
+            n = 0;
+            pos = 0;
         }
     }
+
+    // Trailing partial group
+    if n >= 2 { result.push((vals[0] << 3) | (vals[1] >> 2)); }
+    if n >= 4 { result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4)); }
+    if n >= 5 { result.push((vals[3] << 4) | (vals[4] >> 1)); }
+    if n >= 7 { result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3)); }
+    if n >= 8 { result.push((vals[6] << 5) | vals[7]); }
 
     Ok(result)
 }

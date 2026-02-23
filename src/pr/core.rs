@@ -217,16 +217,26 @@ fn has_explicit_separator(config: &PrConfig) -> bool {
 /// GNU pr pads columns using tab characters (8-space tab stops) to reach the column boundary.
 /// `abs_pos` is the current absolute position on the line.
 /// `target_abs_pos` is the target absolute position.
+/// Static spaces buffer for padding without allocation.
+const SPACES: [u8; 256] = [b' '; 256];
+
 fn write_column_padding<W: Write>(output: &mut W, abs_pos: usize, target_abs_pos: usize) -> io::Result<()> {
     let tab_size = 8;
     let mut pos = abs_pos;
     while pos < target_abs_pos {
         let next_tab = ((pos / tab_size) + 1) * tab_size;
         if next_tab <= target_abs_pos {
-            write!(output, "\t")?;
+            output.write_all(b"\t")?;
             pos = next_tab;
         } else {
-            write!(output, "{}", " ".repeat(target_abs_pos - pos))?;
+            let n = target_abs_pos - pos;
+            if n <= SPACES.len() {
+                output.write_all(&SPACES[..n])?;
+            } else {
+                for _ in 0..n {
+                    output.write_all(b" ")?;
+                }
+            }
             pos = target_abs_pos;
         }
     }
@@ -254,8 +264,10 @@ pub fn pr_file<R: BufRead, W: Write>(
             line = expand_tabs_in_line(&line, tab_char, tab_width);
         }
 
-        // Process control characters
-        line = process_control_chars(&line, config.show_control_chars, config.show_nonprinting);
+        // Process control characters (skip when not needed to avoid copying)
+        if config.show_control_chars || config.show_nonprinting {
+            line = process_control_chars(&line, config.show_control_chars, config.show_nonprinting);
+        }
 
         all_lines.push(line);
     }
@@ -443,6 +455,7 @@ pub fn pr_merge<W: Write>(
                 write_header(output, &date_str, header_str, page_num, config)?;
             }
 
+            let indent_str = " ".repeat(config.indent);
             let mut body_lines_written = 0;
             for i in line_idx..page_end {
                 if config.double_space && body_lines_written > 0 {
@@ -450,8 +463,7 @@ pub fn pr_merge<W: Write>(
                     body_lines_written += 1;
                 }
 
-                let indent_str = " ".repeat(config.indent);
-                write!(output, "{}", indent_str)?;
+                output.write_all(indent_str.as_bytes())?;
                 let mut abs_pos = config.indent;
 
                 if let Some((sep, digits)) = config.number_lines {
@@ -596,10 +608,11 @@ fn write_single_column_body<W: Write>(
     body_lines_per_page: usize,
 ) -> io::Result<()> {
     let indent_str = " ".repeat(config.indent);
+    let content_width = if config.truncate_lines { compute_content_width(config) } else { 0 };
     let mut body_lines_written = 0;
 
     for line in lines.iter() {
-        write!(output, "{}", indent_str)?;
+        output.write_all(indent_str.as_bytes())?;
 
         if let Some((sep, digits)) = config.number_lines {
             write!(output, "{:>width$}{}", line_number, sep, width = digits)?;
@@ -607,9 +620,8 @@ fn write_single_column_body<W: Write>(
         }
 
         let content = if config.truncate_lines {
-            let max_w = compute_content_width(config);
-            if line.len() > max_w {
-                &line[..max_w]
+            if line.len() > content_width {
+                &line[..content_width]
             } else {
                 line.as_str()
             }
@@ -695,7 +707,7 @@ fn write_multicolumn_body<W: Write>(
                 }
             }
 
-            write!(output, "{}", indent_str)?;
+            output.write_all(indent_str.as_bytes())?;
             let mut abs_pos = config.indent;
 
             // Find the last column with data on this row
@@ -765,7 +777,7 @@ fn write_multicolumn_body<W: Write>(
                 }
             }
 
-            write!(output, "{}", indent_str)?;
+            output.write_all(indent_str.as_bytes())?;
             let mut abs_pos = config.indent;
 
             // Find the last column with data for this row

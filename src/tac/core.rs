@@ -194,76 +194,76 @@ fn tac_bytes_before_contiguous(data: &[u8], sep: u8, out: &mut impl Write) -> io
     Ok(())
 }
 
-/// After-separator mode for small files: forward SIMD scan + contiguous buffer.
-/// Forward memchr_iter is faster than backward memrchr_iter.
-/// Builds a contiguous reversed output buffer, then writes with a single write_all.
-/// This beats IoSlice/writev for high line density data (10MB with ~244K lines)
-/// because one write syscall is faster than ~238 batched writev calls (EXP-010).
+/// After-separator mode for small files: backward memrchr scan + streaming output.
+/// Zero extra allocation: scans backward with memrchr, writes records directly.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
 
-    // Fast path: if no separator exists, output is identical to input.
-    // Check before allocating the positions Vec to avoid unnecessary allocation.
-    if memchr::memchr(sep, data).is_none() {
-        return out.write_all(data);
-    }
+    let mut prev_end = data.len();
+    let mut search_end = data.len();
 
-    // Forward scan for separator positions
-    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
-    for pos in memchr::memchr_iter(sep, data) {
-        positions.push(pos);
-    }
-
-    // Build contiguous reversed output buffer
-    let mut buf = Vec::with_capacity(data.len());
-    let mut end = data.len();
-    for &pos in positions.iter().rev() {
-        let rec_start = pos + 1;
-        if rec_start < end {
-            buf.extend_from_slice(&data[rec_start..end]);
+    loop {
+        match memchr::memrchr(sep, &data[..search_end]) {
+            Some(pos) => {
+                let rec_start = pos + 1;
+                if rec_start < prev_end {
+                    out.write_all(&data[rec_start..prev_end])?;
+                }
+                prev_end = rec_start;
+                search_end = pos;
+            }
+            None => {
+                if prev_end > 0 {
+                    out.write_all(&data[..prev_end])?;
+                }
+                break;
+            }
         }
-        end = rec_start;
+        if search_end == 0 {
+            if prev_end > 0 {
+                out.write_all(&data[..prev_end])?;
+            }
+            break;
+        }
     }
-    if end > 0 {
-        buf.extend_from_slice(&data[..end]);
-    }
-    out.write_all(&buf)
+
+    Ok(())
 }
 
-/// Before-separator mode for small files: forward SIMD scan + contiguous buffer.
-/// Builds a contiguous reversed output buffer, then writes with a single write_all.
+/// Before-separator mode for small files: backward memrchr scan + streaming output.
+/// Zero extra allocation: scans backward with memrchr, writes records directly.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
 
-    // Fast path: if no separator exists, output is identical to input.
-    // Check before allocating the positions Vec to avoid unnecessary allocation.
-    if memchr::memchr(sep, data).is_none() {
-        return out.write_all(data);
-    }
+    let mut prev_end = data.len();
+    let mut search_end = data.len();
 
-    // Forward scan for separator positions
-    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
-    for pos in memchr::memchr_iter(sep, data) {
-        positions.push(pos);
-    }
-
-    // Build contiguous reversed output buffer
-    let mut buf = Vec::with_capacity(data.len());
-    let mut end = data.len();
-    for &pos in positions.iter().rev() {
-        if pos < end {
-            buf.extend_from_slice(&data[pos..end]);
+    loop {
+        match memchr::memrchr(sep, &data[..search_end]) {
+            Some(pos) => {
+                if pos < prev_end {
+                    out.write_all(&data[pos..prev_end])?;
+                }
+                prev_end = pos;
+                if pos == 0 {
+                    break;
+                }
+                search_end = pos;
+            }
+            None => {
+                if prev_end > 0 {
+                    out.write_all(&data[..prev_end])?;
+                }
+                break;
+            }
         }
-        end = pos;
     }
-    if end > 0 {
-        buf.extend_from_slice(&data[..end]);
-    }
-    out.write_all(&buf)
+
+    Ok(())
 }
 
 /// Reverse records using a multi-byte string separator.

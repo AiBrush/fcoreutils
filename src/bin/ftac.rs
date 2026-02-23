@@ -279,37 +279,24 @@ fn main() {
         std::mem::take(&mut cli.files)
     };
 
-    let is_byte_sep = !cli.regex && cli.separator.is_none();
-
-    // Byte-separator path: contiguous buffer + single write_all is fastest
-    // for 10MB files with high line density (~244K lines). One write(2)
-    // syscall beats ~238 batched writev calls (EXP-010).
-    // Non-byte-sep paths use BufWriter for buffered output.
+    // All paths use BufWriter: byte-separator path now uses streaming backward
+    // scan (many small writes), so BufWriter is needed to amortize syscalls.
     #[cfg(unix)]
     let had_error = {
         let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        if is_byte_sep {
-            run(&cli, &files, &mut &*raw)
-        } else {
-            let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, &*raw);
-            let err = run(&cli, &files, &mut writer);
-            let _ = writer.flush();
-            err
-        }
+        let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, &*raw);
+        let err = run(&cli, &files, &mut writer);
+        let _ = writer.flush();
+        err
     };
     #[cfg(not(unix))]
     let had_error = {
         let stdout = io::stdout();
         let lock = stdout.lock();
-        if is_byte_sep {
-            let mut writer = lock;
-            run(&cli, &files, &mut writer)
-        } else {
-            let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, lock);
-            let err = run(&cli, &files, &mut writer);
-            let _ = writer.flush();
-            err
-        }
+        let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, lock);
+        let err = run(&cli, &files, &mut writer);
+        let _ = writer.flush();
+        err
     };
 
     if had_error {

@@ -1,13 +1,14 @@
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
+use std::path::Path;
 use std::process;
 
+use coreutils_rs::common::io::{read_file_mmap, read_stdin, FileData};
 use coreutils_rs::common::io_error_msg;
-use coreutils_rs::fmt::FmtConfig;
+use coreutils_rs::fmt::{FmtConfig, fmt_data};
 
 struct Cli {
     width: usize,
@@ -301,16 +302,19 @@ fn main() {
     let mut had_error = false;
 
     for filename in &files {
-        let result = if filename == "-" {
-            let stdin = io::stdin();
-            let reader = BufReader::new(stdin.lock());
-            coreutils_rs::fmt::fmt_file(reader, &mut out, &config)
-        } else {
-            match File::open(filename) {
-                Ok(f) => {
-                    let reader = BufReader::new(f);
-                    coreutils_rs::fmt::fmt_file(reader, &mut out, &config)
+        // Read file data (mmap for files, read for stdin)
+        let data: FileData = if filename == "-" {
+            match read_stdin() {
+                Ok(d) => FileData::Owned(d),
+                Err(e) => {
+                    eprintln!("fmt: standard input: {}", io_error_msg(&e));
+                    had_error = true;
+                    continue;
                 }
+            }
+        } else {
+            match read_file_mmap(Path::new(filename)) {
+                Ok(d) => d,
                 Err(e) => {
                     eprintln!("fmt: {}: {}", filename, io_error_msg(&e));
                     had_error = true;
@@ -319,6 +323,7 @@ fn main() {
             }
         };
 
+        let result = fmt_data(&data, &mut out, &config);
         if let Err(e) = result {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 process::exit(0);
