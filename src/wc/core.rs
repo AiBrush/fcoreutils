@@ -21,25 +21,32 @@ pub struct WcCounts {
 // ──────────────────────────────────────────────────
 //
 // GNU wc uses 2-state word counting:
-//   0 = word content: starts or continues a word (any non-whitespace byte)
+//   0 = word content: starts or continues a word
 //   1 = space (word break): ends any current word
 //
-// Whitespace bytes (C locale): 0x09 TAB, 0x0A LF, 0x0B VT, 0x0C FF, 0x0D CR, 0x20 SPACE, 0xA0.
-// Everything else (including NUL, control chars, high bytes 0x80-0xFF except 0xA0) is word content.
+// C locale (GNU coreutils 9.4, Ubuntu 24.04): only printable ASCII 0x21-0x7E
+// is word content. All other bytes — NUL, control chars (0x00-0x1F), DEL (0x7F),
+// and high bytes (0x80-0xFF) — are word-break.
+//
+// UTF-8 locale: 0x09-0x0D, 0x20 (ASCII spaces) break words; multi-byte Unicode
+// spaces are detected via codepoint lookup. Everything else is word content.
 
 /// Byte classification for C/POSIX locale word counting.
-/// GNU wc treats whitespace as word breaks and everything else as word content.
-/// In C locale, whitespace bytes are 0x09-0x0D and 0x20 (matching POSIX isspace).
-///   0 = word content: starts or continues a word
-///   1 = space (word break): ends any current word
+/// Only printable ASCII (0x21-0x7E) is word content; all other bytes are word-break.
+/// Matches GNU coreutils 9.4 (Ubuntu 24.04) behavior.
+///   0 = word content (0x21-0x7E only)
+///   1 = word-break (everything else: NUL, controls, DEL, high bytes)
 const fn make_byte_class_c() -> [u8; 256] {
-    // GNU wc C locale: 0x09-0x0D, 0x20, AND 0xA0 break words.
-    // Verified on GNU coreutils 9.7: `printf 'a\xa0b' | env LC_ALL=C wc -w` => 2
-    // Note: `echo -e '\xe4\xbd\xa0' | LC_ALL=C wc -w` = 1 is NOT a distinguishing
-    // test (gives 1 regardless of 0xA0 treatment since nothing follows it).
-    // 0xA0 is the final byte of '你' (U+4F60 = E4 BD A0), so it splits adjacent CJK.
-    let mut t = make_byte_class_utf8();
-    t[0xA0] = 1;
+    let mut t = [1u8; 256]; // all word-break by default
+    // Only printable non-space ASCII is word content
+    let mut b = 0x21u8;
+    loop {
+        t[b as usize] = 0;
+        if b == 0x7E {
+            break;
+        }
+        b += 1;
+    }
     t
 }
 const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
@@ -119,10 +126,9 @@ pub fn count_words_locale(data: &[u8], utf8: bool) -> u64 {
     }
 }
 
-/// Count words in C/POSIX locale using 2-state logic matching GNU wc.
-/// GNU wc treats bytes as either whitespace (word break) or word content.
-/// Whitespace: 0x09-0x0D, 0x20, 0xA0.
-/// Everything else (including NUL, control chars, high bytes except 0xA0) is word content.
+/// Count words in C/POSIX locale using 2-state logic matching GNU wc 9.4.
+/// Only printable ASCII (0x21-0x7E) is word content.
+/// All other bytes (NUL, control chars, DEL 0x7F, high bytes 0x80-0xFF) are word-break.
 fn count_words_c(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;
@@ -147,8 +153,8 @@ fn count_words_c(data: &[u8]) -> u64 {
 
 /// AVX2-accelerated fused line+word counter for C locale chunks.
 /// Processes 32 bytes per iteration using 2-state logic:
-///   - Space bytes (0x09-0x0D, 0x20, 0xA0): word breaks
-///   - Everything else: word content (starts/continues words)
+///   - Word content: 0x21-0x7E (printable ASCII only; signed: b > 0x20 AND b < 0x7F)
+///   - Word-break: everything else (NUL, controls, DEL, high bytes 0x80-0xFF)
 /// Word transitions detected via bitmask: word_content_mask & ~prev_word_content_mask.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -166,11 +172,11 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm256_set1_epi8(b'\n' as i8);
         let zero = _mm256_setzero_si256();
         let ones = _mm256_set1_epi8(1);
-        // Space detection: 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale); NUL is word content
-        let space_char = _mm256_set1_epi8(0x20i8);
-        let tab_lo = _mm256_set1_epi8(0x08i8);
-        let tab_hi = _mm256_set1_epi8(0x0Ei8);
-        let nbsp_char = _mm256_set1_epi8(0xA0u8 as i8);
+        // Word content = 0x21-0x7E only (printable ASCII).
+        // Signed comparison: b > 0x20 (32) AND b < 0x7F (127).
+        // High bytes 0x80-0xFF are negative in signed, so they fail b > 0x20.
+        let lo = _mm256_set1_epi8(0x20i8); // 32
+        let hi = _mm256_set1_epi8(0x7Fi8); // 127
 
         let mut line_acc = _mm256_setzero_si256();
         let mut batch = 0u32;
@@ -180,17 +186,11 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // is_space = (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
-            let is_sp = _mm256_cmpeq_epi8(v, space_char);
-            let is_nbsp = _mm256_cmpeq_epi8(v, nbsp_char);
-            let gt_08 = _mm256_cmpgt_epi8(v, tab_lo);
-            let lt_0e = _mm256_cmpgt_epi8(tab_hi, v);
-            let is_tab_range = _mm256_and_si256(gt_08, lt_0e);
-            let is_space = _mm256_or_si256(_mm256_or_si256(is_sp, is_nbsp), is_tab_range);
-
-            let space_mask = _mm256_movemask_epi8(is_space) as u32;
-            // Word content = NOT space
-            let word_mask = !space_mask;
+            // Word content: b > 0x20 AND b < 0x7F (signed)
+            let gt_lo = _mm256_cmpgt_epi8(v, lo);
+            let lt_hi = _mm256_cmpgt_epi8(hi, v);
+            let is_word = _mm256_and_si256(gt_lo, lt_hi);
+            let word_mask = _mm256_movemask_epi8(is_word) as u32;
 
             // 2-state bitmask approach: count transitions from non-word to word
             let prev_mask = (word_mask << 1) | (prev_in_word as u32);
@@ -246,7 +246,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
 
 /// SSE2-accelerated fused line+word counter for C locale chunks.
 /// Same 2-state algorithm as AVX2 but processes 16 bytes per iteration.
-/// Space bytes: 0x09-0x0D, 0x20, 0xA0 (NUL is word content). Available on all x86_64 CPUs.
+/// Word content: 0x21-0x7E only (signed: b > 0x20 AND b < 0x7F).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
@@ -263,11 +263,10 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        // Space detection: 0x09-0x0D, 0x20, and 0xA0 (GNU wc C locale); NUL is word content
-        let space_char = _mm_set1_epi8(0x20i8);
-        let tab_lo = _mm_set1_epi8(0x08i8);
-        let tab_hi = _mm_set1_epi8(0x0Ei8);
-        let nbsp_char = _mm_set1_epi8(0xA0u8 as i8);
+        // Word content = 0x21-0x7E only (printable ASCII).
+        // Signed comparison: b > 0x20 (32) AND b < 0x7F (127).
+        let lo = _mm_set1_epi8(0x20i8); // 32
+        let hi = _mm_set1_epi8(0x7Fi8); // 127
 
         let mut line_acc = _mm_setzero_si128();
         let mut batch = 0u32;
@@ -277,17 +276,11 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            // is_space = (v == 0x20) | (v == 0xA0) | (v > 0x08 && v < 0x0E)
-            let is_sp = _mm_cmpeq_epi8(v, space_char);
-            let is_nbsp = _mm_cmpeq_epi8(v, nbsp_char);
-            let gt_08 = _mm_cmpgt_epi8(v, tab_lo);
-            let lt_0e = _mm_cmpgt_epi8(tab_hi, v);
-            let is_tab_range = _mm_and_si128(gt_08, lt_0e);
-            let is_space = _mm_or_si128(_mm_or_si128(is_sp, is_nbsp), is_tab_range);
-
-            let space_mask = _mm_movemask_epi8(is_space) as u32;
-            // Word content = NOT space (only 16 bits relevant)
-            let word_mask = (!space_mask) & 0xFFFF;
+            // Word content: b > 0x20 AND b < 0x7F (signed; only 16 bits relevant)
+            let gt_lo = _mm_cmpgt_epi8(v, lo);
+            let lt_hi = _mm_cmpgt_epi8(hi, v);
+            let is_word = _mm_and_si128(gt_lo, lt_hi);
+            let word_mask = (_mm_movemask_epi8(is_word) as u32) & 0xFFFF;
 
             // 2-state bitmask: count transitions from non-word to word
             let prev_mask = (word_mask << 1) | (prev_in_word as u32);
@@ -351,7 +344,7 @@ fn count_lw_c_chunk_fast(data: &[u8]) -> (u64, u64, bool, bool) {
 /// Count words + lines in a C locale chunk using 2-state logic, returning
 /// counts plus boundary info for parallel chunk merging.
 /// Returns (line_count, word_count, first_is_word_content, ends_in_word).
-/// GNU wc: whitespace (0x09-0x0D, 0x20) breaks words; everything else is word content.
+/// GNU wc 9.4: only printable ASCII (0x21-0x7E) is word content.
 fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     let mut lines = 0u64;
     let mut words = 0u64;
