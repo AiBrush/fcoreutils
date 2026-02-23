@@ -14,7 +14,7 @@ fn write_all_fd1(buf: &[u8]) {
             libc::write(
                 1,
                 buf[pos..].as_ptr() as *const libc::c_void,
-                buf.len() - pos,
+                (buf.len() - pos) as _,
             )
         };
         if ret > 0 {
