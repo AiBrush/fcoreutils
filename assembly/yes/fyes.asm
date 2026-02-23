@@ -30,7 +30,7 @@
 ;    - "-" alone is a regular string, not an option
 ;    - Multiple args joined with spaces, repeated on stdout forever
 ;    - No args → outputs "y\n" forever
-;    - SIGPIPE/EPIPE → clean exit 0 (no error message)
+;    - SIGPIPE/EPIPE → print error to stderr, exit 1 (GNU behavior)
 ;    - EINTR on write → automatic retry
 ;
 ;  ARCHITECTURE OVERVIEW
@@ -66,7 +66,8 @@
 ;                    --version:       option):
 ;                    print & exit 0   print & exit 1
 ;
-;  Syscall Surface (entire binary uses only 2 syscalls):
+;  Syscall Surface (entire binary uses only 3 syscalls):
+;    - SYS_RT_SIGPROCMASK (14): block SIGPIPE at startup
 ;    - SYS_WRITE (1): output to stdout/stderr
 ;    - SYS_EXIT  (60): terminate process
 ;
@@ -100,10 +101,10 @@
 ;  - No RWX memory segments (W^X policy)
 ;  - No dynamic linker (immune to LD_PRELOAD attacks)
 ;  - No file I/O (never calls open/openat/creat)
-;  - Minimal syscall surface (only write + exit)
+;  - Minimal syscall surface (only rt_sigprocmask + write + exit)
 ;  - Compile-time fixed memory layout (no heap corruption possible)
 ;  - EINTR-safe write loop (no signal-related data loss)
-;  - Clean EPIPE/SIGPIPE handling (exit 0, no crash)
+;  - EPIPE/SIGPIPE handling (print diagnostic to stderr, exit 1)
 ;
 ;  HOW TO MODIFY
 ;  =============
@@ -261,6 +262,21 @@ phdr_size equ $ - phdr              ; Size of one program header entry (56 bytes
 _start:
     pop     rcx                     ; rcx = argc (argument count)
     mov     r14, rsp                ; r14 = &argv[0] (saved for build_line)
+
+    ; ---- Block SIGPIPE so write() returns -EPIPE instead of killing us ----
+    ; rt_sigprocmask(SIG_BLOCK=0, &sigset, NULL, 8)
+    ; SIGPIPE=13; sigset bit = 1<<(13-1) = 1<<12 = 0x1000
+    push    rcx                     ; save argc (rcx will be clobbered)
+    sub     rsp, 16                 ; allocate 16 bytes for sigset_t on stack
+    mov     qword [rsp], 0x1000     ; sigset: bit 12 = SIGPIPE
+    mov     eax, 14                 ; SYS_RT_SIGPROCMASK = 14
+    xor     edi, edi                ; rdi = 0 (SIG_BLOCK)
+    mov     rsi, rsp                ; rsi = &new_set (on stack)
+    xor     edx, edx                ; rdx = NULL (old_set, don't care)
+    mov     r10d, 8                 ; r10 = sigsetsize = 8
+    syscall
+    add     rsp, 16                 ; free sigset_t
+    pop     rcx                     ; restore argc
 
     cmp     ecx, 2
     jl      .default                ; argc < 2 → no args, use default "y\n"
@@ -637,8 +653,9 @@ _start:
 ;
 ; This loop handles two special cases:
 ;   - EINTR (errno -4): The write was interrupted by a signal. Retry.
-;   - EPIPE/error (negative or zero return): The pipe was closed or
-;     another error occurred. Exit cleanly with code 0.
+;   - EPIPE (errno -32): The pipe was closed. Print diagnostic to stderr
+;     and exit with code 1 (GNU yes compatibility).
+;   - Other errors (negative or zero return): Exit with code 1.
 ;
 ; Note: `mov eax, edi` is a 2-byte instruction that copies fd (1) to eax
 ; for the SYS_WRITE syscall number. This is smaller than `mov eax, 1` (5
@@ -658,9 +675,24 @@ _start:
     test    eax, eax                ; positive return (bytes written)?
     jg      .write_loop             ; yes → keep writing
 
-    ; Zero or negative return (EPIPE, ENOSPC, EBADF, etc.) → exit
+    ; Zero or negative return — check if EPIPE for GNU-compatible diagnostic
+    cmp     eax, -32                ; returned -EPIPE?
+    jne     .write_exit_fail        ; not EPIPE → exit 1 without diagnostic
+
+    ; EPIPE: write "yes: standard output: Broken pipe\n" to stderr
+    mov     eax, 1                  ; SYS_WRITE
+    mov     edi, 2                  ; fd = stderr
+    mov     esi, broken_pipe_msg    ; buffer = error message
+    mov     edx, broken_pipe_msg_len ; length
+    syscall
+    jmp     .exit_fail              ; exit with code 1
+
+.write_exit_fail:
+    jmp     .exit_fail              ; exit with code 1
 
 ; ======================== Exit (success, code 0) ============================
+;
+; Used by --help and --version after successful output.
 
 .exit:
     xor     edi, edi                ; rdi = 0 (exit code)
@@ -775,7 +807,14 @@ err_suffix:     db 0x27, 0x0a, 0x54, 0x72, 0x79, 0x20, 0x27, 0x79, 0x65, 0x73, 0
                 db 0x70, 0x27, 0x20, 0x66, 0x6f, 0x72, 0x20, 0x6d, 0x6f, 0x72, 0x65, 0x20, 0x69, 0x6e, 0x66, 0x6f
                 db 0x72, 0x6d, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x2e, 0x0a
 err_suffix_len equ $ - err_suffix
+
 ; @@DATA_END@@
+
+; EPIPE diagnostic message (GNU yes compatibility — not patched by build.py)
+; "yes: standard output: Broken pipe\n"
+broken_pipe_msg:
+                db "yes: standard output: Broken pipe", 0x0a
+broken_pipe_msg_len equ $ - broken_pipe_msg
 
 file_end:
 ; ============================================================================
