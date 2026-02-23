@@ -62,14 +62,14 @@ fn main() {
     }
 
     if files.is_empty() {
-        if data_only || file_system {
+        if data_only {
             eprintln!(
-                "{}: --data and --file-system require at least one FILE argument",
+                "{}: --data needs at least one argument",
                 TOOL_NAME
             );
             process::exit(1);
         }
-        // sync all filesystems
+        // sync all filesystems (--file-system without file is the same as plain sync)
         #[cfg(unix)]
         unsafe {
             libc::sync();
@@ -79,10 +79,11 @@ fn main() {
         for file in &files {
             match sync_file(file, data_only, file_system) {
                 Ok(()) => {}
-                Err(e) => {
+                Err((phase, e)) => {
                     eprintln!(
-                        "{}: error syncing '{}': {}",
+                        "{}: error {} '{}': {}",
                         TOOL_NAME,
+                        phase,
                         file,
                         coreutils_rs::common::io_error_msg(&e)
                     );
@@ -96,12 +97,12 @@ fn main() {
     }
 }
 
-fn sync_file(path: &str, data_only: bool, file_system: bool) -> std::io::Result<()> {
+fn sync_file(path: &str, data_only: bool, file_system: bool) -> Result<(), (&'static str, std::io::Error)> {
     use std::fs::File;
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
 
-    let file = File::open(path)?;
+    let file = File::open(path).map_err(|e| ("opening", e))?;
 
     #[cfg(unix)]
     {
@@ -133,14 +134,14 @@ fn sync_file(path: &str, data_only: bool, file_system: bool) -> std::io::Result<
             unsafe { libc::fsync(fd) }
         };
         if ret != 0 {
-            return Err(std::io::Error::last_os_error());
+            return Err(("syncing", std::io::Error::last_os_error()));
         }
     }
 
     #[cfg(not(unix))]
     {
         let _ = (data_only, file_system);
-        file.sync_all()?;
+        file.sync_all().map_err(|e| ("syncing", e))?;
     }
 
     Ok(())
