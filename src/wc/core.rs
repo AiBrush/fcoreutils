@@ -182,12 +182,14 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // is_space = (v == 0x20) | (v > 0x08 && v < 0x0E)
+            // is_space = (v == 0x20) | (v > 0x08 && v < 0x0E) | (v == 0xA0)
             let is_sp = _mm256_cmpeq_epi8(v, space_char);
             let gt_08 = _mm256_cmpgt_epi8(v, tab_lo);
             let lt_0e = _mm256_cmpgt_epi8(tab_hi, v);
             let is_tab_range = _mm256_and_si256(gt_08, lt_0e);
-            let is_space = _mm256_or_si256(is_sp, is_tab_range);
+            let nbsp = _mm256_set1_epi8(0xa0u8 as i8);
+            let is_nbsp = _mm256_cmpeq_epi8(v, nbsp);
+            let is_space = _mm256_or_si256(_mm256_or_si256(is_sp, is_tab_range), is_nbsp);
 
             let space_mask = _mm256_movemask_epi8(is_space) as u32;
             // Word content = NOT space
@@ -279,12 +281,14 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            // is_space = (v == 0x20) | (v > 0x08 && v < 0x0E)
+            // is_space = (v == 0x20) | (v > 0x08 && v < 0x0E) | (v == 0xA0)
             let is_sp = _mm_cmpeq_epi8(v, space_char);
             let gt_08 = _mm_cmpgt_epi8(v, tab_lo);
             let lt_0e = _mm_cmpgt_epi8(tab_hi, v);
             let is_tab_range = _mm_and_si128(gt_08, lt_0e);
-            let is_space = _mm_or_si128(is_sp, is_tab_range);
+            let nbsp = _mm_set1_epi8(0xa0u8 as i8);
+            let is_nbsp = _mm_cmpeq_epi8(v, nbsp);
+            let is_space = _mm_or_si128(_mm_or_si128(is_sp, is_tab_range), is_nbsp);
 
             let space_mask = _mm_movemask_epi8(is_space) as u32;
             // Word content = NOT space (only 16 bits relevant)
