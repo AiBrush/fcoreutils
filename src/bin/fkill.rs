@@ -18,7 +18,7 @@ fn main() {
     }
 
     // Parse signal and PIDs
-    let mut signal = libc::SIGTERM;
+    let mut signal: i32 = 15; // SIGTERM
     let mut pids: Vec<i32> = Vec::new();
     let mut list_signals = false;
     let mut i = 0;
@@ -69,15 +69,39 @@ fn main() {
 
     let mut had_error = false;
     for pid in pids {
-        let ret = unsafe { libc::kill(pid, signal) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            eprintln!("kill: ({}) - {}", pid, err);
+        if let Err(e) = send_signal(pid, signal) {
+            eprintln!("kill: ({}) - {}", pid, e);
             had_error = true;
         }
     }
 
     process::exit(if had_error { 1 } else { 0 });
+}
+
+#[cfg(unix)]
+fn send_signal(pid: i32, signal: i32) -> Result<(), std::io::Error> {
+    let ret = unsafe { libc::kill(pid, signal) };
+    if ret != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn send_signal(pid: i32, _signal: i32) -> Result<(), std::io::Error> {
+    // On Windows, use taskkill to terminate processes
+    let output = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ))
+    }
 }
 
 fn parse_signal(s: &str) -> Option<i32> {
