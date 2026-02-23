@@ -207,16 +207,19 @@ fn main() {
 
     if start >= args.len() {
         eprintln!("{}: missing operand", TOOL_NAME);
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(EXIT_FAILURE);
     }
 
     let duration = parse_duration(&args[start]).unwrap_or_else(|| {
         eprintln!("{}: invalid time interval '{}'", TOOL_NAME, args[start]);
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(EXIT_FAILURE);
     });
 
     if start + 1 >= args.len() {
         eprintln!("{}: missing operand", TOOL_NAME);
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(EXIT_FAILURE);
     }
 
