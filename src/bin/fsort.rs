@@ -1,4 +1,5 @@
 use std::process;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use coreutils_rs::common::io_error_msg;
