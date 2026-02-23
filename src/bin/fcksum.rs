@@ -224,6 +224,7 @@ unsafe fn cksum_pclmul_chunk(buf: &mut [u8], mut crc: u32) -> u32 {
 }
 
 /// Read as many bytes as possible into buf, retrying on EINTR.
+#[cfg(target_arch = "x86_64")]
 fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
     let mut total = 0;
     while total < buf.len() {
