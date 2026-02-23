@@ -25,7 +25,8 @@ fn print_version() {
 }
 
 fn run(input: &str, source_name: &str) -> i32 {
-    // Parse tokens
+    // Parse tokens — use byte offsets into the input string to avoid allocations.
+    // Each "token" is stored as a (start, end) pair referencing the input.
     let tokens: Vec<&str> = input.split_whitespace().collect();
 
     if !tokens.len().is_multiple_of(2) {
@@ -36,26 +37,22 @@ fn run(input: &str, source_name: &str) -> i32 {
         return 1;
     }
 
-    // Use integer node IDs to avoid string cloning throughout the algorithm
-    let mut node_names: Vec<String> = Vec::new();
-    let mut name_to_id: HashMap<String, usize> = HashMap::new();
-
-    let get_id = |name: &str, names: &mut Vec<String>, map: &mut HashMap<String, usize>| -> usize {
-        use std::collections::hash_map::Entry;
-        match map.entry(name.to_string()) {
-            Entry::Occupied(e) => *e.get(),
-            Entry::Vacant(e) => {
-                let id = names.len();
-                names.push(e.key().clone());
-                *e.insert(id)
-            }
-        }
-    };
+    // Use integer node IDs. Store &str references into input to avoid String allocations.
+    let mut node_names: Vec<&str> = Vec::new();
+    let mut name_to_id: HashMap<&str, usize> = HashMap::new();
 
     let mut edge_pairs: Vec<(usize, usize)> = Vec::with_capacity(tokens.len() / 2);
     for pair in tokens.chunks(2) {
-        let from = get_id(pair[0], &mut node_names, &mut name_to_id);
-        let to = get_id(pair[1], &mut node_names, &mut name_to_id);
+        let from = *name_to_id.entry(pair[0]).or_insert_with(|| {
+            let id = node_names.len();
+            node_names.push(pair[0]);
+            id
+        });
+        let to = *name_to_id.entry(pair[1]).or_insert_with(|| {
+            let id = node_names.len();
+            node_names.push(pair[1]);
+            id
+        });
         edge_pairs.push((from, to));
     }
 
@@ -94,7 +91,8 @@ fn run(input: &str, source_name: &str) -> i32 {
         while let Some(node) = queue.pop_front() {
             processed += 1;
             removed[node] = true;
-            let _ = writeln!(out, "{}", node_names[node]);
+            let _ = out.write_all(node_names[node].as_bytes());
+            let _ = out.write_all(b"\n");
             let mut new_zeros = Vec::new();
             for &nb in &adj[node] {
                 if removed[nb] {
