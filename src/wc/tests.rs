@@ -549,9 +549,9 @@ fn test_c_locale_cjk_word_count() {
     // Full test data:
     // "Hello, 世界!\n你好世界\nこんにちは\n"
     // Line 1: "Hello," (word 1) + space + "世界!" (word 2) + newline
-    // Line 2: "你好世界" (word 3) + newline
+    // Line 2: "你好世界" (word 3) + newline  [0xa0 is NOT whitespace in C locale]
     // Line 3: "こんにちは" (word 4) + newline
-    // Total: 4 words
+    // Total: 4 words (verified: `echo -e '\xe4\xbd\xa0' | LC_ALL=C wc -w` = 1)
     let full = "Hello, 世界!\n你好世界\nこんにちは\n".as_bytes();
     assert_eq!(count_words_locale(full, false), 4);
 }
