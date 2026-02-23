@@ -24,8 +24,8 @@ pub struct WcCounts {
 //   0 = word content: starts or continues a word (any non-whitespace byte)
 //   1 = space (word break): ends any current word
 //
-// Whitespace bytes: 0x00 NUL, 0x09 TAB, 0x0A LF, 0x0B VT, 0x0C FF, 0x0D CR, 0x20 SPACE, 0xA0.
-// Everything else (control chars, high bytes 0x80-0xFF except 0xA0) is word content.
+// Whitespace bytes: 0x09 TAB, 0x0A LF, 0x0B VT, 0x0C FF, 0x0D CR, 0x20 SPACE, 0xA0.
+// Everything else (including NUL, control chars, high bytes 0x80-0xFF except 0xA0) is word content.
 
 /// Byte classification for C/POSIX locale word counting.
 /// GNU wc treats whitespace as word breaks and everything else as word content.
@@ -48,9 +48,7 @@ const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
 /// Multi-byte UTF-8 sequences are handled by the state machine separately.
 const fn make_byte_class_utf8() -> [u8; 256] {
     let mut t = [0u8; 256]; // default: word content
-    // NUL is not word content (GNU wc: file of only NUL bytes has 0 words)
-    t[0x00] = 1; // NUL — word break
-    // Spaces (only these break words — everything else is word content)
+    // Spaces (only these break words — everything else including NUL is word content)
     t[0x09] = 1; // \t
     t[0x0A] = 1; // \n
     t[0x0B] = 1; // \v
@@ -123,8 +121,8 @@ pub fn count_words_locale(data: &[u8], utf8: bool) -> u64 {
 
 /// Count words in C/POSIX locale using 2-state logic matching GNU wc.
 /// GNU wc treats bytes as either whitespace (word break) or word content.
-/// Whitespace: 0x00 NUL, 0x09-0x0D, 0x20, 0xA0.
-/// Everything else (control chars, high bytes except 0xA0) is word content.
+/// Whitespace: 0x09-0x0D, 0x20, 0xA0.
+/// Everything else (including NUL, control chars, high bytes except 0xA0) is word content.
 fn count_words_c(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;
@@ -149,7 +147,7 @@ fn count_words_c(data: &[u8]) -> u64 {
 
 /// AVX2-accelerated fused line+word counter for C locale chunks.
 /// Processes 32 bytes per iteration using 2-state logic:
-///   - Space bytes (0x00, 0x09-0x0D, 0x20, 0xA0): word breaks
+///   - Space bytes (0x09-0x0D, 0x20, 0xA0): word breaks
 ///   - Everything else: word content (starts/continues words)
 /// Word transitions detected via bitmask: word_content_mask & ~prev_word_content_mask.
 #[cfg(target_arch = "x86_64")]
