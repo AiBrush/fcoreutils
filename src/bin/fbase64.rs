@@ -233,7 +233,12 @@ fn main() {
         if e.kind() == io::ErrorKind::BrokenPipe {
             process::exit(0);
         }
-        if filename != "-" {
+        // GNU base64 prints "base64: invalid input" without the filename
+        // for decode errors (InvalidData), but includes the filename for
+        // I/O errors (file not found, permission denied, etc.).
+        if e.kind() == io::ErrorKind::InvalidData {
+            eprintln!("base64: {}", io_error_msg(&e));
+        } else if filename != "-" {
             eprintln!("base64: {}: {}", filename, io_error_msg(&e));
         } else {
             eprintln!("base64: {}", io_error_msg(&e));

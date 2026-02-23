@@ -277,6 +277,171 @@ fn test_process_multiline_bytes() {
     assert_eq!(result, "hel\nwor\n");
 }
 
+// --- Complement field tests (process_cut_data) ---
+
+#[test]
+fn test_complement_field_f1() {
+    // --complement -f1: output all fields except field 1
+    let result = process_data_str(
+        "a,b,c,d\n",
+        CutMode::Fields,
+        "1",
+        b',',
+        true,
+        false,
+        None,
+        b'\n',
+    );
+    assert_eq!(result, "b,c,d\n");
+}
+
+#[test]
+fn test_complement_field_f2() {
+    // --complement -f2: output all fields except field 2
+    let result = process_data_str(
+        "a,b,c,d\n",
+        CutMode::Fields,
+        "2",
+        b',',
+        true,
+        false,
+        None,
+        b'\n',
+    );
+    assert_eq!(result, "a,c,d\n");
+}
+
+#[test]
+fn test_complement_bytes_b1_3() {
+    // --complement -b1-3: output all bytes except 1-3
+    let result = process_data_str(
+        "hello\n",
+        CutMode::Bytes,
+        "1-3",
+        b'\t',
+        true,
+        false,
+        None,
+        b'\n',
+    );
+    assert_eq!(result, "lo\n");
+}
+
+#[test]
+fn test_complement_field_multiline() {
+    let result = process_data_str(
+        "a:b:c\nx:y:z\n",
+        CutMode::Fields,
+        "2",
+        b':',
+        true,
+        false,
+        None,
+        b'\n',
+    );
+    assert_eq!(result, "a:c\nx:z\n");
+}
+
+// --- Output delimiter tests ---
+
+#[test]
+fn test_output_delimiter_fields() {
+    // --output-delimiter=':' with comma-delimited fields
+    let result = process_data_str(
+        "a,b,c\n",
+        CutMode::Fields,
+        "1,3",
+        b',',
+        false,
+        false,
+        Some(b":"),
+        b'\n',
+    );
+    assert_eq!(result, "a:c\n");
+}
+
+#[test]
+fn test_output_delimiter_bytes() {
+    // --output-delimiter=':' with byte selection
+    let result = process_data_str(
+        "hello\n",
+        CutMode::Bytes,
+        "1,3,5",
+        b'\t',
+        false,
+        false,
+        Some(b":"),
+        b'\n',
+    );
+    assert_eq!(result, "h:l:o\n");
+}
+
+#[test]
+fn test_output_delimiter_complement_fields() {
+    // --complement --output-delimiter=':' -f2
+    let result = process_data_str(
+        "a,b,c,d\n",
+        CutMode::Fields,
+        "2",
+        b',',
+        true,
+        false,
+        Some(b":"),
+        b'\n',
+    );
+    assert_eq!(result, "a:c:d\n");
+}
+
+// --- Zero-terminated (-z) tests ---
+
+#[test]
+fn test_zero_terminated_fields() {
+    // -z: NUL-delimited input and output
+    let result = process_data_str(
+        "a,b\0c,d\0",
+        CutMode::Fields,
+        "1",
+        b',',
+        false,
+        false,
+        None,
+        b'\0',
+    );
+    assert_eq!(result, "a\0c\0");
+}
+
+#[test]
+fn test_zero_terminated_bytes() {
+    // -z with byte selection
+    let result = process_data_str(
+        "hello\0world\0",
+        CutMode::Bytes,
+        "1-3",
+        b'\t',
+        false,
+        false,
+        None,
+        b'\0',
+    );
+    assert_eq!(result, "hel\0wor\0");
+}
+
+#[test]
+fn test_zero_terminated_complement() {
+    // -z with --complement
+    let result = process_data_str(
+        "a,b,c\0x,y,z\0",
+        CutMode::Fields,
+        "2",
+        b',',
+        true,
+        false,
+        None,
+        b'\0',
+    );
+    assert_eq!(result, "a,c\0x,z\0");
+}
+
 // --- Return value tests ---
 
 #[test]
