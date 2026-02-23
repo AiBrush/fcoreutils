@@ -1692,7 +1692,9 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
     // For TTYs: use a 64 KB BufWriter for performance.
     #[cfg(target_os = "linux")]
     if !is_tty {
-        unsafe { libc::fcntl(1, 1031 /* F_SETPIPE_SZ */, 4096i32) };
+        unsafe {
+            libc::fcntl(1, 1031 /* F_SETPIPE_SZ */, 4096i32)
+        };
     }
     let buf_cap = if is_tty { 64 * 1024 } else { 4 * 1024 };
     let mut out = BufWriter::with_capacity(buf_cap, stdout.lock());
