@@ -2902,9 +2902,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         let mut c_buf = vec![0u8; 512];
                         key_offs
                             .iter()
-                            .map(|&(sa, ea)| {
-                                compute_xfrm_key_reuse(&data[sa..ea], &mut c_buf)
-                            })
+                            .map(|&(sa, ea)| compute_xfrm_key_reuse(&data[sa..ea], &mut c_buf))
                             .collect()
                     };
                     // If any strxfrm failed (e.g. invalid multibyte sequence),
@@ -3085,9 +3083,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 } else {
                     let mut c_buf = vec![0u8; 512];
                     ko.iter()
-                        .map(|&(sa, ea)| {
-                            compute_xfrm_key_reuse(&data[sa..ea], &mut c_buf)
-                        })
+                        .map(|&(sa, ea)| compute_xfrm_key_reuse(&data[sa..ea], &mut c_buf))
                         .collect()
                 };
                 // If any key in this column failed strxfrm (e.g. invalid
