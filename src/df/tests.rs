@@ -476,7 +476,11 @@ fn test_total_line() {
     // print_total_line emits header + data row
     assert!(lines.len() >= 2);
     let total_line = lines.last().unwrap();
-    assert!(total_line.starts_with("total"), "expected total line, got: {:?}", total_line);
+    assert!(
+        total_line.starts_with("total"),
+        "expected total line, got: {:?}",
+        total_line
+    );
     // Total size: (100+200)*1024 bytes / 1024 block_size = 300
     assert!(total_line.contains("300"));
 }
