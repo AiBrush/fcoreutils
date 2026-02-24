@@ -1796,22 +1796,7 @@ fn decode_clean_slice(data: &mut [u8], out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
-    match BASE64_ENGINE.decode_inplace(data) {
-        Ok(decoded) => out.write_all(decoded),
-        Err(_) => {
-            // Try padding truncated input (GNU base64 accepts missing padding).
-            let remainder = data.len() % 4;
-            if remainder == 2 || remainder == 3 {
-                let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
-                padded.extend_from_slice(data);
-                padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
-                if let Ok(decoded) = BASE64_ENGINE.decode_inplace(&mut padded) {
-                    return out.write_all(decoded);
-                }
-            }
-            decode_error()
-        }
-    }
+    decode_inplace_with_padding(data, out)
 }
 
 /// Cold error path — keeps hot decode path tight by moving error construction out of line.
@@ -1830,11 +1815,16 @@ fn decode_inplace_with_padding(data: &mut [u8], out: &mut impl Write) -> io::Res
         Err(_) => {
             let remainder = data.len() % 4;
             if remainder == 2 || remainder == 3 {
+                let has_existing_padding = memchr::memchr(b'=', data).is_some();
                 let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
                 padded.extend_from_slice(data);
                 padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
                 if let Ok(decoded) = BASE64_ENGINE.decode_inplace(&mut padded) {
-                    return out.write_all(decoded);
+                    out.write_all(decoded)?;
+                    if has_existing_padding {
+                        return decode_error();
+                    }
+                    return Ok(());
                 }
             }
             decode_error()
@@ -1855,10 +1845,17 @@ fn decode_borrowed_clean(out: &mut impl Write, data: &[u8]) -> io::Result<()> {
     // If input has truncated padding, pad it first (GNU base64 accepts missing padding).
     let remainder = data.len() % 4;
     if remainder == 2 || remainder == 3 {
+        // If input already has '=' but length mod 4 != 0, the padding is
+        // wrong/truncated. GNU base64 still decodes but reports error.
+        let has_existing_padding = memchr::memchr(b'=', data).is_some();
         let mut padded = Vec::with_capacity(data.len() + (4 - remainder));
         padded.extend_from_slice(data);
         padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
-        return decode_borrowed_clean(out, &padded);
+        let result = decode_borrowed_clean(out, &padded);
+        if has_existing_padding && result.is_ok() {
+            return decode_error();
+        }
+        return result;
     }
     // Pre-allocate exact output size to avoid decode_to_vec's reallocation.
     // Decoded size = data.len() * 3 / 4 minus padding.

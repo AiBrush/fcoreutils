@@ -523,6 +523,27 @@ fn main() {
         process::exit(1);
     }
 
+    // Parse and validate timestamps once, reusing the result below
+    let parsed_stamp = stamp.as_deref().map(parse_touch_timestamp);
+    let parsed_date = date_str.as_deref().map(parse_date_string);
+
+    if let Some(Err(_)) = &parsed_stamp {
+        eprintln!(
+            "{}: invalid date format '{}'",
+            TOOL_NAME,
+            stamp.as_deref().unwrap()
+        );
+        process::exit(1);
+    }
+    if let Some(Err(_)) = &parsed_date {
+        eprintln!(
+            "{}: invalid date format '{}'",
+            TOOL_NAME,
+            date_str.as_deref().unwrap()
+        );
+        process::exit(1);
+    }
+
     // Determine the timestamp to apply
     let (ts_sec, ts_nsec) = if let Some(ref r) = reference {
         match get_file_times(r) {
@@ -540,22 +561,10 @@ fn main() {
                 process::exit(1);
             }
         }
-    } else if let Some(ref d) = date_str {
-        match parse_date_string(d) {
-            Ok((sec, nsec)) => (sec, nsec),
-            Err(e) => {
-                eprintln!("{}: invalid date format '{}': {}", TOOL_NAME, d, e);
-                process::exit(1);
-            }
-        }
-    } else if let Some(ref st) = stamp {
-        match parse_touch_timestamp(st) {
-            Ok((sec, nsec)) => (sec, nsec),
-            Err(e) => {
-                eprintln!("{}: invalid date format '{}': {}", TOOL_NAME, st, e);
-                process::exit(1);
-            }
-        }
+    } else if let Some(Ok((sec, nsec))) = parsed_date {
+        (sec, nsec)
+    } else if let Some(Ok((sec, nsec))) = parsed_stamp {
+        (sec, nsec)
     } else {
         current_time()
     };

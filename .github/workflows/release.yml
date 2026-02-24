@@ -176,13 +176,15 @@ jobs:
           mkdir -p release
           BINDIR="target/${{ matrix.target }}/release"
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            for bin in fwc fcut fbase64 fsha256sum fsort ftr funiq fb2sum ftac fmd5sum fyes; do
-              cp "${BINDIR}/${bin}.exe" release/ 2>/dev/null || true
+            # Copy ALL f* binaries (not just a hardcoded subset)
+            for bin in "${BINDIR}"/f*.exe; do
+              [ -f "$bin" ] && cp "$bin" release/
             done
             7z a fcoreutils-${{ matrix.target }}.zip release/*
           else
-            for bin in fwc fcut fbase64 fsha256sum fsort ftr funiq fb2sum ftac fmd5sum fyes; do
-              cp "${BINDIR}/${bin}" release/ 2>/dev/null || true
+            # Copy ALL f* binaries (not just a hardcoded subset)
+            for bin in "${BINDIR}"/f*; do
+              [ -f "$bin" ] && [ -x "$bin" ] && [[ "$(basename "$bin")" != *.* ]] && cp "$bin" release/
             done
             # On Linux x86_64: replace the Rust fyes with the NASM flat-binary assembly.
             if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
@@ -218,6 +220,9 @@ jobs:
             fi
             tar -czf fcoreutils-${{ matrix.target }}.tar.gz -C release .
           fi
+          echo "Packaged $(ls release/ | wc -l) binaries:"
+          ls release/ | head -20
+          echo "..."
 
       - name: Upload archive
         uses: actions/upload-artifact@v6

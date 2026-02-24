@@ -257,8 +257,12 @@ fn reflow_paragraph<W: Write>(
     let width = config.width;
     let uniform = config.uniform_spacing;
 
+    // GNU fmt cost model: SHORT_COST(n) = EQUIV(n*10) = (n*10)^2 = n^2 * 100
+    // RAGGED_COST(n) = SHORT_COST(n) / 2 = n^2 * 50
+    // LINE_COST = EQUIV(70) = 4900, SENTENCE_BONUS = EQUIV(50) = 2500
+    const SHORT_FACTOR: i64 = 100;
+    const RAGGED_FACTOR: i64 = 50;
     const LINE_COST: i64 = 70 * 70;
-    const NOBREAK_COST: i64 = 600 * 600;
     const SENTENCE_BONUS: i64 = 50 * 50;
     const SENT_FLAG: u32 = 1 << 16;
 
@@ -311,25 +315,23 @@ fn reflow_paragraph<W: Write>(
                 len += sep + unsafe { (*winfo_ptr.add(j) & 0xFFFF) as usize };
             }
 
-            if len > width {
-                if j == i {
+            // Compute line cost for placing words i..=j on one line.
+            // Extracted to avoid duplication between the overflow and normal branches.
+            macro_rules! try_candidate {
+                () => {
                     let lc = if j == n - 1 {
                         0i64
                     } else {
                         let bc = if unsafe { *winfo_ptr.add(j) & SENT_FLAG != 0 } {
-                            if uniform {
-                                LINE_COST - SENTENCE_BONUS
-                            } else {
-                                LINE_COST + NOBREAK_COST
-                            }
+                            LINE_COST - SENTENCE_BONUS
                         } else {
                             LINE_COST
                         };
                         let short_n = goal - len as i64;
-                        let short_cost = short_n * 10 * short_n * 10;
+                        let short_cost = short_n * short_n * SHORT_FACTOR;
                         let ragged_cost = if unsafe { *best_ptr.add(j + 1) as usize + 1 < n } {
                             let ragged_n = len as i64 - unsafe { *line_len_ptr.add(j + 1) } as i64;
-                            ragged_n * 10 * ragged_n * 10 / 2
+                            ragged_n * ragged_n * RAGGED_FACTOR
                         } else {
                             0
                         };
@@ -344,42 +346,17 @@ fn reflow_paragraph<W: Write>(
                             best_len = len as i32;
                         }
                     }
+                };
+            }
+
+            if len > width {
+                if j == i {
+                    try_candidate!();
                 }
                 break;
             }
 
-            let lc = if j == n - 1 {
-                0i64
-            } else {
-                let bc = if unsafe { *winfo_ptr.add(j) & SENT_FLAG != 0 } {
-                    if uniform {
-                        LINE_COST - SENTENCE_BONUS
-                    } else {
-                        LINE_COST + NOBREAK_COST
-                    }
-                } else {
-                    LINE_COST
-                };
-                let short_n = goal - len as i64;
-                let short_cost = short_n * 10 * short_n * 10;
-                let ragged_cost = if unsafe { *best_ptr.add(j + 1) as usize + 1 < n } {
-                    let ragged_n = len as i64 - unsafe { *line_len_ptr.add(j + 1) } as i64;
-                    ragged_n * 10 * ragged_n * 10 / 2
-                } else {
-                    0
-                };
-                bc + short_cost + ragged_cost
-            };
-
-            let cj1 = unsafe { *dp_cost_ptr.add(j + 1) };
-            if cj1 != i64::MAX {
-                let total = lc + cj1;
-                if total < best_total {
-                    best_total = total;
-                    best_j = j as u32;
-                    best_len = len as i32;
-                }
-            }
+            try_candidate!();
         }
 
         if best_total < i64::MAX {
@@ -457,23 +434,18 @@ fn split_long_line<W: Write>(
     output.write_all(pfx.as_bytes())?;
     output.write_all(indent.as_bytes())?;
 
-    for (i, word) in s.split_whitespace().enumerate() {
-        let sep_len = if first_word_on_line {
-            0
-        } else if config.uniform_spacing && i > 0 {
-            // Check the previous word for sentence end - we can't easily do this
-            // without tracking, so use 1 for safety
-            1
-        } else {
-            1
-        };
-
-        if !first_word_on_line && cur_len + sep_len + word.len() > config.width {
-            output.write_all(b"\n")?;
-            output.write_all(pfx.as_bytes())?;
-            output.write_all(indent.as_bytes())?;
-            cur_len = pfx_indent_len;
-            first_word_on_line = true;
+    // GNU fmt -s uses the goal width for soft-breaking, and width as hard limit.
+    // Break preferentially at goal, but always break before exceeding width.
+    for word in s.split_whitespace() {
+        if !first_word_on_line {
+            let new_len = cur_len + 1 + word.len();
+            if new_len > config.width || (new_len > config.goal && cur_len > pfx_indent_len) {
+                output.write_all(b"\n")?;
+                output.write_all(pfx.as_bytes())?;
+                output.write_all(indent.as_bytes())?;
+                cur_len = pfx_indent_len;
+                first_word_on_line = true;
+            }
         }
 
         if !first_word_on_line {

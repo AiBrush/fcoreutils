@@ -63,9 +63,10 @@ fn main() {
 
     if files.is_empty() {
         if data_only || file_system {
+            let flag = if data_only { "--data" } else { "--file-system" };
             eprintln!(
-                "{}: --data and --file-system require at least one FILE argument",
-                TOOL_NAME
+                "{}: {} requires at least one FILE argument",
+                TOOL_NAME, flag
             );
             process::exit(1);
         }
