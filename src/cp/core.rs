@@ -195,11 +195,10 @@ fn preserve_attributes_from_meta(
     dst: &Path,
     config: &CpConfig,
 ) -> io::Result<()> {
-    // Always copy source permissions to match std::fs::copy / GNU cp behavior.
-    // When preserve_mode is NOT set, copy permissions masked by umask (matching
-    // GNU cp default behavior). When preserve_mode IS set, copy exact permissions.
+    // Only chmod when -p/--preserve=mode is set. Without it, the destination
+    // keeps its O_CREAT permissions (source_mode & ~umask), matching GNU cp.
     #[cfg(unix)]
-    {
+    if config.preserve_mode {
         let mode = meta.mode();
         std::fs::set_permissions(dst, std::fs::Permissions::from_mode(mode))?;
     }
@@ -254,27 +253,41 @@ fn preserve_attributes_from_meta(
 
 /// Copy file data using a thread-local buffer (up to 4MB, capped to file size).
 /// Avoids stdlib's 64KB default buffer and amortizes allocation across files.
-fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64) -> io::Result<()> {
+/// Creates the destination with `src_mode` so the kernel applies the process umask.
+fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64, src_mode: u32) -> io::Result<()> {
     use std::cell::RefCell;
     use std::io::{Read, Write};
     const MAX_BUF: usize = 4 * 1024 * 1024; // 4 MB
+    /// Shrink the thread-local buffer when it exceeds this size and the current
+    /// file needs much less, to avoid holding 4 MB per Rayon thread permanently.
+    const SHRINK_THRESHOLD: usize = 512 * 1024; // 512 KB
 
     thread_local! {
         static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
 
-    let buf_size = (src_len as usize).clamp(8192, MAX_BUF);
+    // Safe on 32-bit: clamp via u64 before casting to usize.
+    let buf_size = src_len.min(MAX_BUF as u64).max(8192) as usize;
 
     let mut reader = std::fs::File::open(src)?;
-    let mut writer = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dst)?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(src_mode);
+    }
+    #[cfg(not(unix))]
+    let _ = src_mode;
+    let mut writer = opts.open(dst)?;
 
     BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
-        if buf.len() < buf_size {
+        // Shrink if buffer is much larger than needed to limit per-thread memory.
+        if buf.len() > SHRINK_THRESHOLD && buf_size < buf.len() / 4 {
+            buf.resize(buf_size, 0);
+            buf.shrink_to_fit();
+        } else if buf.len() < buf_size {
             buf.resize(buf_size, 0);
         }
         loop {
@@ -291,7 +304,8 @@ fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64) -> io::Result<()> {
 // ---- Linux copy_file_range optimisation ----
 
 #[cfg(target_os = "linux")]
-fn copy_file_range_linux(src: &Path, dst: &Path) -> io::Result<()> {
+fn copy_file_range_linux(src: &Path, dst: &Path, src_mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
     let src_file = std::fs::File::open(src)?;
@@ -302,6 +316,7 @@ fn copy_file_range_linux(src: &Path, dst: &Path) -> io::Result<()> {
         .write(true)
         .create(true)
         .truncate(true)
+        .mode(src_mode)
         .open(dst)?;
 
     let mut remaining = len as i64;
@@ -435,8 +450,10 @@ fn copy_file_with_meta(
 
     // Try Linux copy_file_range for zero-copy.
     #[cfg(target_os = "linux")]
+    let src_mode_bits = src_meta.mode();
+    #[cfg(target_os = "linux")]
     {
-        match copy_file_range_linux(src, dst) {
+        match copy_file_range_linux(src, dst, src_mode_bits) {
             Ok(()) => {
                 preserve_attributes_from_meta(src_meta, dst, config)?;
                 return Ok(());
@@ -454,7 +471,11 @@ fn copy_file_with_meta(
     }
 
     // Fallback: large-buffer copy (up to 4MB vs stdlib's 64KB).
-    copy_data_large_buf(src, dst, src_meta.len())?;
+    #[cfg(unix)]
+    let mode = src_meta.mode();
+    #[cfg(not(unix))]
+    let mode = 0o666u32;
+    copy_data_large_buf(src, dst, src_meta.len(), mode)?;
     preserve_attributes_from_meta(src_meta, dst, config)?;
     Ok(())
 }
@@ -504,6 +525,15 @@ fn copy_recursive(
             } else {
                 std::fs::symlink_metadata(&child_src)?
             };
+            // Check --one-file-system for all entries (not just directories).
+            #[cfg(unix)]
+            if config.one_file_system {
+                if let Some(dev) = root_dev {
+                    if meta.dev() != dev {
+                        continue;
+                    }
+                }
+            }
             if meta.is_dir() {
                 dirs.push((child_src, child_dst));
             } else {
@@ -511,8 +541,12 @@ fn copy_recursive(
             }
         }
 
+        /// Minimum number of files before we parallelize copies within a directory.
+        /// Rayon dispatch overhead dominates below this threshold (empirical).
+        const PARALLEL_FILE_THRESHOLD: usize = 8;
+
         // Copy files in parallel using Rayon when there are enough to benefit.
-        if files.len() > 4 {
+        if files.len() >= PARALLEL_FILE_THRESHOLD {
             use rayon::prelude::*;
             let result: Result<(), io::Error> =
                 files
