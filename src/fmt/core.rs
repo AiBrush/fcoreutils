@@ -365,6 +365,7 @@ fn reflow_paragraph<W: Write>(
     let cont_base = prefix.len() + cont_indent.len();
     let goal = config.goal as i64;
     let width = config.width;
+    debug_assert_eq!(sentence_ends.len(), words.len());
 
     // GNU fmt cost model (from coreutils fmt.c):
     // EQUIV(n)       = n²
@@ -549,7 +550,7 @@ fn reflow_paragraph<W: Write>(
         for k in (i + 1)..=j {
             // GNU fmt uses 2 spaces after sentence-ending punctuation
             // (only when the original input had 2+ spaces or end-of-line after it)
-            if sentence_ends.get(k - 1).copied().unwrap_or(false) {
+            if sentence_ends[k - 1] {
                 output.write_all(b"  ")?;
             } else {
                 output.write_all(b" ")?;
