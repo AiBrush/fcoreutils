@@ -849,10 +849,11 @@ fn print_row(
 }
 
 /// Print the df output header only (one line).
+/// Note: widths are computed from header alone. For aligned output with data,
+/// use `print_table()` which computes widths over all rows at once.
 pub fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
     let header = build_header_row(config);
-    let empty: Vec<Vec<String>> = vec![];
-    let widths = compute_widths(&header, &empty, config);
+    let widths = compute_widths(&header, &[], config);
     let aligns = get_col_alignments(config, header.len());
     print_row(&header, &widths, &aligns, out)
 }

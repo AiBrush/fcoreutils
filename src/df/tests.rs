@@ -517,10 +517,10 @@ fn test_output_mode_source_column_min_width() {
         "source column should be at least 14 chars wide, got: {:?}",
         lines[0]
     );
-    // Data line "tmpfs" (5 chars) should also be padded to match
+    // Data line "tmpfs" (5 chars) should be padded to at least 14 chars
     assert!(
-        lines[1].starts_with("tmpfs"),
-        "data line should start with source, got: {:?}",
+        lines[1].starts_with("tmpfs         "),
+        "source column should be padded to at least 14 chars wide, got: {:?}",
         lines[1]
     );
 }
