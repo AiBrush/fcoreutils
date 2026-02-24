@@ -56,10 +56,10 @@ jobs:
         run: |
           mkdir -p artifacts/release artifacts/test-bins
           # Compile test harnesses and capture executable paths via JSON output
-          # (stderr shows compilation progress, stdout has JSON for jq)
-          cargo test --release --no-run --message-format=json 2>&1 | \
-            tee /dev/stderr | \
+          # stderr (compilation progress) goes to log file; stdout (JSON) goes to jq
+          cargo test --release --no-run --message-format=json 2>compile_log.txt | \
             jq -r 'select(.reason == "compiler-artifact") | select(.executable != null) | select(.profile.test == true) | .executable' > test_executables.txt
+          cat compile_log.txt
           # Copy f* release binaries (exclude .d dependency files)
           for f in target/release/f*; do
             [ -f "$f" ] && [ -x "$f" ] && [[ "$f" != *.d ]] && cp "$f" artifacts/release/
@@ -96,9 +96,9 @@ jobs:
       - name: Compile tests and collect artifacts
         run: |
           mkdir -p artifacts/release artifacts/test-bins
-          cargo test --release --no-run --message-format=json 2>&1 | \
-            tee /dev/stderr | \
+          cargo test --release --no-run --message-format=json 2>compile_log.txt | \
             jq -r 'select(.reason == "compiler-artifact") | select(.executable != null) | select(.profile.test == true) | .executable' > test_executables.txt
+          cat compile_log.txt
           for f in target/release/f*; do
             [ -f "$f" ] && [ -x "$f" ] && [[ "$f" != *.d ]] && cp "$f" artifacts/release/
           done
@@ -133,9 +133,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts/release artifacts/test-bins
-          cargo test --release --no-run --message-format=json 2>&1 | \
-            tee /dev/stderr | \
+          cargo test --release --no-run --message-format=json 2>compile_log.txt | \
             jq -r 'select(.reason == "compiler-artifact") | select(.executable != null) | select(.profile.test == true) | .executable' > test_executables.txt
+          cat compile_log.txt
           # On Windows, binaries have .exe extension
           for f in target/release/f*.exe; do
             [ -f "$f" ] && cp "$f" artifacts/release/
