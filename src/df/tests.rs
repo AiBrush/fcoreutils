@@ -471,8 +471,54 @@ fn test_total_line() {
     ];
     let mut buf = Vec::new();
     print_total_line(&filesystems, &config, &mut buf).unwrap();
-    let line = String::from_utf8(buf).unwrap();
-    assert!(line.starts_with("total"));
+    let output = String::from_utf8(buf).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    // print_total_line emits header + data row
+    assert!(lines.len() >= 2);
+    let total_line = lines.last().unwrap();
+    assert!(total_line.starts_with("total"), "expected total line, got: {:?}", total_line);
     // Total size: (100+200)*1024 bytes / 1024 block_size = 300
-    assert!(line.contains("300"));
+    assert!(total_line.contains("300"));
+}
+
+#[test]
+fn test_output_mode_source_column_min_width() {
+    // GNU df uses minimum width of 14 for the source (Filesystem) column
+    // even in --output mode. Short sources like "tmpfs" should be padded.
+    let config = DfConfig {
+        output_fields: Some(vec![
+            "source".to_string(),
+            "size".to_string(),
+            "used".to_string(),
+            "avail".to_string(),
+            "pcent".to_string(),
+        ]),
+        ..DfConfig::default()
+    };
+    let info = FsInfo {
+        source: "tmpfs".to_string(),
+        fstype: "tmpfs".to_string(),
+        target: "/dev/shm".to_string(),
+        total: 1910040 * 1024,
+        used: 0,
+        available: 1910040 * 1024,
+        use_percent: 0.0,
+        itotal: 0,
+        iused: 0,
+        iavail: 0,
+        iuse_percent: 0.0,
+    };
+    // Use public API: print_header then print_fs_line
+    let mut buf = Vec::new();
+    print_header(&config, &mut buf).unwrap();
+    print_fs_line(&info, &config, &mut buf).unwrap();
+    let output = String::from_utf8(buf).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert!(lines.len() >= 2);
+    // Header "Filesystem" (10 chars) should be padded to at least 14
+    assert!(
+        lines[0].starts_with("Filesystem    "),
+        "source column should be at least 14 chars wide, got: {:?}",
+        lines[0]
+    );
 }
