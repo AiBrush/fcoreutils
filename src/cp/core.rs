@@ -304,12 +304,13 @@ fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64, src_mode: u32) -> i
 // ---- Linux copy_file_range optimisation ----
 
 #[cfg(target_os = "linux")]
-fn copy_file_range_linux(src: &Path, dst: &Path, src_mode: u32, src_len: u64) -> io::Result<()> {
+fn copy_file_range_linux(src: &Path, dst: &Path, src_mode: u32) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
     let src_file = std::fs::File::open(src)?;
-    let len = src_len;
+    let src_meta = src_file.metadata()?;
+    let len = src_meta.len();
 
     let dst_file = std::fs::OpenOptions::new()
         .write(true)
@@ -452,7 +453,7 @@ fn copy_file_with_meta(
     let src_mode_bits = src_meta.mode();
     #[cfg(target_os = "linux")]
     {
-        match copy_file_range_linux(src, dst, src_mode_bits, src_meta.len()) {
+        match copy_file_range_linux(src, dst, src_mode_bits) {
             Ok(()) => {
                 preserve_attributes_from_meta(src_meta, dst, config)?;
                 return Ok(());

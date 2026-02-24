@@ -481,7 +481,7 @@ pub fn join(
                     }
                 }
                 i1 += 1;
-                if buf.len() >= FLUSH_THRESHOLD {
+                if show_unpaired1 && buf.len() >= FLUSH_THRESHOLD {
                     out.write_all(&buf)?;
                     buf.clear();
                 }
@@ -560,6 +560,11 @@ pub fn join(
                             }
                         }
                     }
+                    // Flush inside cross-product loop to bound buffer for N×M groups
+                    if buf.len() >= FLUSH_THRESHOLD {
+                        out.write_all(&buf)?;
+                        buf.clear();
+                    }
                     i1 += 1;
                     if i1 >= lines1.len() {
                         break;
@@ -590,10 +595,6 @@ pub fn join(
                         }
                         break;
                     }
-                }
-                if buf.len() >= FLUSH_THRESHOLD {
-                    out.write_all(&buf)?;
-                    buf.clear();
                 }
             }
         }
