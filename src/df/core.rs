@@ -754,19 +754,9 @@ fn get_col_alignments(config: &DfConfig, num_cols: usize) -> Vec<ColAlign> {
     aligns
 }
 
-/// Print all rows with auto-sized columns, matching GNU df output format.
-fn print_table(
-    header: &[String],
-    rows: &[Vec<String>],
-    config: &DfConfig,
-    out: &mut impl Write,
-) -> io::Result<()> {
+/// Compute column widths from header and data rows, applying GNU df minimums.
+fn compute_widths(header: &[String], rows: &[Vec<String>], config: &DfConfig) -> Vec<usize> {
     let num_cols = header.len();
-    if num_cols == 0 {
-        return Ok(());
-    }
-
-    // Compute column widths from header and all data rows.
     let mut widths = vec![0usize; num_cols];
     for (i, h) in header.iter().enumerate() {
         widths[i] = widths[i].max(h.len());
@@ -783,7 +773,6 @@ fn print_table(
     // Minimum width of 14 for the source (Filesystem) column, and minimum
     // width of 5 for numeric size columns.
     if let Some(ref fields) = config.output_fields {
-        // --output mode: apply minimums based on field names
         for (i, field) in fields.iter().enumerate() {
             if i >= num_cols {
                 break;
@@ -797,11 +786,9 @@ fn print_table(
             }
         }
     } else {
-        // Standard mode: first column is source
         if !widths.is_empty() {
             widths[0] = widths[0].max(14);
         }
-        // Size columns start after source (and optionally type)
         let start_col = if config.print_type { 2 } else { 1 };
         for i in start_col..start_col + 3 {
             if i < num_cols {
@@ -810,12 +797,25 @@ fn print_table(
         }
     }
 
+    widths
+}
+
+/// Print all rows with auto-sized columns, matching GNU df output format.
+fn print_table(
+    header: &[String],
+    rows: &[Vec<String>],
+    config: &DfConfig,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let num_cols = header.len();
+    if num_cols == 0 {
+        return Ok(());
+    }
+
+    let widths = compute_widths(header, rows, config);
     let aligns = get_col_alignments(config, num_cols);
 
-    // Print header.
     print_row(header, &widths, &aligns, out)?;
-
-    // Print data rows.
     for row in rows {
         print_row(row, &widths, &aligns, out)?;
     }
@@ -848,29 +848,37 @@ fn print_row(
     Ok(())
 }
 
-/// Print the df output header (for backward compat with tests).
+/// Print the df output header only (one line).
 pub fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
     let header = build_header_row(config);
     let empty: Vec<Vec<String>> = vec![];
-    print_table(&header, &empty, config, out)
+    let widths = compute_widths(&header, &empty, config);
+    let aligns = get_col_alignments(config, header.len());
+    print_row(&header, &widths, &aligns, out)
 }
 
-/// Print a single filesystem info line (for backward compat with tests).
+/// Print a single filesystem info line only (one line, no header).
 pub fn print_fs_line(info: &FsInfo, config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
     let header = build_header_row(config);
     let row = build_row(info, config);
-    print_table(&header, &[row], config, out)
+    let rows = [row];
+    let widths = compute_widths(&header, &rows, config);
+    let aligns = get_col_alignments(config, header.len());
+    print_row(&rows[0], &widths, &aligns, out)
 }
 
-/// Print the total line (for backward compat with tests).
+/// Print a total line only (one line, no header).
 pub fn print_total_line(
     filesystems: &[FsInfo],
     config: &DfConfig,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    let row = build_total_row(filesystems, config);
     let header = build_header_row(config);
-    print_table(&header, &[row], config, out)
+    let row = build_total_row(filesystems, config);
+    let rows = [row];
+    let widths = compute_widths(&header, &rows, config);
+    let aligns = get_col_alignments(config, header.len());
+    print_row(&rows[0], &widths, &aligns, out)
 }
 
 /// Run the df command and write output.

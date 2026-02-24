@@ -471,18 +471,10 @@ fn test_total_line() {
     ];
     let mut buf = Vec::new();
     print_total_line(&filesystems, &config, &mut buf).unwrap();
-    let output = String::from_utf8(buf).unwrap();
-    let lines: Vec<&str> = output.lines().collect();
-    // print_total_line emits header + data row
-    assert!(lines.len() >= 2);
-    let total_line = lines.last().unwrap();
-    assert!(
-        total_line.starts_with("total"),
-        "expected total line, got: {:?}",
-        total_line
-    );
+    let line = String::from_utf8(buf).unwrap();
+    assert!(line.starts_with("total"));
     // Total size: (100+200)*1024 bytes / 1024 block_size = 300
-    assert!(total_line.contains("300"));
+    assert!(line.contains("300"));
 }
 
 #[test]
@@ -512,17 +504,23 @@ fn test_output_mode_source_column_min_width() {
         iavail: 0,
         iuse_percent: 0.0,
     };
-    // Use public API: print_header then print_fs_line
+    // print_header emits 1 line (header), print_fs_line emits 1 line (data)
     let mut buf = Vec::new();
     print_header(&config, &mut buf).unwrap();
     print_fs_line(&info, &config, &mut buf).unwrap();
     let output = String::from_utf8(buf).unwrap();
     let lines: Vec<&str> = output.lines().collect();
-    assert!(lines.len() >= 2);
+    assert_eq!(lines.len(), 2, "expected header + data, got: {:?}", lines);
     // Header "Filesystem" (10 chars) should be padded to at least 14
     assert!(
         lines[0].starts_with("Filesystem    "),
         "source column should be at least 14 chars wide, got: {:?}",
         lines[0]
+    );
+    // Data line "tmpfs" (5 chars) should also be padded to match
+    assert!(
+        lines[1].starts_with("tmpfs"),
+        "data line should start with source, got: {:?}",
+        lines[1]
     );
 }
