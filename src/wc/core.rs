@@ -20,56 +20,42 @@ pub struct WcCounts {
 // Byte classification for word counting
 // ──────────────────────────────────────────────────
 //
-// C locale (GNU wc 9.4): 3-state model using isprint() as gatekeeper.
-//   0 = transparent: non-printable, non-space bytes (NUL, controls, DEL, 0x80-0xFF)
-//   1 = word-break: whitespace (0x09-0x0D, 0x20)
-//   2 = word content: printable ASCII (0x21-0x7E)
-// Transparent bytes don't start, continue, or break words.
+// GNU wc 9.7 uses a simple 2-state model for word counting:
+//   - Space (word-break): whitespace bytes (0x09-0x0D, 0x20)
+//   - Non-space (word content): everything else, including NUL, control chars,
+//     DEL, high bytes (0x80-0xFF), and encoding errors
 //
-// UTF-8 locale: 3-state model (matching GNU wc 9.4 mbrtowc behavior).
-// ASCII uses same BYTE_CLASS_C table (controls transparent, spaces break, printable content).
-// Multi-byte Unicode spaces are detected via codepoint lookup.
-// Invalid UTF-8 encoding errors are transparent (GNU mbrtowc skips on error).
+// This matches the GNU wc source which uses `!wc_isspace[c]` to determine
+// if a byte is word content. There is no "transparent" state — every byte
+// either breaks a word or is part of a word.
+//
+// In UTF-8 locale with multibyte path:
+//   - ASCII bytes use the same wc_isspace table
+//   - Encoding errors (EILSEQ) are treated as word content
+//   - Valid multibyte chars: iswspace() determines break vs content
+//   - Non-breaking spaces (U+00A0, U+2007, U+202F, U+2060) are also
+//     treated as space (when POSIXLY_CORRECT is not set), matching GNU wc
 
-/// Byte classification for C/POSIX locale word counting (matching GNU wc 9.4).
-/// GNU wc uses isprint() as a gatekeeper: only printable bytes (0x21-0x7E) can
-/// start or continue words. Non-printable, non-space bytes are "transparent" —
-/// they don't start words, don't continue words, and don't break words.
-///   0 = transparent (non-printable, non-space): NUL, controls, DEL, high bytes
-///   1 = word-break (whitespace): tab, newline, VT, FF, CR, space
-///   2 = word content (printable): 0x21-0x7E
-const fn make_byte_class_c() -> [u8; 256] {
-    let mut t = [0u8; 256]; // default: transparent
-    // C locale isspace() chars → word-break
-    t[0x09] = 1; // tab
-    t[0x0A] = 1; // newline
-    t[0x0B] = 1; // vertical tab
-    t[0x0C] = 1; // form feed
-    t[0x0D] = 1; // carriage return
-    t[0x20] = 1; // space
-    // C locale isprint() chars (excluding space) → word content
-    let mut b = 0x21u16;
-    while b <= 0x7E {
-        t[b as usize] = 2;
-        b += 1;
-    }
+/// Byte-level space table matching GNU wc 9.7 `wc_isspace[]`.
+/// true = whitespace (word break), false = word content.
+/// Only the 6 standard C locale whitespace bytes are spaces.
+const fn make_is_space() -> [bool; 256] {
+    let mut t = [false; 256];
+    t[0x09] = true; // tab
+    t[0x0A] = true; // newline
+    t[0x0B] = true; // vertical tab
+    t[0x0C] = true; // form feed
+    t[0x0D] = true; // carriage return
+    t[0x20] = true; // space
     t
 }
-const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
+const IS_SPACE: [bool; 256] = make_is_space();
 
-/// For parallel chunk merging: determine if a chunk effectively starts with
-/// word content by scanning past leading transparent bytes. This is needed
-/// because transparent bytes don't break words, so a chunk starting with
-/// [\x00, \x80, 'a'] should be treated as starting with word content.
+/// For parallel chunk merging: determine if a chunk starts with word content
+/// (i.e., the first byte is not whitespace).
 #[inline]
-pub(crate) fn first_is_word_c(data: &[u8]) -> bool {
-    for &b in data {
-        let class = BYTE_CLASS_C[b as usize];
-        if class != 0 {
-            return class == 2;
-        }
-    }
-    false // all transparent
+pub(crate) fn first_is_word(data: &[u8]) -> bool {
+    !data.is_empty() && !IS_SPACE[data[0] as usize]
 }
 
 // ──────────────────────────────────────────────────
@@ -82,20 +68,30 @@ pub(crate) fn first_is_word_c(data: &[u8]) -> bool {
 fn is_unicode_space(cp: u32) -> bool {
     matches!(
         cp,
-        0x00A0 |           // No-Break Space
         0x1680 |           // Ogham Space Mark
         0x2000
             ..=0x200A |  // En Quad through Hair Space
         0x2028 |           // Line Separator
         0x2029 |           // Paragraph Separator
-        0x202F |           // Narrow No-Break Space
         0x205F |           // Medium Mathematical Space
         0x3000 // Ideographic Space
     )
 }
 
-/// Check if a Unicode codepoint (>= 0x80) is printable (matching glibc iswprint).
-/// C1 control characters (U+0080-U+009F) are not printable.
+/// Check if a Unicode codepoint is a "non-breaking space" that GNU wc treats
+/// as a word separator (when POSIXLY_CORRECT is not set).
+/// Matches GNU wc 9.7 iswnbspace(): U+00A0, U+2007, U+202F, U+2060.
+#[inline]
+fn is_wnbspace(cp: u32) -> bool {
+    matches!(cp, 0x00A0 | 0x2007 | 0x202F | 0x2060)
+}
+
+/// Check if a Unicode codepoint is any kind of space (iswspace || iswnbspace).
+#[inline]
+fn is_unicode_word_break(cp: u32) -> bool {
+    is_unicode_space(cp) || is_wnbspace(cp)
+}
+
 // ──────────────────────────────────────────────────
 // Core counting functions
 // ──────────────────────────────────────────────────
@@ -113,7 +109,7 @@ pub fn count_bytes(data: &[u8]) -> u64 {
     data.len() as u64
 }
 
-/// Count words using locale-aware 3-state logic (default: UTF-8).
+/// Count words using locale-aware 2-state logic (default: UTF-8).
 pub fn count_words(data: &[u8]) -> u64 {
     count_words_locale(data, true)
 }
@@ -131,11 +127,9 @@ pub fn count_words_locale(data: &[u8], utf8: bool) -> u64 {
     }
 }
 
-/// Count words in C/POSIX locale using 3-state logic matching GNU wc 9.4.
-/// Bytes are classified into 3 categories:
-///   - Word-break (class 1): 0x09-0x0D, 0x20 — ends current word
-///   - Word content (class 2): 0x21-0x7E — starts or continues a word
-///   - Transparent (class 0): everything else — no effect on word state
+/// Count words in C/POSIX locale using 2-state logic matching GNU wc 9.7.
+/// Every byte is either whitespace (0x09-0x0D, 0x20) or word content (everything else).
+/// NUL bytes, control chars, DEL, and high bytes (0x80-0xFF) are all word content.
 fn count_words_c(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;
@@ -144,18 +138,12 @@ fn count_words_c(data: &[u8]) -> u64 {
 
     while i < len {
         let b = unsafe { *data.get_unchecked(i) };
-        let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
-        if class == 1 {
-            // Word-break (whitespace) — end current word
+        if IS_SPACE[b as usize] {
             in_word = false;
-        } else if class == 2 {
-            // Word content (printable) — start or continue word
-            if !in_word {
-                in_word = true;
-                words += 1;
-            }
+        } else if !in_word {
+            in_word = true;
+            words += 1;
         }
-        // class == 0: transparent — no state change
         i += 1;
     }
     words
@@ -177,31 +165,26 @@ fn count_lw_c_scalar_tail(
 ) -> (u64, u64, bool, bool) {
     while i < len {
         let b = unsafe { *ptr.add(i) };
-        let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
-        if class == 1 {
-            // Word-break
+        if IS_SPACE[b as usize] {
             if b == b'\n' {
                 total_lines += 1;
             }
             prev_in_word = false;
-        } else if class == 2 && !prev_in_word {
-            // Word content (printable) — transition into word
+        } else if !prev_in_word {
             total_words += 1;
             prev_in_word = true;
         }
-        // class == 0: transparent — no state change
         i += 1;
     }
-    let first_is_word = first_is_word_c(data);
-    (total_lines, total_words, first_is_word, prev_in_word)
+    let first_word = first_is_word(data);
+    (total_lines, total_words, first_word, prev_in_word)
 }
 
 /// AVX2-accelerated fused line+word counter for C locale chunks.
-/// Processes 32 bytes per iteration using 3-state logic matching GNU wc 9.4:
-///   - Word-break: {0x09-0x0D, 0x20} (6 bytes) — ends word
-///   - Word content: {0x21-0x7E} (printable ASCII) — starts/continues word
-///   - Transparent: everything else — no effect on word state
-/// Word transitions detected via bitmask on printable bytes only.
+/// Processes 32 bytes per iteration using 2-state logic matching GNU wc 9.7:
+///   - Space: {0x09-0x0D, 0x20} (6 bytes) — ends word
+///   - Non-space: everything else — starts/continues word
+/// Word transitions detected via bitmask: space-to-nonspace transitions.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
@@ -218,10 +201,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm256_set1_epi8(b'\n' as i8);
         let zero = _mm256_setzero_si256();
         let ones = _mm256_set1_epi8(1);
-        // Printable range detection: 0x21-0x7E
-        let const_0x21 = _mm256_set1_epi8(0x21u8 as i8);
-        let const_0x7e = _mm256_set1_epi8(0x7Eu8 as i8);
-        // Word-break detection: {0x09-0x0D, 0x20}
+        // Space detection: {0x09-0x0D, 0x20}
         let const_0x09 = _mm256_set1_epi8(0x09u8 as i8);
         let const_0x0d = _mm256_set1_epi8(0x0Du8 as i8);
         let const_0x20 = _mm256_set1_epi8(0x20u8 as i8);
@@ -234,41 +214,24 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // Printable check: byte in [0x21, 0x7E] (word content)
-            let ge_21 = _mm256_cmpeq_epi8(_mm256_max_epu8(v, const_0x21), v);
-            let le_7e = _mm256_cmpeq_epi8(_mm256_min_epu8(v, const_0x7e), v);
-            let is_printable = _mm256_and_si256(ge_21, le_7e);
-            let word_mask = _mm256_movemask_epi8(is_printable) as u32;
-
-            // Word-break check: byte in {0x09-0x0D, 0x20}
+            // Space check: byte in {0x09-0x0D, 0x20}
             let ge_09 = _mm256_cmpeq_epi8(_mm256_max_epu8(v, const_0x09), v);
             let le_0d = _mm256_cmpeq_epi8(_mm256_min_epu8(v, const_0x0d), v);
             let in_tab_range = _mm256_and_si256(ge_09, le_0d);
-            let is_space = _mm256_cmpeq_epi8(v, const_0x20);
-            let is_break = _mm256_or_si256(in_tab_range, is_space);
-            let break_mask = _mm256_movemask_epi8(is_break) as u32;
+            let is_sp = _mm256_cmpeq_epi8(v, const_0x20);
+            let is_space = _mm256_or_si256(in_tab_range, is_sp);
+            let space_mask = _mm256_movemask_epi8(is_space) as u32;
 
-            // 3-state segmented carry-propagation: compute word starts in O(1).
-            // Uses a segmented parallel prefix scan so carry cannot bridge across
-            // break positions. At each doubling step, the pass mask narrows to
-            // require ALL intermediate positions to be transparent.
-            let transparent = !break_mask & !word_mask;
-            let mut carry = word_mask | if prev_in_word { 1u32 } else { 0u32 };
-            carry &= !break_mask;
-            let mut pass = transparent;
-            carry |= (carry << 1) & pass;
-            pass &= pass << 1;
-            carry |= (carry << 2) & pass;
-            pass &= pass << 2;
-            carry |= (carry << 4) & pass;
-            pass &= pass << 4;
-            carry |= (carry << 8) & pass;
-            pass &= pass << 8;
-            carry |= (carry << 16) & pass;
-            let prev_carry = (carry << 1) | if prev_in_word { 1u32 } else { 0u32 };
-            let starts = word_mask & !prev_carry;
+            // 2-state: non-space = word content, space = break
+            // Word starts = positions where byte is non-space AND previous byte was space
+            let nonspace_mask = !space_mask;
+            // Build "previous was space" mask: shift space_mask right by 1, inject prev state
+            let prev_space = (space_mask << 1) | if prev_in_word { 0u32 } else { 1u32 };
+            let starts = nonspace_mask & prev_space;
             total_words += starts.count_ones() as u64;
-            prev_in_word = (carry >> 31) & 1 == 1;
+
+            // Update prev_in_word: last byte of this chunk is non-space?
+            prev_in_word = (nonspace_mask >> 31) & 1 == 1;
 
             batch += 1;
             if batch >= 255 {
@@ -317,10 +280,7 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        // Printable range detection: 0x21-0x7E
-        let const_0x21 = _mm_set1_epi8(0x21u8 as i8);
-        let const_0x7e = _mm_set1_epi8(0x7Eu8 as i8);
-        // Word-break detection: {0x09-0x0D, 0x20}
+        // Space detection: {0x09-0x0D, 0x20}
         let const_0x09 = _mm_set1_epi8(0x09u8 as i8);
         let const_0x0d = _mm_set1_epi8(0x0Du8 as i8);
         let const_0x20 = _mm_set1_epi8(0x20u8 as i8);
@@ -333,36 +293,21 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            // Printable check: byte in [0x21, 0x7E] (word content)
-            let ge_21 = _mm_cmpeq_epi8(_mm_max_epu8(v, const_0x21), v);
-            let le_7e = _mm_cmpeq_epi8(_mm_min_epu8(v, const_0x7e), v);
-            let is_printable = _mm_and_si128(ge_21, le_7e);
-            let word_mask = (_mm_movemask_epi8(is_printable) as u32) & 0xFFFF;
-
-            // Word-break check: byte in {0x09-0x0D, 0x20}
+            // Space check: byte in {0x09-0x0D, 0x20}
             let ge_09 = _mm_cmpeq_epi8(_mm_max_epu8(v, const_0x09), v);
             let le_0d = _mm_cmpeq_epi8(_mm_min_epu8(v, const_0x0d), v);
             let in_tab_range = _mm_and_si128(ge_09, le_0d);
-            let is_space = _mm_cmpeq_epi8(v, const_0x20);
-            let is_break = _mm_or_si128(in_tab_range, is_space);
-            let break_mask = (_mm_movemask_epi8(is_break) as u32) & 0xFFFF;
+            let is_sp = _mm_cmpeq_epi8(v, const_0x20);
+            let is_space = _mm_or_si128(in_tab_range, is_sp);
+            let space_mask = (_mm_movemask_epi8(is_space) as u32) & 0xFFFF;
 
-            // 3-state segmented carry-propagation (16-bit, 4 doubling steps)
-            let transparent = !break_mask & !word_mask & 0xFFFF;
-            let mut carry = (word_mask | if prev_in_word { 1u32 } else { 0u32 }) & 0xFFFF;
-            carry &= !break_mask;
-            let mut pass = transparent;
-            carry |= (carry << 1) & pass;
-            pass &= pass << 1;
-            carry |= (carry << 2) & pass;
-            pass &= pass << 2;
-            carry |= (carry << 4) & pass;
-            pass &= pass << 4;
-            carry |= (carry << 8) & pass;
-            let prev_carry = ((carry << 1) | if prev_in_word { 1u32 } else { 0u32 }) & 0xFFFF;
-            let starts = word_mask & !prev_carry & 0xFFFF;
+            // 2-state word start detection
+            let nonspace_mask = !space_mask & 0xFFFF;
+            let prev_space = ((space_mask << 1) | if prev_in_word { 0u32 } else { 1u32 }) & 0xFFFF;
+            let starts = nonspace_mask & prev_space;
             total_words += starts.count_ones() as u64;
-            prev_in_word = (carry >> 15) & 1 == 1;
+
+            prev_in_word = (nonspace_mask >> 15) & 1 == 1;
 
             batch += 1;
             if batch >= 255 {
@@ -402,10 +347,9 @@ fn count_lw_c_chunk_fast(data: &[u8]) -> (u64, u64, bool, bool) {
     count_lw_c_chunk(data)
 }
 
-/// Count words + lines in a C locale chunk using 3-state logic, returning
+/// Count words + lines in a C locale chunk using 2-state logic, returning
 /// counts plus boundary info for parallel chunk merging.
 /// Returns (line_count, word_count, first_is_word_content, ends_in_word).
-/// Word-break: 0x09-0x0D, 0x20. Word content: 0x21-0x7E. Transparent: rest.
 fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     let mut lines = 0u64;
     let mut words = 0u64;
@@ -413,41 +357,33 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     let mut i = 0;
     let len = data.len();
 
-    // Determine first byte's classification for boundary merging
-    let first_is_word = first_is_word_c(data);
+    let first_word = first_is_word(data);
 
     while i < len {
         let b = unsafe { *data.get_unchecked(i) };
-        let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
-        if class == 1 {
-            // Word-break
+        if IS_SPACE[b as usize] {
             if b == b'\n' {
                 lines += 1;
             }
             in_word = false;
-        } else if class == 2 && !in_word {
-            // Word content (printable) — start word
+        } else if !in_word {
             in_word = true;
             words += 1;
         }
-        // class == 0: transparent — no state change
         i += 1;
     }
-    (lines, words, first_is_word, in_word)
+    (lines, words, first_word, in_word)
 }
 
-/// Count words in UTF-8 locale using 3-state logic matching GNU wc 9.4.
-///
-/// States: transparent (no state change), break (ends word), content (starts/continues word).
+/// Count words in UTF-8 locale using 2-state logic matching GNU wc 9.7.
 ///
 /// Handles:
 /// - ASCII spaces (0x09-0x0D, 0x20): word break
-/// - ASCII control chars (0x00-0x08, 0x0E-0x1F, 0x7F): transparent (don't start or break words)
-/// - ASCII printable (0x21-0x7E): word content
-/// - Valid UTF-8 multi-byte Unicode spaces (U+00A0, U+2000-U+200A, etc.): word break
-/// - Valid UTF-8 multi-byte printable chars: word content
-/// - Invalid UTF-8 encoding errors: transparent (matches GNU mbrtowc which skips
-///   1 byte on error without changing in_word state)
+/// - All other ASCII bytes (including NUL, controls, DEL): word content
+/// - Valid UTF-8 multi-byte Unicode spaces (iswspace): word break
+/// - Non-breaking spaces (U+00A0, U+2007, U+202F, U+2060): word break (iswnbspace)
+/// - Valid UTF-8 multi-byte non-space chars: word content
+/// - Invalid UTF-8 encoding errors: word content (matches GNU wc EILSEQ handling)
 fn count_words_utf8(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;
@@ -458,27 +394,27 @@ fn count_words_utf8(data: &[u8]) -> u64 {
         let b = unsafe { *data.get_unchecked(i) };
 
         if b < 0x80 {
-            // ASCII byte — use 3-state classification matching GNU wc 9.4:
-            // printable (0x21-0x7E) = word content, space = break, control = transparent
-            let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
-            if class == 1 {
+            // ASCII byte — 2-state: space or non-space
+            if IS_SPACE[b as usize] {
                 in_word = false;
-            } else if class == 2 && !in_word {
+            } else if !in_word {
                 in_word = true;
                 words += 1;
             }
-            // class == 0: transparent (control chars) — no state change
             i += 1;
         } else if b < 0xC2 {
             // Invalid UTF-8: bare continuation byte (0x80-0xBF) or overlong (0xC0-0xC1)
-            // Encoding error is transparent — matches GNU mbrtowc which skips 1 byte
-            // without changing in_word state on error
+            // Encoding error → word content (matches GNU wc EILSEQ handling)
+            if !in_word {
+                in_word = true;
+                words += 1;
+            }
             i += 1;
         } else if b < 0xE0 {
             if i + 1 < len && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80 {
                 let cp = ((b as u32 & 0x1F) << 6)
                     | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
-                if is_unicode_space(cp) {
+                if is_unicode_word_break(cp) {
                     in_word = false;
                 } else if !in_word {
                     in_word = true;
@@ -486,7 +422,11 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                 }
                 i += 2;
             } else {
-                // Incomplete sequence — transparent (skip 1 byte, no state change)
+                // Incomplete sequence → word content (encoding error)
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
                 i += 1;
             }
         } else if b < 0xF0 {
@@ -497,7 +437,7 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                 let cp = ((b as u32 & 0x0F) << 12)
                     | ((unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F) << 6)
                     | (unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F);
-                if is_unicode_space(cp) {
+                if is_unicode_word_break(cp) {
                     in_word = false;
                 } else if !in_word {
                     in_word = true;
@@ -505,7 +445,11 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                 }
                 i += 3;
             } else {
-                // Incomplete sequence — transparent (skip 1 byte, no state change)
+                // Incomplete sequence → word content (encoding error)
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
                 i += 1;
             }
         } else if b < 0xF5 {
@@ -518,7 +462,7 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                     | ((unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F) << 12)
                     | ((unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F) << 6)
                     | (unsafe { *data.get_unchecked(i + 3) } as u32 & 0x3F);
-                if is_unicode_space(cp) {
+                if is_unicode_word_break(cp) {
                     in_word = false;
                 } else if !in_word {
                     in_word = true;
@@ -526,11 +470,19 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                 }
                 i += 4;
             } else {
-                // Incomplete sequence — transparent (skip 1 byte, no state change)
+                // Incomplete sequence → word content (encoding error)
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
                 i += 1;
             }
         } else {
-            // Invalid byte >= 0xF5 — transparent (skip, no state change)
+            // Invalid byte >= 0xF5 → word content (encoding error)
+            if !in_word {
+                in_word = true;
+                words += 1;
+            }
             i += 1;
         }
     }
@@ -552,11 +504,10 @@ pub fn count_lines_words(data: &[u8], utf8: bool) -> (u64, u64) {
 
 /// Fused lines+words counting in UTF-8 mode (single pass).
 /// Avoids separate memchr pass for newlines by counting them inline with words.
-/// Uses 3-state logic for ASCII (matching GNU wc 9.4) plus UTF-8 decoding:
-///   - Encoding errors are transparent (matching GNU mbrtowc which skips 1 byte
-///     on error without changing in_word state)
-///   - ASCII control chars are transparent (don't affect word state)
-///   - Printable ASCII and valid multi-byte chars are word content
+/// Uses 2-state logic matching GNU wc 9.7:
+///   - Encoding errors are word content (matching GNU wc EILSEQ handling)
+///   - ASCII non-space bytes (including NUL, controls) are word content
+///   - Valid multi-byte non-space chars are word content
 fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
     let mut lines = 0u64;
     let mut words = 0u64;
@@ -572,24 +523,26 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
             in_word = false;
             i += 1;
         } else if b < 0x80 {
-            // ASCII byte — use 3-state classification
-            let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
-            if class == 1 {
+            // ASCII byte — 2-state: space or non-space
+            if IS_SPACE[b as usize] {
                 in_word = false;
-            } else if class == 2 && !in_word {
+            } else if !in_word {
                 in_word = true;
                 words += 1;
             }
-            // class == 0: transparent — no state change
             i += 1;
         } else if b < 0xC2 {
-            // Invalid UTF-8: bare continuation or overlong — transparent (skip, no state change)
+            // Invalid UTF-8 → word content
+            if !in_word {
+                in_word = true;
+                words += 1;
+            }
             i += 1;
         } else if b < 0xE0 {
             if i + 1 < len && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80 {
                 let cp = ((b as u32 & 0x1F) << 6)
                     | (unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F);
-                if is_unicode_space(cp) {
+                if is_unicode_word_break(cp) {
                     in_word = false;
                 } else if !in_word {
                     in_word = true;
@@ -597,7 +550,10 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                 }
                 i += 2;
             } else {
-                // Incomplete sequence — transparent (skip 1 byte, no state change)
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
                 i += 1;
             }
         } else if b < 0xF0 {
@@ -608,7 +564,7 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                 let cp = ((b as u32 & 0x0F) << 12)
                     | ((unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F) << 6)
                     | (unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F);
-                if is_unicode_space(cp) {
+                if is_unicode_word_break(cp) {
                     in_word = false;
                 } else if !in_word {
                     in_word = true;
@@ -616,7 +572,10 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                 }
                 i += 3;
             } else {
-                // Incomplete sequence — transparent (skip 1 byte, no state change)
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
                 i += 1;
             }
         } else if b < 0xF5 {
@@ -629,7 +588,7 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                     | ((unsafe { *data.get_unchecked(i + 1) } as u32 & 0x3F) << 12)
                     | ((unsafe { *data.get_unchecked(i + 2) } as u32 & 0x3F) << 6)
                     | (unsafe { *data.get_unchecked(i + 3) } as u32 & 0x3F);
-                if is_unicode_space(cp) {
+                if is_unicode_word_break(cp) {
                     in_word = false;
                 } else if !in_word {
                     in_word = true;
@@ -637,11 +596,18 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                 }
                 i += 4;
             } else {
-                // Incomplete sequence — transparent (skip 1 byte, no state change)
+                if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
                 i += 1;
             }
         } else {
-            // Invalid byte >= 0xF5 — transparent (skip, no state change)
+            // Invalid byte >= 0xF5 → word content
+            if !in_word {
+                in_word = true;
+                words += 1;
+            }
             i += 1;
         }
     }
@@ -1298,7 +1264,7 @@ pub fn max_line_length_utf8(data: &[u8]) -> u64 {
             i += 1;
         } else {
             // Multibyte UTF-8
-            let (cp, len) = decode_utf8(&data[i..]);
+            let (cp, blen) = decode_utf8(&data[i..]);
 
             // C1 control characters (0x80..0x9F): non-printable, width 0
             if cp <= 0x9F {
@@ -1317,7 +1283,7 @@ pub fn max_line_length_utf8(data: &[u8]) -> u64 {
                     line_len = linepos;
                 }
             }
-            i += len;
+            i += blen;
         }
     }
 
@@ -1343,7 +1309,7 @@ pub fn max_line_length(data: &[u8], utf8: bool) -> u64 {
 ///
 /// Each metric uses its own optimized algorithm:
 /// - Lines: SIMD-accelerated memchr
-/// - Words: 3-state scalar/state-machine (locale-dependent)
+/// - Words: 2-state scalar/state-machine (locale-dependent)
 /// - Chars: non-continuation byte counting (UTF-8) or byte counting (C locale)
 /// - Max line length: locale-aware display width tracking
 ///
@@ -1495,12 +1461,12 @@ pub fn count_words_parallel(data: &[u8], utf8: bool) -> u64 {
         let chunks = split_at_newlines(data, num_threads);
         chunks.par_iter().map(|chunk| count_words_utf8(chunk)).sum()
     } else {
-        // C locale: parallel 3-state word counting with boundary adjustment
+        // C locale: parallel 2-state word counting with boundary adjustment
         let chunk_size = (data.len() / num_threads).max(1024 * 1024);
 
         let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
 
-        // Each chunk returns (lines, word_count, first_active_is_printable, ends_in_word)
+        // Each chunk returns (lines, word_count, first_is_word, ends_in_word)
         let results: Vec<(u64, u64, bool, bool)> = chunks
             .par_iter()
             .map(|chunk| count_lw_c_chunk(chunk))
@@ -1510,7 +1476,7 @@ pub fn count_words_parallel(data: &[u8], utf8: bool) -> u64 {
         for i in 0..results.len() {
             total += results[i].1;
             // Boundary adjustment: if previous chunk ended in_word AND
-            // current chunk's first non-transparent byte is printable,
+            // current chunk's first byte is non-space (word content),
             // the word was split across chunks — subtract the overcount.
             if i > 0 && results[i - 1].3 && results[i].2 {
                 total -= 1;
