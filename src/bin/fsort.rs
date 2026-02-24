@@ -539,7 +539,9 @@ fn main() {
             // but re-raise SIGPIPE so the shell sees exit 141, not 2.
             #[cfg(unix)]
             if !sigpipe_ignored {
-                unsafe { libc::raise(libc::SIGPIPE); }
+                unsafe {
+                    libc::raise(libc::SIGPIPE);
+                }
             }
             process::exit(2);
         }
