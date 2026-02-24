@@ -39,8 +39,7 @@ pub fn compare_locale(a: &[u8], b: &[u8]) -> Ordering {
             buf_a[a.len()] = 0;
             std::ptr::copy_nonoverlapping(b.as_ptr(), buf_b.as_mut_ptr(), b.len());
             buf_b[b.len()] = 0;
-            let result =
-                libc::strcoll(buf_a.as_ptr() as *const _, buf_b.as_ptr() as *const _);
+            let result = libc::strcoll(buf_a.as_ptr() as *const _, buf_b.as_ptr() as *const _);
             return result.cmp(&0);
         }
     }

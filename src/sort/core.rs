@@ -2902,14 +2902,11 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             ord
                         }
                     });
-                    write_sorted_output(
-                        data, &offsets, &indices, config, &mut writer, terminator,
-                    )?;
+                    write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
                 } else {
                     // General flagged sort: pre-select comparator
                     let mut indices: Vec<usize> = (0..num_lines).collect();
-                    let (cmp_fn, needs_blank, needs_reverse) =
-                        select_comparator(opts, random_seed);
+                    let (cmp_fn, needs_blank, needs_reverse) = select_comparator(opts, random_seed);
                     let dp_sk = data.as_ptr() as usize;
                     do_sort(&mut indices, stable, |&a, &b| {
                         let dp = dp_sk as *const u8;
@@ -2946,9 +2943,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             ord
                         }
                     });
-                    write_sorted_output(
-                        data, &offsets, &indices, config, &mut writer, terminator,
-                    )?;
+                    write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
                 }
             }
         }
@@ -3041,11 +3036,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             let mut c_buf = vec![0u8; key.len() + 1];
                             c_buf[..key.len()].copy_from_slice(key);
                             let needed = unsafe {
-                                libc::strxfrm(
-                                    std::ptr::null_mut(),
-                                    c_buf.as_ptr() as *const _,
-                                    0,
-                                )
+                                libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0)
                             };
                             let mut out = vec![0u8; needed + 1];
                             unsafe {
@@ -3073,11 +3064,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             c_buf[..key.len()].copy_from_slice(key);
                             c_buf[key.len()] = 0;
                             let needed = unsafe {
-                                libc::strxfrm(
-                                    std::ptr::null_mut(),
-                                    c_buf.as_ptr() as *const _,
-                                    0,
-                                )
+                                libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0)
                             };
                             let mut out = vec![0u8; needed + 1];
                             unsafe {
