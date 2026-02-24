@@ -72,7 +72,8 @@ fn main() {
         _ => {}
     }
 
-    // Handle -- as argument separator (GNU compat)
+    // Handle -- as argument separator (GNU compat).
+    // -- can appear before the format string or between format and arguments.
     let arg_start = if args[0] == "--" { 1 } else { 0 };
     if arg_start >= args.len() {
         eprintln!("{}: missing operand", TOOL_NAME);
@@ -81,7 +82,13 @@ fn main() {
     }
 
     let format = &args[arg_start];
-    let remaining = &args[arg_start + 1..];
+    // Also consume -- after the format string if present
+    let data_start = arg_start + 1;
+    let remaining = if data_start < args.len() && args[data_start] == "--" {
+        &args[data_start + 1..]
+    } else {
+        &args[data_start..]
+    };
     let arg_strs: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
 
     coreutils_rs::printf::reset_conv_error();

@@ -24,60 +24,50 @@ pub struct WcCounts {
 //   0 = word content: starts or continues a word
 //   1 = space (word break): ends any current word
 //
-// C locale word content depends on the glibc version:
-//   - glibc ≤2.39 (Ubuntu 24.04, GNU coreutils 9.4): isgraph() in C locale
-//     returns true only for 0x21-0x7E (printable ASCII). All other bytes are
-//     word-break.
-//   - glibc 2.41 (Debian 13, GNU coreutils 9.7): isgraph() accepts more bytes
-//     (high bytes except 0xA0), giving different word counts for non-ASCII.
-//
-// We target glibc ≤2.39 / 0x21-0x7E semantics since our CI (Ubuntu 24.04)
-// compares against GNU coreutils 9.4.
+// C locale: GNU wc uses isspace() for word breaks. In the C locale, only
+// 0x09-0x0D (tab, newline, vtab, formfeed, CR) and 0x20 (space) are spaces.
+// All other bytes — including NUL, other control chars, DEL, and high bytes —
+// are word content. This means binary data with NUL bytes counts as word content.
 //
 // UTF-8 locale: 0x09-0x0D, 0x20 (ASCII spaces) break words; multi-byte Unicode
 // spaces are detected via codepoint lookup. Everything else is word content.
 
 /// Byte classification for C/POSIX locale word counting.
-/// Only printable ASCII (0x21-0x7E) is word content; all other bytes are word-break.
-/// Matches GNU coreutils 9.4 (Ubuntu 24.04) behavior.
-///   0 = word content (0x21-0x7E only)
-///   1 = word-break (everything else: NUL, controls, DEL, high bytes)
+/// Uses isspace() semantics plus 0xA0 (Latin-1 NO-BREAK SPACE) which GNU wc
+/// also treats as a word-break in C locale despite isspace(0xA0) returning false.
+///   0 = word content
+///   1 = word-break
 const fn make_byte_class_c() -> [u8; 256] {
-    let mut t = [1u8; 256]; // all word-break by default
-    // Only printable non-space ASCII is word content
-    let mut b = 0x21u8;
-    loop {
-        t[b as usize] = 0;
-        if b == 0x7E {
-            break;
-        }
-        b += 1;
-    }
+    let mut t = [0u8; 256]; // all word-content by default
+    // C locale isspace() chars
+    t[0x09] = 1; // tab
+    t[0x0A] = 1; // newline
+    t[0x0B] = 1; // vertical tab
+    t[0x0C] = 1; // form feed
+    t[0x0D] = 1; // carriage return
+    t[0x20] = 1; // space
+    t[0xA0] = 1; // Latin-1 NO-BREAK SPACE (GNU wc compat)
     t
 }
 const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
 
-/// 2-state single-byte classification for UTF-8 locale.
+/// 2-state single-byte classification for UTF-8 locale word counting.
 /// Multi-byte UTF-8 sequences are handled by the state machine separately.
 ///
-/// GNU wc 9.4 uses 3-state logic: iswspace() → word-break, iswprint() → word
-/// content, neither → word-break. For single bytes (ASCII), only 0x21-0x7E are
-/// printable and non-space. NUL, control chars, and DEL are word-break.
-/// High bytes (0x80-0xFF) are UTF-8 continuation/start — handled by the
-/// multi-byte decoder, so they stay class=0 in this table.
+/// GNU wc uses a hardcoded set of 6 space characters for word counting
+/// in ALL locales (both C and UTF-8). From wc.c: '\t', '\n', '\v', '\f',
+/// '\r', ' ' are word-break; everything else (including NUL, other control
+/// chars, DEL) is word content. High bytes (0x80-0xFF) are UTF-8
+/// continuation/start bytes handled by the multi-byte decoder.
 const fn make_byte_class_utf8() -> [u8; 256] {
-    let mut t = [0u8; 256]; // default: word content (for high bytes: UTF-8 multi-byte)
-    // NUL and all C0 control characters (0x00-0x1F) are word-break
-    let mut b = 0u8;
-    loop {
-        t[b as usize] = 1;
-        if b == 0x1F {
-            break;
-        }
-        b += 1;
-    }
+    let mut t = [0u8; 256]; // default: word content
+    // Only the 6 ASCII space characters are word-break (matching GNU wc)
+    t[0x09] = 1; // tab
+    t[0x0A] = 1; // newline
+    t[0x0B] = 1; // vertical tab
+    t[0x0C] = 1; // form feed
+    t[0x0D] = 1; // carriage return
     t[0x20] = 1; // space
-    t[0x7F] = 1; // DEL
     t
 }
 
@@ -142,9 +132,9 @@ pub fn count_words_locale(data: &[u8], utf8: bool) -> u64 {
     }
 }
 
-/// Count words in C/POSIX locale using 2-state logic matching GNU wc 9.4.
-/// Only printable ASCII (0x21-0x7E) is word content.
-/// All other bytes (NUL, control chars, DEL 0x7F, high bytes 0x80-0xFF) are word-break.
+/// Count words in C/POSIX locale using 2-state logic matching GNU wc 9.7.
+/// Only 7 bytes are word-break: 0x09-0x0D (tab/NL/VT/FF/CR), 0x20 (space), 0xA0 (NBSP).
+/// All other bytes (NUL, control chars, DEL, printable, high bytes) are word content.
 fn count_words_c(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;
