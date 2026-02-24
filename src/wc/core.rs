@@ -448,9 +448,6 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
 /// - Valid UTF-8 multi-byte printable chars: word content
 /// - Invalid UTF-8 encoding errors: transparent (matches GNU mbrtowc which skips
 ///   1 byte on error without changing in_word state)
-///
-/// Optimized with ASCII run skipping: when inside a word of printable ASCII,
-/// skips remaining non-space ASCII bytes without per-byte table lookups.
 fn count_words_utf8(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;

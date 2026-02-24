@@ -156,7 +156,7 @@ fn test_count_words_all_whitespace_types() {
 //   - Printable ASCII (0x21-0x7E): word content
 //   - Whitespace (0x09-0x0D, 0x20): word break
 //   - Control chars (NUL, 0x01-0x08, 0x0E-0x1F, 0x7F): transparent
-//   - Encoding errors (invalid UTF-8): word break
+//   - Encoding errors (invalid UTF-8): transparent (skip 1 byte, no state change)
 //   - Valid multi-byte printable chars: word content
 // ──────────────────────────────────────────────────
 
