@@ -223,8 +223,9 @@ fn print_pretty(uptime_secs: f64) {
 
 #[cfg(target_os = "linux")]
 fn read_btime() -> Option<libc::time_t> {
-    let content = std::fs::read_to_string("/proc/stat").ok()?;
-    for line in content.lines() {
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open("/proc/stat").ok()?;
+    for line in BufReader::new(f).lines().map_while(Result::ok) {
         if let Some(rest) = line.strip_prefix("btime ") {
             return rest.trim().parse::<libc::time_t>().ok();
         }
