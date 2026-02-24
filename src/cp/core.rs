@@ -495,11 +495,12 @@ fn copy_recursive(
         // Copy files in parallel using Rayon when there are enough to benefit.
         if files.len() > 4 {
             use rayon::prelude::*;
-            let result: Result<(), io::Error> = files
-                .par_iter()
-                .try_for_each(|(child_src, child_dst, meta)| {
-                    copy_file_with_meta(child_src, child_dst, meta, config)
-                });
+            let result: Result<(), io::Error> =
+                files
+                    .par_iter()
+                    .try_for_each(|(child_src, child_dst, meta)| {
+                        copy_file_with_meta(child_src, child_dst, meta, config)
+                    });
             result?;
         } else {
             for (child_src, child_dst, meta) in &files {
