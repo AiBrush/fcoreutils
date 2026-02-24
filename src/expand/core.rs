@@ -136,14 +136,18 @@ pub fn expand_bytes(
         return out.write_all(data);
     }
 
-    // For regular tab stops with no -i flag, use the fast SIMD path
+    // For regular tab stops, use fast SIMD paths
     if let TabStops::Regular(tab_size) = tabs {
-        if !initial_only && memchr::memchr(b'\x08', data).is_none() {
-            return expand_regular_fast(data, *tab_size, out);
+        if memchr::memchr(b'\x08', data).is_none() {
+            if initial_only {
+                return expand_initial_fast(data, *tab_size, out);
+            } else {
+                return expand_regular_fast(data, *tab_size, out);
+            }
         }
     }
 
-    // Generic path for -i flag or tab lists
+    // Generic path for backspace handling or tab lists
     expand_generic(data, tabs, initial_only, out)
 }
 
@@ -179,6 +183,48 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
                 break;
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Fast expand for --initial mode with regular tab stops.
+/// Only expands tabs in the leading whitespace of each line, bulk-copying the rest.
+fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
+    let mut pos: usize = 0;
+
+    while pos < data.len() {
+        // Find end of this line
+        let line_end = memchr::memchr(b'\n', &data[pos..])
+            .map(|off| pos + off + 1)
+            .unwrap_or(data.len());
+
+        // Expand only leading tabs/spaces in this line
+        let mut column: usize = 0;
+        let mut i = pos;
+        while i < line_end {
+            let byte = data[i];
+            if byte == b'\t' {
+                let spaces = tab_size - (column % tab_size);
+                out.write_all(&SPACES[..spaces])?;
+                column += spaces;
+                i += 1;
+            } else if byte == b' ' {
+                out.write_all(b" ")?;
+                column += 1;
+                i += 1;
+            } else {
+                // First non-blank: write the rest of the line unchanged
+                break;
+            }
+        }
+
+        // Write remainder of line as-is (zero-copy)
+        if i < line_end {
+            out.write_all(&data[i..line_end])?;
+        }
+
+        pos = line_end;
     }
 
     Ok(())
