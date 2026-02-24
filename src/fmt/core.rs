@@ -206,7 +206,12 @@ fn format_paragraph_str(
             Some(pfx) => line.strip_prefix(pfx).unwrap_or(line),
             None => line,
         };
-        collect_words_with_sentence_info(s, &mut all_words, &mut sentence_ends);
+        collect_words_with_sentence_info(
+            s,
+            config.uniform_spacing,
+            &mut all_words,
+            &mut sentence_ends,
+        );
     }
 
     if all_words.is_empty() {
@@ -277,8 +282,14 @@ fn is_sentence_end_contextual(word: &str, followed_by_double_space_or_eol: bool)
 
 /// Collect words from a line, tracking which words are sentence endings
 /// based on the original spacing context.
+///
+/// With `uniform = true` (-u flag): words at end-of-line with sentence-ending
+/// punctuation are treated as sentence ends (2 spaces in output).
+/// With `uniform = false`: only words explicitly followed by 2+ spaces in the
+/// original input are treated as sentence ends, matching GNU fmt behavior.
 fn collect_words_with_sentence_info<'a>(
     line: &'a str,
+    uniform: bool,
     words: &mut Vec<&'a str>,
     sentence_ends: &mut Vec<bool>,
 ) {
@@ -306,14 +317,14 @@ fn collect_words_with_sentence_info<'a>(
         }
         let space_count = i - space_start;
 
-        // Sentence end: at end of line (i >= len) or followed by 2+ spaces
+        // Sentence end detection:
+        // - Always: word followed by 2+ spaces in original input
+        // - With -u (uniform): also words at end of line
         let at_eol = i >= len;
         let double_space = space_count >= 2;
+        let context = double_space || (uniform && at_eol);
 
-        // If there was a previous word, mark it
-        // (the sentence_ends entry corresponds to the PREVIOUS word)
-        // But we need to record for THIS word
-        let is_sent_end = is_sentence_end_contextual(word, at_eol || double_space);
+        let is_sent_end = is_sentence_end_contextual(word, context);
 
         words.push(word);
         sentence_ends.push(is_sent_end);

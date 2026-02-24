@@ -389,7 +389,8 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
 ///
 /// Handles:
 /// - ASCII spaces (0x09-0x0D, 0x20): word break
-/// - All other bytes: word content (including NUL, control chars, high bytes)
+/// - NUL, C0 controls (0x00-0x1F), DEL (0x7F): word break
+/// - Printable ASCII (0x21-0x7E): word content
 /// - Valid UTF-8 multi-byte Unicode spaces: word break
 /// - Everything else: word content
 ///

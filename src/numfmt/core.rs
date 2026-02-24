@@ -385,7 +385,7 @@ fn format_with_scale(
         let scaled = value / mult;
         let abs_scaled = scaled.abs();
 
-        if abs_scaled < 9.95 {
+        if abs_scaled < 10.0 {
             // Display with 1 decimal place: "N.Nk"
             let rounded = apply_round_for_display(scaled, round);
             if rounded.abs() >= 10.0 {
