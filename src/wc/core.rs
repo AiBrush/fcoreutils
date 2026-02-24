@@ -24,49 +24,49 @@ pub struct WcCounts {
 //   0 = word content: starts or continues a word
 //   1 = space (word break): ends any current word
 //
-// C locale word content depends on the glibc version:
-//   - glibc ≤2.39 (Ubuntu 24.04, GNU coreutils 9.4): isgraph() in C locale
-//     returns true only for 0x21-0x7E (printable ASCII). All other bytes are
-//     word-break.
-//   - glibc 2.41 (Debian 13, GNU coreutils 9.7): isgraph() accepts more bytes
-//     (high bytes except 0xA0), giving different word counts for non-ASCII.
-//
-// We target glibc ≤2.39 / 0x21-0x7E semantics since our CI (Ubuntu 24.04)
-// compares against GNU coreutils 9.4.
+// C locale: GNU wc 9.7 uses 7 word-break bytes: 0x09-0x0D (tab, newline,
+// vtab, formfeed, CR), 0x20 (space), and 0xA0 (Latin-1 NBSP).
+// All other bytes — including NUL, other control chars, DEL, and high bytes —
+// are word content. This means binary data with NUL bytes counts as word content.
 //
 // UTF-8 locale: 0x09-0x0D, 0x20 (ASCII spaces) break words; multi-byte Unicode
 // spaces are detected via codepoint lookup. Everything else is word content.
 
 /// Byte classification for C/POSIX locale word counting.
-/// Only printable ASCII (0x21-0x7E) is word content; all other bytes are word-break.
-/// Matches GNU coreutils 9.4 (Ubuntu 24.04) behavior.
-///   0 = word content (0x21-0x7E only)
-///   1 = word-break (everything else: NUL, controls, DEL, high bytes)
+/// Uses isspace() semantics plus 0xA0 (Latin-1 NO-BREAK SPACE) which GNU wc
+/// also treats as a word-break in C locale despite isspace(0xA0) returning false.
+///   0 = word content
+///   1 = word-break
 const fn make_byte_class_c() -> [u8; 256] {
-    let mut t = [1u8; 256]; // all word-break by default
-    // Only printable non-space ASCII is word content
-    let mut b = 0x21u8;
-    loop {
-        t[b as usize] = 0;
-        if b == 0x7E {
-            break;
-        }
-        b += 1;
-    }
+    let mut t = [0u8; 256]; // all word-content by default
+    // C locale isspace() chars
+    t[0x09] = 1; // tab
+    t[0x0A] = 1; // newline
+    t[0x0B] = 1; // vertical tab
+    t[0x0C] = 1; // form feed
+    t[0x0D] = 1; // carriage return
+    t[0x20] = 1; // space
+    t[0xA0] = 1; // Latin-1 NO-BREAK SPACE (GNU wc compat)
     t
 }
 const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
 
-/// 2-state single-byte classification for UTF-8 locale.
+/// 2-state single-byte classification for UTF-8 locale word counting.
 /// Multi-byte UTF-8 sequences are handled by the state machine separately.
+///
+/// GNU wc uses a hardcoded set of 6 space characters for word counting
+/// in ALL locales (both C and UTF-8). From wc.c: '\t', '\n', '\v', '\f',
+/// '\r', ' ' are word-break; everything else (including NUL, other control
+/// chars, DEL) is word content. High bytes (0x80-0xFF) are UTF-8
+/// continuation/start bytes handled by the multi-byte decoder.
 const fn make_byte_class_utf8() -> [u8; 256] {
     let mut t = [0u8; 256]; // default: word content
-    // Spaces (only these break words — everything else including NUL is word content)
-    t[0x09] = 1; // \t
-    t[0x0A] = 1; // \n
-    t[0x0B] = 1; // \v
-    t[0x0C] = 1; // \f
-    t[0x0D] = 1; // \r
+    // Only the 6 ASCII space characters are word-break (matching GNU wc)
+    t[0x09] = 1; // tab
+    t[0x0A] = 1; // newline
+    t[0x0B] = 1; // vertical tab
+    t[0x0C] = 1; // form feed
+    t[0x0D] = 1; // carriage return
     t[0x20] = 1; // space
     t
 }
@@ -132,9 +132,9 @@ pub fn count_words_locale(data: &[u8], utf8: bool) -> u64 {
     }
 }
 
-/// Count words in C/POSIX locale using 2-state logic matching GNU wc 9.4.
-/// Only printable ASCII (0x21-0x7E) is word content.
-/// All other bytes (NUL, control chars, DEL 0x7F, high bytes 0x80-0xFF) are word-break.
+/// Count words in C/POSIX locale using 2-state logic matching GNU wc 9.7.
+/// Only 7 bytes are word-break: 0x09-0x0D (tab/NL/VT/FF/CR), 0x20 (space), 0xA0 (NBSP).
+/// All other bytes (NUL, control chars, DEL, printable, high bytes) are word content.
 fn count_words_c(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;
@@ -189,9 +189,9 @@ fn count_lw_c_scalar_tail(
 }
 
 /// AVX2-accelerated fused line+word counter for C locale chunks.
-/// Processes 32 bytes per iteration using 2-state logic:
-///   - Word content: 0x21-0x7E (printable ASCII only; signed: b > 0x20 AND b < 0x7F)
-///   - Word-break: everything else (NUL, controls, DEL, high bytes 0x80-0xFF)
+/// Processes 32 bytes per iteration using 2-state logic matching BYTE_CLASS_C:
+///   - Word-break: {0x09-0x0D, 0x20, 0xA0} (7 bytes total)
+///   - Word content: everything else
 /// Word transitions detected via bitmask: word_content_mask & ~prev_word_content_mask.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -209,13 +209,12 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm256_set1_epi8(b'\n' as i8);
         let zero = _mm256_setzero_si256();
         let ones = _mm256_set1_epi8(1);
-        // Word content = 0x21-0x7E only (printable ASCII).
-        // Signed comparison: b > 0x20 (32) AND b < 0x7F (127).
-        // High bytes 0x80-0xFF, when reinterpreted as i8, are negative (-128
-        // to -1). Since lo = 0x20 = 32, `cmpgt(v, lo)` (signed) is false for
-        // all negative values, correctly excluding them without a third check.
-        let lo = _mm256_set1_epi8(0x20i8); // 32
-        let hi = _mm256_set1_epi8(0x7Fi8); // 127
+        let all_ones = _mm256_set1_epi8(-1i8);
+        // Word-break detection constants for {0x09-0x0D, 0x20, 0xA0}
+        let const_0x09 = _mm256_set1_epi8(0x09u8 as i8);
+        let const_0x0d = _mm256_set1_epi8(0x0Du8 as i8);
+        let const_0x20 = _mm256_set1_epi8(0x20u8 as i8);
+        let const_0xa0 = _mm256_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm256_setzero_si256();
         let mut batch = 0u32;
@@ -225,10 +224,16 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // Word content: b > 0x20 AND b < 0x7F (signed)
-            let gt_lo = _mm256_cmpgt_epi8(v, lo);
-            let lt_hi = _mm256_cmpgt_epi8(hi, v);
-            let is_word = _mm256_and_si256(gt_lo, lt_hi);
+            // Word-break = byte in {0x09-0x0D, 0x20, 0xA0}
+            // Range check [0x09, 0x0D]: v >= 0x09 AND v <= 0x0D
+            let ge_09 = _mm256_cmpeq_epi8(_mm256_max_epu8(v, const_0x09), v);
+            let le_0d = _mm256_cmpeq_epi8(_mm256_min_epu8(v, const_0x0d), v);
+            let in_tab_range = _mm256_and_si256(ge_09, le_0d);
+            let is_space = _mm256_cmpeq_epi8(v, const_0x20);
+            let is_nbsp = _mm256_cmpeq_epi8(v, const_0xa0);
+            let is_break = _mm256_or_si256(_mm256_or_si256(in_tab_range, is_space), is_nbsp);
+            // Word content = NOT word-break
+            let is_word = _mm256_xor_si256(is_break, all_ones);
             let word_mask = _mm256_movemask_epi8(is_word) as u32;
 
             // 2-state bitmask approach: count transitions from non-word to word
@@ -266,7 +271,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
 }
 
 /// SSE2 variant of count_lw_c_chunk_avx2 — processes 16 bytes per iteration.
-/// See AVX2 function above for algorithm details and signed comparison notes.
+/// See AVX2 function above for algorithm details.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
@@ -283,8 +288,11 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        let lo = _mm_set1_epi8(0x20i8);
-        let hi = _mm_set1_epi8(0x7Fi8);
+        let all_ones = _mm_set1_epi8(-1i8);
+        let const_0x09 = _mm_set1_epi8(0x09u8 as i8);
+        let const_0x0d = _mm_set1_epi8(0x0Du8 as i8);
+        let const_0x20 = _mm_set1_epi8(0x20u8 as i8);
+        let const_0xa0 = _mm_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm_setzero_si128();
         let mut batch = 0u32;
@@ -294,9 +302,15 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            let gt_lo = _mm_cmpgt_epi8(v, lo);
-            let lt_hi = _mm_cmpgt_epi8(hi, v);
-            let is_word = _mm_and_si128(gt_lo, lt_hi);
+            // Word-break = byte in {0x09-0x0D, 0x20, 0xA0}
+            // Range check [0x09, 0x0D]: v >= 0x09 AND v <= 0x0D
+            let ge_09 = _mm_cmpeq_epi8(_mm_max_epu8(v, const_0x09), v);
+            let le_0d = _mm_cmpeq_epi8(_mm_min_epu8(v, const_0x0d), v);
+            let in_tab_range = _mm_and_si128(ge_09, le_0d);
+            let is_space = _mm_cmpeq_epi8(v, const_0x20);
+            let is_nbsp = _mm_cmpeq_epi8(v, const_0xa0);
+            let is_break = _mm_or_si128(_mm_or_si128(in_tab_range, is_space), is_nbsp);
+            let is_word = _mm_xor_si128(is_break, all_ones);
             let word_mask = (_mm_movemask_epi8(is_word) as u32) & 0xFFFF;
 
             // 2-state bitmask: count transitions from non-word to word
@@ -345,7 +359,7 @@ fn count_lw_c_chunk_fast(data: &[u8]) -> (u64, u64, bool, bool) {
 /// Count words + lines in a C locale chunk using 2-state logic, returning
 /// counts plus boundary info for parallel chunk merging.
 /// Returns (line_count, word_count, first_is_word_content, ends_in_word).
-/// GNU wc 9.4: only printable ASCII (0x21-0x7E) is word content.
+/// Word-break bytes: 0x09-0x0D, 0x20, 0xA0. All others are word content.
 fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     let mut lines = 0u64;
     let mut words = 0u64;
@@ -375,13 +389,13 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     (lines, words, first_is_word, in_word)
 }
 
-/// Count words in UTF-8 locale using 2-state logic matching GNU wc.
+/// Count words in UTF-8 locale using 2-state logic matching GNU wc 9.7.
 ///
 /// Handles:
 /// - ASCII spaces (0x09-0x0D, 0x20): word break
-/// - All other bytes: word content (including NUL, control chars, high bytes)
-/// - Valid UTF-8 multi-byte Unicode spaces: word break
-/// - Everything else: word content
+/// - All other ASCII bytes (NUL, controls, printable, DEL): word content
+/// - Valid UTF-8 multi-byte Unicode spaces (U+00A0, U+2000-U+200A, etc.): word break
+/// - Everything else (high bytes, multi-byte sequences): word content
 ///
 /// Optimized with ASCII run skipping: when inside a word of printable ASCII,
 /// skips remaining non-space ASCII bytes without per-byte table lookups.

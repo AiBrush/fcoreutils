@@ -719,13 +719,14 @@ fn sort_entries(entries: &mut [FileEntry], config: &LsConfig) {
 }
 
 fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering {
+    // GNU ls uses strcoll() for name comparison, which in C locale (LC_ALL=C)
+    // is byte-order comparison (strcmp). We use byte comparison to match.
     let ord = match config.sort_by {
-        SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        SortBy::Name => a.name.cmp(&b.name),
         SortBy::Size => {
             let size_ord = b.size.cmp(&a.size);
             if size_ord == Ordering::Equal {
-                // GNU uses name as tie-breaker for equal sizes.
-                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                a.name.cmp(&b.name)
             } else {
                 size_ord
             }
@@ -739,8 +740,7 @@ fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering 
                 let nb = b.time_nsec(config.time_field);
                 let nsec_ord = nb.cmp(&na);
                 if nsec_ord == Ordering::Equal {
-                    // GNU uses name as tie-breaker for equal times.
-                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                    a.name.cmp(&b.name)
                 } else {
                     nsec_ord
                 }
@@ -749,11 +749,11 @@ fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering 
             }
         }
         SortBy::Extension => {
-            let ea = a.extension().to_lowercase();
-            let eb = b.extension().to_lowercase();
-            let ord = ea.cmp(&eb);
+            let ea = a.extension();
+            let eb = b.extension();
+            let ord = ea.cmp(eb);
             if ord == Ordering::Equal {
-                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                a.name.cmp(&b.name)
             } else {
                 ord
             }
