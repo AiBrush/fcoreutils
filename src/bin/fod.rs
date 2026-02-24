@@ -281,6 +281,11 @@ fn main() {
                     j += 1;
                 }
             }
+            _ if arg.starts_with("--") => {
+                eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
+                eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                process::exit(1);
+            }
             _ if arg.starts_with('+') => {
                 // Traditional offset: +OFFSET[.][b]
                 skip_bytes = parse_offset(&arg[1..]);
