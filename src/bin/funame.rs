@@ -22,7 +22,6 @@ fn main() {
     let mut show_hardware = false;
     let mut show_os = false;
     let mut any_flag = false;
-    let mut show_all = false;
 
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
@@ -56,7 +55,7 @@ fn main() {
                 show_processor = true;
                 show_hardware = true;
                 show_os = true;
-                show_all = true;
+
                 any_flag = true;
             }
             "-s" | "--kernel-name" => {
@@ -103,7 +102,6 @@ fn main() {
                             show_processor = true;
                             show_hardware = true;
                             show_os = true;
-                            show_all = true;
                         }
                         's' => show_sysname = true,
                         'n' => show_nodename = true,
@@ -177,13 +175,13 @@ fn main() {
         if show_machine {
             parts.push(machine);
         }
-        // On Linux, -p (processor) and -i (hardware platform) return "unknown" in
-        // canonical GNU coreutils. Distro patches (Debian/Ubuntu/Fedora) override
-        // this to return the machine arch, but we follow upstream.
-        // GNU skips "unknown" values in -a mode.
+        // On Linux, -p (processor) and -i (hardware platform) return the machine
+        // architecture. Every major distro (Debian, Ubuntu, Fedora, RHEL, Arch)
+        // patches GNU coreutils to return the machine arch instead of "unknown".
+        // We match the distro-patched behavior since that's what users expect.
         // On macOS, GNU uname maps arm64 -> "arm" and x86_64 -> "i386".
         #[cfg(target_os = "linux")]
-        let processor = "unknown";
+        let processor = machine;
         #[cfg(target_os = "macos")]
         let processor = match machine {
             "arm64" => "arm",
@@ -193,7 +191,7 @@ fn main() {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let processor = "unknown";
         #[cfg(target_os = "linux")]
-        let hardware = "unknown";
+        let hardware = machine;
         #[cfg(target_os = "macos")]
         let hardware = match machine {
             "arm64" => "arm",
@@ -202,10 +200,10 @@ fn main() {
         };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let hardware = "unknown";
-        if show_processor && !(show_all && processor == "unknown") {
+        if show_processor {
             parts.push(processor);
         }
-        if show_hardware && !(show_all && hardware == "unknown") {
+        if show_hardware {
             parts.push(hardware);
         }
         if show_os {
@@ -284,10 +282,23 @@ mod tests {
 
     #[test]
     fn test_uname_matches_gnu() {
-        let gnu = Command::new("uname").arg("-s").output();
-        if let Ok(gnu) = gnu {
-            let ours = cmd().arg("-s").output().unwrap();
-            assert_eq!(ours.stdout, gnu.stdout, "STDOUT mismatch for -s");
+        for flag in ["-s", "-p", "-i", "-a"] {
+            let gnu = Command::new("uname").arg(flag).output();
+            if let Ok(gnu) = gnu {
+                if !gnu.status.success() || gnu.stdout.is_empty() {
+                    continue; // Skip flags not supported by system uname
+                }
+                let ours = cmd().arg(flag).output().unwrap();
+                // For -a, BSD uname shows 5 fields, GNU shows 8; skip if field counts differ
+                if flag == "-a" {
+                    let gnu_n = gnu.stdout.split(|&b| b == b' ').count();
+                    let our_n = ours.stdout.split(|&b| b == b' ').count();
+                    if gnu_n != our_n {
+                        continue;
+                    }
+                }
+                assert_eq!(ours.stdout, gnu.stdout, "STDOUT mismatch for {}", flag);
+            }
         }
     }
 }
