@@ -709,7 +709,6 @@ fn write_all_vectored_sort(writer: &mut SortOutput, slices: &[io::IoSlice<'_>]) 
     Ok(())
 }
 
-/// Software prefetch a cache line for reading.
 /// Returns true if LC_COLLATE is C or POSIX (byte comparison equals strcoll).
 /// When false, the raw-byte fast path must be disabled to use locale-aware strcoll.
 /// Cached via OnceLock since locale is set once at startup and never changes during sort.

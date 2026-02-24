@@ -676,6 +676,9 @@ pub fn compare_with_opts(a: &[u8], b: &[u8], opts: &KeyOpts, random_seed: u64) -
             opts.ignore_nonprinting,
             opts.ignore_case,
         )
+    } else if super::core::is_c_locale() {
+        // C/POSIX locale: strcoll == byte comparison, skip CString overhead
+        a.cmp(b)
     } else {
         // Default: locale-aware comparison matching GNU sort's LC_COLLATE behavior
         compare_locale(a, b)
