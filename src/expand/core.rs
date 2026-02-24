@@ -153,7 +153,7 @@ pub fn expand_bytes(
         if initial_only {
             // --initial mode processes line-by-line anyway, so handle backspace
             // per-line instead of scanning the whole buffer.
-            return expand_initial_fast(data, *tab_size, tabs, out);
+            return expand_initial_fast(data, *tab_size, out);
         } else if memchr::memchr(b'\x08', data).is_none() {
             return expand_regular_fast(data, *tab_size, out);
         }
@@ -207,10 +207,10 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
 fn expand_initial_fast(
     data: &[u8],
     tab_size: usize,
-    tabs: &TabStops,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
     debug_assert!(tab_size > 0, "tab_size must be > 0");
+    let tabs = TabStops::Regular(tab_size);
     let mut pos: usize = 0;
 
     while pos < data.len() {
@@ -220,6 +220,7 @@ fn expand_initial_fast(
             .unwrap_or(data.len());
 
         let line = &data[pos..line_end];
+        debug_assert!(!line.is_empty());
 
         // Fast skip: if line doesn't start with tab or space, write it whole
         let first = line[0];
@@ -231,7 +232,7 @@ fn expand_initial_fast(
 
         // If this line contains a backspace, fall back to generic for this line only
         if memchr::memchr(b'\x08', line).is_some() {
-            expand_generic(line, tabs, true, out)?;
+            expand_generic(line, &tabs, true, out)?;
             pos = line_end;
             continue;
         }
