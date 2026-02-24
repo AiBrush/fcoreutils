@@ -476,3 +476,140 @@ fn test_total_line() {
     // Total size: (100+200)*1024 bytes / 1024 block_size = 300
     assert!(line.contains("300"));
 }
+
+#[test]
+fn test_output_mode_source_column_min_width() {
+    // GNU df uses minimum width of 14 for the source (Filesystem) column
+    // even in --output mode. Short sources like "tmpfs" should be padded.
+    let config = DfConfig {
+        output_fields: Some(vec![
+            "source".to_string(),
+            "size".to_string(),
+            "used".to_string(),
+            "avail".to_string(),
+            "pcent".to_string(),
+        ]),
+        ..DfConfig::default()
+    };
+    let info = FsInfo {
+        source: "tmpfs".to_string(),
+        fstype: "tmpfs".to_string(),
+        target: "/dev/shm".to_string(),
+        total: 1910040 * 1024,
+        used: 0,
+        available: 1910040 * 1024,
+        use_percent: 0.0,
+        itotal: 0,
+        iused: 0,
+        iavail: 0,
+        iuse_percent: 0.0,
+    };
+    // print_header emits 1 line (header), print_fs_line emits 1 line (data)
+    let mut buf = Vec::new();
+    print_header(&config, &mut buf).unwrap();
+    print_fs_line(&info, &config, &mut buf).unwrap();
+    let output = String::from_utf8(buf).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines.len(), 2, "expected header + data, got: {:?}", lines);
+    // Header "Filesystem" (10 chars) should be padded to at least 14
+    assert!(
+        lines[0].starts_with("Filesystem    "),
+        "source column should be at least 14 chars wide, got: {:?}",
+        lines[0]
+    );
+    // Data line "tmpfs" (5 chars) should be padded to at least 14 chars
+    assert!(
+        lines[1].starts_with("tmpfs         "),
+        "source column should be padded to at least 14 chars wide, got: {:?}",
+        lines[1]
+    );
+}
+
+#[test]
+fn test_print_table_long_source_alignment() {
+    // When a source name exceeds the minimum width (14), print_table computes
+    // widths over all rows at once so header and data remain aligned.
+    let config = DfConfig::default();
+    let header = build_header_row(&config);
+    let info = FsInfo {
+        source: "/dev/mmcblk0p17".to_string(),
+        fstype: "ext4".to_string(),
+        target: "/".to_string(),
+        total: 100 * 1024 * 1024,
+        used: 60 * 1024 * 1024,
+        available: 40 * 1024 * 1024,
+        use_percent: 60.0,
+        itotal: 0,
+        iused: 0,
+        iavail: 0,
+        iuse_percent: 0.0,
+    };
+    let rows = vec![build_row(&info, &config)];
+    let mut buf = Vec::new();
+    print_table(&header, &rows, &config, &mut buf).unwrap();
+    let output = String::from_utf8(buf).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines.len(), 2);
+    // Source is 15 chars, exceeds min-14 → column should be 15 wide.
+    // Header "Filesystem" (10 chars) padded to 15 with trailing spaces.
+    assert!(
+        lines[0].starts_with("Filesystem      "),
+        "header should expand source column for long name, got: {:?}",
+        lines[0]
+    );
+    // Data line should have full source name followed by a space separator.
+    assert!(
+        lines[1].starts_with("/dev/mmcblk0p17 "),
+        "data should contain the full source name with separator, got: {:?}",
+        lines[1]
+    );
+    // Verify the "1K-blocks" header starts at position 16 (15 for column + 1 separator),
+    // not position 15 (which would mean 14-char minimum was used instead of 15).
+    let blocks_pos = lines[0].find("1K-blocks").unwrap();
+    assert!(
+        blocks_pos >= 16,
+        "1K-blocks should start at offset >= 16 (source=15+sep), got: {}",
+        blocks_pos
+    );
+}
+
+#[test]
+fn test_print_table_min5_size_columns() {
+    // GNU df enforces minimum width of 5 for numeric size columns.
+    // With --output=used and value "0" (1 char), the column must still be 5 wide.
+    let config = DfConfig {
+        output_fields: Some(vec!["source".to_string(), "used".to_string()]),
+        ..DfConfig::default()
+    };
+    let header = build_header_row(&config);
+    let info = FsInfo {
+        source: "tmpfs".to_string(),
+        fstype: "tmpfs".to_string(),
+        target: "/dev/shm".to_string(),
+        total: 0,
+        used: 0,
+        available: 0,
+        use_percent: 0.0,
+        itotal: 0,
+        iused: 0,
+        iavail: 0,
+        iuse_percent: 0.0,
+    };
+    let rows = vec![build_row(&info, &config)];
+    let mut buf = Vec::new();
+    print_table(&header, &rows, &config, &mut buf).unwrap();
+    let output = String::from_utf8(buf).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines.len(), 2);
+    // Header "Used" (4 chars) should be right-aligned in a 5-wide column.
+    // The "Used" header should occupy at least 5 characters of space.
+    let header_line = lines[0];
+    let used_start = header_line.find("Used").unwrap();
+    // "Used" at position N means column goes from N to at least N+4.
+    // With min-5, the right-aligned "Used" should have a leading space.
+    assert!(
+        used_start > 14,
+        "Used header should be after 14-char source column, got pos: {}",
+        used_start
+    );
+}
