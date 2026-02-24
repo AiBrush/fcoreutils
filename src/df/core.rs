@@ -848,9 +848,7 @@ fn print_row(
     Ok(())
 }
 
-/// Print the df output header only (one line).
-/// Note: widths are computed from header alone. For aligned output with data,
-/// use `print_table()` which computes widths over all rows at once.
+#[cfg(test)]
 pub(crate) fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
     let header = build_header_row(config);
     let widths = compute_widths(&header, &[], config);
@@ -858,7 +856,7 @@ pub(crate) fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Resul
     print_row(&header, &widths, &aligns, out)
 }
 
-/// Print a single filesystem info line only (one line, no header).
+#[cfg(test)]
 pub(crate) fn print_fs_line(info: &FsInfo, config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
     let header = build_header_row(config);
     let row = build_row(info, config);
@@ -868,7 +866,7 @@ pub(crate) fn print_fs_line(info: &FsInfo, config: &DfConfig, out: &mut impl Wri
     print_row(&rows[0], &widths, &aligns, out)
 }
 
-/// Print a total line only (one line, no header).
+#[cfg(test)]
 pub(crate) fn print_total_line(
     filesystems: &[FsInfo],
     config: &DfConfig,
