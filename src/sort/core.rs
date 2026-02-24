@@ -723,6 +723,68 @@ fn is_c_locale() -> bool {
     }
 }
 
+/// Compute a strxfrm collation key for a byte slice.
+/// Returns `None` if the key contains interior null bytes (strxfrm treats
+/// those as C-string terminators, silently truncating the result).
+/// The caller should fall back to raw byte comparison in that case.
+fn compute_xfrm_key(key: &[u8]) -> Option<Vec<u8>> {
+    if key.is_empty() {
+        return Some(Vec::new());
+    }
+    if memchr::memchr(0, key).is_some() {
+        return None;
+    }
+    let mut c_buf = vec![0u8; key.len() + 1];
+    c_buf[..key.len()].copy_from_slice(key);
+    // c_buf is zero-terminated from vec init
+    let needed = unsafe { libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0) };
+    // strxfrm returns (size_t)-1 on error (e.g. invalid multibyte sequence)
+    if needed == usize::MAX {
+        return None;
+    }
+    let mut out = vec![0u8; needed + 1];
+    unsafe {
+        libc::strxfrm(
+            out.as_mut_ptr() as *mut _,
+            c_buf.as_ptr() as *const _,
+            needed + 1,
+        );
+    }
+    out.truncate(needed);
+    Some(out)
+}
+
+/// Compute a strxfrm collation key, reusing `c_buf` to reduce allocations.
+/// Returns `None` if the key contains interior null bytes or strxfrm fails.
+fn compute_xfrm_key_reuse(key: &[u8], c_buf: &mut Vec<u8>) -> Option<Vec<u8>> {
+    if key.is_empty() {
+        return Some(Vec::new());
+    }
+    if memchr::memchr(0, key).is_some() {
+        return None;
+    }
+    if key.len() + 1 > c_buf.len() {
+        c_buf.resize(key.len() + 1, 0);
+    }
+    c_buf[..key.len()].copy_from_slice(key);
+    c_buf[key.len()] = 0;
+    let needed = unsafe { libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0) };
+    // strxfrm returns (size_t)-1 on error (e.g. invalid multibyte sequence)
+    if needed == usize::MAX {
+        return None;
+    }
+    let mut out = vec![0u8; needed + 1];
+    unsafe {
+        libc::strxfrm(
+            out.as_mut_ptr() as *mut _,
+            c_buf.as_ptr() as *const _,
+            needed + 1,
+        );
+    }
+    out.truncate(needed);
+    Some(out)
+}
+
 /// Hides memory latency by loading data into L1 cache before it's needed.
 #[inline(always)]
 fn prefetch_read(ptr: *const u8) {
@@ -2806,66 +2868,125 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                 }
             } else {
-                // Pre-select comparator: eliminates per-comparison option branching
-                let mut indices: Vec<usize> = (0..num_lines).collect();
-                let (cmp_fn, needs_blank, needs_reverse) = select_comparator(opts, random_seed);
-                let dp_sk = data.as_ptr() as usize;
-                do_sort(&mut indices, stable, |&a, &b| {
-                    let dp = dp_sk as *const u8;
-                    let (sa, ea) = key_offs[a];
-                    let (sb, eb) = key_offs[b];
-                    let ka = if sa == ea {
-                        &[] as &[u8]
-                    } else if needs_blank {
-                        skip_leading_blanks(unsafe {
-                            std::slice::from_raw_parts(dp.add(sa), ea - sa)
-                        })
+                // Locale-aware sort path: pre-compute strxfrm collation keys
+                // so sorting uses byte comparison instead of per-comparison strcoll.
+                let is_locale_only = !opts.dictionary_order
+                    && !opts.ignore_case
+                    && !opts.ignore_nonprinting
+                    && !opts.ignore_leading_blanks
+                    && !opts.has_sort_type()
+                    && !is_c_locale();
+
+                // Check if any key contains null bytes (strxfrm can't handle them).
+                // If so, skip the strxfrm path entirely to avoid comparing
+                // strxfrm output against raw bytes (incompatible domains).
+                let has_null_keys = is_locale_only
+                    && key_offs
+                        .iter()
+                        .any(|&(sa, ea)| memchr::memchr(0, &data[sa..ea]).is_some());
+
+                // Attempt strxfrm pre-computation for locale-only sorts.
+                // Returns None if any key fails (invalid multibyte, etc.),
+                // in which case we fall back to per-comparison strcoll.
+                let xfrm_keys: Option<Vec<Vec<u8>>> = if is_locale_only && !has_null_keys {
+                    // SAFETY: strxfrm reads LC_COLLATE global state.
+                    // Parallel calls are safe as long as setlocale is not called
+                    // concurrently, which we guarantee since locale is set once
+                    // at startup.
+                    let keys: Vec<Option<Vec<u8>>> = if num_lines > 10_000 {
+                        key_offs
+                            .par_iter()
+                            .map(|&(sa, ea)| compute_xfrm_key(&data[sa..ea]))
+                            .collect()
                     } else {
-                        unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) }
+                        let mut c_buf = vec![0u8; 512];
+                        key_offs
+                            .iter()
+                            .map(|&(sa, ea)| compute_xfrm_key_reuse(&data[sa..ea], &mut c_buf))
+                            .collect()
                     };
-                    let kb = if sb == eb {
-                        &[] as &[u8]
-                    } else if needs_blank {
-                        skip_leading_blanks(unsafe {
-                            std::slice::from_raw_parts(dp.add(sb), eb - sb)
-                        })
+                    // If any strxfrm failed (e.g. invalid multibyte sequence),
+                    // abandon the strxfrm path to avoid silent sort corruption.
+                    if keys.iter().all(|k| k.is_some()) {
+                        Some(keys.into_iter().map(|k| k.unwrap()).collect())
                     } else {
-                        unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) }
-                    };
-                    let ord = cmp_fn(ka, kb);
-                    let ord = if needs_reverse { ord.reverse() } else { ord };
-                    if ord == Ordering::Equal && !stable {
-                        let (la, ra) = offsets[a];
-                        let (lb, rb) = offsets[b];
-                        unsafe {
-                            std::slice::from_raw_parts(dp.add(la), ra - la)
-                                .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
-                        }
-                    } else {
-                        ord
+                        None
                     }
-                });
-                write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+                } else {
+                    None
+                };
+
+                if let Some(xfrm_keys) = xfrm_keys {
+                    let mut indices: Vec<usize> = (0..num_lines).collect();
+                    let dp_sk = data.as_ptr() as usize;
+                    do_sort(&mut indices, stable, |&a, &b| {
+                        let ka = xfrm_keys[a].as_slice();
+                        let kb = xfrm_keys[b].as_slice();
+                        let ord = ka.cmp(kb);
+                        let ord = if reverse { ord.reverse() } else { ord };
+                        if ord == Ordering::Equal && !stable {
+                            let dp = dp_sk as *const u8;
+                            let (la, ra) = offsets[a];
+                            let (lb, rb) = offsets[b];
+                            unsafe {
+                                std::slice::from_raw_parts(dp.add(la), ra - la)
+                                    .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
+                            }
+                        } else {
+                            ord
+                        }
+                    });
+                    write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+                } else {
+                    // General flagged sort: pre-select comparator
+                    let mut indices: Vec<usize> = (0..num_lines).collect();
+                    let (cmp_fn, needs_blank, needs_reverse) = select_comparator(opts, random_seed);
+                    let dp_sk = data.as_ptr() as usize;
+                    do_sort(&mut indices, stable, |&a, &b| {
+                        let dp = dp_sk as *const u8;
+                        let (sa, ea) = key_offs[a];
+                        let (sb, eb) = key_offs[b];
+                        let ka = if sa == ea {
+                            &[] as &[u8]
+                        } else if needs_blank {
+                            skip_leading_blanks(unsafe {
+                                std::slice::from_raw_parts(dp.add(sa), ea - sa)
+                            })
+                        } else {
+                            unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) }
+                        };
+                        let kb = if sb == eb {
+                            &[] as &[u8]
+                        } else if needs_blank {
+                            skip_leading_blanks(unsafe {
+                                std::slice::from_raw_parts(dp.add(sb), eb - sb)
+                            })
+                        } else {
+                            unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) }
+                        };
+                        let ord = cmp_fn(ka, kb);
+                        let ord = if needs_reverse { ord.reverse() } else { ord };
+                        if ord == Ordering::Equal && !stable {
+                            let (la, ra) = offsets[a];
+                            let (lb, rb) = offsets[b];
+                            unsafe {
+                                std::slice::from_raw_parts(dp.add(la), ra - la)
+                                    .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
+                            }
+                        } else {
+                            ord
+                        }
+                    });
+                    write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+                }
             }
         }
     } else if config.keys.len() > 1 {
         // FAST PATH 4: Multi-key sort with pre-extracted key offsets for ALL keys.
-        // Eliminates per-comparison key extraction (O(n log n) calls to extract_key).
+        // Uses a flat array in line-major layout for cache-friendly comparisons:
+        // flat_offs[line_idx * num_keys + ki] — all keys for a line are contiguous.
         let mut indices: Vec<usize> = (0..num_lines).collect();
-        let all_key_offs: Vec<Vec<(usize, usize)>> = if config.keys.len() > 1 && num_lines > 10_000
-        {
-            config
-                .keys
-                .par_iter()
-                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
-                .collect()
-        } else {
-            config
-                .keys
-                .iter()
-                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
-                .collect()
-        };
+        let num_keys = config.keys.len();
 
         let stable = config.stable;
         let random_seed = config.random_seed;
@@ -2891,28 +3012,136 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             })
             .collect();
 
+        // Extract key offsets per-key, then flatten into line-major layout.
+        // Pre-skip leading blanks during flattening to avoid per-comparison skipping.
+        let per_key_offs: Vec<Vec<(usize, usize)>> = if num_lines > 10_000 {
+            config
+                .keys
+                .par_iter()
+                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .collect()
+        } else {
+            config
+                .keys
+                .iter()
+                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .collect()
+        };
+
+        // Identify which keys need locale comparison (strxfrm pre-computation).
+        // A key needs locale comparison if it has no special flags and we're not in C locale.
+        let is_not_c = !is_c_locale();
+        let key_needs_locale: Vec<bool> = keys
+            .iter()
+            .map(|key| {
+                let opts = if key.opts.has_sort_type()
+                    || key.opts.ignore_case
+                    || key.opts.dictionary_order
+                    || key.opts.ignore_nonprinting
+                    || key.opts.ignore_leading_blanks
+                    || key.opts.reverse
+                {
+                    &key.opts
+                } else {
+                    global_opts
+                };
+                is_not_c
+                    && !opts.has_sort_type()
+                    && !opts.dictionary_order
+                    && !opts.ignore_case
+                    && !opts.ignore_nonprinting
+                    && !opts.ignore_leading_blanks
+            })
+            .collect();
+
+        // Pre-compute strxfrm collation keys for locale-aware keys (parallel).
+        // If any key in a locale-key column has null bytes, disable strxfrm
+        // for that column to avoid comparing strxfrm output against raw bytes.
+        let key_has_nulls: Vec<bool> = (0..num_keys)
+            .map(|ki| {
+                if !key_needs_locale[ki] {
+                    return false;
+                }
+                per_key_offs[ki]
+                    .iter()
+                    .any(|&(sa, ea)| memchr::memchr(0, &data[sa..ea]).is_some())
+            })
+            .collect();
+
+        let per_key_xfrm: Vec<Option<Vec<Vec<u8>>>> = (0..num_keys)
+            .map(|ki| {
+                if !key_needs_locale[ki] || key_has_nulls[ki] {
+                    return None;
+                }
+                let ko = &per_key_offs[ki];
+                // SAFETY: strxfrm reads LC_COLLATE global state.
+                // Parallel calls are safe since locale is set once at startup.
+                let keys: Vec<Option<Vec<u8>>> = if num_lines > 10_000 {
+                    ko.par_iter()
+                        .map(|&(sa, ea)| compute_xfrm_key(&data[sa..ea]))
+                        .collect()
+                } else {
+                    let mut c_buf = vec![0u8; 512];
+                    ko.iter()
+                        .map(|&(sa, ea)| compute_xfrm_key_reuse(&data[sa..ea], &mut c_buf))
+                        .collect()
+                };
+                // If any key in this column failed strxfrm (e.g. invalid
+                // multibyte), disable strxfrm for the entire column to avoid
+                // silent sort corruption from empty-key substitution.
+                if keys.iter().all(|k| k.is_some()) {
+                    Some(keys.into_iter().map(|k| k.unwrap()).collect())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Flatten into line-major layout: [line0_key0, line0_key1, ..., line1_key0, ...]
+        // Pre-skip leading blanks so the comparison loop doesn't need to.
+        let mut flat_offs: Vec<(usize, usize)> = Vec::with_capacity(num_lines * num_keys);
+        for li in 0..num_lines {
+            for (ki, key_offs) in per_key_offs.iter().enumerate() {
+                let (s, e) = key_offs[li];
+                if s == e || !comparators[ki].1 {
+                    flat_offs.push((s, e));
+                } else {
+                    let slice = &data[s..e];
+                    let trimmed = skip_leading_blanks(slice);
+                    let new_s = s + (slice.len() - trimmed.len());
+                    flat_offs.push((new_s, e));
+                }
+            }
+        }
+        drop(per_key_offs);
+
         let dp_mk = data.as_ptr() as usize;
+        let flat_ptr_usize = flat_offs.as_ptr() as usize;
         do_sort(&mut indices, stable, |&a, &b| {
             let dp = dp_mk as *const u8;
-            for (ki, &(cmp_fn, needs_blank, needs_reverse)) in comparators.iter().enumerate() {
-                let (sa, ea) = all_key_offs[ki][a];
-                let (sb, eb) = all_key_offs[ki][b];
-                let ka = if sa == ea {
-                    &[] as &[u8]
-                } else if needs_blank {
-                    skip_leading_blanks(unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) })
+            let fp = flat_ptr_usize as *const (usize, usize);
+            let base_a = a * num_keys;
+            let base_b = b * num_keys;
+            for (ki, &(cmp_fn, _needs_blank, needs_reverse)) in comparators.iter().enumerate() {
+                let result = if let Some(ref xfrm) = per_key_xfrm[ki] {
+                    // Use pre-computed strxfrm keys for locale comparison
+                    xfrm[a].as_slice().cmp(xfrm[b].as_slice())
                 } else {
-                    unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) }
-                };
-                let kb = if sb == eb {
-                    &[] as &[u8]
-                } else if needs_blank {
-                    skip_leading_blanks(unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) })
-                } else {
-                    unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) }
+                    let (sa, ea) = unsafe { *fp.add(base_a + ki) };
+                    let (sb, eb) = unsafe { *fp.add(base_b + ki) };
+                    let ka = if sa == ea {
+                        &[] as &[u8]
+                    } else {
+                        unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) }
+                    };
+                    let kb = if sb == eb {
+                        &[] as &[u8]
+                    } else {
+                        unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) }
+                    };
+                    cmp_fn(ka, kb)
                 };
 
-                let result = cmp_fn(ka, kb);
                 let result = if needs_reverse {
                     result.reverse()
                 } else {
