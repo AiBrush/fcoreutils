@@ -47,6 +47,8 @@ const SIGNALS: [&str; 32] = [
 ];
 
 fn main() {
+    coreutils_rs::common::reset_sigpipe();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() {

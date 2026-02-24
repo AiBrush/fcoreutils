@@ -160,11 +160,19 @@ fn main() {
         (Some(ctx), fls)
     };
 
-    // Check preserve-root
-    if opts.recursive && preserve_root && files.iter().any(|f| f == "/") {
-        eprintln!("chcon: it is dangerous to operate recursively on '/'");
-        eprintln!("chcon: use --no-preserve-root to override this failsafe");
-        std::process::exit(1);
+    // Check preserve-root (canonicalize to catch "//" , "foo/../.." etc.)
+    if opts.recursive && preserve_root {
+        for f in &files {
+            let is_root = std::path::Path::new(f)
+                .canonicalize()
+                .map(|p| p.as_os_str() == "/")
+                .unwrap_or(f == "/");
+            if is_root {
+                eprintln!("chcon: it is dangerous to operate recursively on '/'");
+                eprintln!("chcon: use --no-preserve-root to override this failsafe");
+                std::process::exit(1);
+            }
+        }
     }
 
     // Read reference context if needed
@@ -194,7 +202,7 @@ fn main() {
 
     let mut had_error = false;
     for file in &files {
-        if process_file(file, &cfg).is_err() {
+        if process_file(file, &cfg, true).is_err() {
             had_error = true;
         }
     }
@@ -254,11 +262,19 @@ fn parse_short_opts(s: &str, args: &[String], i: &mut usize, opts: &mut ParseOpt
 }
 
 #[cfg(unix)]
-fn process_file(path: &str, cfg: &ChconConfig) -> Result<(), ()> {
-    let md = if cfg.no_dereference {
-        std::fs::symlink_metadata(path)
-    } else {
+fn process_file(path: &str, cfg: &ChconConfig, cmdline: bool) -> Result<(), ()> {
+    // For -H: follow symlinks only for command-line arguments
+    // For -L: always follow symlinks
+    // For -P: never follow symlinks (default)
+    let follow = match cfg.traverse_mode {
+        b'L' => !cfg.no_dereference,
+        b'H' if cmdline => true,
+        _ => !cfg.no_dereference,
+    };
+    let md = if follow {
         std::fs::metadata(path)
+    } else {
+        std::fs::symlink_metadata(path)
     };
     let md = match md {
         Ok(m) => m,

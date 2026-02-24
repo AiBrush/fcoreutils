@@ -147,7 +147,8 @@ fn main() {
             // First positional is CONTEXT, rest is COMMAND [ARG]...
             if start + 1 >= args.len() {
                 // Only context, no command
-                eprintln!("runcon: must specify -c, -t, -u, -r, or -l");
+                eprintln!("runcon: no command specified");
+                eprintln!("Try 'runcon --help' for more information.");
                 std::process::exit(125);
             }
             (Some(args[start].clone()), start + 1)
