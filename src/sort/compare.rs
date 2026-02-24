@@ -16,23 +16,41 @@ pub fn skip_leading_blanks(s: &[u8]) -> &[u8] {
 }
 
 /// Compare two byte slices using locale-aware collation (strcoll).
-/// Falls back to byte comparison if the input is not valid UTF-8 or strcoll fails.
+/// Uses stack buffers (up to 256 bytes) to avoid heap allocation in the hot path.
+/// Falls back to heap-allocated CString for longer strings, and to byte comparison
+/// if the input contains interior null bytes.
 #[inline]
 pub fn compare_locale(a: &[u8], b: &[u8]) -> Ordering {
-    use std::ffi::CString;
-    // Fast path: try to create null-terminated strings and use strcoll
-    // strcoll respects LC_COLLATE for locale-aware ordering
-    if let (Ok(ca), Ok(cb)) = (CString::new(a), CString::new(b)) {
-        let result = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
-        if result < 0 {
-            return Ordering::Less;
-        } else if result > 0 {
-            return Ordering::Greater;
-        } else {
-            return Ordering::Equal;
+    // Stack buffer size for null-terminated copies. Most sort keys are < 256 bytes.
+    const STACK_BUF: usize = 256;
+
+    // Fast path: if either contains a null byte, fall back to byte comparison
+    // (CString can't represent interior nulls)
+    if memchr::memchr(0, a).is_some() || memchr::memchr(0, b).is_some() {
+        return a.cmp(b);
+    }
+
+    unsafe {
+        if a.len() < STACK_BUF && b.len() < STACK_BUF {
+            // Stack-only path: no heap allocation
+            let mut buf_a = [0u8; STACK_BUF];
+            let mut buf_b = [0u8; STACK_BUF];
+            std::ptr::copy_nonoverlapping(a.as_ptr(), buf_a.as_mut_ptr(), a.len());
+            buf_a[a.len()] = 0;
+            std::ptr::copy_nonoverlapping(b.as_ptr(), buf_b.as_mut_ptr(), b.len());
+            buf_b[b.len()] = 0;
+            let result =
+                libc::strcoll(buf_a.as_ptr() as *const _, buf_b.as_ptr() as *const _);
+            return result.cmp(&0);
         }
     }
-    // Fallback: byte comparison
+
+    // Fallback for long strings: heap allocate
+    use std::ffi::CString;
+    if let (Ok(ca), Ok(cb)) = (CString::new(a), CString::new(b)) {
+        let result = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
+        return result.cmp(&0);
+    }
     a.cmp(b)
 }
 

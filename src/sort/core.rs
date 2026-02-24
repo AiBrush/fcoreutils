@@ -2806,66 +2806,158 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     }
                 }
             } else {
-                // Pre-select comparator: eliminates per-comparison option branching
-                let mut indices: Vec<usize> = (0..num_lines).collect();
-                let (cmp_fn, needs_blank, needs_reverse) = select_comparator(opts, random_seed);
-                let dp_sk = data.as_ptr() as usize;
-                do_sort(&mut indices, stable, |&a, &b| {
-                    let dp = dp_sk as *const u8;
-                    let (sa, ea) = key_offs[a];
-                    let (sb, eb) = key_offs[b];
-                    let ka = if sa == ea {
-                        &[] as &[u8]
-                    } else if needs_blank {
-                        skip_leading_blanks(unsafe {
-                            std::slice::from_raw_parts(dp.add(sa), ea - sa)
-                        })
+                // Locale-aware sort path: pre-compute strxfrm collation keys
+                // so sorting uses byte comparison instead of per-comparison strcoll.
+                let is_locale_only = !opts.dictionary_order
+                    && !opts.ignore_case
+                    && !opts.ignore_nonprinting
+                    && !opts.ignore_leading_blanks
+                    && !opts.has_sort_type()
+                    && !is_c_locale();
+
+                if is_locale_only {
+                    // Pre-compute strxfrm collation keys in parallel, then sort with memcmp.
+                    // Each thread computes its chunk's transformed keys independently.
+                    let xfrm_keys: Vec<Vec<u8>> = if num_lines > 10_000 {
+                        key_offs
+                            .par_iter()
+                            .map(|&(sa, ea)| {
+                                if sa == ea {
+                                    return Vec::new();
+                                }
+                                let key = &data[sa..ea];
+                                let mut c_buf = vec![0u8; key.len() + 1];
+                                c_buf[..key.len()].copy_from_slice(key);
+                                // c_buf is already zero-terminated from vec init
+                                let needed = unsafe {
+                                    libc::strxfrm(
+                                        std::ptr::null_mut(),
+                                        c_buf.as_ptr() as *const _,
+                                        0,
+                                    )
+                                };
+                                let mut out = vec![0u8; needed + 1];
+                                unsafe {
+                                    libc::strxfrm(
+                                        out.as_mut_ptr() as *mut _,
+                                        c_buf.as_ptr() as *const _,
+                                        needed + 1,
+                                    );
+                                }
+                                out.truncate(needed);
+                                out
+                            })
+                            .collect()
                     } else {
-                        unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) }
+                        let mut c_buf = vec![0u8; 512];
+                        key_offs
+                            .iter()
+                            .map(|&(sa, ea)| {
+                                if sa == ea {
+                                    return Vec::new();
+                                }
+                                let key = &data[sa..ea];
+                                if key.len() + 1 > c_buf.len() {
+                                    c_buf.resize(key.len() + 1, 0);
+                                }
+                                c_buf[..key.len()].copy_from_slice(key);
+                                c_buf[key.len()] = 0;
+                                let needed = unsafe {
+                                    libc::strxfrm(
+                                        std::ptr::null_mut(),
+                                        c_buf.as_ptr() as *const _,
+                                        0,
+                                    )
+                                };
+                                let mut out = vec![0u8; needed + 1];
+                                unsafe {
+                                    libc::strxfrm(
+                                        out.as_mut_ptr() as *mut _,
+                                        c_buf.as_ptr() as *const _,
+                                        needed + 1,
+                                    );
+                                }
+                                out.truncate(needed);
+                                out
+                            })
+                            .collect()
                     };
-                    let kb = if sb == eb {
-                        &[] as &[u8]
-                    } else if needs_blank {
-                        skip_leading_blanks(unsafe {
-                            std::slice::from_raw_parts(dp.add(sb), eb - sb)
-                        })
-                    } else {
-                        unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) }
-                    };
-                    let ord = cmp_fn(ka, kb);
-                    let ord = if needs_reverse { ord.reverse() } else { ord };
-                    if ord == Ordering::Equal && !stable {
-                        let (la, ra) = offsets[a];
-                        let (lb, rb) = offsets[b];
-                        unsafe {
-                            std::slice::from_raw_parts(dp.add(la), ra - la)
-                                .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
+
+                    let mut indices: Vec<usize> = (0..num_lines).collect();
+                    let dp_sk = data.as_ptr() as usize;
+                    do_sort(&mut indices, stable, |&a, &b| {
+                        let ka = xfrm_keys[a].as_slice();
+                        let kb = xfrm_keys[b].as_slice();
+                        let ord = ka.cmp(kb);
+                        let ord = if reverse { ord.reverse() } else { ord };
+                        if ord == Ordering::Equal && !stable {
+                            let dp = dp_sk as *const u8;
+                            let (la, ra) = offsets[a];
+                            let (lb, rb) = offsets[b];
+                            unsafe {
+                                std::slice::from_raw_parts(dp.add(la), ra - la)
+                                    .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
+                            }
+                        } else {
+                            ord
                         }
-                    } else {
-                        ord
-                    }
-                });
-                write_sorted_output(data, &offsets, &indices, config, &mut writer, terminator)?;
+                    });
+                    write_sorted_output(
+                        data, &offsets, &indices, config, &mut writer, terminator,
+                    )?;
+                } else {
+                    // General flagged sort: pre-select comparator
+                    let mut indices: Vec<usize> = (0..num_lines).collect();
+                    let (cmp_fn, needs_blank, needs_reverse) =
+                        select_comparator(opts, random_seed);
+                    let dp_sk = data.as_ptr() as usize;
+                    do_sort(&mut indices, stable, |&a, &b| {
+                        let dp = dp_sk as *const u8;
+                        let (sa, ea) = key_offs[a];
+                        let (sb, eb) = key_offs[b];
+                        let ka = if sa == ea {
+                            &[] as &[u8]
+                        } else if needs_blank {
+                            skip_leading_blanks(unsafe {
+                                std::slice::from_raw_parts(dp.add(sa), ea - sa)
+                            })
+                        } else {
+                            unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) }
+                        };
+                        let kb = if sb == eb {
+                            &[] as &[u8]
+                        } else if needs_blank {
+                            skip_leading_blanks(unsafe {
+                                std::slice::from_raw_parts(dp.add(sb), eb - sb)
+                            })
+                        } else {
+                            unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) }
+                        };
+                        let ord = cmp_fn(ka, kb);
+                        let ord = if needs_reverse { ord.reverse() } else { ord };
+                        if ord == Ordering::Equal && !stable {
+                            let (la, ra) = offsets[a];
+                            let (lb, rb) = offsets[b];
+                            unsafe {
+                                std::slice::from_raw_parts(dp.add(la), ra - la)
+                                    .cmp(std::slice::from_raw_parts(dp.add(lb), rb - lb))
+                            }
+                        } else {
+                            ord
+                        }
+                    });
+                    write_sorted_output(
+                        data, &offsets, &indices, config, &mut writer, terminator,
+                    )?;
+                }
             }
         }
     } else if config.keys.len() > 1 {
         // FAST PATH 4: Multi-key sort with pre-extracted key offsets for ALL keys.
-        // Eliminates per-comparison key extraction (O(n log n) calls to extract_key).
+        // Uses a flat array in line-major layout for cache-friendly comparisons:
+        // flat_offs[line_idx * num_keys + ki] — all keys for a line are contiguous.
         let mut indices: Vec<usize> = (0..num_lines).collect();
-        let all_key_offs: Vec<Vec<(usize, usize)>> = if config.keys.len() > 1 && num_lines > 10_000
-        {
-            config
-                .keys
-                .par_iter()
-                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
-                .collect()
-        } else {
-            config
-                .keys
-                .iter()
-                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
-                .collect()
-        };
+        let num_keys = config.keys.len();
 
         let stable = config.stable;
         let random_seed = config.random_seed;
@@ -2891,28 +2983,164 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             })
             .collect();
 
+        // Extract key offsets per-key, then flatten into line-major layout.
+        // Pre-skip leading blanks during flattening to avoid per-comparison skipping.
+        let per_key_offs: Vec<Vec<(usize, usize)>> = if num_lines > 10_000 {
+            config
+                .keys
+                .par_iter()
+                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .collect()
+        } else {
+            config
+                .keys
+                .iter()
+                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .collect()
+        };
+
+        // Identify which keys need locale comparison (strxfrm pre-computation).
+        // A key needs locale comparison if it has no special flags and we're not in C locale.
+        let is_not_c = !is_c_locale();
+        let key_needs_locale: Vec<bool> = keys
+            .iter()
+            .map(|key| {
+                let opts = if key.opts.has_sort_type()
+                    || key.opts.ignore_case
+                    || key.opts.dictionary_order
+                    || key.opts.ignore_nonprinting
+                    || key.opts.ignore_leading_blanks
+                    || key.opts.reverse
+                {
+                    &key.opts
+                } else {
+                    global_opts
+                };
+                is_not_c
+                    && !opts.has_sort_type()
+                    && !opts.dictionary_order
+                    && !opts.ignore_case
+                    && !opts.ignore_nonprinting
+            })
+            .collect();
+
+        // Pre-compute strxfrm collation keys for locale-aware keys (parallel).
+        let per_key_xfrm: Vec<Option<Vec<Vec<u8>>>> = (0..num_keys)
+            .map(|ki| {
+                if !key_needs_locale[ki] {
+                    return None;
+                }
+                let ko = &per_key_offs[ki];
+                let xfrm = if num_lines > 10_000 {
+                    ko.par_iter()
+                        .map(|&(sa, ea)| {
+                            if sa == ea {
+                                return Vec::new();
+                            }
+                            let key = &data[sa..ea];
+                            let mut c_buf = vec![0u8; key.len() + 1];
+                            c_buf[..key.len()].copy_from_slice(key);
+                            let needed = unsafe {
+                                libc::strxfrm(
+                                    std::ptr::null_mut(),
+                                    c_buf.as_ptr() as *const _,
+                                    0,
+                                )
+                            };
+                            let mut out = vec![0u8; needed + 1];
+                            unsafe {
+                                libc::strxfrm(
+                                    out.as_mut_ptr() as *mut _,
+                                    c_buf.as_ptr() as *const _,
+                                    needed + 1,
+                                );
+                            }
+                            out.truncate(needed);
+                            out
+                        })
+                        .collect()
+                } else {
+                    let mut c_buf = vec![0u8; 512];
+                    ko.iter()
+                        .map(|&(sa, ea)| {
+                            if sa == ea {
+                                return Vec::new();
+                            }
+                            let key = &data[sa..ea];
+                            if key.len() + 1 > c_buf.len() {
+                                c_buf.resize(key.len() + 1, 0);
+                            }
+                            c_buf[..key.len()].copy_from_slice(key);
+                            c_buf[key.len()] = 0;
+                            let needed = unsafe {
+                                libc::strxfrm(
+                                    std::ptr::null_mut(),
+                                    c_buf.as_ptr() as *const _,
+                                    0,
+                                )
+                            };
+                            let mut out = vec![0u8; needed + 1];
+                            unsafe {
+                                libc::strxfrm(
+                                    out.as_mut_ptr() as *mut _,
+                                    c_buf.as_ptr() as *const _,
+                                    needed + 1,
+                                );
+                            }
+                            out.truncate(needed);
+                            out
+                        })
+                        .collect()
+                };
+                Some(xfrm)
+            })
+            .collect();
+
+        // Flatten into line-major layout: [line0_key0, line0_key1, ..., line1_key0, ...]
+        // Pre-skip leading blanks so the comparison loop doesn't need to.
+        let mut flat_offs: Vec<(usize, usize)> = Vec::with_capacity(num_lines * num_keys);
+        for li in 0..num_lines {
+            for (ki, key_offs) in per_key_offs.iter().enumerate() {
+                let (s, e) = key_offs[li];
+                if s == e || !comparators[ki].1 {
+                    flat_offs.push((s, e));
+                } else {
+                    let slice = &data[s..e];
+                    let trimmed = skip_leading_blanks(slice);
+                    let new_s = s + (slice.len() - trimmed.len());
+                    flat_offs.push((new_s, e));
+                }
+            }
+        }
+        drop(per_key_offs);
+
         let dp_mk = data.as_ptr() as usize;
+        let flat_ptr_usize = flat_offs.as_ptr() as usize;
         do_sort(&mut indices, stable, |&a, &b| {
             let dp = dp_mk as *const u8;
-            for (ki, &(cmp_fn, needs_blank, needs_reverse)) in comparators.iter().enumerate() {
-                let (sa, ea) = all_key_offs[ki][a];
-                let (sb, eb) = all_key_offs[ki][b];
-                let ka = if sa == ea {
-                    &[] as &[u8]
-                } else if needs_blank {
-                    skip_leading_blanks(unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) })
+            let fp = flat_ptr_usize as *const (usize, usize);
+            let base_a = a * num_keys;
+            let base_b = b * num_keys;
+            for (ki, &(cmp_fn, _needs_blank, needs_reverse)) in comparators.iter().enumerate() {
+                let result = if let Some(ref xfrm) = per_key_xfrm[ki] {
+                    // Use pre-computed strxfrm keys for locale comparison
+                    xfrm[a].as_slice().cmp(xfrm[b].as_slice())
                 } else {
-                    unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) }
-                };
-                let kb = if sb == eb {
-                    &[] as &[u8]
-                } else if needs_blank {
-                    skip_leading_blanks(unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) })
-                } else {
-                    unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) }
+                    let (sa, ea) = unsafe { *fp.add(base_a + ki) };
+                    let (sb, eb) = unsafe { *fp.add(base_b + ki) };
+                    let ka = if sa == ea {
+                        &[] as &[u8]
+                    } else {
+                        unsafe { std::slice::from_raw_parts(dp.add(sa), ea - sa) }
+                    };
+                    let kb = if sb == eb {
+                        &[] as &[u8]
+                    } else {
+                        unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) }
+                    };
+                    cmp_fn(ka, kb)
                 };
 
-                let result = cmp_fn(ka, kb);
                 let result = if needs_reverse {
                     result.reverse()
                 } else {
