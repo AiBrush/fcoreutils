@@ -189,9 +189,9 @@ fn count_lw_c_scalar_tail(
 }
 
 /// AVX2-accelerated fused line+word counter for C locale chunks.
-/// Processes 32 bytes per iteration using 2-state logic:
-///   - Word content: 0x21-0x7E (printable ASCII only; signed: b > 0x20 AND b < 0x7F)
-///   - Word-break: everything else (NUL, controls, DEL, high bytes 0x80-0xFF)
+/// Processes 32 bytes per iteration using 2-state logic matching BYTE_CLASS_C:
+///   - Word-break: {0x09-0x0D, 0x20, 0xA0} (7 bytes total)
+///   - Word content: everything else
 /// Word transitions detected via bitmask: word_content_mask & ~prev_word_content_mask.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -209,13 +209,12 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm256_set1_epi8(b'\n' as i8);
         let zero = _mm256_setzero_si256();
         let ones = _mm256_set1_epi8(1);
-        // Word content = 0x21-0x7E only (printable ASCII).
-        // Signed comparison: b > 0x20 (32) AND b < 0x7F (127).
-        // High bytes 0x80-0xFF, when reinterpreted as i8, are negative (-128
-        // to -1). Since lo = 0x20 = 32, `cmpgt(v, lo)` (signed) is false for
-        // all negative values, correctly excluding them without a third check.
-        let lo = _mm256_set1_epi8(0x20i8); // 32
-        let hi = _mm256_set1_epi8(0x7Fi8); // 127
+        let all_ones = _mm256_set1_epi8(-1i8);
+        // Word-break detection constants for {0x09-0x0D, 0x20, 0xA0}
+        let const_0x09 = _mm256_set1_epi8(0x09u8 as i8);
+        let const_0x04 = _mm256_set1_epi8(0x04u8 as i8);
+        let const_0x20 = _mm256_set1_epi8(0x20u8 as i8);
+        let const_0xa0 = _mm256_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm256_setzero_si256();
         let mut batch = 0u32;
@@ -225,10 +224,15 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // Word content: b > 0x20 AND b < 0x7F (signed)
-            let gt_lo = _mm256_cmpgt_epi8(v, lo);
-            let lt_hi = _mm256_cmpgt_epi8(hi, v);
-            let is_word = _mm256_and_si256(gt_lo, lt_hi);
+            // Word-break = byte in {0x09-0x0D, 0x20, 0xA0}
+            // Range check [0x09, 0x0D]: saturating sub 0x09, then min with 4
+            let sub = _mm256_subs_epu8(v, const_0x09);
+            let in_tab_range = _mm256_cmpeq_epi8(_mm256_min_epu8(sub, const_0x04), sub);
+            let is_space = _mm256_cmpeq_epi8(v, const_0x20);
+            let is_nbsp = _mm256_cmpeq_epi8(v, const_0xa0);
+            let is_break = _mm256_or_si256(_mm256_or_si256(in_tab_range, is_space), is_nbsp);
+            // Word content = NOT word-break
+            let is_word = _mm256_xor_si256(is_break, all_ones);
             let word_mask = _mm256_movemask_epi8(is_word) as u32;
 
             // 2-state bitmask approach: count transitions from non-word to word
@@ -266,7 +270,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
 }
 
 /// SSE2 variant of count_lw_c_chunk_avx2 — processes 16 bytes per iteration.
-/// See AVX2 function above for algorithm details and signed comparison notes.
+/// See AVX2 function above for algorithm details.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
@@ -283,8 +287,11 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        let lo = _mm_set1_epi8(0x20i8);
-        let hi = _mm_set1_epi8(0x7Fi8);
+        let all_ones = _mm_set1_epi8(-1i8);
+        let const_0x09 = _mm_set1_epi8(0x09u8 as i8);
+        let const_0x04 = _mm_set1_epi8(0x04u8 as i8);
+        let const_0x20 = _mm_set1_epi8(0x20u8 as i8);
+        let const_0xa0 = _mm_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm_setzero_si128();
         let mut batch = 0u32;
@@ -294,9 +301,13 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            let gt_lo = _mm_cmpgt_epi8(v, lo);
-            let lt_hi = _mm_cmpgt_epi8(hi, v);
-            let is_word = _mm_and_si128(gt_lo, lt_hi);
+            // Word-break = byte in {0x09-0x0D, 0x20, 0xA0}
+            let sub = _mm_subs_epu8(v, const_0x09);
+            let in_tab_range = _mm_cmpeq_epi8(_mm_min_epu8(sub, const_0x04), sub);
+            let is_space = _mm_cmpeq_epi8(v, const_0x20);
+            let is_nbsp = _mm_cmpeq_epi8(v, const_0xa0);
+            let is_break = _mm_or_si128(_mm_or_si128(in_tab_range, is_space), is_nbsp);
+            let is_word = _mm_xor_si128(is_break, all_ones);
             let word_mask = (_mm_movemask_epi8(is_word) as u32) & 0xFFFF;
 
             // 2-state bitmask: count transitions from non-word to word
@@ -345,7 +356,7 @@ fn count_lw_c_chunk_fast(data: &[u8]) -> (u64, u64, bool, bool) {
 /// Count words + lines in a C locale chunk using 2-state logic, returning
 /// counts plus boundary info for parallel chunk merging.
 /// Returns (line_count, word_count, first_is_word_content, ends_in_word).
-/// GNU wc 9.4: only printable ASCII (0x21-0x7E) is word content.
+/// Word-break bytes: 0x09-0x0D, 0x20, 0xA0. All others are word content.
 fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     let mut lines = 0u64;
     let mut words = 0u64;
