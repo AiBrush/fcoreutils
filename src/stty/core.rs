@@ -109,11 +109,6 @@ pub fn format_cc(c: libc::cc_t) -> String {
     }
 }
 
-/// Format min/time as numeric values (not control chars), matching GNU.
-fn format_cc_numeric(c: libc::cc_t) -> String {
-    format!("{}", c)
-}
-
 /// Special character names and their termios indices (GNU order).
 #[cfg(target_os = "linux")]
 const SPECIAL_CHARS_ALL: &[(&str, usize)] = &[
@@ -193,8 +188,6 @@ const INPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
     ("imaxbel", libc::IMAXBEL),
 ];
 
-const INPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
-
 /// Output flags and their names (GNU order).
 #[cfg(target_os = "linux")]
 const OUTPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
@@ -218,8 +211,6 @@ const OUTPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
     ("ofill", libc::OFILL),
     ("ofdel", libc::OFDEL),
 ];
-
-const OUTPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
 
 /// Output delay flags (displayed but not negatable).
 #[cfg(target_os = "linux")]
@@ -300,8 +291,6 @@ const LOCAL_FLAGS: &[(&str, libc::tcflag_t)] = &[
     ("flusho", libc::FLUSHO),
 ];
 
-const LOCAL_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
-
 /// Character size names.
 fn csize_str(cflag: libc::tcflag_t) -> &'static str {
     match cflag & libc::CSIZE {
@@ -318,9 +307,8 @@ fn print_flags(
     parts: &mut Vec<String>,
     flags: libc::tcflag_t,
     entries: &[(&str, libc::tcflag_t)],
-    extra: &[(&str, libc::tcflag_t)],
 ) {
-    for &(name, flag) in entries.iter().chain(extra.iter()) {
+    for &(name, flag) in entries {
         if flags & flag != 0 {
             parts.push(name.to_string());
         } else {
@@ -334,16 +322,16 @@ fn print_flags(
 fn print_wrapped(items: &[String], sep: &str, max_cols: usize) {
     let mut line = String::new();
     for item in items {
-        let entry = if line.is_empty() {
-            item.clone()
-        } else {
-            format!("{}{}", sep, item)
-        };
-        if !line.is_empty() && line.len() + entry.len() > max_cols {
+        let add_len = if line.is_empty() { item.len() } else { sep.len() + item.len() };
+        if !line.is_empty() && line.len() + add_len > max_cols {
             println!("{}", line);
-            line = item.clone();
+            line.clear();
+        }
+        if line.is_empty() {
+            line.push_str(item);
         } else {
-            line.push_str(&entry);
+            line.push_str(sep);
+            line.push_str(item);
         }
     }
     if !line.is_empty() {
@@ -355,6 +343,13 @@ fn print_wrapped(items: &[String], sep: &str, max_cols: usize) {
 pub fn print_all(termios: &libc::termios, fd: i32) {
     let ispeed = unsafe { libc::cfgetispeed(termios) };
     let ospeed = unsafe { libc::cfgetospeed(termios) };
+
+    // Query terminal width for line wrapping (GNU uses stdout tty width, falls back to 80)
+    let wrap_cols = if unsafe { libc::isatty(1) } == 1 {
+        get_winsize(1).map(|ws| ws.ws_col as usize).unwrap_or(80)
+    } else {
+        80
+    };
 
     // Line 1: speed, window size, and line discipline
     let speed_str = if ispeed == ospeed {
@@ -384,13 +379,13 @@ pub fn print_all(termios: &libc::termios, fd: i32) {
     for &(name, idx) in SPECIAL_CHARS_ALL.iter() {
         // min and time are numeric values, not control chars
         let formatted = if name == "min" || name == "time" {
-            format_cc_numeric(termios.c_cc[idx])
+            termios.c_cc[idx].to_string()
         } else {
             format_cc(termios.c_cc[idx])
         };
         cc_parts.push(format!("{} = {};", name, formatted));
     }
-    print_wrapped(&cc_parts, " ", 80);
+    print_wrapped(&cc_parts, " ", wrap_cols);
 
     // GNU order: control, input, output, local
 
@@ -439,21 +434,16 @@ pub fn print_all(termios: &libc::termios, fd: i32) {
             control_items.push("-crtscts".to_string());
         }
     }
-    print_wrapped(&control_items, " ", 80);
+    print_wrapped(&control_items, " ", wrap_cols);
 
     // Input flags
     parts.clear();
-    print_flags(&mut parts, termios.c_iflag, INPUT_FLAGS, INPUT_FLAGS_LINUX);
-    print_wrapped(&parts, " ", 80);
+    print_flags(&mut parts, termios.c_iflag, INPUT_FLAGS);
+    print_wrapped(&parts, " ", wrap_cols);
 
     // Output flags (with delay flags on Linux)
     parts.clear();
-    print_flags(
-        &mut parts,
-        termios.c_oflag,
-        OUTPUT_FLAGS,
-        OUTPUT_FLAGS_LINUX,
-    );
+    print_flags(&mut parts, termios.c_oflag, OUTPUT_FLAGS);
     // Add delay flags (nl0, cr0, tab0, bs0, vt0, ff0)
     #[cfg(target_os = "linux")]
     {
@@ -466,12 +456,12 @@ pub fn print_all(termios: &libc::termios, fd: i32) {
             }
         }
     }
-    print_wrapped(&parts, " ", 80);
+    print_wrapped(&parts, " ", wrap_cols);
 
     // Local flags
     parts.clear();
-    print_flags(&mut parts, termios.c_lflag, LOCAL_FLAGS, LOCAL_FLAGS_LINUX);
-    print_wrapped(&parts, " ", 80);
+    print_flags(&mut parts, termios.c_lflag, LOCAL_FLAGS);
+    print_wrapped(&parts, " ", wrap_cols);
 }
 
 /// Parse a control character specification like "^C", "^?", "^-", or a literal.
@@ -614,7 +604,7 @@ pub fn apply_flag(termios: &mut libc::termios, name: &str) -> bool {
     };
 
     // Check input flags
-    for &(n, flag) in INPUT_FLAGS.iter().chain(INPUT_FLAGS_LINUX.iter()) {
+    for &(n, flag) in INPUT_FLAGS.iter() {
         if n == flag_name {
             if negate {
                 termios.c_iflag &= !flag;
@@ -626,7 +616,7 @@ pub fn apply_flag(termios: &mut libc::termios, name: &str) -> bool {
     }
 
     // Check output flags
-    for &(n, flag) in OUTPUT_FLAGS.iter().chain(OUTPUT_FLAGS_LINUX.iter()) {
+    for &(n, flag) in OUTPUT_FLAGS.iter() {
         if n == flag_name {
             if negate {
                 termios.c_oflag &= !flag;
@@ -650,7 +640,7 @@ pub fn apply_flag(termios: &mut libc::termios, name: &str) -> bool {
     }
 
     // Check local flags
-    for &(n, flag) in LOCAL_FLAGS.iter().chain(LOCAL_FLAGS_LINUX.iter()) {
+    for &(n, flag) in LOCAL_FLAGS.iter() {
         if n == flag_name {
             if negate {
                 termios.c_lflag &= !flag;
