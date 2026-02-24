@@ -275,13 +275,32 @@ fn is_sentence_end_contextual(word: &str, followed_by_double_space_or_eol: bool)
     end > 0
 }
 
-/// Collect words from a line, tracking which words are sentence endings
-/// based on the original spacing context.
+/// Word flags for GNU fmt cost model.
+/// Packed into the upper bits of the winfo u32 array for cache efficiency.
+const SENT_FLAG: u32 = 1 << 16; // sentence-final (period + double-space/eol context)
+const PERIOD_FLAG: u32 = 1 << 17; // has sentence-ending punct (.!?) regardless of context
+const PUNCT_FLAG: u32 = 1 << 18; // ends with non-period punctuation (,;:)
+const PAREN_FLAG: u32 = 1 << 19; // starts with opening paren/bracket
+
+/// Check if a word ends with non-period punctuation (,;:).
+fn has_non_period_punct(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    let mut i = bytes.len();
+    // Skip trailing close quotes/parens
+    while i > 0 && matches!(bytes[i - 1], b'"' | b'\'' | b')' | b']') {
+        i -= 1;
+    }
+    i > 0 && matches!(bytes[i - 1], b',' | b';' | b':')
+}
+
+/// Collect words from a line, tracking sentence endings and word properties
+/// for the GNU fmt cost model.
 ///
-/// GNU fmt sentence-end detection rules:
-/// - A word ending in .?! is a sentence end if followed by 2+ spaces OR at end of line.
-/// - Words followed by exactly 1 space keep 1-space separation (original spacing preserved).
-/// - Words at end of line get 2-space separation when reflowed (even without -u).
+/// Word properties tracked:
+/// - `final` (sentence-ending): .!? followed by 2+ spaces or at end of line
+/// - `period`: has .!? regardless of spacing context
+/// - `punct`: ends with ,;:
+/// - `paren`: starts with ([{
 fn collect_words_with_sentence_info<'a>(
     line: &'a str,
     words: &mut Vec<&'a str>,
@@ -347,29 +366,47 @@ fn reflow_paragraph<W: Write>(
     let goal = config.goal as i64;
     let width = config.width;
 
-    // GNU fmt cost model: SHORT_COST(n) = EQUIV(n*10) = (n*10)^2 = n^2 * 100
-    // RAGGED_COST(n) = SHORT_COST(n) / 2 = n^2 * 50
-    // LINE_COST = EQUIV(70) = 4900, SENTENCE_BONUS = EQUIV(50) = 2500
+    // GNU fmt cost model (from coreutils fmt.c):
+    // EQUIV(n)       = n²
+    // SHORT_COST(n)  = EQUIV(n*10) = 100n²
+    // RAGGED_COST(n) = SHORT_COST(n)/2 = 50n²
+    // LINE_COST      = EQUIV(70) = 4900
+    // SENTENCE_BONUS = EQUIV(50) = 2500
+    // NOBREAK_COST   = EQUIV(600) = 360000
+    // PUNCT_BONUS    = EQUIV(40) = 1600
+    // PAREN_BONUS    = EQUIV(40) = 1600
+    // WIDOW_COST(n)  = EQUIV(200)/(n+2) = 40000/(n+2)
+    // ORPHAN_COST(n) = EQUIV(150)/(n+2) = 22500/(n+2)
     const SHORT_FACTOR: i64 = 100;
     const RAGGED_FACTOR: i64 = 50;
     const LINE_COST: i64 = 70 * 70;
     const SENTENCE_BONUS: i64 = 50 * 50;
-    const SENT_FLAG: u32 = 1 << 16;
+    const NOBREAK_COST: i64 = 600 * 600;
+    const PUNCT_BONUS: i64 = 40 * 40;
+    const PAREN_BONUS: i64 = 40 * 40;
 
-    // Pack word length + sentence-end flag into compact u32 array.
-    // bits 0-15: word length, bit 16: sentence-end flag.
-    // This is 4 bytes/word vs 16 bytes/word for fat pointers — much better cache usage.
+    // Pack word length + flags into compact u32 array.
+    // bits 0-15: word length, bits 16-19: flags.
     let winfo: Vec<u32> = words
         .iter()
         .enumerate()
         .map(|(i, w)| {
             let len = w.len() as u32;
-            let sent = if sentence_ends.get(i).copied().unwrap_or(false) {
-                SENT_FLAG
-            } else {
-                0
-            };
-            len | sent
+            let mut flags = 0u32;
+            if sentence_ends.get(i).copied().unwrap_or(false) {
+                flags |= SENT_FLAG; // sentence-final (period + context)
+            }
+            if has_sentence_ending_punct(w) {
+                flags |= PERIOD_FLAG; // has .!? regardless of context
+            }
+            if has_non_period_punct(w) {
+                flags |= PUNCT_FLAG; // ends with ,;:
+            }
+            let bytes = w.as_bytes();
+            if !bytes.is_empty() && matches!(bytes[0], b'(' | b'[' | b'{') {
+                flags |= PAREN_FLAG; // starts with opening paren
+            }
+            len | flags
         })
         .collect();
 
@@ -398,7 +435,7 @@ fn reflow_paragraph<W: Write>(
 
         for j in i..n {
             if j > i {
-                // GNU fmt always uses 2 spaces after sentence-ending punctuation
+                // GNU fmt uses 2 spaces after sentence-ending punctuation
                 let sep = if unsafe { *winfo_ptr.add(j - 1) & SENT_FLAG != 0 } {
                     2
                 } else {
@@ -408,17 +445,12 @@ fn reflow_paragraph<W: Write>(
             }
 
             // Compute line cost for placing words i..=j on one line.
-            // Extracted to avoid duplication between the overflow and normal branches.
             macro_rules! try_candidate {
                 () => {
                     let lc = if j == n - 1 {
                         0i64
                     } else {
-                        let bc = if unsafe { *winfo_ptr.add(j) & SENT_FLAG != 0 } {
-                            LINE_COST - SENTENCE_BONUS
-                        } else {
-                            LINE_COST
-                        };
+                        // line_cost: SHORT_COST + RAGGED_COST
                         let short_n = goal - len as i64;
                         let short_cost = short_n * short_n * SHORT_FACTOR;
                         let ragged_cost = if unsafe { *best_ptr.add(j + 1) as usize + 1 < n } {
@@ -427,11 +459,50 @@ fn reflow_paragraph<W: Write>(
                         } else {
                             0
                         };
-                        bc + short_cost + ragged_cost
+                        short_cost + ragged_cost
                     };
+
+                    // base_cost for the NEXT line starting at j+1 (GNU base_cost model).
+                    // Applies to all lines except last (which has lc=0 already).
+                    let bc = if j == n - 1 {
+                        0i64
+                    } else {
+                        let wj = unsafe { *winfo_ptr.add(j) };
+                        let wj1 = unsafe { *winfo_ptr.add(j + 1) };
+                        let mut cost = LINE_COST;
+
+                        // Context from word ending the current line (word j)
+                        if wj & PERIOD_FLAG != 0 {
+                            if wj & SENT_FLAG != 0 {
+                                cost -= SENTENCE_BONUS;
+                            } else {
+                                cost += NOBREAK_COST;
+                            }
+                        } else if wj & PUNCT_FLAG != 0 {
+                            cost -= PUNCT_BONUS;
+                        } else if j > 0 {
+                            // WIDOW_COST: short word after a sentence end
+                            let wjm1 = unsafe { *winfo_ptr.add(j - 1) };
+                            if wjm1 & SENT_FLAG != 0 {
+                                let word_len = (wj & 0xFFFF) as i64;
+                                cost += 40000 / (word_len + 2);
+                            }
+                        }
+
+                        // Context from word starting the next line (word j+1)
+                        if wj1 & PAREN_FLAG != 0 {
+                            cost -= PAREN_BONUS;
+                        } else if wj1 & SENT_FLAG != 0 {
+                            let word_len = (wj1 & 0xFFFF) as i64;
+                            cost += 22500 / (word_len + 2);
+                        }
+
+                        cost
+                    };
+
                     let cj1 = unsafe { *dp_cost_ptr.add(j + 1) };
                     if cj1 != i64::MAX {
-                        let total = lc + cj1;
+                        let total = lc + bc + cj1;
                         if total < best_total {
                             best_total = total;
                             best_j = j as u32;
@@ -528,12 +599,12 @@ fn split_long_line<W: Write>(
     output.write_all(pfx.as_bytes())?;
     output.write_all(indent.as_bytes())?;
 
-    // GNU fmt -s uses the goal width for soft-breaking, and width as hard limit.
-    // Break preferentially at goal, but always break before exceeding width.
+    // GNU fmt -s splits long lines at the max width (not goal width).
+    // Break before a word would exceed the maximum line width.
     for word in s.split_whitespace() {
         if !first_word_on_line {
             let new_len = cur_len + 1 + word.len();
-            if new_len > config.width || (new_len > config.goal && cur_len > pfx_indent_len) {
+            if new_len > config.width {
                 output.write_all(b"\n")?;
                 output.write_all(pfx.as_bytes())?;
                 output.write_all(indent.as_bytes())?;
