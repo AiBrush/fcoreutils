@@ -285,6 +285,9 @@ mod tests {
         for flag in ["-s", "-p", "-i", "-a"] {
             let gnu = Command::new("uname").arg(flag).output();
             if let Ok(gnu) = gnu {
+                if !gnu.status.success() {
+                    continue; // Skip flags not supported by system uname (e.g. -i on macOS)
+                }
                 let ours = cmd().arg(flag).output().unwrap();
                 assert_eq!(ours.stdout, gnu.stdout, "STDOUT mismatch for {}", flag);
             }
