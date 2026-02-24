@@ -94,10 +94,12 @@ fn ensure_stream_buf(buf: &mut Vec<u8>) {
 // This matches what GNU coreutils uses internally.
 
 /// Single-shot hash using OpenSSL (Linux).
+/// Returns an error if OpenSSL rejects the algorithm (e.g. FIPS mode).
 #[cfg(target_os = "linux")]
 #[inline]
-fn openssl_hash_bytes(md: openssl::hash::MessageDigest, data: &[u8]) -> String {
-    hex_encode(&openssl::hash::hash(md, data).expect("openssl hash"))
+fn openssl_hash_bytes(md: openssl::hash::MessageDigest, data: &[u8]) -> io::Result<String> {
+    let digest = openssl::hash::hash(md, data).map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(hex_encode(&digest))
 }
 
 /// Streaming hash using OpenSSL Hasher (Linux).
@@ -128,16 +130,17 @@ fn openssl_hash_reader(
 }
 
 /// Single-shot hash and write hex directly to buffer using OpenSSL (Linux).
+/// Returns an error if OpenSSL rejects the algorithm (e.g. FIPS mode).
 #[cfg(target_os = "linux")]
 #[inline]
 fn openssl_hash_bytes_to_buf(
     md: openssl::hash::MessageDigest,
     data: &[u8],
     out: &mut [u8],
-) -> usize {
-    let digest = openssl::hash::hash(md, data).expect("openssl hash");
+) -> io::Result<usize> {
+    let digest = openssl::hash::hash(md, data).map_err(|e| io::Error::other(e.to_string()))?;
     hex_encode_to_slice(&digest, out);
-    digest.len() * 2
+    Ok(digest.len() * 2)
 }
 
 // ── Ring-accelerated hash functions (non-Apple, non-Linux targets) ────
@@ -146,8 +149,8 @@ fn openssl_hash_bytes_to_buf(
 /// Single-shot hash using ring::digest (non-Apple, non-Linux).
 #[cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))]
 #[inline]
-fn ring_hash_bytes(algo: &'static ring::digest::Algorithm, data: &[u8]) -> String {
-    hex_encode(ring::digest::digest(algo, data).as_ref())
+fn ring_hash_bytes(algo: &'static ring::digest::Algorithm, data: &[u8]) -> io::Result<String> {
+    Ok(hex_encode(ring::digest::digest(algo, data).as_ref()))
 }
 
 /// Streaming hash using ring::digest::Context (non-Apple, non-Linux).
@@ -171,24 +174,41 @@ fn ring_hash_reader(
     })
 }
 
+// ── Algorithm → OpenSSL MessageDigest mapping (Linux) ──────────────────
+// Centralizes OpenSSL algorithm dispatch, used by hash_bytes, hash_stream_with_prefix,
+// hash_file_streaming, and hash_file_pipelined_read.
+
+#[cfg(target_os = "linux")]
+fn algo_to_openssl_md(algo: HashAlgorithm) -> openssl::hash::MessageDigest {
+    match algo {
+        HashAlgorithm::Sha1 => openssl::hash::MessageDigest::sha1(),
+        HashAlgorithm::Sha224 => openssl::hash::MessageDigest::sha224(),
+        HashAlgorithm::Sha256 => openssl::hash::MessageDigest::sha256(),
+        HashAlgorithm::Sha384 => openssl::hash::MessageDigest::sha384(),
+        HashAlgorithm::Sha512 => openssl::hash::MessageDigest::sha512(),
+        HashAlgorithm::Md5 => openssl::hash::MessageDigest::md5(),
+        HashAlgorithm::Blake2b => unreachable!("Blake2b uses its own hasher"),
+    }
+}
+
 // ── SHA-256 ───────────────────────────────────────────────────────────
 // Linux: OpenSSL (system libcrypto, matches GNU coreutils)
 // Windows/FreeBSD: ring (BoringSSL assembly)
 // Apple: sha2 crate (ring doesn't compile on Apple Silicon)
 
 #[cfg(target_os = "linux")]
-fn sha256_bytes(data: &[u8]) -> String {
+fn sha256_bytes(data: &[u8]) -> io::Result<String> {
     openssl_hash_bytes(openssl::hash::MessageDigest::sha256(), data)
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-fn sha256_bytes(data: &[u8]) -> String {
+fn sha256_bytes(data: &[u8]) -> io::Result<String> {
     ring_hash_bytes(&ring::digest::SHA256, data)
 }
 
 #[cfg(target_vendor = "apple")]
-fn sha256_bytes(data: &[u8]) -> String {
-    hash_digest::<sha2::Sha256>(data)
+fn sha256_bytes(data: &[u8]) -> io::Result<String> {
+    Ok(hash_digest::<sha2::Sha256>(data))
 }
 
 #[cfg(target_os = "linux")]
@@ -209,18 +229,18 @@ fn sha256_reader(reader: impl Read) -> io::Result<String> {
 // ── SHA-1 ─────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
-fn sha1_bytes(data: &[u8]) -> String {
+fn sha1_bytes(data: &[u8]) -> io::Result<String> {
     openssl_hash_bytes(openssl::hash::MessageDigest::sha1(), data)
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-fn sha1_bytes(data: &[u8]) -> String {
+fn sha1_bytes(data: &[u8]) -> io::Result<String> {
     ring_hash_bytes(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data)
 }
 
 #[cfg(target_vendor = "apple")]
-fn sha1_bytes(data: &[u8]) -> String {
-    hash_digest::<sha1::Sha1>(data)
+fn sha1_bytes(data: &[u8]) -> io::Result<String> {
+    Ok(hash_digest::<sha1::Sha1>(data))
 }
 
 #[cfg(target_os = "linux")]
@@ -242,13 +262,13 @@ fn sha1_reader(reader: impl Read) -> io::Result<String> {
 // ring does not support SHA-224. Use OpenSSL on Linux, sha2 crate elsewhere.
 
 #[cfg(target_os = "linux")]
-fn sha224_bytes(data: &[u8]) -> String {
+fn sha224_bytes(data: &[u8]) -> io::Result<String> {
     openssl_hash_bytes(openssl::hash::MessageDigest::sha224(), data)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn sha224_bytes(data: &[u8]) -> String {
-    hex_encode(&sha2::Sha224::digest(data))
+fn sha224_bytes(data: &[u8]) -> io::Result<String> {
+    Ok(hex_encode(&sha2::Sha224::digest(data)))
 }
 
 #[cfg(target_os = "linux")]
@@ -277,18 +297,18 @@ fn sha224_reader(reader: impl Read) -> io::Result<String> {
 // ── SHA-384 ───────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
-fn sha384_bytes(data: &[u8]) -> String {
+fn sha384_bytes(data: &[u8]) -> io::Result<String> {
     openssl_hash_bytes(openssl::hash::MessageDigest::sha384(), data)
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-fn sha384_bytes(data: &[u8]) -> String {
+fn sha384_bytes(data: &[u8]) -> io::Result<String> {
     ring_hash_bytes(&ring::digest::SHA384, data)
 }
 
 #[cfg(target_vendor = "apple")]
-fn sha384_bytes(data: &[u8]) -> String {
-    hex_encode(&sha2::Sha384::digest(data))
+fn sha384_bytes(data: &[u8]) -> io::Result<String> {
+    Ok(hex_encode(&sha2::Sha384::digest(data)))
 }
 
 #[cfg(target_os = "linux")]
@@ -322,18 +342,18 @@ fn sha384_reader(reader: impl Read) -> io::Result<String> {
 // ── SHA-512 ───────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
-fn sha512_bytes(data: &[u8]) -> String {
+fn sha512_bytes(data: &[u8]) -> io::Result<String> {
     openssl_hash_bytes(openssl::hash::MessageDigest::sha512(), data)
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-fn sha512_bytes(data: &[u8]) -> String {
+fn sha512_bytes(data: &[u8]) -> io::Result<String> {
     ring_hash_bytes(&ring::digest::SHA512, data)
 }
 
 #[cfg(target_vendor = "apple")]
-fn sha512_bytes(data: &[u8]) -> String {
-    hex_encode(&sha2::Sha512::digest(data))
+fn sha512_bytes(data: &[u8]) -> io::Result<String> {
+    Ok(hex_encode(&sha2::Sha512::digest(data)))
 }
 
 #[cfg(target_os = "linux")]
@@ -365,7 +385,8 @@ fn sha512_reader(reader: impl Read) -> io::Result<String> {
 }
 
 /// Compute hash of a byte slice directly (zero-copy fast path).
-pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> String {
+/// Returns an error if the underlying crypto library rejects the algorithm.
+pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> io::Result<String> {
     match algo {
         HashAlgorithm::Sha1 => sha1_bytes(data),
         HashAlgorithm::Sha224 => sha224_bytes(data),
@@ -375,7 +396,7 @@ pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> String {
         HashAlgorithm::Md5 => md5_bytes(data),
         HashAlgorithm::Blake2b => {
             let hash = blake2b_simd::blake2b(data);
-            hex_encode(hash.as_bytes())
+            Ok(hex_encode(hash.as_bytes()))
         }
     }
 }
@@ -385,7 +406,7 @@ pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> String {
 /// on the critical single-file fast path.
 /// `out` must be at least 128 bytes for BLAKE2b/SHA512 (64 * 2), 64 for SHA256, 32 for MD5, etc.
 #[cfg(target_os = "linux")]
-pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> usize {
+pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     match algo {
         HashAlgorithm::Md5 => {
             openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::md5(), data, out)
@@ -399,94 +420,94 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> us
             let hash = blake2b_simd::blake2b(data);
             let bytes = hash.as_bytes();
             hex_encode_to_slice(bytes, out);
-            bytes.len() * 2
+            Ok(bytes.len() * 2)
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn sha1_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha1_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha1(), data, out)
 }
 #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-fn sha1_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha1_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
     hex_encode_to_slice(digest.as_ref(), out);
-    40
+    Ok(40)
 }
 #[cfg(target_vendor = "apple")]
-fn sha1_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha1_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = sha1::Sha1::digest(data);
     hex_encode_to_slice(&digest, out);
-    40
+    Ok(40)
 }
 
 #[cfg(target_os = "linux")]
-fn sha224_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha224_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha224(), data, out)
 }
 #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-fn sha224_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha224_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = <sha2::Sha224 as sha2::Digest>::digest(data);
     hex_encode_to_slice(&digest, out);
-    56
+    Ok(56)
 }
 #[cfg(target_vendor = "apple")]
-fn sha224_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha224_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = <sha2::Sha224 as sha2::Digest>::digest(data);
     hex_encode_to_slice(&digest, out);
-    56
+    Ok(56)
 }
 
 #[cfg(target_os = "linux")]
-fn sha256_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha256_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha256(), data, out)
 }
 #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-fn sha256_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha256_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = ring::digest::digest(&ring::digest::SHA256, data);
     hex_encode_to_slice(digest.as_ref(), out);
-    64
+    Ok(64)
 }
 #[cfg(target_vendor = "apple")]
-fn sha256_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha256_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = <sha2::Sha256 as sha2::Digest>::digest(data);
     hex_encode_to_slice(&digest, out);
-    64
+    Ok(64)
 }
 
 #[cfg(target_os = "linux")]
-fn sha384_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha384_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha384(), data, out)
 }
 #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-fn sha384_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha384_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = ring::digest::digest(&ring::digest::SHA384, data);
     hex_encode_to_slice(digest.as_ref(), out);
-    96
+    Ok(96)
 }
 #[cfg(target_vendor = "apple")]
-fn sha384_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha384_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = <sha2::Sha384 as sha2::Digest>::digest(data);
     hex_encode_to_slice(&digest, out);
-    96
+    Ok(96)
 }
 
 #[cfg(target_os = "linux")]
-fn sha512_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha512_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha512(), data, out)
 }
 #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-fn sha512_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha512_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = ring::digest::digest(&ring::digest::SHA512, data);
     hex_encode_to_slice(digest.as_ref(), out);
-    128
+    Ok(128)
 }
 #[cfg(target_vendor = "apple")]
-fn sha512_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+fn sha512_bytes_to_buf(data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     let digest = <sha2::Sha512 as sha2::Digest>::digest(data);
     hex_encode_to_slice(&digest, out);
-    128
+    Ok(128)
 }
 
 /// Hash a single file using raw syscalls and write hex directly to output buffer.
@@ -543,7 +564,7 @@ fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::
         unsafe {
             libc::close(fd);
         }
-        return Ok(hash_bytes_to_buf(algo, &[], out));
+        return hash_bytes_to_buf(algo, &[], out);
     }
 
     // Tiny files (<8KB): fully raw path — zero heap allocation
@@ -576,7 +597,7 @@ fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::
         unsafe {
             libc::close(fd);
         }
-        return Ok(hash_bytes_to_buf(algo, &buf[..total], out));
+        return hash_bytes_to_buf(algo, &buf[..total], out);
     }
 
     // Larger files: fall back to hash_from_raw_fd which returns a String,
@@ -594,7 +615,7 @@ fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::
                 if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
                     let _ = mmap.advise(memmap2::Advice::WillNeed);
                 }
-                hash_bytes(algo, &mmap)
+                hash_bytes(algo, &mmap)?
             } else {
                 hash_file_small(algo, file, size as usize)?
             }
@@ -614,13 +635,13 @@ fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::
 // Other platforms: md-5 crate (pure Rust)
 
 #[cfg(target_os = "linux")]
-fn md5_bytes(data: &[u8]) -> String {
+fn md5_bytes(data: &[u8]) -> io::Result<String> {
     openssl_hash_bytes(openssl::hash::MessageDigest::md5(), data)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn md5_bytes(data: &[u8]) -> String {
-    hash_digest::<Md5>(data)
+fn md5_bytes(data: &[u8]) -> io::Result<String> {
+    Ok(hash_digest::<Md5>(data))
 }
 
 #[cfg(target_os = "linux")]
@@ -761,15 +782,11 @@ fn hash_file_streaming(algo: HashAlgorithm, file: File, file_size: u64) -> io::R
         )
     };
 
-    // Use OpenSSL for all SHA algorithms on Linux (same library as GNU coreutils).
-    match algo {
-        HashAlgorithm::Sha1 => openssl_hash_reader(openssl::hash::MessageDigest::sha1(), file),
-        HashAlgorithm::Sha224 => openssl_hash_reader(openssl::hash::MessageDigest::sha224(), file),
-        HashAlgorithm::Sha256 => openssl_hash_reader(openssl::hash::MessageDigest::sha256(), file),
-        HashAlgorithm::Sha384 => openssl_hash_reader(openssl::hash::MessageDigest::sha384(), file),
-        HashAlgorithm::Sha512 => openssl_hash_reader(openssl::hash::MessageDigest::sha512(), file),
-        HashAlgorithm::Md5 => openssl_hash_reader(openssl::hash::MessageDigest::md5(), file),
-        HashAlgorithm::Blake2b => blake2b_hash_reader(file, 64),
+    // Use OpenSSL for all algorithms on Linux (same library as GNU coreutils).
+    if matches!(algo, HashAlgorithm::Blake2b) {
+        blake2b_hash_reader(file, 64)
+    } else {
+        openssl_hash_reader(algo_to_openssl_md(algo), file)
     }
 }
 
@@ -838,21 +855,15 @@ fn hash_file_pipelined_read(
         }};
     }
 
-    let hash_result: io::Result<String> = match algo {
-        HashAlgorithm::Sha1 => hash_pipelined_openssl!(openssl::hash::MessageDigest::sha1()),
-        HashAlgorithm::Sha224 => hash_pipelined_openssl!(openssl::hash::MessageDigest::sha224()),
-        HashAlgorithm::Sha256 => hash_pipelined_openssl!(openssl::hash::MessageDigest::sha256()),
-        HashAlgorithm::Sha384 => hash_pipelined_openssl!(openssl::hash::MessageDigest::sha384()),
-        HashAlgorithm::Sha512 => hash_pipelined_openssl!(openssl::hash::MessageDigest::sha512()),
-        HashAlgorithm::Md5 => hash_pipelined_openssl!(openssl::hash::MessageDigest::md5()),
-        HashAlgorithm::Blake2b => {
-            let mut state = blake2b_simd::Params::new().to_state();
-            while let Ok((buf, n)) = rx.recv() {
-                state.update(&buf[..n]);
-                let _ = buf_tx.send(buf);
-            }
-            Ok(hex_encode(state.finalize().as_bytes()))
+    let hash_result: io::Result<String> = if matches!(algo, HashAlgorithm::Blake2b) {
+        let mut state = blake2b_simd::Params::new().to_state();
+        while let Ok((buf, n)) = rx.recv() {
+            state.update(&buf[..n]);
+            let _ = buf_tx.send(buf);
         }
+        Ok(hex_encode(state.finalize().as_bytes()))
+    } else {
+        hash_pipelined_openssl!(algo_to_openssl_md(algo))
     };
 
     match reader_handle.join() {
@@ -884,7 +895,7 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     let (file, file_size, is_regular) = open_and_stat(path)?;
 
     if is_regular && file_size == 0 {
-        return Ok(hash_bytes(algo, &[]));
+        return hash_bytes(algo, &[]);
     }
 
     if file_size > 0 && is_regular {
@@ -903,7 +914,7 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
             {
                 let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
                 if let Ok(mmap) = mmap_result {
-                    return Ok(hash_bytes(algo, &mmap));
+                    return hash_bytes(algo, &mmap);
                 }
             }
         }
@@ -941,7 +952,7 @@ fn hash_file_tiny(algo: HashAlgorithm, mut file: File, size: usize) -> io::Resul
             Err(e) => return Err(e),
         }
     }
-    Ok(hash_bytes(algo, &buf[..total]))
+    hash_bytes(algo, &buf[..total])
 }
 
 /// Hash a small file by reading it entirely into a thread-local buffer,
@@ -967,7 +978,7 @@ fn hash_file_small(algo: HashAlgorithm, mut file: File, size: usize) -> io::Resu
                 Err(e) => return Err(e),
             }
         }
-        Ok(hash_bytes(algo, &buf[..total]))
+        hash_bytes(algo, &buf[..total])
     })
 }
 
@@ -1883,7 +1894,7 @@ pub fn hash_files_batch(paths: &[&Path], algo: HashAlgorithm) -> Vec<io::Result<
                             break;
                         }
                         let result = match &file_data[idx] {
-                            Ok(content) => Ok(hash_bytes(algo, content.as_ref())),
+                            Ok(content) => hash_bytes(algo, content.as_ref()),
                             Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
                         };
                         local_results.push((idx, result));
@@ -1914,58 +1925,38 @@ fn hash_stream_with_prefix(
     prefix: &[u8],
     mut file: File,
 ) -> io::Result<String> {
-    match algo {
-        #[cfg(target_os = "linux")]
-        HashAlgorithm::Sha1 => {
-            hash_stream_with_prefix_openssl(openssl::hash::MessageDigest::sha1(), prefix, file)
-        }
-        #[cfg(not(target_os = "linux"))]
-        HashAlgorithm::Sha1 => hash_stream_with_prefix_digest::<sha1::Sha1>(prefix, file),
-        #[cfg(target_os = "linux")]
-        HashAlgorithm::Sha224 => {
-            hash_stream_with_prefix_openssl(openssl::hash::MessageDigest::sha224(), prefix, file)
-        }
-        #[cfg(not(target_os = "linux"))]
-        HashAlgorithm::Sha224 => hash_stream_with_prefix_digest::<sha2::Sha224>(prefix, file),
-        #[cfg(target_os = "linux")]
-        HashAlgorithm::Sha256 => {
-            hash_stream_with_prefix_openssl(openssl::hash::MessageDigest::sha256(), prefix, file)
-        }
-        #[cfg(not(target_os = "linux"))]
-        HashAlgorithm::Sha256 => hash_stream_with_prefix_digest::<sha2::Sha256>(prefix, file),
-        #[cfg(target_os = "linux")]
-        HashAlgorithm::Sha384 => {
-            hash_stream_with_prefix_openssl(openssl::hash::MessageDigest::sha384(), prefix, file)
-        }
-        #[cfg(not(target_os = "linux"))]
-        HashAlgorithm::Sha384 => hash_stream_with_prefix_digest::<sha2::Sha384>(prefix, file),
-        #[cfg(target_os = "linux")]
-        HashAlgorithm::Sha512 => {
-            hash_stream_with_prefix_openssl(openssl::hash::MessageDigest::sha512(), prefix, file)
-        }
-        #[cfg(not(target_os = "linux"))]
-        HashAlgorithm::Sha512 => hash_stream_with_prefix_digest::<sha2::Sha512>(prefix, file),
-        #[cfg(target_os = "linux")]
-        HashAlgorithm::Md5 => {
-            hash_stream_with_prefix_openssl(openssl::hash::MessageDigest::md5(), prefix, file)
-        }
-        #[cfg(not(target_os = "linux"))]
-        HashAlgorithm::Md5 => hash_stream_with_prefix_digest::<md5::Md5>(prefix, file),
-        HashAlgorithm::Blake2b => {
-            let mut state = blake2b_simd::Params::new().to_state();
-            state.update(prefix);
-            STREAM_BUF.with(|cell| {
-                let mut buf = cell.borrow_mut();
-                ensure_stream_buf(&mut buf);
-                loop {
-                    let n = read_full(&mut file, &mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    state.update(&buf[..n]);
+    // Blake2b uses its own hasher on all platforms
+    if matches!(algo, HashAlgorithm::Blake2b) {
+        let mut state = blake2b_simd::Params::new().to_state();
+        state.update(prefix);
+        return STREAM_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            ensure_stream_buf(&mut buf);
+            loop {
+                let n = read_full(&mut file, &mut buf)?;
+                if n == 0 {
+                    break;
                 }
-                Ok(hex_encode(state.finalize().as_bytes()))
-            })
+                state.update(&buf[..n]);
+            }
+            Ok(hex_encode(state.finalize().as_bytes()))
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        hash_stream_with_prefix_openssl(algo_to_openssl_md(algo), prefix, file)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        match algo {
+            HashAlgorithm::Sha1 => hash_stream_with_prefix_digest::<sha1::Sha1>(prefix, file),
+            HashAlgorithm::Sha224 => hash_stream_with_prefix_digest::<sha2::Sha224>(prefix, file),
+            HashAlgorithm::Sha256 => hash_stream_with_prefix_digest::<sha2::Sha256>(prefix, file),
+            HashAlgorithm::Sha384 => hash_stream_with_prefix_digest::<sha2::Sha384>(prefix, file),
+            HashAlgorithm::Sha512 => hash_stream_with_prefix_digest::<sha2::Sha512>(prefix, file),
+            HashAlgorithm::Md5 => hash_stream_with_prefix_digest::<md5::Md5>(prefix, file),
+            HashAlgorithm::Blake2b => unreachable!(),
         }
     }
 }
@@ -2035,10 +2026,10 @@ pub fn hash_file_nostat(algo: HashAlgorithm, path: &Path) -> io::Result<String> 
     // with a single read() syscall and no fallback.
     let mut small_buf = [0u8; 4096];
     match file.read(&mut small_buf) {
-        Ok(0) => return Ok(hash_bytes(algo, &[])),
+        Ok(0) => return hash_bytes(algo, &[]),
         Ok(n) if n < small_buf.len() => {
             // File fits in small buffer — hash directly (common case)
-            return Ok(hash_bytes(algo, &small_buf[..n]));
+            return hash_bytes(algo, &small_buf[..n]);
         }
         Ok(n) => {
             // Might be more data — fall back to larger buffer
@@ -2047,7 +2038,7 @@ pub fn hash_file_nostat(algo: HashAlgorithm, path: &Path) -> io::Result<String> 
             let mut total = n;
             loop {
                 match file.read(&mut buf[total..]) {
-                    Ok(0) => return Ok(hash_bytes(algo, &buf[..total])),
+                    Ok(0) => return hash_bytes(algo, &buf[..total]),
                     Ok(n) => {
                         total += n;
                         if total >= buf.len() {
@@ -2067,7 +2058,7 @@ pub fn hash_file_nostat(algo: HashAlgorithm, path: &Path) -> io::Result<String> 
             let mut total = 0;
             loop {
                 match file.read(&mut buf[total..]) {
-                    Ok(0) => return Ok(hash_bytes(algo, &buf[..total])),
+                    Ok(0) => return hash_bytes(algo, &buf[..total]),
                     Ok(n) => {
                         total += n;
                         if total >= buf.len() {
@@ -2146,7 +2137,7 @@ fn hash_from_raw_fd(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
         unsafe {
             libc::close(fd);
         }
-        return Ok(hash_bytes(algo, &[]));
+        return hash_bytes(algo, &[]);
     }
 
     // Tiny files (<8KB): raw read into stack buffer, no File wrapper needed.
@@ -2180,7 +2171,7 @@ fn hash_from_raw_fd(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
         unsafe {
             libc::close(fd);
         }
-        return Ok(hash_bytes(algo, &buf[..total]));
+        return hash_bytes(algo, &buf[..total]);
     }
 
     // For larger files, wrap fd in File for RAII close and existing optimized paths.
@@ -2200,7 +2191,7 @@ fn hash_from_raw_fd(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
                 if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
                     let _ = mmap.advise(memmap2::Advice::WillNeed);
                 }
-                return Ok(hash_bytes(algo, &mmap));
+                return hash_bytes(algo, &mmap);
             }
         }
         // Small files (8KB-16MB): single-read into thread-local buffer
