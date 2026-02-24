@@ -260,7 +260,7 @@ fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64) -> io::Result<()> {
     const MAX_BUF: usize = 4 * 1024 * 1024; // 4 MB
 
     thread_local! {
-        static BUF: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+        static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
 
     let buf_size = (src_len as usize).clamp(8192, MAX_BUF);
