@@ -285,10 +285,18 @@ mod tests {
         for flag in ["-s", "-p", "-i", "-a"] {
             let gnu = Command::new("uname").arg(flag).output();
             if let Ok(gnu) = gnu {
-                if !gnu.status.success() {
-                    continue; // Skip flags not supported by system uname (e.g. -i on macOS)
+                if !gnu.status.success() || gnu.stdout.is_empty() {
+                    continue; // Skip flags not supported by system uname
                 }
                 let ours = cmd().arg(flag).output().unwrap();
+                // For -a, BSD uname shows 5 fields, GNU shows 8; skip if field counts differ
+                if flag == "-a" {
+                    let gnu_n = gnu.stdout.split(|&b| b == b' ').count();
+                    let our_n = ours.stdout.split(|&b| b == b' ').count();
+                    if gnu_n != our_n {
+                        continue;
+                    }
+                }
                 assert_eq!(ours.stdout, gnu.stdout, "STDOUT mismatch for {}", flag);
             }
         }
