@@ -63,7 +63,7 @@ fn hash_reader_impl<D: Digest>(mut reader: impl Read) -> io::Result<String> {
 // ── Public hashing API ──────────────────────────────────────────────
 
 /// Buffer size for streaming hash I/O.
-/// 32KB matches GNU coreutils' buffer size, which works well with kernel readahead.
+/// 128KB matches GNU coreutils' buffer size (BUFSIZE=131072), which works well with kernel readahead.
 /// Many small reads allow the kernel to pipeline I/O efficiently, reducing latency
 /// vs fewer large reads that stall waiting for the full buffer to fill.
 const HASH_READ_BUF: usize = 131072;
@@ -388,21 +388,11 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> us
             hex_encode_to_slice(&digest, out);
             32
         }
-        HashAlgorithm::Sha1 => {
-            openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha1(), data, out)
-        }
-        HashAlgorithm::Sha224 => {
-            openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha224(), data, out)
-        }
-        HashAlgorithm::Sha256 => {
-            openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha256(), data, out)
-        }
-        HashAlgorithm::Sha384 => {
-            openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha384(), data, out)
-        }
-        HashAlgorithm::Sha512 => {
-            openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha512(), data, out)
-        }
+        HashAlgorithm::Sha1 => sha1_bytes_to_buf(data, out),
+        HashAlgorithm::Sha224 => sha224_bytes_to_buf(data, out),
+        HashAlgorithm::Sha256 => sha256_bytes_to_buf(data, out),
+        HashAlgorithm::Sha384 => sha384_bytes_to_buf(data, out),
+        HashAlgorithm::Sha512 => sha512_bytes_to_buf(data, out),
         HashAlgorithm::Blake2b => {
             let hash = blake2b_simd::blake2b(data);
             let bytes = hash.as_bytes();
@@ -410,6 +400,91 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> us
             bytes.len() * 2
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn sha1_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha1(), data, out)
+}
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+fn sha1_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
+    hex_encode_to_slice(digest.as_ref(), out);
+    40
+}
+#[cfg(target_vendor = "apple")]
+fn sha1_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = sha1::Sha1::digest(data);
+    hex_encode_to_slice(&digest, out);
+    40
+}
+
+#[cfg(target_os = "linux")]
+fn sha224_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha224(), data, out)
+}
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+fn sha224_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = <sha2::Sha224 as sha2::Digest>::digest(data);
+    hex_encode_to_slice(&digest, out);
+    56
+}
+#[cfg(target_vendor = "apple")]
+fn sha224_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = <sha2::Sha224 as sha2::Digest>::digest(data);
+    hex_encode_to_slice(&digest, out);
+    56
+}
+
+#[cfg(target_os = "linux")]
+fn sha256_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha256(), data, out)
+}
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+fn sha256_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = ring::digest::digest(&ring::digest::SHA256, data);
+    hex_encode_to_slice(digest.as_ref(), out);
+    64
+}
+#[cfg(target_vendor = "apple")]
+fn sha256_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(data);
+    hex_encode_to_slice(&digest, out);
+    64
+}
+
+#[cfg(target_os = "linux")]
+fn sha384_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha384(), data, out)
+}
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+fn sha384_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = ring::digest::digest(&ring::digest::SHA384, data);
+    hex_encode_to_slice(digest.as_ref(), out);
+    96
+}
+#[cfg(target_vendor = "apple")]
+fn sha384_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = <sha2::Sha384 as sha2::Digest>::digest(data);
+    hex_encode_to_slice(&digest, out);
+    96
+}
+
+#[cfg(target_os = "linux")]
+fn sha512_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    openssl_hash_bytes_to_buf(openssl::hash::MessageDigest::sha512(), data, out)
+}
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+fn sha512_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = ring::digest::digest(&ring::digest::SHA512, data);
+    hex_encode_to_slice(digest.as_ref(), out);
+    128
+}
+#[cfg(target_vendor = "apple")]
+fn sha512_bytes_to_buf(data: &[u8], out: &mut [u8]) -> usize {
+    let digest = <sha2::Sha512 as sha2::Digest>::digest(data);
+    hex_encode_to_slice(&digest, out);
+    128
 }
 
 /// Hash a single file using raw syscalls and write hex directly to output buffer.
@@ -663,14 +738,14 @@ fn hash_file_pipelined(algo: HashAlgorithm, file: File, file_size: u64) -> io::R
 fn hash_file_streaming(algo: HashAlgorithm, file: File, file_size: u64) -> io::Result<String> {
     use std::os::unix::io::AsRawFd;
 
-    unsafe {
+    let _ = unsafe {
         libc::posix_fadvise(
             file.as_raw_fd(),
             0,
             file_size as i64,
             libc::POSIX_FADV_SEQUENTIAL,
-        );
-    }
+        )
+    };
 
     // Use OpenSSL for all SHA algorithms on Linux (same library as GNU coreutils).
     match algo {
@@ -697,14 +772,14 @@ fn hash_file_pipelined_read(
 
     const PIPE_BUF_SIZE: usize = 4 * 1024 * 1024; // 4MB per buffer
 
-    unsafe {
+    let _ = unsafe {
         libc::posix_fadvise(
             file.as_raw_fd(),
             0,
             file_size as i64,
             libc::POSIX_FADV_SEQUENTIAL,
-        );
-    }
+        )
+    };
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, usize)>(1);
     let (buf_tx, buf_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
