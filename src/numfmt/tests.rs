@@ -45,13 +45,13 @@ fn test_numfmt_none_to_si() {
     config.to = ScaleUnit::Si;
 
     let result = process_line("1000", &config).unwrap();
-    assert_eq!(result, "1.0k"); // GNU numfmt uses lowercase 'k' for SI kilo
+    assert_eq!(result, "1.0K"); // GNU coreutils 9.4 uses uppercase 'K' for SI kilo
 
     let result = process_line("1000000", &config).unwrap();
     assert_eq!(result, "1.0M");
 
     let result = process_line("1500", &config).unwrap();
-    assert_eq!(result, "1.5k"); // lowercase 'k' for SI
+    assert_eq!(result, "1.5K"); // uppercase 'K' for SI
 
     let result = process_line("500", &config).unwrap();
     assert_eq!(result, "500");
@@ -271,7 +271,7 @@ fn test_numfmt_round() {
 
     let result = process_line("1001", &config).unwrap();
     // 1001/1000 = 1.001, rounded up to 1 decimal => 1.1
-    assert_eq!(result, "1.1k");
+    assert_eq!(result, "1.1K");
 }
 
 #[test]
@@ -283,7 +283,7 @@ fn test_numfmt_round_down() {
 
     let result = process_line("1999", &config).unwrap();
     // 1999/1000 = 1.999, rounded down to 1 decimal => 1.9
-    assert_eq!(result, "1.9k");
+    assert_eq!(result, "1.9K");
 }
 
 #[test]
@@ -295,7 +295,7 @@ fn test_numfmt_round_nearest() {
 
     let result = process_line("1450", &config).unwrap();
     // 1450/1000 = 1.45, rounded nearest to 1 decimal => 1.5
-    assert_eq!(result, "1.5k");
+    assert_eq!(result, "1.5K");
 }
 
 #[test]
@@ -330,10 +330,10 @@ fn test_numfmt_gnu_integer_display() {
     };
 
     // Values >= 10 after scaling should display as integer
-    assert_eq!(process_line("9999", &config).unwrap(), "10k");
-    assert_eq!(process_line("35000", &config).unwrap(), "35k");
-    assert_eq!(process_line("99999", &config).unwrap(), "100k");
-    assert_eq!(process_line("998123", &config).unwrap(), "999k");
+    assert_eq!(process_line("9999", &config).unwrap(), "10K");
+    assert_eq!(process_line("35000", &config).unwrap(), "35K");
+    assert_eq!(process_line("99999", &config).unwrap(), "100K");
+    assert_eq!(process_line("998123", &config).unwrap(), "999K");
     assert_eq!(process_line("999000000000", &config).unwrap(), "999G");
     assert_eq!(process_line("123600000000000", &config).unwrap(), "124T");
     assert_eq!(process_line("35000001", &config).unwrap(), "36M");
@@ -539,7 +539,7 @@ fn test_run_numfmt_to_si() {
     let mut output = Vec::new();
     run_numfmt(input.as_bytes(), &mut output, &config).unwrap();
     let result = String::from_utf8(output).unwrap();
-    assert_eq!(result, "1.0k\n1.0M\n"); // lowercase 'k' for SI kilo
+    assert_eq!(result, "1.0K\n1.0M\n"); // uppercase 'K' for SI kilo
 }
 
 // ──────────────────────────────────────────────────
@@ -560,7 +560,7 @@ fn test_numfmt_matches_gnu() {
     // echo "1000" | numfmt --to=si
     let mut config = default_config();
     config.to = ScaleUnit::Si;
-    assert_eq!(process_line("1000", &config).unwrap(), "1.0k"); // GNU uses lowercase 'k' for SI
+    assert_eq!(process_line("1000", &config).unwrap(), "1.0K"); // GNU uses uppercase 'K' for SI
 
     // echo "1024" | numfmt --to=iec
     let mut config = default_config();
@@ -609,7 +609,7 @@ fn test_numfmt_negative() {
     config.to = ScaleUnit::Si;
 
     let result = process_line("-1000", &config).unwrap();
-    assert_eq!(result, "-1.0k"); // lowercase 'k' for SI kilo
+    assert_eq!(result, "-1.0K"); // uppercase 'K' for SI kilo
 }
 
 #[test]
