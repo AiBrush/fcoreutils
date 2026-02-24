@@ -712,15 +712,18 @@ fn write_all_vectored_sort(writer: &mut SortOutput, slices: &[io::IoSlice<'_>]) 
 /// Software prefetch a cache line for reading.
 /// Returns true if LC_COLLATE is C or POSIX (byte comparison equals strcoll).
 /// When false, the raw-byte fast path must be disabled to use locale-aware strcoll.
-fn is_c_locale() -> bool {
-    unsafe {
+/// Cached via OnceLock since locale is set once at startup and never changes during sort.
+pub(crate) fn is_c_locale() -> bool {
+    use std::sync::OnceLock;
+    static IS_C: OnceLock<bool> = OnceLock::new();
+    *IS_C.get_or_init(|| unsafe {
         let lc = libc::setlocale(libc::LC_COLLATE, std::ptr::null());
         if lc.is_null() {
             return true;
         }
         let name = std::ffi::CStr::from_ptr(lc).to_string_lossy();
         name == "C" || name == "POSIX"
-    }
+    })
 }
 
 /// Compute a strxfrm collation key for a byte slice.

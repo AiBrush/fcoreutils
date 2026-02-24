@@ -30,12 +30,13 @@ pub fn compare_locale(a: &[u8], b: &[u8]) -> Ordering {
         return a.cmp(b);
     }
 
-    unsafe {
-        if a.len() < STACK_BUF && b.len() < STACK_BUF {
-            // Stack-only path: no heap allocation.
-            // Zero-init provides the null terminator after copy_nonoverlapping.
-            let mut buf_a = [0u8; STACK_BUF];
-            let mut buf_b = [0u8; STACK_BUF];
+    if a.len() < STACK_BUF && b.len() < STACK_BUF {
+        // Stack-only path: no heap allocation.
+        // Zero-init provides the null terminator after copy_nonoverlapping.
+        let mut buf_a = [0u8; STACK_BUF];
+        let mut buf_b = [0u8; STACK_BUF];
+        // SAFETY: a.len() < STACK_BUF (checked above), no interior NULs (checked above).
+        unsafe {
             std::ptr::copy_nonoverlapping(a.as_ptr(), buf_a.as_mut_ptr(), a.len());
             std::ptr::copy_nonoverlapping(b.as_ptr(), buf_b.as_mut_ptr(), b.len());
             let result = libc::strcoll(buf_a.as_ptr() as *const _, buf_b.as_ptr() as *const _);
@@ -46,8 +47,8 @@ pub fn compare_locale(a: &[u8], b: &[u8]) -> Ordering {
     // Fallback for long strings: heap allocate.
     // Null bytes were already filtered above, so CString::new always succeeds.
     use std::ffi::CString;
-    let ca = CString::new(a).unwrap();
-    let cb = CString::new(b).unwrap();
+    let ca = CString::new(a).expect("null bytes already filtered above");
+    let cb = CString::new(b).expect("null bytes already filtered above");
     let result = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
     result.cmp(&0)
 }
@@ -737,6 +738,9 @@ pub fn select_comparator(opts: &KeyOpts, random_seed: u64) -> (CompareFn, bool, 
             }
             _ => |a: &[u8], b: &[u8]| a.cmp(b),
         }
+    } else if super::core::is_c_locale() {
+        // C/POSIX locale: strcoll == byte comparison, skip CString overhead
+        compare_lexical
     } else {
         // Default: locale-aware comparison matching GNU sort's LC_COLLATE behavior
         compare_locale
