@@ -39,6 +39,8 @@ jobs:
     name: Build (ubuntu-latest)
     runs-on: ubuntu-latest
     env:
+      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
+      # when rust-cache provides artifacts from runners with different CPUs.
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
@@ -50,13 +52,13 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Build binaries
         run: cargo build --release
-      - name: Compile tests
-        run: cargo test --release --no-run
-      - name: Collect artifacts
+      - name: Compile tests and collect artifacts
         run: |
           mkdir -p artifacts/release artifacts/test-bins
-          # Get test executable paths from cargo's JSON output
-          cargo test --release --no-run --message-format=json 2>/dev/null | \
+          # Compile test harnesses and capture executable paths via JSON output
+          # (stderr shows compilation progress, stdout has JSON for jq)
+          cargo test --release --no-run --message-format=json 2>&1 | \
+            tee /dev/stderr | \
             jq -r 'select(.reason == "compiler-artifact") | select(.executable != null) | select(.profile.test == true) | .executable' > test_executables.txt
           # Copy f* release binaries (exclude .d dependency files)
           for f in target/release/f*; do
@@ -80,6 +82,8 @@ jobs:
     name: Build (macos-latest)
     runs-on: macos-latest
     env:
+      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
+      # when rust-cache provides artifacts from runners with different CPUs.
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
@@ -89,12 +93,11 @@ jobs:
           key: build-v1-macos-latest
       - name: Build binaries
         run: cargo build --release
-      - name: Compile tests
-        run: cargo test --release --no-run
-      - name: Collect artifacts
+      - name: Compile tests and collect artifacts
         run: |
           mkdir -p artifacts/release artifacts/test-bins
-          cargo test --release --no-run --message-format=json 2>/dev/null | \
+          cargo test --release --no-run --message-format=json 2>&1 | \
+            tee /dev/stderr | \
             jq -r 'select(.reason == "compiler-artifact") | select(.executable != null) | select(.profile.test == true) | .executable' > test_executables.txt
           for f in target/release/f*; do
             [ -f "$f" ] && [ -x "$f" ] && [[ "$f" != *.d ]] && cp "$f" artifacts/release/
@@ -115,6 +118,8 @@ jobs:
     name: Build (windows-latest)
     runs-on: windows-latest
     env:
+      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
+      # when rust-cache provides artifacts from runners with different CPUs.
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
@@ -124,13 +129,12 @@ jobs:
           key: build-v1-windows-latest
       - name: Build binaries
         run: cargo build --release
-      - name: Compile tests
-        run: cargo test --release --no-run
-      - name: Collect artifacts
+      - name: Compile tests and collect artifacts
         shell: bash
         run: |
           mkdir -p artifacts/release artifacts/test-bins
-          cargo test --release --no-run --message-format=json 2>/dev/null | \
+          cargo test --release --no-run --message-format=json 2>&1 | \
+            tee /dev/stderr | \
             jq -r 'select(.reason == "compiler-artifact") | select(.executable != null) | select(.profile.test == true) | .executable' > test_executables.txt
           # On Windows, binaries have .exe extension
           for f in target/release/f*.exe; do
@@ -156,7 +160,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v6
         with:
           name: build-ubuntu-latest
           path: artifacts/
@@ -187,7 +191,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v6
         with:
           name: build-macos-latest
           path: artifacts/
@@ -213,7 +217,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v6
         with:
           name: build-windows-latest
           path: artifacts/
@@ -257,6 +261,8 @@ jobs:
     needs: [test-linux]
     runs-on: ubuntu-latest
     env:
+      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
+      # when rust-cache provides artifacts from runners with different CPUs.
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
