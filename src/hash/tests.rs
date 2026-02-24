@@ -58,19 +58,19 @@ fn test_blake2b_hello_newline() {
 
 #[test]
 fn test_hash_bytes_md5_empty() {
-    let hash = hash_bytes(HashAlgorithm::Md5, b"");
+    let hash = hash_bytes(HashAlgorithm::Md5, b"").unwrap();
     assert_eq!(hash, "d41d8cd98f00b204e9800998ecf8427e");
 }
 
 #[test]
 fn test_hash_bytes_md5_hello() {
-    let hash = hash_bytes(HashAlgorithm::Md5, b"hello\n");
+    let hash = hash_bytes(HashAlgorithm::Md5, b"hello\n").unwrap();
     assert_eq!(hash, "b1946ac92492d2347c6235b4d2611184");
 }
 
 #[test]
 fn test_hash_bytes_sha256_empty() {
-    let hash = hash_bytes(HashAlgorithm::Sha256, b"");
+    let hash = hash_bytes(HashAlgorithm::Sha256, b"").unwrap();
     assert_eq!(
         hash,
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -79,7 +79,7 @@ fn test_hash_bytes_sha256_empty() {
 
 #[test]
 fn test_hash_bytes_sha256_hello() {
-    let hash = hash_bytes(HashAlgorithm::Sha256, b"hello\n");
+    let hash = hash_bytes(HashAlgorithm::Sha256, b"hello\n").unwrap();
     assert_eq!(
         hash,
         "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
@@ -99,7 +99,7 @@ fn test_hash_bytes_matches_reader() {
         HashAlgorithm::Sha512,
         HashAlgorithm::Blake2b,
     ] {
-        let from_bytes = hash_bytes(algo, data);
+        let from_bytes = hash_bytes(algo, data).unwrap();
         let from_reader = hash_reader(algo, Cursor::new(data)).unwrap();
         assert_eq!(from_bytes, from_reader, "Mismatch for {:?}", algo);
     }
@@ -301,7 +301,7 @@ fn test_hash_file_large() {
     std::fs::write(&path, &data).unwrap();
 
     let file_hash = hash_file(HashAlgorithm::Md5, &path).unwrap();
-    let bytes_hash = hash_bytes(HashAlgorithm::Md5, &data);
+    let bytes_hash = hash_bytes(HashAlgorithm::Md5, &data).unwrap();
     assert_eq!(file_hash, bytes_hash);
 }
 
@@ -313,7 +313,7 @@ fn test_hash_file_large_sha256() {
     std::fs::write(&path, &data).unwrap();
 
     let file_hash = hash_file(HashAlgorithm::Sha256, &path).unwrap();
-    let bytes_hash = hash_bytes(HashAlgorithm::Sha256, &data);
+    let bytes_hash = hash_bytes(HashAlgorithm::Sha256, &data).unwrap();
     assert_eq!(file_hash, bytes_hash);
 }
 
@@ -751,13 +751,13 @@ fn test_sha1_hello_newline() {
 
 #[test]
 fn test_hash_bytes_sha1_empty() {
-    let hash = hash_bytes(HashAlgorithm::Sha1, b"");
+    let hash = hash_bytes(HashAlgorithm::Sha1, b"").unwrap();
     assert_eq!(hash, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
 }
 
 #[test]
 fn test_hash_bytes_sha1_hello() {
-    let hash = hash_bytes(HashAlgorithm::Sha1, b"hello\n");
+    let hash = hash_bytes(HashAlgorithm::Sha1, b"hello\n").unwrap();
     assert_eq!(hash, "f572d396fae9206628714fb2ce00f72e94f2258f");
 }
 
@@ -783,7 +783,7 @@ fn test_sha224_hello_newline() {
 
 #[test]
 fn test_hash_bytes_sha224_empty() {
-    let hash = hash_bytes(HashAlgorithm::Sha224, b"");
+    let hash = hash_bytes(HashAlgorithm::Sha224, b"").unwrap();
     assert_eq!(
         hash,
         "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f"
@@ -814,7 +814,7 @@ fn test_sha384_hello_newline() {
 
 #[test]
 fn test_hash_bytes_sha384_empty() {
-    let hash = hash_bytes(HashAlgorithm::Sha384, b"");
+    let hash = hash_bytes(HashAlgorithm::Sha384, b"").unwrap();
     assert_eq!(
         hash,
         "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da\
@@ -846,7 +846,7 @@ fn test_sha512_hello_newline() {
 
 #[test]
 fn test_hash_bytes_sha512_empty() {
-    let hash = hash_bytes(HashAlgorithm::Sha512, b"");
+    let hash = hash_bytes(HashAlgorithm::Sha512, b"").unwrap();
     assert_eq!(
         hash,
         "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
