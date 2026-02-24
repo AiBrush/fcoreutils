@@ -548,8 +548,8 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
     let time_str = format_time(entry.ut_tv_sec);
     let _ = write!(out, " {}", time_str);
 
-    // IDLE + PID for -u
-    if config.show_users || config.show_all {
+    // IDLE + PID for -u, -a, or -l (login process entries)
+    if config.show_users || config.show_all || config.show_login {
         match entry.ut_type {
             USER_PROCESS => {
                 let idle = idle_str(&entry.ut_line);
@@ -557,7 +557,7 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
                 let _ = write!(out, " {:>11}", entry.ut_pid);
             }
             LOGIN_PROCESS => {
-                let _ = write!(out, " {:>5} {:>11}", "?", entry.ut_pid);
+                let _ = write!(out, " {:>5} {:>11}", " ", entry.ut_pid);
             }
             DEAD_PROCESS => {
                 let _ = write!(out, "      {:>10}", entry.ut_pid);
@@ -568,11 +568,6 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
 
     // For LOGIN_PROCESS, always show id
     if entry.ut_type == LOGIN_PROCESS {
-        if !(config.show_users || config.show_all) {
-            // Without -u, show PID with extra spacing to match column position
-            // 10 literal spaces + 5-char right-aligned PID = 15 chars (GNU compat)
-            let _ = write!(out, "          {:>5}", entry.ut_pid);
-        }
         let _ = write!(out, " id={}", entry.ut_id);
     }
 
