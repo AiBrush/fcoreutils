@@ -24,8 +24,8 @@ pub struct WcCounts {
 //   0 = word content: starts or continues a word
 //   1 = space (word break): ends any current word
 //
-// C locale: GNU wc uses isspace() for word breaks. In the C locale, only
-// 0x09-0x0D (tab, newline, vtab, formfeed, CR) and 0x20 (space) are spaces.
+// C locale: GNU wc 9.7 uses 7 word-break bytes: 0x09-0x0D (tab, newline,
+// vtab, formfeed, CR), 0x20 (space), and 0xA0 (Latin-1 NBSP).
 // All other bytes — including NUL, other control chars, DEL, and high bytes —
 // are word content. This means binary data with NUL bytes counts as word content.
 //
@@ -375,14 +375,13 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     (lines, words, first_is_word, in_word)
 }
 
-/// Count words in UTF-8 locale using 2-state logic matching GNU wc.
+/// Count words in UTF-8 locale using 2-state logic matching GNU wc 9.7.
 ///
 /// Handles:
 /// - ASCII spaces (0x09-0x0D, 0x20): word break
-/// - NUL, C0 controls (0x00-0x1F), DEL (0x7F): word break
-/// - Printable ASCII (0x21-0x7E): word content
-/// - Valid UTF-8 multi-byte Unicode spaces: word break
-/// - Everything else: word content
+/// - All other ASCII bytes (NUL, controls, printable, DEL): word content
+/// - Valid UTF-8 multi-byte Unicode spaces (U+00A0, U+2000-U+200A, etc.): word break
+/// - Everything else (high bytes, multi-byte sequences): word content
 ///
 /// Optimized with ASCII run skipping: when inside a word of printable ASCII,
 /// skips remaining non-space ASCII bytes without per-byte table lookups.
