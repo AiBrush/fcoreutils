@@ -718,15 +718,25 @@ fn sort_entries(entries: &mut [FileEntry], config: &LsConfig) {
     }
 }
 
+/// Locale-aware string comparison matching GNU ls behavior.
+/// Uses `strcoll()` which respects LC_COLLATE for correct sort order.
+fn locale_cmp(a: &str, b: &str) -> Ordering {
+    use std::ffi::CString;
+    let ca = CString::new(a).unwrap_or_default();
+    let cb = CString::new(b).unwrap_or_default();
+    let result = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
+    result.cmp(&0)
+}
+
 fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering {
-    // GNU ls uses strcoll() for name comparison, which in C locale (LC_ALL=C)
-    // is byte-order comparison (strcmp). We use byte comparison to match.
+    // GNU ls uses strcoll() for name comparison, which respects the current
+    // locale (LC_COLLATE). In C locale this equals byte-order (strcmp).
     let ord = match config.sort_by {
-        SortBy::Name => a.name.cmp(&b.name),
+        SortBy::Name => locale_cmp(&a.name, &b.name),
         SortBy::Size => {
             let size_ord = b.size.cmp(&a.size);
             if size_ord == Ordering::Equal {
-                a.name.cmp(&b.name)
+                locale_cmp(&a.name, &b.name)
             } else {
                 size_ord
             }
@@ -740,7 +750,7 @@ fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering 
                 let nb = b.time_nsec(config.time_field);
                 let nsec_ord = nb.cmp(&na);
                 if nsec_ord == Ordering::Equal {
-                    a.name.cmp(&b.name)
+                    locale_cmp(&a.name, &b.name)
                 } else {
                     nsec_ord
                 }
@@ -751,9 +761,9 @@ fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering 
         SortBy::Extension => {
             let ea = a.extension();
             let eb = b.extension();
-            let ord = ea.cmp(eb);
+            let ord = locale_cmp(ea, eb);
             if ord == Ordering::Equal {
-                a.name.cmp(&b.name)
+                locale_cmp(&a.name, &b.name)
             } else {
                 ord
             }
@@ -1767,11 +1777,11 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
         }
     }
 
-    // Sort directory args by name
+    // Sort directory args by name using locale-aware comparison
     dir_args.sort_by(|a, b| {
-        let an = a.to_string_lossy().to_lowercase();
-        let bn = b.to_string_lossy().to_lowercase();
-        let ord = an.cmp(&bn);
+        let an = a.to_string_lossy();
+        let bn = b.to_string_lossy();
+        let ord = locale_cmp(&an, &bn);
         if config.reverse { ord.reverse() } else { ord }
     });
 

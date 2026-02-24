@@ -455,11 +455,9 @@ fn reflow_paragraph<W: Write>(
                         // line_cost: SHORT_COST + RAGGED_COST
                         let short_n = goal - len as i64;
                         let short_cost = short_n * short_n * SHORT_FACTOR;
-                        let ragged_cost = if unsafe { *best_ptr.add(j + 1) as usize + 1 < n } {
+                        let ragged_cost = {
                             let ragged_n = len as i64 - unsafe { *line_len_ptr.add(j + 1) } as i64;
                             ragged_n * ragged_n * RAGGED_FACTOR
-                        } else {
-                            0
                         };
                         short_cost + ragged_cost
                     };

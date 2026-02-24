@@ -522,6 +522,12 @@ fn parse_args() -> (LsConfig, Vec<String>) {
 fn main() {
     reset_sigpipe();
 
+    // Initialize locale from environment (LC_COLLATE, LC_ALL, etc.)
+    // so that strcoll() sorts correctly for the user's locale.
+    unsafe {
+        libc::setlocale(libc::LC_ALL, c"".as_ptr());
+    }
+
     let (config, paths) = parse_args();
 
     let file_args: Vec<String> = if paths.is_empty() {
