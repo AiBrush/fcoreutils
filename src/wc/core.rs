@@ -435,13 +435,17 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     (lines, words, first_is_word, in_word)
 }
 
-/// Count words in UTF-8 locale using 2-state logic matching GNU wc 9.7.
+/// Count words in UTF-8 locale using 3-state logic matching GNU wc 9.4.
+///
+/// States: transparent (no state change), break (ends word), content (starts/continues word).
 ///
 /// Handles:
 /// - ASCII spaces (0x09-0x0D, 0x20): word break
-/// - All other ASCII bytes (NUL, controls, printable, DEL): word content
+/// - ASCII control chars (0x00-0x08, 0x0E-0x1F, 0x7F): transparent (don't start or break words)
+/// - ASCII printable (0x21-0x7E): word content
 /// - Valid UTF-8 multi-byte Unicode spaces (U+00A0, U+2000-U+200A, etc.): word break
-/// - Everything else (high bytes, multi-byte sequences): word content
+/// - Valid UTF-8 multi-byte printable chars: word content
+/// - Invalid UTF-8 encoding errors: word break (matches GNU mbrtowc error handling)
 ///
 /// Optimized with ASCII run skipping: when inside a word of printable ASCII,
 /// skips remaining non-space ASCII bytes without per-byte table lookups.
