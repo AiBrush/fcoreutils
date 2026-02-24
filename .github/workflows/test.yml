@@ -33,18 +33,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  # Build + test on all platforms. Clippy/fmt handled by lint job above.
+  # Build + test on all platforms
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    env:
-      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
-      # when rust-cache provides artifacts from runners with different CPUs.
-      RUSTFLAGS: ""
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
+      # when rust-cache provides artifacts from runners with different CPUs.
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -89,6 +89,8 @@ jobs:
     needs: [test]
     runs-on: ubuntu-latest
     env:
+      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
+      # when rust-cache provides artifacts from runners with different CPUs.
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
