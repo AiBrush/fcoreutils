@@ -723,6 +723,60 @@ fn is_c_locale() -> bool {
     }
 }
 
+/// Compute a strxfrm collation key for a byte slice.
+/// Returns `None` if the key contains interior null bytes (strxfrm treats
+/// those as C-string terminators, silently truncating the result).
+/// The caller should fall back to raw byte comparison in that case.
+fn compute_xfrm_key(key: &[u8]) -> Option<Vec<u8>> {
+    if key.is_empty() {
+        return Some(Vec::new());
+    }
+    if memchr::memchr(0, key).is_some() {
+        return None;
+    }
+    let mut c_buf = vec![0u8; key.len() + 1];
+    c_buf[..key.len()].copy_from_slice(key);
+    // c_buf is zero-terminated from vec init
+    let needed = unsafe { libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0) };
+    let mut out = vec![0u8; needed + 1];
+    unsafe {
+        libc::strxfrm(
+            out.as_mut_ptr() as *mut _,
+            c_buf.as_ptr() as *const _,
+            needed + 1,
+        );
+    }
+    out.truncate(needed);
+    Some(out)
+}
+
+/// Compute a strxfrm collation key, reusing `c_buf` to reduce allocations.
+/// Returns `None` if the key contains interior null bytes.
+fn compute_xfrm_key_reuse(key: &[u8], c_buf: &mut Vec<u8>) -> Option<Vec<u8>> {
+    if key.is_empty() {
+        return Some(Vec::new());
+    }
+    if memchr::memchr(0, key).is_some() {
+        return None;
+    }
+    if key.len() + 1 > c_buf.len() {
+        c_buf.resize(key.len() + 1, 0);
+    }
+    c_buf[..key.len()].copy_from_slice(key);
+    c_buf[key.len()] = 0;
+    let needed = unsafe { libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0) };
+    let mut out = vec![0u8; needed + 1];
+    unsafe {
+        libc::strxfrm(
+            out.as_mut_ptr() as *mut _,
+            c_buf.as_ptr() as *const _,
+            needed + 1,
+        );
+    }
+    out.truncate(needed);
+    Some(out)
+}
+
 /// Hides memory latency by loading data into L1 cache before it's needed.
 #[inline(always)]
 fn prefetch_read(ptr: *const u8) {
@@ -2816,36 +2870,14 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     && !is_c_locale();
 
                 if is_locale_only {
-                    // Pre-compute strxfrm collation keys in parallel, then sort with memcmp.
-                    // Each thread computes its chunk's transformed keys independently.
+                    // Pre-compute strxfrm collation keys, then sort with memcmp.
+                    // Keys containing null bytes get raw bytes (strxfrm can't handle them).
                     let xfrm_keys: Vec<Vec<u8>> = if num_lines > 10_000 {
                         key_offs
                             .par_iter()
                             .map(|&(sa, ea)| {
-                                if sa == ea {
-                                    return Vec::new();
-                                }
                                 let key = &data[sa..ea];
-                                let mut c_buf = vec![0u8; key.len() + 1];
-                                c_buf[..key.len()].copy_from_slice(key);
-                                // c_buf is already zero-terminated from vec init
-                                let needed = unsafe {
-                                    libc::strxfrm(
-                                        std::ptr::null_mut(),
-                                        c_buf.as_ptr() as *const _,
-                                        0,
-                                    )
-                                };
-                                let mut out = vec![0u8; needed + 1];
-                                unsafe {
-                                    libc::strxfrm(
-                                        out.as_mut_ptr() as *mut _,
-                                        c_buf.as_ptr() as *const _,
-                                        needed + 1,
-                                    );
-                                }
-                                out.truncate(needed);
-                                out
+                                compute_xfrm_key(key).unwrap_or_else(|| key.to_vec())
                             })
                             .collect()
                     } else {
@@ -2853,32 +2885,9 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         key_offs
                             .iter()
                             .map(|&(sa, ea)| {
-                                if sa == ea {
-                                    return Vec::new();
-                                }
                                 let key = &data[sa..ea];
-                                if key.len() + 1 > c_buf.len() {
-                                    c_buf.resize(key.len() + 1, 0);
-                                }
-                                c_buf[..key.len()].copy_from_slice(key);
-                                c_buf[key.len()] = 0;
-                                let needed = unsafe {
-                                    libc::strxfrm(
-                                        std::ptr::null_mut(),
-                                        c_buf.as_ptr() as *const _,
-                                        0,
-                                    )
-                                };
-                                let mut out = vec![0u8; needed + 1];
-                                unsafe {
-                                    libc::strxfrm(
-                                        out.as_mut_ptr() as *mut _,
-                                        c_buf.as_ptr() as *const _,
-                                        needed + 1,
-                                    );
-                                }
-                                out.truncate(needed);
-                                out
+                                compute_xfrm_key_reuse(key, &mut c_buf)
+                                    .unwrap_or_else(|| key.to_vec())
                             })
                             .collect()
                     };
@@ -3016,10 +3025,12 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     && !opts.dictionary_order
                     && !opts.ignore_case
                     && !opts.ignore_nonprinting
+                    && !opts.ignore_leading_blanks
             })
             .collect();
 
         // Pre-compute strxfrm collation keys for locale-aware keys (parallel).
+        // Keys containing null bytes fall back to raw bytes (strxfrm can't handle them).
         let per_key_xfrm: Vec<Option<Vec<Vec<u8>>>> = (0..num_keys)
             .map(|ki| {
                 if !key_needs_locale[ki] {
@@ -3029,53 +3040,16 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 let xfrm = if num_lines > 10_000 {
                     ko.par_iter()
                         .map(|&(sa, ea)| {
-                            if sa == ea {
-                                return Vec::new();
-                            }
                             let key = &data[sa..ea];
-                            let mut c_buf = vec![0u8; key.len() + 1];
-                            c_buf[..key.len()].copy_from_slice(key);
-                            let needed = unsafe {
-                                libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0)
-                            };
-                            let mut out = vec![0u8; needed + 1];
-                            unsafe {
-                                libc::strxfrm(
-                                    out.as_mut_ptr() as *mut _,
-                                    c_buf.as_ptr() as *const _,
-                                    needed + 1,
-                                );
-                            }
-                            out.truncate(needed);
-                            out
+                            compute_xfrm_key(key).unwrap_or_else(|| key.to_vec())
                         })
                         .collect()
                 } else {
                     let mut c_buf = vec![0u8; 512];
                     ko.iter()
                         .map(|&(sa, ea)| {
-                            if sa == ea {
-                                return Vec::new();
-                            }
                             let key = &data[sa..ea];
-                            if key.len() + 1 > c_buf.len() {
-                                c_buf.resize(key.len() + 1, 0);
-                            }
-                            c_buf[..key.len()].copy_from_slice(key);
-                            c_buf[key.len()] = 0;
-                            let needed = unsafe {
-                                libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0)
-                            };
-                            let mut out = vec![0u8; needed + 1];
-                            unsafe {
-                                libc::strxfrm(
-                                    out.as_mut_ptr() as *mut _,
-                                    c_buf.as_ptr() as *const _,
-                                    needed + 1,
-                                );
-                            }
-                            out.truncate(needed);
-                            out
+                            compute_xfrm_key_reuse(key, &mut c_buf).unwrap_or_else(|| key.to_vec())
                         })
                         .collect()
                 };

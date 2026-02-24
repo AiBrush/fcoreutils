@@ -32,25 +32,24 @@ pub fn compare_locale(a: &[u8], b: &[u8]) -> Ordering {
 
     unsafe {
         if a.len() < STACK_BUF && b.len() < STACK_BUF {
-            // Stack-only path: no heap allocation
+            // Stack-only path: no heap allocation.
+            // Zero-init provides the null terminator after copy_nonoverlapping.
             let mut buf_a = [0u8; STACK_BUF];
             let mut buf_b = [0u8; STACK_BUF];
             std::ptr::copy_nonoverlapping(a.as_ptr(), buf_a.as_mut_ptr(), a.len());
-            buf_a[a.len()] = 0;
             std::ptr::copy_nonoverlapping(b.as_ptr(), buf_b.as_mut_ptr(), b.len());
-            buf_b[b.len()] = 0;
             let result = libc::strcoll(buf_a.as_ptr() as *const _, buf_b.as_ptr() as *const _);
             return result.cmp(&0);
         }
     }
 
-    // Fallback for long strings: heap allocate
+    // Fallback for long strings: heap allocate.
+    // Null bytes were already filtered above, so CString::new always succeeds.
     use std::ffi::CString;
-    if let (Ok(ca), Ok(cb)) = (CString::new(a), CString::new(b)) {
-        let result = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
-        return result.cmp(&0);
-    }
-    a.cmp(b)
+    let ca = CString::new(a).unwrap();
+    let cb = CString::new(b).unwrap();
+    let result = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
+    result.cmp(&0)
 }
 
 /// Compare two byte slices lexicographically (default sort).
