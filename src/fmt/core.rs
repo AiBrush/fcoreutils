@@ -320,7 +320,6 @@ fn collect_words_with_sentence_info<'a>(
     }
 }
 
-
 /// Reflow words into lines that fit within the configured width.
 ///
 /// Uses optimal line breaking with a cost function matching GNU fmt.
