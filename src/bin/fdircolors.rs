@@ -95,7 +95,7 @@ enum OutputFormat {
     CShell,
 }
 
-/// Built-in default database, matching GNU dircolors defaults.
+/// Built-in default database, matching GNU dircolors 9.4 (Ubuntu 24.04).
 const DEFAULT_DATABASE: &str = "\
 # Configuration file for dircolors, a utility to help you set the
 # LS_COLORS environment variable used by GNU ls with the --color option.
@@ -136,7 +136,6 @@ TERM st
 TERM terminator
 TERM tmux*
 TERM vt100
-TERM vt220
 TERM xterm*
 # ===================================================================
 # Basic file attributes
@@ -165,13 +164,13 @@ BLK 40;33;01 # block device driver
 CHR 40;33;01 # character device driver
 ORPHAN 40;31;01 # symlink to nonexistent file, or non-stat'able file ...
 MISSING 00 # ... and the files they point to
-SETUID 37;41 # regular file that is setuid (u+s)
-SETGID 30;43 # regular file that is setgid (g+s)
-CAPABILITY 00 # regular file with capability (very expensive to lookup)
+SETUID 37;41 # file that is setuid (u+s)
+SETGID 30;43 # file that is setgid (g+s)
+CAPABILITY 00 # file with capability (very expensive to lookup)
 STICKY_OTHER_WRITABLE 30;42 # dir that is sticky and other-writable (+t,o+w)
 OTHER_WRITABLE 34;42 # dir that is other-writable (o+w) and not sticky
 STICKY 37;44 # dir with the sticky bit set (+t) and not other-writable
-# This is for regular files with execute permission:
+# This is for files with execute permission:
 EXEC 01;32
 # ===================================================================
 # File extension attributes
@@ -193,64 +192,56 @@ EXEC 01;32
 #.sh 01;32
 #.csh 01;32
 # archives or compressed (bright red)
-.7z 01;31
-.ace 01;31
-.alz 01;31
-.apk 01;31
+.tar 01;31
+.tgz 01;31
 .arc 01;31
 .arj 01;31
-.bz 01;31
-.bz2 01;31
-.cab 01;31
-.cpio 01;31
-.crate 01;31
-.deb 01;31
-.drpm 01;31
-.dwm 01;31
-.dz 01;31
-.ear 01;31
-.egg 01;31
-.esd 01;31
-.gz 01;31
-.jar 01;31
+.taz 01;31
 .lha 01;31
-.lrz 01;31
-.lz 01;31
 .lz4 01;31
 .lzh 01;31
 .lzma 01;31
-.lzo 01;31
-.pyz 01;31
-.rar 01;31
-.rpm 01;31
-.rz 01;31
-.sar 01;31
-.swm 01;31
-.t7z 01;31
-.tar 01;31
-.taz 01;31
-.tbz 01;31
-.tbz2 01;31
-.tgz 01;31
 .tlz 01;31
 .txz 01;31
-.tz 01;31
 .tzo 01;31
-.tzst 01;31
-.udeb 01;31
-.war 01;31
-.whl 01;31
-.wim 01;31
-.xz 01;31
-.z 01;31
+.t7z 01;31
 .zip 01;31
-.zoo 01;31
+.z   01;31
+.dz  01;31
+.gz  01;31
+.lrz 01;31
+.lz  01;31
+.lzo 01;31
+.xz  01;31
 .zst 01;31
+.tzst 01;31
+.bz2 01;31
+.bz  01;31
+.tbz 01;31
+.tbz2 01;31
+.tz  01;31
+.deb 01;31
+.rpm 01;31
+.jar 01;31
+.war 01;31
+.ear 01;31
+.sar 01;31
+.rar 01;31
+.alz 01;31
+.ace 01;31
+.zoo 01;31
+.cpio 01;31
+.7z  01;31
+.rz  01;31
+.cab 01;31
+.wim 01;31
+.swm 01;31
+.dwm 01;31
+.esd 01;31
 # image formats
 .avif 01;35
 .jpg 01;35
 .jpeg 01;35
-.jxl 01;35
 .mjpg 01;35
 .mjpeg 01;35
 .gif 01;35

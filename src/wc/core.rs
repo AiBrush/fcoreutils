@@ -32,21 +32,28 @@ pub struct WcCounts {
 // UTF-8 locale: 0x09-0x0D, 0x20 (ASCII spaces) break words; multi-byte Unicode
 // spaces are detected via codepoint lookup. Everything else is word content.
 
-/// Byte classification for C/POSIX locale word counting.
-/// Uses isspace() semantics plus 0xA0 (Latin-1 NO-BREAK SPACE) which GNU wc
-/// also treats as a word-break in C locale despite isspace(0xA0) returning false.
-///   0 = word content
-///   1 = word-break
+/// Byte classification for C/POSIX locale word counting (matching GNU wc 9.4).
+/// GNU wc uses isprint() as a gatekeeper: only printable bytes (0x21-0x7E) can
+/// start or continue words. Non-printable, non-space bytes are "transparent" —
+/// they don't start words, don't continue words, and don't break words.
+///   0 = transparent (non-printable, non-space): NUL, controls, DEL, high bytes
+///   1 = word-break (whitespace): tab, newline, VT, FF, CR, space
+///   2 = word content (printable): 0x21-0x7E
 const fn make_byte_class_c() -> [u8; 256] {
-    let mut t = [0u8; 256]; // all word-content by default
-    // C locale isspace() chars
+    let mut t = [0u8; 256]; // default: transparent
+    // C locale isspace() chars → word-break
     t[0x09] = 1; // tab
     t[0x0A] = 1; // newline
     t[0x0B] = 1; // vertical tab
     t[0x0C] = 1; // form feed
     t[0x0D] = 1; // carriage return
     t[0x20] = 1; // space
-    t[0xA0] = 1; // Latin-1 NO-BREAK SPACE (GNU wc compat)
+    // C locale isprint() chars (excluding space) → word content
+    let mut b = 0x21u16;
+    while b <= 0x7E {
+        t[b as usize] = 2;
+        b += 1;
+    }
     t
 }
 const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
@@ -132,9 +139,11 @@ pub fn count_words_locale(data: &[u8], utf8: bool) -> u64 {
     }
 }
 
-/// Count words in C/POSIX locale using 2-state logic matching GNU wc 9.7.
-/// Only 7 bytes are word-break: 0x09-0x0D (tab/NL/VT/FF/CR), 0x20 (space), 0xA0 (NBSP).
-/// All other bytes (NUL, control chars, DEL, printable, high bytes) are word content.
+/// Count words in C/POSIX locale using 3-state logic matching GNU wc 9.4.
+/// Bytes are classified into 3 categories:
+///   - Word-break (class 1): 0x09-0x0D, 0x20 — ends current word
+///   - Word content (class 2): 0x21-0x7E — starts or continues a word
+///   - Transparent (class 0): everything else — no effect on word state
 fn count_words_c(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;
@@ -145,13 +154,16 @@ fn count_words_c(data: &[u8]) -> u64 {
         let b = unsafe { *data.get_unchecked(i) };
         let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
         if class == 1 {
-            // Space — break word
+            // Word-break (whitespace) — end current word
             in_word = false;
-        } else if !in_word {
-            // Word content (any non-space byte)
-            in_word = true;
-            words += 1;
+        } else if class == 2 {
+            // Word content (printable) — start or continue word
+            if !in_word {
+                in_word = true;
+                words += 1;
+            }
         }
+        // class == 0: transparent — no state change
         i += 1;
     }
     words
@@ -173,26 +185,31 @@ fn count_lw_c_scalar_tail(
 ) -> (u64, u64, bool, bool) {
     while i < len {
         let b = unsafe { *ptr.add(i) };
-        if b == b'\n' {
-            total_lines += 1;
+        let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
+        if class == 1 {
+            // Word-break
+            if b == b'\n' {
+                total_lines += 1;
+            }
             prev_in_word = false;
-        } else if unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) } == 1 {
-            prev_in_word = false;
-        } else if !prev_in_word {
+        } else if class == 2 && !prev_in_word {
+            // Word content (printable) — transition into word
             total_words += 1;
             prev_in_word = true;
         }
+        // class == 0: transparent — no state change
         i += 1;
     }
-    let first_is_word = !data.is_empty() && BYTE_CLASS_C[data[0] as usize] != 1;
+    let first_is_word = !data.is_empty() && BYTE_CLASS_C[data[0] as usize] == 2;
     (total_lines, total_words, first_is_word, prev_in_word)
 }
 
 /// AVX2-accelerated fused line+word counter for C locale chunks.
-/// Processes 32 bytes per iteration using 2-state logic matching BYTE_CLASS_C:
-///   - Word-break: {0x09-0x0D, 0x20, 0xA0} (7 bytes total)
-///   - Word content: everything else
-/// Word transitions detected via bitmask: word_content_mask & ~prev_word_content_mask.
+/// Processes 32 bytes per iteration using 3-state logic matching GNU wc 9.4:
+///   - Word-break: {0x09-0x0D, 0x20} (6 bytes) — ends word
+///   - Word content: {0x21-0x7E} (printable ASCII) — starts/continues word
+///   - Transparent: everything else — no effect on word state
+/// Word transitions detected via bitmask on printable bytes only.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
@@ -209,12 +226,13 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm256_set1_epi8(b'\n' as i8);
         let zero = _mm256_setzero_si256();
         let ones = _mm256_set1_epi8(1);
-        let all_ones = _mm256_set1_epi8(-1i8);
-        // Word-break detection constants for {0x09-0x0D, 0x20, 0xA0}
+        // Printable range detection: 0x21-0x7E
+        let const_0x21 = _mm256_set1_epi8(0x21u8 as i8);
+        let const_0x7e = _mm256_set1_epi8(0x7Eu8 as i8);
+        // Word-break detection: {0x09-0x0D, 0x20}
         let const_0x09 = _mm256_set1_epi8(0x09u8 as i8);
         let const_0x0d = _mm256_set1_epi8(0x0Du8 as i8);
         let const_0x20 = _mm256_set1_epi8(0x20u8 as i8);
-        let const_0xa0 = _mm256_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm256_setzero_si256();
         let mut batch = 0u32;
@@ -224,22 +242,47 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // Word-break = byte in {0x09-0x0D, 0x20, 0xA0}
-            // Range check [0x09, 0x0D]: v >= 0x09 AND v <= 0x0D
+            // Printable check: byte in [0x21, 0x7E] (word content)
+            let ge_21 = _mm256_cmpeq_epi8(_mm256_max_epu8(v, const_0x21), v);
+            let le_7e = _mm256_cmpeq_epi8(_mm256_min_epu8(v, const_0x7e), v);
+            let is_printable = _mm256_and_si256(ge_21, le_7e);
+            let word_mask = _mm256_movemask_epi8(is_printable) as u32;
+
+            // Word-break check: byte in {0x09-0x0D, 0x20}
             let ge_09 = _mm256_cmpeq_epi8(_mm256_max_epu8(v, const_0x09), v);
             let le_0d = _mm256_cmpeq_epi8(_mm256_min_epu8(v, const_0x0d), v);
             let in_tab_range = _mm256_and_si256(ge_09, le_0d);
             let is_space = _mm256_cmpeq_epi8(v, const_0x20);
-            let is_nbsp = _mm256_cmpeq_epi8(v, const_0xa0);
-            let is_break = _mm256_or_si256(_mm256_or_si256(in_tab_range, is_space), is_nbsp);
-            // Word content = NOT word-break
-            let is_word = _mm256_xor_si256(is_break, all_ones);
-            let word_mask = _mm256_movemask_epi8(is_word) as u32;
+            let is_break = _mm256_or_si256(in_tab_range, is_space);
+            let break_mask = _mm256_movemask_epi8(is_break) as u32;
 
-            // 2-state bitmask approach: count transitions from non-word to word
-            let prev_mask = (word_mask << 1) | (prev_in_word as u32);
-            total_words += (word_mask & !prev_mask).count_ones() as u64;
-            prev_in_word = (word_mask >> 31) & 1 == 1;
+            // 3-state bitmask: word starts at printable byte not preceded by
+            // printable byte. Transparent bytes preserve prev_in_word state.
+            // Build effective prev state: for each bit position, the effective
+            // "previous in_word" is true if the prev bit was word content OR
+            // (prev bit was transparent AND prev_in_word was already true).
+            // With bitmask approach: reset in_word on break, set on printable.
+            // Process the 32 bytes to build an "active word" mask.
+            let mut active = 0u32;
+            let mut iw = prev_in_word;
+            let mut w_count = 0u32;
+            let mut bm = 0u32;
+            while bm < 32 {
+                let bit = 1u32 << bm;
+                if break_mask & bit != 0 {
+                    iw = false;
+                } else if word_mask & bit != 0 {
+                    if !iw {
+                        w_count += 1;
+                        iw = true;
+                    }
+                    active |= bit;
+                }
+                // transparent: iw unchanged
+                bm += 1;
+            }
+            total_words += w_count as u64;
+            prev_in_word = iw;
 
             batch += 1;
             if batch >= 255 {
@@ -288,11 +331,13 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        let all_ones = _mm_set1_epi8(-1i8);
+        // Printable range detection: 0x21-0x7E
+        let const_0x21 = _mm_set1_epi8(0x21u8 as i8);
+        let const_0x7e = _mm_set1_epi8(0x7Eu8 as i8);
+        // Word-break detection: {0x09-0x0D, 0x20}
         let const_0x09 = _mm_set1_epi8(0x09u8 as i8);
         let const_0x0d = _mm_set1_epi8(0x0Du8 as i8);
         let const_0x20 = _mm_set1_epi8(0x20u8 as i8);
-        let const_0xa0 = _mm_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm_setzero_si128();
         let mut batch = 0u32;
@@ -302,21 +347,36 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            // Word-break = byte in {0x09-0x0D, 0x20, 0xA0}
-            // Range check [0x09, 0x0D]: v >= 0x09 AND v <= 0x0D
+            // Printable check: byte in [0x21, 0x7E] (word content)
+            let ge_21 = _mm_cmpeq_epi8(_mm_max_epu8(v, const_0x21), v);
+            let le_7e = _mm_cmpeq_epi8(_mm_min_epu8(v, const_0x7e), v);
+            let is_printable = _mm_and_si128(ge_21, le_7e);
+            let word_mask = (_mm_movemask_epi8(is_printable) as u32) & 0xFFFF;
+
+            // Word-break check: byte in {0x09-0x0D, 0x20}
             let ge_09 = _mm_cmpeq_epi8(_mm_max_epu8(v, const_0x09), v);
             let le_0d = _mm_cmpeq_epi8(_mm_min_epu8(v, const_0x0d), v);
             let in_tab_range = _mm_and_si128(ge_09, le_0d);
             let is_space = _mm_cmpeq_epi8(v, const_0x20);
-            let is_nbsp = _mm_cmpeq_epi8(v, const_0xa0);
-            let is_break = _mm_or_si128(_mm_or_si128(in_tab_range, is_space), is_nbsp);
-            let is_word = _mm_xor_si128(is_break, all_ones);
-            let word_mask = (_mm_movemask_epi8(is_word) as u32) & 0xFFFF;
+            let is_break = _mm_or_si128(in_tab_range, is_space);
+            let break_mask = (_mm_movemask_epi8(is_break) as u32) & 0xFFFF;
 
-            // 2-state bitmask: count transitions from non-word to word
-            let prev_mask = (word_mask << 1) | (prev_in_word as u32);
-            total_words += (word_mask & !prev_mask).count_ones() as u64;
-            prev_in_word = (word_mask >> 15) & 1 == 1;
+            // 3-state per-bit processing
+            let mut w_count = 0u32;
+            let mut bm = 0u32;
+            while bm < 16 {
+                let bit = 1u32 << bm;
+                if break_mask & bit != 0 {
+                    prev_in_word = false;
+                } else if word_mask & bit != 0 {
+                    if !prev_in_word {
+                        w_count += 1;
+                        prev_in_word = true;
+                    }
+                }
+                bm += 1;
+            }
+            total_words += w_count as u64;
 
             batch += 1;
             if batch >= 255 {
@@ -356,10 +416,10 @@ fn count_lw_c_chunk_fast(data: &[u8]) -> (u64, u64, bool, bool) {
     count_lw_c_chunk(data)
 }
 
-/// Count words + lines in a C locale chunk using 2-state logic, returning
+/// Count words + lines in a C locale chunk using 3-state logic, returning
 /// counts plus boundary info for parallel chunk merging.
 /// Returns (line_count, word_count, first_is_word_content, ends_in_word).
-/// Word-break bytes: 0x09-0x0D, 0x20, 0xA0. All others are word content.
+/// Word-break: 0x09-0x0D, 0x20. Word content: 0x21-0x7E. Transparent: rest.
 fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     let mut lines = 0u64;
     let mut words = 0u64;
@@ -368,22 +428,23 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     let len = data.len();
 
     // Determine first byte's classification for boundary merging
-    let first_is_word = !data.is_empty() && BYTE_CLASS_C[data[0] as usize] != 1;
+    let first_is_word = !data.is_empty() && BYTE_CLASS_C[data[0] as usize] == 2;
 
     while i < len {
         let b = unsafe { *data.get_unchecked(i) };
         let class = unsafe { *BYTE_CLASS_C.get_unchecked(b as usize) };
         if class == 1 {
-            // Space byte — break word
+            // Word-break
             if b == b'\n' {
                 lines += 1;
             }
             in_word = false;
-        } else if !in_word {
-            // Word content (any non-space byte)
+        } else if class == 2 && !in_word {
+            // Word content (printable) — start word
             in_word = true;
             words += 1;
         }
+        // class == 0: transparent — no state change
         i += 1;
     }
     (lines, words, first_is_word, in_word)

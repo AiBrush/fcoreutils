@@ -196,35 +196,38 @@ fn test_2state_space_still_breaks() {
 }
 
 #[test]
-fn test_c_locale_high_bytes_are_word_content() {
-    // GNU wc 9.7 C locale: high bytes (except 0xA0) are word content
-    assert_eq!(count_words_locale(b"\x80", false), 1);
-    assert_eq!(count_words_locale(b"\xFF", false), 1);
-    // High bytes between ASCII: word content, doesn't split
+fn test_c_locale_high_bytes_are_transparent() {
+    // GNU wc 9.4 C locale: high bytes are transparent (not printable, not space)
+    // They don't start words, don't continue words, don't break words
+    assert_eq!(count_words_locale(b"\x80", false), 0);
+    assert_eq!(count_words_locale(b"\xFF", false), 0);
+    // High bytes between printable ASCII: transparent, doesn't split word
     assert_eq!(count_words_locale(b"hello\x80world", false), 1);
-    // High bytes between spaces: word content, counted as word
-    assert_eq!(count_words_locale(b"hello \x80 world", false), 3);
-    // 0xA0 is the exception: it IS a word-break (Latin-1 NBSP)
-    assert_eq!(count_words_locale(b"hello\xa0world", false), 2);
+    // High bytes between spaces: transparent, not counted as word
+    assert_eq!(count_words_locale(b"hello \x80 world", false), 2);
+    // 0xA0 is also transparent (not printable in C locale)
+    assert_eq!(count_words_locale(b"hello\xa0world", false), 1);
 }
 
 #[test]
 fn test_c_locale_word_counting() {
-    // GNU wc 9.7 C locale: only 7 bytes are word-break (0x09-0x0D, 0x20, 0xA0)
-    // Everything else is word content
+    // GNU wc 9.4 C locale: 3-state model
+    // Word content: printable ASCII (0x21-0x7E)
+    // Word break: whitespace (0x09-0x0D, 0x20)
+    // Transparent: everything else (NUL, controls, DEL, high bytes)
     assert_eq!(count_words_locale(b"hello", false), 1);
     assert_eq!(count_words_locale(b"hello world", false), 2);
-    // Control chars are word CONTENT in C locale (GNU 9.7)
-    assert_eq!(count_words_locale(b"\x01", false), 1);
-    assert_eq!(count_words_locale(b"\x7f", false), 1);
-    // DEL (0x7F) is word content, doesn't break
+    // Control chars are TRANSPARENT in C locale (GNU 9.4) — not words
+    assert_eq!(count_words_locale(b"\x01", false), 0);
+    assert_eq!(count_words_locale(b"\x7f", false), 0);
+    // DEL (0x7F) is transparent, doesn't break printable word
     assert_eq!(count_words_locale(b"hello\x7fworld", false), 1);
-    // NUL is word content
+    // NUL is transparent, doesn't break printable word
     assert_eq!(count_words_locale(b"hello\x00world", false), 1);
-    // All non-space bytes are word content
+    // All non-printable bytes: 0 words (all transparent)
     assert_eq!(
         count_words_locale(b"\x00\x01\x02\x80\x81\xfe\xff", false),
-        1
+        0
     );
 }
 
@@ -505,9 +508,9 @@ fn test_count_all_binary_data() {
     let counts = count_all(data, false);
     assert_eq!(counts.lines, 2);
     assert_eq!(counts.bytes, 7);
-    // GNU wc 9.7 C locale: \x00, \x01, \x02 are word content (word 1).
-    // \n breaks. \xFF, \xFE are word content (word 2). \n breaks.
-    assert_eq!(counts.words, 2);
+    // GNU wc 9.4 C locale: \x00, \x01, \x02 are transparent (not printable).
+    // \n breaks. \xFF, \xFE are transparent. \n breaks. 0 words.
+    assert_eq!(counts.words, 0);
     // C locale: each byte is a char
     assert_eq!(counts.chars, 7);
 }
@@ -527,10 +530,10 @@ fn test_gnu_trailing_newline() {
 
 #[test]
 fn test_gnu_word_definition() {
-    // GNU wc 9.7: NUL, control chars, DEL are all word content
-    assert_eq!(count_words(b"\x00"), 1); // NUL: word content
-    assert_eq!(count_words(b"\x01"), 1); // SOH: word content
-    assert_eq!(count_words(b"\x7f"), 1); // DEL: word content
+    // UTF-8 mode: NUL, control chars, DEL are word content (GNU wc UTF-8 path)
+    assert_eq!(count_words(b"\x00"), 1); // NUL: word content in UTF-8
+    assert_eq!(count_words(b"\x01"), 1); // SOH: word content in UTF-8
+    assert_eq!(count_words(b"\x7f"), 1); // DEL: word content in UTF-8
     // Printable ASCII is always word content
     assert_eq!(count_words(b"!"), 1);
     assert_eq!(count_words(b"hello"), 1);
@@ -540,24 +543,24 @@ fn test_gnu_word_definition() {
 
 #[test]
 fn test_c_locale_cjk_word_count() {
-    // GNU wc 9.7 C locale: high bytes are word content, only 0xA0 breaks words.
-    // "世界" bytes: e4 b8 96 e7 95 8c — no 0xA0, all word content. 1 word.
+    // GNU wc 9.4 C locale: high bytes are transparent, only printable ASCII forms words.
+    // "世界" bytes: e4 b8 96 e7 95 8c — all non-printable in C locale. 0 words.
     let data = "世界".as_bytes();
-    assert_eq!(count_words_locale(data, false), 1);
-    // Mixed: "Hello, 世界!" — "Hello," word 1, space breaks, "世界!" word 2.
+    assert_eq!(count_words_locale(data, false), 0);
+    // Mixed: "Hello, 世界!" — "Hello," (word 1), space breaks, "!" (word 2)
+    // CJK bytes between space and "!" are transparent
     let mixed = "Hello, 世界!".as_bytes();
     assert_eq!(count_words_locale(mixed, false), 2);
-    // Japanese CJK: no 0xA0 in these chars, newline breaks → 2 words
+    // Japanese CJK only: all non-printable bytes in C locale → 0 words
     let multi = "こんにちは\nさようなら\n".as_bytes();
-    assert_eq!(count_words_locale(multi, false), 2);
-    // Full test data:
-    // "Hello, 世界!\n你好世界\nこんにちは\n"
-    // Line 1: "Hello," (word 1) + space + "世界!" (word 2)
-    // Line 2: 你(e4 bd A0) — A0 breaks! "e4 bd" (word 3) + "好世界" (word 4)
-    // Line 3: こんにちは (word 5)
-    // Total: 5. Verified against GNU wc 9.7.
+    assert_eq!(count_words_locale(multi, false), 0);
+    // Full test data: "Hello, 世界!\n你好世界\nこんにちは\n"
+    // Line 1: "Hello," (word 1) + space + transparent bytes + "!" (word 2)
+    // Line 2: all CJK bytes are transparent → 0 words
+    // Line 3: all CJK bytes are transparent → 0 words
+    // Total: 2. Matches GNU wc 9.4 on Ubuntu 24.04.
     let full = "Hello, 世界!\n你好世界\nこんにちは\n".as_bytes();
-    assert_eq!(count_words_locale(full, false), 5);
+    assert_eq!(count_words_locale(full, false), 2);
 }
 
 #[test]
