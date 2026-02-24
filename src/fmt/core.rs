@@ -355,7 +355,6 @@ fn reflow_paragraph<W: Write>(
     let cont_base = prefix.len() + cont_indent.len();
     let goal = config.goal as i64;
     let width = config.width;
-    let _uniform = config.uniform_spacing;
 
     // GNU fmt cost model: SHORT_COST(n) = EQUIV(n*10) = (n*10)^2 = n^2 * 100
     // RAGGED_COST(n) = SHORT_COST(n) / 2 = n^2 * 50
