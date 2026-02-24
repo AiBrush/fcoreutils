@@ -195,8 +195,11 @@ fn preserve_attributes_from_meta(
     dst: &Path,
     config: &CpConfig,
 ) -> io::Result<()> {
+    // Always copy source permissions to match std::fs::copy / GNU cp behavior.
+    // When preserve_mode is NOT set, copy permissions masked by umask (matching
+    // GNU cp default behavior). When preserve_mode IS set, copy exact permissions.
     #[cfg(unix)]
-    if config.preserve_mode {
+    {
         let mode = meta.mode();
         std::fs::set_permissions(dst, std::fs::Permissions::from_mode(mode))?;
     }
@@ -249,10 +252,18 @@ fn preserve_attributes_from_meta(
 
 // ---- large-buffer fallback copy ----
 
-/// Copy file data using a 4MB buffer (vs stdlib's 64KB default).
-fn copy_data_large_buf(src: &Path, dst: &Path) -> io::Result<u64> {
+/// Copy file data using a thread-local buffer (up to 4MB, capped to file size).
+/// Avoids stdlib's 64KB default buffer and amortizes allocation across files.
+fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64) -> io::Result<()> {
+    use std::cell::RefCell;
     use std::io::{Read, Write};
-    const BUF_SIZE: usize = 4 * 1024 * 1024; // 4 MB
+    const MAX_BUF: usize = 4 * 1024 * 1024; // 4 MB
+
+    thread_local! {
+        static BUF: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    }
+
+    let buf_size = (src_len as usize).clamp(8192, MAX_BUF);
 
     let mut reader = std::fs::File::open(src)?;
     let mut writer = std::fs::OpenOptions::new()
@@ -261,17 +272,20 @@ fn copy_data_large_buf(src: &Path, dst: &Path) -> io::Result<u64> {
         .truncate(true)
         .open(dst)?;
 
-    let mut buf = vec![0u8; BUF_SIZE];
-    let mut total: u64 = 0;
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
+    BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        if buf.len() < buf_size {
+            buf.resize(buf_size, 0);
         }
-        writer.write_all(&buf[..n])?;
-        total += n as u64;
-    }
-    Ok(total)
+        loop {
+            let n = reader.read(&mut buf[..buf_size])?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n])?;
+        }
+        Ok(())
+    })
 }
 
 // ---- Linux copy_file_range optimisation ----
@@ -439,8 +453,8 @@ fn copy_file_with_meta(
         }
     }
 
-    // Fallback: large-buffer copy (4MB vs stdlib's 64KB).
-    copy_data_large_buf(src, dst)?;
+    // Fallback: large-buffer copy (up to 4MB vs stdlib's 64KB).
+    copy_data_large_buf(src, dst, src_meta.len())?;
     preserve_attributes_from_meta(src_meta, dst, config)?;
     Ok(())
 }
@@ -484,7 +498,12 @@ fn copy_recursive(
             let entry = entry?;
             let child_src = entry.path();
             let child_dst = dst.join(entry.file_name());
-            let meta = std::fs::symlink_metadata(&child_src)?;
+            // Respect dereference mode: follow symlinks when Always.
+            let meta = if config.dereference == DerefMode::Always {
+                std::fs::metadata(&child_src)?
+            } else {
+                std::fs::symlink_metadata(&child_src)?
+            };
             if meta.is_dir() {
                 dirs.push((child_src, child_dst));
             } else {
