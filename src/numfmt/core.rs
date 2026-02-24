@@ -389,9 +389,10 @@ fn format_with_scale(
             // Display with 1 decimal place: "N.Nk"
             let rounded = apply_round_for_display(scaled, round);
             if rounded.abs() >= 10.0 {
-                // Rounding pushed it past 10, switch to integer display
-                // Use rounded (not raw scaled) for consistent precision
-                let int_val = apply_round_int(rounded, round);
+                // Rounding pushed it past 10, switch to integer display.
+                // Use rounded directly (already at the right magnitude from
+                // apply_round_for_display), truncate to integer.
+                let int_val = rounded as i64;
                 if int_val.unsigned_abs() >= 1000 && idx + 1 < suffixes.len() {
                     idx += 1;
                     continue;
