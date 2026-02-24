@@ -328,6 +328,16 @@ pub fn join(
     let lines1 = split_lines(data1, delim);
     let lines2 = split_lines(data2, delim);
 
+    // Pre-compute all join keys — turns O(field_position) per comparison into O(1).
+    let keys1: Vec<&[u8]> = lines1
+        .iter()
+        .map(|l| extract_field(l, config.field1, config.separator))
+        .collect();
+    let keys2: Vec<&[u8]> = lines2
+        .iter()
+        .map(|l| extract_field(l, config.field2, config.separator))
+        .collect();
+
     let mut i1 = 0usize;
     let mut i2 = 0usize;
     let mut had_order_error = false;
@@ -403,13 +413,13 @@ pub fn join(
     }
 
     while i1 < lines1.len() && i2 < lines2.len() {
-        let key1 = extract_field(lines1[i1], config.field1, config.separator);
-        let key2 = extract_field(lines2[i2], config.field2, config.separator);
+        let key1 = keys1[i1];
+        let key2 = keys2[i2];
 
         // Order checks
         if config.order_check != OrderCheck::None {
             if !warned1 && i1 > (if config.header { 1 } else { 0 }) {
-                let prev_key = extract_field(lines1[i1 - 1], config.field1, config.separator);
+                let prev_key = keys1[i1 - 1];
                 if compare_keys(key1, prev_key, ci) == Ordering::Less {
                     had_order_error = true;
                     warned1 = true;
@@ -427,7 +437,7 @@ pub fn join(
                 }
             }
             if !warned2 && i2 > (if config.header { 1 } else { 0 }) {
-                let prev_key = extract_field(lines2[i2 - 1], config.field2, config.separator);
+                let prev_key = keys2[i2 - 1];
                 if compare_keys(key2, prev_key, ci) == Ordering::Less {
                     had_order_error = true;
                     warned2 = true;
@@ -499,7 +509,7 @@ pub fn join(
                 let current_key = key2;
                 i2 += 1;
                 while i2 < lines2.len() {
-                    let next_key = extract_field(lines2[i2], config.field2, config.separator);
+                    let next_key = keys2[i2];
                     if compare_keys(next_key, current_key, ci) != Ordering::Equal {
                         break;
                     }
@@ -543,7 +553,7 @@ pub fn join(
                     if i1 >= lines1.len() {
                         break;
                     }
-                    let next_key = extract_field(lines1[i1], config.field1, config.separator);
+                    let next_key = keys1[i1];
                     let cmp = compare_keys(next_key, current_key, ci);
                     if cmp != Ordering::Equal {
                         // Check order: next_key should be > current_key
@@ -579,8 +589,8 @@ pub fn join(
             && !warned1
             && i1 > (if config.header { 1 } else { 0 })
         {
-            let key1 = extract_field(lines1[i1], config.field1, config.separator);
-            let prev_key = extract_field(lines1[i1 - 1], config.field1, config.separator);
+            let key1 = keys1[i1];
+            let prev_key = keys1[i1 - 1];
             if compare_keys(key1, prev_key, ci) == Ordering::Less {
                 had_order_error = true;
                 warned1 = true;
@@ -624,8 +634,8 @@ pub fn join(
             && !warned2
             && i2 > (if config.header { 1 } else { 0 })
         {
-            let key2 = extract_field(lines2[i2], config.field2, config.separator);
-            let prev_key = extract_field(lines2[i2 - 1], config.field2, config.separator);
+            let key2 = keys2[i2];
+            let prev_key = keys2[i2 - 1];
             if compare_keys(key2, prev_key, ci) == Ordering::Less {
                 had_order_error = true;
                 warned2 = true;
