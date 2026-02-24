@@ -329,6 +329,8 @@ pub fn join(
     let lines2 = split_lines(data2, delim);
 
     // Pre-compute all join keys — turns O(field_position) per comparison into O(1).
+    // Memory: 16 bytes per fat pointer × (lines1 + lines2). At 1M+1M lines ≈ 32 MB,
+    // acceptable for the >2x speedup over repeated extract_field scanning.
     let keys1: Vec<&[u8]> = lines1
         .iter()
         .map(|l| extract_field(l, config.field1, config.separator))
@@ -413,8 +415,11 @@ pub fn join(
     }
 
     while i1 < lines1.len() && i2 < lines2.len() {
-        let key1 = keys1[i1];
-        let key2 = keys2[i2];
+        debug_assert!(i1 < keys1.len() && i2 < keys2.len());
+        // SAFETY: keys1.len() == lines1.len() and keys2.len() == lines2.len(),
+        // guaranteed by the collect() above; loop condition ensures in-bounds.
+        let key1 = unsafe { *keys1.get_unchecked(i1) };
+        let key2 = unsafe { *keys2.get_unchecked(i2) };
 
         // Order checks
         if config.order_check != OrderCheck::None {
@@ -476,6 +481,10 @@ pub fn join(
                     }
                 }
                 i1 += 1;
+                if show_unpaired1 && buf.len() >= FLUSH_THRESHOLD {
+                    out.write_all(&buf)?;
+                    buf.clear();
+                }
             }
             Ordering::Greater => {
                 if show_unpaired2 {
@@ -509,7 +518,9 @@ pub fn join(
                 let current_key = key2;
                 i2 += 1;
                 while i2 < lines2.len() {
-                    let next_key = keys2[i2];
+                    debug_assert!(i2 < keys2.len());
+                    // SAFETY: i2 < lines2.len() == keys2.len()
+                    let next_key = unsafe { *keys2.get_unchecked(i2) };
                     if compare_keys(next_key, current_key, ci) != Ordering::Equal {
                         break;
                     }
@@ -549,11 +560,18 @@ pub fn join(
                             }
                         }
                     }
+                    // Flush inside cross-product loop to bound buffer for N×M groups
+                    if buf.len() >= FLUSH_THRESHOLD {
+                        out.write_all(&buf)?;
+                        buf.clear();
+                    }
                     i1 += 1;
                     if i1 >= lines1.len() {
                         break;
                     }
-                    let next_key = keys1[i1];
+                    debug_assert!(i1 < keys1.len());
+                    // SAFETY: i1 < lines1.len() == keys1.len() (checked above)
+                    let next_key = unsafe { *keys1.get_unchecked(i1) };
                     let cmp = compare_keys(next_key, current_key, ci);
                     if cmp != Ordering::Equal {
                         // Check order: next_key should be > current_key
