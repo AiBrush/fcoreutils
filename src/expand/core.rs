@@ -119,6 +119,18 @@ fn push_spaces(output: &mut Vec<u8>, n: usize) {
     }
 }
 
+/// Write N spaces to a Write stream using pre-computed buffer.
+#[inline]
+fn write_spaces(out: &mut impl Write, n: usize) -> std::io::Result<()> {
+    let mut remaining = n;
+    while remaining > 0 {
+        let chunk = remaining.min(SPACES.len());
+        out.write_all(&SPACES[..chunk])?;
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
 /// Expand tabs to spaces using SIMD scanning.
 /// Uses memchr2 to find tabs and newlines, bulk-copying everything between them.
 pub fn expand_bytes(
@@ -172,9 +184,9 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
                     out.write_all(b"\n")?;
                     column = 0;
                 } else {
-                    // Tab: write spaces directly from const buffer
+                    // Tab: write spaces
                     let spaces = tab_size - (column % tab_size);
-                    out.write_all(&SPACES[..spaces])?;
+                    write_spaces(out, spaces)?;
                     column += spaces;
                 }
             }
@@ -206,13 +218,17 @@ fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
             let byte = data[i];
             if byte == b'\t' {
                 let spaces = tab_size - (column % tab_size);
-                out.write_all(&SPACES[..spaces])?;
+                write_spaces(out, spaces)?;
                 column += spaces;
                 i += 1;
             } else if byte == b' ' {
-                out.write_all(b" ")?;
-                column += 1;
-                i += 1;
+                // Batch consecutive spaces from source data
+                let space_start = i;
+                while i < line_end && data[i] == b' ' {
+                    i += 1;
+                }
+                out.write_all(&data[space_start..i])?;
+                column += i - space_start;
             } else {
                 // First non-blank: write the rest of the line unchanged
                 break;
