@@ -134,7 +134,10 @@ fn count_users() -> usize {
     // Read utmpx directly (with systemd session fallback).
     // uptime doesn't filter by PID liveness (unlike who), matching GNU behavior.
     let entries = coreutils_rs::who::read_utmpx_with_systemd_fallback_no_pid_check();
-    entries.iter().filter(|e| e.ut_type == libc::USER_PROCESS).count()
+    entries
+        .iter()
+        .filter(|e| e.ut_type == libc::USER_PROCESS)
+        .count()
 }
 
 #[cfg(unix)]

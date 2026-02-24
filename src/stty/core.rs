@@ -303,11 +303,7 @@ fn csize_str(cflag: libc::tcflag_t) -> &'static str {
 }
 
 /// Helper: iterate all flag entries (portable + linux-specific).
-fn print_flags(
-    parts: &mut Vec<String>,
-    flags: libc::tcflag_t,
-    entries: &[(&str, libc::tcflag_t)],
-) {
+fn print_flags(parts: &mut Vec<String>, flags: libc::tcflag_t, entries: &[(&str, libc::tcflag_t)]) {
     for &(name, flag) in entries {
         if flags & flag != 0 {
             parts.push(name.to_string());
@@ -322,7 +318,11 @@ fn print_flags(
 fn print_wrapped(items: &[String], sep: &str, max_cols: usize) {
     let mut line = String::new();
     for item in items {
-        let add_len = if line.is_empty() { item.len() } else { sep.len() + item.len() };
+        let add_len = if line.is_empty() {
+            item.len()
+        } else {
+            sep.len() + item.len()
+        };
         if !line.is_empty() && line.len() + add_len > max_cols {
             println!("{}", line);
             line.clear();
