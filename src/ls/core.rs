@@ -751,7 +751,7 @@ fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering 
         SortBy::Extension => {
             let ea = a.extension();
             let eb = b.extension();
-            let ord = ea.cmp(&eb);
+            let ord = ea.cmp(eb);
             if ord == Ordering::Equal {
                 a.name.cmp(&b.name)
             } else {
