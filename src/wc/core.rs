@@ -212,7 +212,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let all_ones = _mm256_set1_epi8(-1i8);
         // Word-break detection constants for {0x09-0x0D, 0x20, 0xA0}
         let const_0x09 = _mm256_set1_epi8(0x09u8 as i8);
-        let const_0x04 = _mm256_set1_epi8(0x04u8 as i8);
+        let const_0x0d = _mm256_set1_epi8(0x0Du8 as i8);
         let const_0x20 = _mm256_set1_epi8(0x20u8 as i8);
         let const_0xa0 = _mm256_set1_epi8(0xA0u8 as i8);
 
@@ -225,9 +225,10 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
             // Word-break = byte in {0x09-0x0D, 0x20, 0xA0}
-            // Range check [0x09, 0x0D]: saturating sub 0x09, then min with 4
-            let sub = _mm256_subs_epu8(v, const_0x09);
-            let in_tab_range = _mm256_cmpeq_epi8(_mm256_min_epu8(sub, const_0x04), sub);
+            // Range check [0x09, 0x0D]: v >= 0x09 AND v <= 0x0D
+            let ge_09 = _mm256_cmpeq_epi8(_mm256_max_epu8(v, const_0x09), v);
+            let le_0d = _mm256_cmpeq_epi8(_mm256_min_epu8(v, const_0x0d), v);
+            let in_tab_range = _mm256_and_si256(ge_09, le_0d);
             let is_space = _mm256_cmpeq_epi8(v, const_0x20);
             let is_nbsp = _mm256_cmpeq_epi8(v, const_0xa0);
             let is_break = _mm256_or_si256(_mm256_or_si256(in_tab_range, is_space), is_nbsp);
@@ -289,7 +290,7 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let ones = _mm_set1_epi8(1);
         let all_ones = _mm_set1_epi8(-1i8);
         let const_0x09 = _mm_set1_epi8(0x09u8 as i8);
-        let const_0x04 = _mm_set1_epi8(0x04u8 as i8);
+        let const_0x0d = _mm_set1_epi8(0x0Du8 as i8);
         let const_0x20 = _mm_set1_epi8(0x20u8 as i8);
         let const_0xa0 = _mm_set1_epi8(0xA0u8 as i8);
 
@@ -302,8 +303,10 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
             // Word-break = byte in {0x09-0x0D, 0x20, 0xA0}
-            let sub = _mm_subs_epu8(v, const_0x09);
-            let in_tab_range = _mm_cmpeq_epi8(_mm_min_epu8(sub, const_0x04), sub);
+            // Range check [0x09, 0x0D]: v >= 0x09 AND v <= 0x0D
+            let ge_09 = _mm_cmpeq_epi8(_mm_max_epu8(v, const_0x09), v);
+            let le_0d = _mm_cmpeq_epi8(_mm_min_epu8(v, const_0x0d), v);
+            let in_tab_range = _mm_and_si128(ge_09, le_0d);
             let is_space = _mm_cmpeq_epi8(v, const_0x20);
             let is_nbsp = _mm_cmpeq_epi8(v, const_0xa0);
             let is_break = _mm_or_si128(_mm_or_si128(in_tab_range, is_space), is_nbsp);

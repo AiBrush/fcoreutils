@@ -392,6 +392,7 @@ fn reflow_paragraph<W: Write>(
         .iter()
         .enumerate()
         .map(|(i, w)| {
+            debug_assert!(w.len() <= 0xFFFF, "word too long for winfo packing");
             let len = w.len() as u32;
             let mut flags = 0u32;
             if sentence_ends.get(i).copied().unwrap_or(false) {

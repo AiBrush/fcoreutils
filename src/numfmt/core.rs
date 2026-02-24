@@ -390,8 +390,9 @@ fn format_with_scale(
             let rounded = apply_round_for_display(scaled, round);
             if rounded.abs() >= 10.0 {
                 // Rounding pushed it past 10, switch to integer display.
-                // Use rounded directly (already at the right magnitude from
-                // apply_round_for_display), truncate to integer.
+                // apply_round_for_display rounds to 1 decimal, so the only
+                // value crossing this boundary is exactly 10.0 — truncation
+                // and rounding agree. Use `as i64` (truncation) which is safe.
                 let int_val = rounded as i64;
                 if int_val.unsigned_abs() >= 1000 && idx + 1 < suffixes.len() {
                     idx += 1;
