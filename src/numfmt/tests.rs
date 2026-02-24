@@ -560,7 +560,7 @@ fn test_numfmt_matches_gnu() {
     // echo "1000" | numfmt --to=si
     let mut config = default_config();
     config.to = ScaleUnit::Si;
-    assert_eq!(process_line("1000", &config).unwrap(), "1.0K"); // GNU uses lowercase 'k' for SI
+    assert_eq!(process_line("1000", &config).unwrap(), "1.0K"); // GNU 9.4 uses uppercase 'K' for SI kilo
 
     // echo "1024" | numfmt --to=iec
     let mut config = default_config();

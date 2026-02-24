@@ -17,20 +17,18 @@ pub struct WcCounts {
 }
 
 // ──────────────────────────────────────────────────
-// 2-state byte classification for word counting
+// Byte classification for word counting
 // ──────────────────────────────────────────────────
 //
-// GNU wc uses 2-state word counting:
-//   0 = word content: starts or continues a word
-//   1 = space (word break): ends any current word
+// C locale (GNU wc 9.4): 3-state model using isprint() as gatekeeper.
+//   0 = transparent: non-printable, non-space bytes (NUL, controls, DEL, 0x80-0xFF)
+//   1 = word-break: whitespace (0x09-0x0D, 0x20)
+//   2 = word content: printable ASCII (0x21-0x7E)
+// Transparent bytes don't start, continue, or break words.
 //
-// C locale: GNU wc 9.7 uses 7 word-break bytes: 0x09-0x0D (tab, newline,
-// vtab, formfeed, CR), 0x20 (space), and 0xA0 (Latin-1 NBSP).
-// All other bytes — including NUL, other control chars, DEL, and high bytes —
-// are word content. This means binary data with NUL bytes counts as word content.
-//
-// UTF-8 locale: 0x09-0x0D, 0x20 (ASCII spaces) break words; multi-byte Unicode
-// spaces are detected via codepoint lookup. Everything else is word content.
+// UTF-8 locale: 2-state model. 0x09-0x0D, 0x20 (ASCII spaces) break words;
+// multi-byte Unicode spaces are detected via codepoint lookup.
+// Everything else (including NUL, controls, DEL) is word content.
 
 /// Byte classification for C/POSIX locale word counting (matching GNU wc 9.4).
 /// GNU wc uses isprint() as a gatekeeper: only printable bytes (0x21-0x7E) can
@@ -256,14 +254,8 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_break = _mm256_or_si256(in_tab_range, is_space);
             let break_mask = _mm256_movemask_epi8(is_break) as u32;
 
-            // 3-state bitmask: word starts at printable byte not preceded by
-            // printable byte. Transparent bytes preserve prev_in_word state.
-            // Build effective prev state: for each bit position, the effective
-            // "previous in_word" is true if the prev bit was word content OR
-            // (prev bit was transparent AND prev_in_word was already true).
-            // With bitmask approach: reset in_word on break, set on printable.
-            // Process the 32 bytes to build an "active word" mask.
-            let mut active = 0u32;
+            // 3-state per-bit processing: scan break and word masks to count
+            // word transitions, with transparent bytes preserving in_word state.
             let mut iw = prev_in_word;
             let mut w_count = 0u32;
             let mut bm = 0u32;
@@ -271,14 +263,10 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
                 let bit = 1u32 << bm;
                 if break_mask & bit != 0 {
                     iw = false;
-                } else if word_mask & bit != 0 {
-                    if !iw {
-                        w_count += 1;
-                        iw = true;
-                    }
-                    active |= bit;
+                } else if word_mask & bit != 0 && !iw {
+                    w_count += 1;
+                    iw = true;
                 }
-                // transparent: iw unchanged
                 bm += 1;
             }
             total_words += w_count as u64;

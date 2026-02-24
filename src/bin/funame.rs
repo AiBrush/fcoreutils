@@ -22,7 +22,6 @@ fn main() {
     let mut show_hardware = false;
     let mut show_os = false;
     let mut any_flag = false;
-    let mut show_all = false;
 
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
@@ -56,7 +55,7 @@ fn main() {
                 show_processor = true;
                 show_hardware = true;
                 show_os = true;
-                show_all = true;
+
                 any_flag = true;
             }
             "-s" | "--kernel-name" => {
@@ -103,7 +102,7 @@ fn main() {
                             show_processor = true;
                             show_hardware = true;
                             show_os = true;
-                            show_all = true;
+            
                         }
                         's' => show_sysname = true,
                         'n' => show_nodename = true,
