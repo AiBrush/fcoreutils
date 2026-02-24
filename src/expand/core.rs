@@ -150,12 +150,12 @@ pub fn expand_bytes(
 
     // For regular tab stops, use fast SIMD paths
     if let TabStops::Regular(tab_size) = tabs {
-        if memchr::memchr(b'\x08', data).is_none() {
-            if initial_only {
-                return expand_initial_fast(data, *tab_size, out);
-            } else {
-                return expand_regular_fast(data, *tab_size, out);
-            }
+        if initial_only {
+            // --initial mode processes line-by-line anyway, so handle backspace
+            // per-line instead of scanning the whole buffer.
+            return expand_initial_fast(data, *tab_size, tabs, out);
+        } else if memchr::memchr(b'\x08', data).is_none() {
+            return expand_regular_fast(data, *tab_size, out);
         }
     }
 
@@ -166,6 +166,7 @@ pub fn expand_bytes(
 /// Fast expand for regular tab stops without -i flag.
 /// Writes directly from source data for non-tab runs, avoiding intermediate buffer copies.
 fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
+    debug_assert!(tab_size > 0, "tab_size must be > 0");
     let mut column: usize = 0;
     let mut pos: usize = 0;
 
@@ -202,7 +203,14 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
 
 /// Fast expand for --initial mode with regular tab stops.
 /// Only expands tabs in the leading whitespace of each line, bulk-copying the rest.
-fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
+/// Handles backspace per-line: lines containing \x08 fall back to generic expand.
+fn expand_initial_fast(
+    data: &[u8],
+    tab_size: usize,
+    tabs: &TabStops,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    debug_assert!(tab_size > 0, "tab_size must be > 0");
     let mut pos: usize = 0;
 
     while pos < data.len() {
@@ -211,11 +219,28 @@ fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
             .map(|off| pos + off + 1)
             .unwrap_or(data.len());
 
+        let line = &data[pos..line_end];
+
+        // Fast skip: if line doesn't start with tab or space, write it whole
+        let first = line[0];
+        if first != b'\t' && first != b' ' {
+            out.write_all(line)?;
+            pos = line_end;
+            continue;
+        }
+
+        // If this line contains a backspace, fall back to generic for this line only
+        if memchr::memchr(b'\x08', line).is_some() {
+            expand_generic(line, tabs, true, out)?;
+            pos = line_end;
+            continue;
+        }
+
         // Expand only leading tabs/spaces in this line
         let mut column: usize = 0;
-        let mut i = pos;
-        while i < line_end {
-            let byte = data[i];
+        let mut i = 0; // offset within line
+        while i < line.len() {
+            let byte = line[i];
             if byte == b'\t' {
                 let spaces = tab_size - (column % tab_size);
                 write_spaces(out, spaces)?;
@@ -224,10 +249,10 @@ fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
             } else if byte == b' ' {
                 // Batch consecutive spaces from source data
                 let space_start = i;
-                while i < line_end && data[i] == b' ' {
+                while i < line.len() && line[i] == b' ' {
                     i += 1;
                 }
-                out.write_all(&data[space_start..i])?;
+                out.write_all(&line[space_start..i])?;
                 column += i - space_start;
             } else {
                 // First non-blank: write the rest of the line unchanged
@@ -236,8 +261,8 @@ fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
         }
 
         // Write remainder of line as-is (zero-copy)
-        if i < line_end {
-            out.write_all(&data[i..line_end])?;
+        if i < line.len() {
+            out.write_all(&line[i..])?;
         }
 
         pos = line_end;
