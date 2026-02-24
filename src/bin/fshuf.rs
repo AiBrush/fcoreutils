@@ -5,7 +5,7 @@
 //        shuf -i LO-HI [OPTION]...
 
 use std::fs;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, Read, Write};
 use std::process;
 
 const TOOL_NAME: &str = "shuf";
@@ -161,7 +161,7 @@ impl RandGen {
 }
 
 /// Top-down Fisher-Yates shuffle (matches GNU's algorithm)
-fn shuffle(items: &mut [String], rng: &mut RandGen) {
+fn shuffle<T>(items: &mut [T], rng: &mut RandGen) {
     let n = items.len();
     if n <= 1 {
         return;
@@ -271,22 +271,6 @@ fn main() {
         i += 1;
     }
 
-    // Build the lines to shuffle
-    let mut lines: Vec<String> = if echo_mode {
-        echo_args
-    } else if let Some((lo, hi)) = input_range {
-        (lo..=hi).map(|n| n.to_string()).collect()
-    } else {
-        // Read from file or stdin
-        let filename = positional.first().map(|s| s.as_str());
-        read_lines(filename, zero_terminated)
-    };
-
-    if lines.is_empty() && !repeat {
-        // Nothing to shuffle
-        return;
-    }
-
     let mut rng = if let Some(ref source) = random_source {
         RandGen::from_file(source)
     } else {
@@ -314,8 +298,53 @@ fn main() {
 
     let delimiter = if zero_terminated { b'\0' } else { b'\n' };
 
+    // For echo and input-range modes, use string-based shuffle
+    if echo_mode {
+        if echo_args.is_empty() && !repeat {
+            return;
+        }
+        run_string_shuffle(
+            &mut echo_args,
+            &mut rng,
+            &mut out,
+            delimiter,
+            head_count,
+            repeat,
+        );
+    } else if let Some((lo, hi)) = input_range {
+        let mut lines: Vec<String> = (lo..=hi).map(|n| n.to_string()).collect();
+        if lines.is_empty() && !repeat {
+            return;
+        }
+        run_string_shuffle(
+            &mut lines, &mut rng, &mut out, delimiter, head_count, repeat,
+        );
+    } else {
+        // File/stdin mode: use zero-copy byte-slice shuffle for performance
+        let filename = positional.first().map(|s| s.as_str());
+        run_file_shuffle(
+            filename,
+            zero_terminated,
+            &mut rng,
+            &mut out,
+            delimiter,
+            head_count,
+            repeat,
+        );
+    }
+
+    let _ = out.flush();
+}
+
+fn run_string_shuffle(
+    lines: &mut [String],
+    rng: &mut RandGen,
+    out: &mut dyn Write,
+    delimiter: u8,
+    head_count: Option<usize>,
+    repeat: bool,
+) {
     if repeat {
-        // Repeat mode: output random selections indefinitely (or up to head_count)
         if lines.is_empty() {
             eprintln!("{}: no lines to repeat", TOOL_NAME);
             process::exit(1);
@@ -327,17 +356,89 @@ fn main() {
             let _ = out.write_all(&[delimiter]);
         }
     } else {
-        // Normal shuffle mode
-        shuffle(&mut lines, &mut rng);
-
+        shuffle(lines, rng);
         let count = head_count.unwrap_or(lines.len()).min(lines.len());
         for line in lines.iter().take(count) {
             let _ = out.write_all(line.as_bytes());
             let _ = out.write_all(&[delimiter]);
         }
     }
+}
 
-    let _ = out.flush();
+fn run_file_shuffle(
+    filename: Option<&str>,
+    zero_terminated: bool,
+    rng: &mut RandGen,
+    out: &mut dyn Write,
+    delimiter: u8,
+    head_count: Option<usize>,
+    repeat: bool,
+) {
+    let data = read_file_data(filename);
+    let sep = if zero_terminated { 0u8 } else { b'\n' };
+
+    // Build index of line start/end offsets — no per-line allocation
+    let mut offsets: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for (i, &b) in data.iter().enumerate() {
+        if b == sep {
+            if i > start {
+                offsets.push((start, i));
+            }
+            start = i + 1;
+        }
+    }
+    if start < data.len() {
+        offsets.push((start, data.len()));
+    }
+
+    if offsets.is_empty() && !repeat {
+        return;
+    }
+
+    if repeat {
+        if offsets.is_empty() {
+            eprintln!("{}: no lines to repeat", TOOL_NAME);
+            process::exit(1);
+        }
+        let count = head_count.unwrap_or(usize::MAX);
+        for _ in 0..count {
+            let idx = rng.gen_range(offsets.len());
+            let (s, e) = offsets[idx];
+            let _ = out.write_all(&data[s..e]);
+            let _ = out.write_all(&[delimiter]);
+        }
+    } else {
+        // Shuffle indices (cheap u64 swaps) instead of strings
+        shuffle(&mut offsets, rng);
+        let count = head_count.unwrap_or(offsets.len()).min(offsets.len());
+        for &(s, e) in offsets.iter().take(count) {
+            let _ = out.write_all(&data[s..e]);
+            let _ = out.write_all(&[delimiter]);
+        }
+    }
+}
+
+fn read_file_data(filename: Option<&str>) -> Vec<u8> {
+    match filename {
+        Some("-") | None => {
+            let mut buf = Vec::new();
+            io::stdin().lock().read_to_end(&mut buf).unwrap_or(0);
+            buf
+        }
+        Some(file) => match fs::read(file) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "{}: {}: {}",
+                    TOOL_NAME,
+                    file,
+                    coreutils_rs::common::io_error_msg(&e)
+                );
+                process::exit(1);
+            }
+        },
+    }
 }
 
 fn parse_range(s: &str) -> (u64, u64) {
@@ -395,52 +496,6 @@ fn parse_count(s: &str) -> usize {
             process::exit(1);
         }
     }
-}
-
-fn read_lines(filename: Option<&str>, zero_terminated: bool) -> Vec<String> {
-    let mut lines = Vec::new();
-    match filename {
-        Some("-") | None => {
-            let stdin = io::stdin();
-            if zero_terminated {
-                let mut buf = Vec::new();
-                stdin.lock().read_to_end(&mut buf).unwrap_or(0);
-                for chunk in buf.split(|&b| b == 0) {
-                    if !chunk.is_empty() {
-                        lines.push(String::from_utf8_lossy(chunk).to_string());
-                    }
-                }
-            } else {
-                for line in stdin.lock().lines() {
-                    match line {
-                        Ok(l) => lines.push(l),
-                        Err(_) => break,
-                    }
-                }
-            }
-        }
-        Some(file) => {
-            let contents = match fs::read(file) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!(
-                        "{}: {}: {}",
-                        TOOL_NAME,
-                        file,
-                        coreutils_rs::common::io_error_msg(&e)
-                    );
-                    process::exit(1);
-                }
-            };
-            let delimiter = if zero_terminated { 0u8 } else { b'\n' };
-            for chunk in contents.split(|&b| b == delimiter) {
-                if !chunk.is_empty() {
-                    lines.push(String::from_utf8_lossy(chunk).to_string());
-                }
-            }
-        }
-    }
-    lines
 }
 
 #[cfg(test)]

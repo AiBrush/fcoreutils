@@ -1,10 +1,29 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs::{self, DirEntry, Metadata};
 use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::SystemTime;
+
+/// Whether the current locale uses simple byte-order collation (C/POSIX).
+/// When true, we skip the expensive `strcoll()` + CString allocation path.
+static IS_C_LOCALE: AtomicBool = AtomicBool::new(false);
+
+/// Detect whether the current locale is C/POSIX (byte-order collation).
+/// Must be called after `setlocale(LC_ALL, "")`.
+pub fn detect_c_locale() {
+    let lc = unsafe { libc::setlocale(libc::LC_COLLATE, std::ptr::null()) };
+    if lc.is_null() {
+        IS_C_LOCALE.store(true, AtomicOrdering::Relaxed);
+        return;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(lc) }.to_bytes();
+    let is_c = s == b"C" || s == b"POSIX";
+    IS_C_LOCALE.store(is_c, AtomicOrdering::Relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -334,6 +353,8 @@ impl ColorDb {
 pub struct FileEntry {
     pub name: String,
     pub path: PathBuf,
+    /// Pre-computed CString for locale-aware sorting (avoids allocation in comparator).
+    pub sort_key: CString,
     pub ino: u64,
     pub nlink: u64,
     pub mode: u32,
@@ -402,10 +423,12 @@ impl FileEntry {
         };
 
         let rdev = meta.rdev();
+        let sort_key = CString::new(name.as_str()).unwrap_or_default();
 
         Ok(FileEntry {
             name,
             path,
+            sort_key,
             ino: meta.ino(),
             nlink: meta.nlink(),
             mode: meta.mode(),
@@ -718,15 +741,39 @@ fn sort_entries(entries: &mut [FileEntry], config: &LsConfig) {
     }
 }
 
+/// Locale-aware string comparison matching GNU ls behavior.
+/// Uses pre-computed CStrings with `strcoll()` for non-C locales,
+/// or fast byte comparison for C/POSIX locale.
+#[inline]
+fn locale_cmp_cstr(a: &CString, b: &CString) -> Ordering {
+    if IS_C_LOCALE.load(AtomicOrdering::Relaxed) {
+        a.as_bytes().cmp(b.as_bytes())
+    } else {
+        let result = unsafe { libc::strcoll(a.as_ptr(), b.as_ptr()) };
+        result.cmp(&0)
+    }
+}
+
+/// Locale-aware comparison for ad-hoc strings (e.g. directory args).
+fn locale_cmp(a: &str, b: &str) -> Ordering {
+    if IS_C_LOCALE.load(AtomicOrdering::Relaxed) {
+        a.cmp(b)
+    } else {
+        let ca = CString::new(a).unwrap_or_default();
+        let cb = CString::new(b).unwrap_or_default();
+        let result = unsafe { libc::strcoll(ca.as_ptr(), cb.as_ptr()) };
+        result.cmp(&0)
+    }
+}
+
 fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering {
-    // GNU ls uses strcoll() for name comparison, which in C locale (LC_ALL=C)
-    // is byte-order comparison (strcmp). We use byte comparison to match.
+    // Use pre-computed CString sort keys to avoid allocation during sorting.
     let ord = match config.sort_by {
-        SortBy::Name => a.name.cmp(&b.name),
+        SortBy::Name => locale_cmp_cstr(&a.sort_key, &b.sort_key),
         SortBy::Size => {
             let size_ord = b.size.cmp(&a.size);
             if size_ord == Ordering::Equal {
-                a.name.cmp(&b.name)
+                locale_cmp_cstr(&a.sort_key, &b.sort_key)
             } else {
                 size_ord
             }
@@ -740,7 +787,7 @@ fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering 
                 let nb = b.time_nsec(config.time_field);
                 let nsec_ord = nb.cmp(&na);
                 if nsec_ord == Ordering::Equal {
-                    a.name.cmp(&b.name)
+                    locale_cmp_cstr(&a.sort_key, &b.sort_key)
                 } else {
                     nsec_ord
                 }
@@ -751,9 +798,9 @@ fn compare_entries(a: &FileEntry, b: &FileEntry, config: &LsConfig) -> Ordering 
         SortBy::Extension => {
             let ea = a.extension();
             let eb = b.extension();
-            let ord = ea.cmp(eb);
+            let ord = locale_cmp(ea, eb);
             if ord == Ordering::Equal {
-                a.name.cmp(&b.name)
+                locale_cmp_cstr(&a.sort_key, &b.sort_key)
             } else {
                 ord
             }
@@ -1017,8 +1064,24 @@ fn time_from_epoch(secs: i64) -> BrokenDownTime {
 // ---------------------------------------------------------------------------
 
 /// Look up a username by UID. Returns numeric string on failure.
+/// Cached user name lookup to avoid repeated getpwuid_r syscalls.
 fn lookup_user(uid: u32) -> String {
-    // Use libc::getpwuid_r for thread safety
+    use std::cell::RefCell;
+    thread_local! {
+        static CACHE: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
+    }
+    CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if let Some(name) = cache.get(&uid) {
+            return name.clone();
+        }
+        let name = lookup_user_uncached(uid);
+        cache.insert(uid, name.clone());
+        name
+    })
+}
+
+fn lookup_user_uncached(uid: u32) -> String {
     let mut buf = vec![0u8; 1024];
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
     let mut result: *mut libc::passwd = std::ptr::null_mut();
@@ -1039,8 +1102,24 @@ fn lookup_user(uid: u32) -> String {
     }
 }
 
-/// Look up a group name by GID. Returns numeric string on failure.
+/// Cached group name lookup to avoid repeated getgrgid_r syscalls.
 fn lookup_group(gid: u32) -> String {
+    use std::cell::RefCell;
+    thread_local! {
+        static CACHE: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
+    }
+    CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if let Some(name) = cache.get(&gid) {
+            return name.clone();
+        }
+        let name = lookup_group_uncached(gid);
+        cache.insert(gid, name.clone());
+        name
+    })
+}
+
+fn lookup_group_uncached(gid: u32) -> String {
     let mut buf = vec![0u8; 1024];
     let mut grp: libc::group = unsafe { std::mem::zeroed() };
     let mut result: *mut libc::group = std::ptr::null_mut();
@@ -1767,11 +1846,11 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
         }
     }
 
-    // Sort directory args by name
+    // Sort directory args by name using locale-aware comparison
     dir_args.sort_by(|a, b| {
-        let an = a.to_string_lossy().to_lowercase();
-        let bn = b.to_string_lossy().to_lowercase();
-        let ord = an.cmp(&bn);
+        let an = a.to_string_lossy();
+        let bn = b.to_string_lossy();
+        let ord = locale_cmp(&an, &bn);
         if config.reverse { ord.reverse() } else { ord }
     });
 
