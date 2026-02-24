@@ -232,6 +232,21 @@ fn test_c_locale_word_counting() {
 }
 
 #[test]
+fn test_first_is_word_c_scans_past_transparent() {
+    // first_is_word_c should scan past transparent bytes to find the first meaningful byte
+    assert!(first_is_word_c(b"hello")); // starts with printable
+    assert!(!first_is_word_c(b" hello")); // starts with break
+    assert!(!first_is_word_c(b"")); // empty
+    assert!(!first_is_word_c(b"\x00\x80\xff")); // all transparent
+    // Transparent bytes before word content → true
+    assert!(first_is_word_c(b"\x00\x80hello"));
+    assert!(first_is_word_c(b"\xff\xfea"));
+    // Transparent bytes before break → false
+    assert!(!first_is_word_c(b"\x00\x80 hello"));
+    assert!(!first_is_word_c(b"\xff\n"));
+}
+
+#[test]
 fn test_2state_utf8_c1_controls_word_content() {
     // C1 control characters (U+0080-U+009F) in UTF-8 are word content (matches GNU wc)
     // U+0080 = 0xC2 0x80 (PAD control)

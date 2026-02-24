@@ -56,6 +56,21 @@ const fn make_byte_class_c() -> [u8; 256] {
 }
 const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
 
+/// For parallel chunk merging: determine if a chunk effectively starts with
+/// word content by scanning past leading transparent bytes. This is needed
+/// because transparent bytes don't break words, so a chunk starting with
+/// [\x00, \x80, 'a'] should be treated as starting with word content.
+#[inline]
+pub(crate) fn first_is_word_c(data: &[u8]) -> bool {
+    for &b in data {
+        let class = BYTE_CLASS_C[b as usize];
+        if class != 0 {
+            return class == 2;
+        }
+    }
+    false // all transparent
+}
+
 /// 2-state single-byte classification for UTF-8 locale word counting.
 /// Multi-byte UTF-8 sequences are handled by the state machine separately.
 ///
@@ -198,7 +213,7 @@ fn count_lw_c_scalar_tail(
         // class == 0: transparent — no state change
         i += 1;
     }
-    let first_is_word = !data.is_empty() && BYTE_CLASS_C[data[0] as usize] == 2;
+    let first_is_word = first_is_word_c(data);
     (total_lines, total_words, first_is_word, prev_in_word)
 }
 
@@ -413,7 +428,7 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
     let len = data.len();
 
     // Determine first byte's classification for boundary merging
-    let first_is_word = !data.is_empty() && BYTE_CLASS_C[data[0] as usize] == 2;
+    let first_is_word = first_is_word_c(data);
 
     while i < len {
         let b = unsafe { *data.get_unchecked(i) };
