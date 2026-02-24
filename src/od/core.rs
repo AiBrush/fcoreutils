@@ -33,6 +33,8 @@ pub enum OutputFormat {
 pub struct OdConfig {
     pub address_radix: AddressRadix,
     pub formats: Vec<OutputFormat>,
+    /// Per-format flag: if true, append printable ASCII annotation (the 'z' suffix).
+    pub z_flags: Vec<bool>,
     pub skip_bytes: u64,
     pub read_bytes: Option<u64>,
     pub width: usize,
@@ -44,6 +46,7 @@ impl Default for OdConfig {
         Self {
             address_radix: AddressRadix::Octal,
             formats: vec![OutputFormat::Octal(2)],
+            z_flags: vec![false],
             skip_bytes: 0,
             read_bytes: None,
             width: 16,
@@ -299,6 +302,7 @@ fn write_format_line(
     is_first_format: bool,
     radix: AddressRadix,
     offset: u64,
+    z_annotate: bool,
 ) -> io::Result<()> {
     // Address prefix
     if is_first_format {
@@ -338,21 +342,49 @@ fn write_format_line(
         }
     }
 
+    // Append printable ASCII annotation if 'z' suffix was used
+    if z_annotate {
+        // Pad remaining columns to align the annotation
+        let used_cols = actual_full + if remainder > 0 { 1 } else { 0 };
+        for _ in used_cols..num_elems {
+            for _ in 0..fw {
+                out.write_all(b" ")?;
+            }
+        }
+        out.write_all(b"  >")?;
+        for &b in chunk {
+            if b.is_ascii_graphic() || b == b' ' {
+                out.write_all(&[b])?;
+            } else {
+                out.write_all(b".")?;
+            }
+        }
+        out.write_all(b"<")?;
+    }
+
     writeln!(out)?;
     Ok(())
 }
 
 /// Parse a format type string (the TYPE argument of -t).
-pub fn parse_format_type(s: &str) -> Result<OutputFormat, String> {
+/// Returns the format and whether the 'z' suffix was present.
+pub fn parse_format_type(s: &str) -> Result<(OutputFormat, bool), String> {
     if s.is_empty() {
         return Err("empty format string".to_string());
     }
+
+    // Strip trailing 'z' suffix (printable ASCII annotation)
+    let (s, z_annotate) = if s.len() > 1 && s.ends_with('z') {
+        (&s[..s.len() - 1], true)
+    } else {
+        (s, false)
+    };
 
     let mut chars = s.chars();
     let type_char = chars.next().unwrap();
     let size_str: String = chars.collect();
 
-    match type_char {
+    let fmt = match type_char {
         'a' => Ok(OutputFormat::NamedChar),
         'c' => Ok(OutputFormat::PrintableChar),
         'd' => {
@@ -396,7 +428,8 @@ pub fn parse_format_type(s: &str) -> Result<OutputFormat, String> {
             Ok(OutputFormat::Hex(size))
         }
         _ => Err(format!("invalid type string '{}'", s)),
-    }
+    }?;
+    Ok((fmt, z_annotate))
 }
 
 fn parse_size_spec(s: &str, type_name: &str) -> Result<usize, String> {
@@ -501,6 +534,7 @@ pub fn od_process<R: Read, W: Write>(
         star_printed = false;
 
         for (i, fmt) in config.formats.iter().enumerate() {
+            let z = config.z_flags.get(i).copied().unwrap_or(false);
             write_format_line(
                 output,
                 chunk,
@@ -509,6 +543,7 @@ pub fn od_process<R: Read, W: Write>(
                 i == 0,
                 config.address_radix,
                 offset,
+                z,
             )?;
         }
 

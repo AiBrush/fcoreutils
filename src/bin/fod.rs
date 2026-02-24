@@ -20,6 +20,7 @@ fn main() {
 
     let mut address_radix = None;
     let mut formats: Vec<OutputFormat> = Vec::new();
+    let mut z_flags: Vec<bool> = Vec::new();
     let mut skip_bytes: u64 = 0;
     let mut read_bytes: Option<u64> = None;
     let mut width: Option<usize> = None;
@@ -50,18 +51,54 @@ fn main() {
             "--traditional" => { /* accepted, ignored */ }
 
             // Traditional format shortcuts
-            "-a" => formats.push(OutputFormat::NamedChar),
-            "-b" => formats.push(OutputFormat::Octal(1)),
-            "-c" => formats.push(OutputFormat::PrintableChar),
-            "-d" => formats.push(OutputFormat::UnsignedDec(2)),
-            "-e" => formats.push(OutputFormat::Float(8)),
-            "-f" => formats.push(OutputFormat::Float(4)),
-            "-h" => formats.push(OutputFormat::Hex(2)),
-            "-i" => formats.push(OutputFormat::SignedDec(4)),
-            "-l" => formats.push(OutputFormat::SignedDec(8)),
-            "-o" => formats.push(OutputFormat::Octal(2)),
-            "-s" => formats.push(OutputFormat::SignedDec(2)),
-            "-x" => formats.push(OutputFormat::Hex(2)),
+            "-a" => {
+                formats.push(OutputFormat::NamedChar);
+                z_flags.push(false);
+            }
+            "-b" => {
+                formats.push(OutputFormat::Octal(1));
+                z_flags.push(false);
+            }
+            "-c" => {
+                formats.push(OutputFormat::PrintableChar);
+                z_flags.push(false);
+            }
+            "-d" => {
+                formats.push(OutputFormat::UnsignedDec(2));
+                z_flags.push(false);
+            }
+            "-e" => {
+                formats.push(OutputFormat::Float(8));
+                z_flags.push(false);
+            }
+            "-f" => {
+                formats.push(OutputFormat::Float(4));
+                z_flags.push(false);
+            }
+            "-h" => {
+                formats.push(OutputFormat::Hex(2));
+                z_flags.push(false);
+            }
+            "-i" => {
+                formats.push(OutputFormat::SignedDec(4));
+                z_flags.push(false);
+            }
+            "-l" => {
+                formats.push(OutputFormat::SignedDec(8));
+                z_flags.push(false);
+            }
+            "-o" => {
+                formats.push(OutputFormat::Octal(2));
+                z_flags.push(false);
+            }
+            "-s" => {
+                formats.push(OutputFormat::SignedDec(2));
+                z_flags.push(false);
+            }
+            "-x" => {
+                formats.push(OutputFormat::Hex(2));
+                z_flags.push(false);
+            }
 
             _ if arg.starts_with("--address-radix=") => {
                 address_radix = Some(parse_radix(&arg["--address-radix=".len()..]));
@@ -69,7 +106,10 @@ fn main() {
             _ if arg.starts_with("--format=") => {
                 let fmt_str = &arg["--format=".len()..];
                 match parse_format_type(fmt_str) {
-                    Ok(f) => formats.push(f),
+                    Ok((f, z)) => {
+                        formats.push(f);
+                        z_flags.push(z);
+                    }
                     Err(e) => {
                         eprintln!("{}: {}", TOOL_NAME, e);
                         process::exit(1);
@@ -159,7 +199,10 @@ fn main() {
                                 rest
                             };
                             match parse_format_type(&fmt_str) {
-                                Ok(f) => formats.push(f),
+                                Ok((f, z)) => {
+                                    formats.push(f);
+                                    z_flags.push(z);
+                                }
                                 Err(e) => {
                                     eprintln!("{}: {}", TOOL_NAME, e);
                                     process::exit(1);
@@ -181,18 +224,54 @@ fn main() {
                             continue;
                         }
                         b'v' => show_duplicates = true,
-                        b'a' => formats.push(OutputFormat::NamedChar),
-                        b'b' => formats.push(OutputFormat::Octal(1)),
-                        b'c' => formats.push(OutputFormat::PrintableChar),
-                        b'd' => formats.push(OutputFormat::UnsignedDec(2)),
-                        b'e' => formats.push(OutputFormat::Float(8)),
-                        b'f' => formats.push(OutputFormat::Float(4)),
-                        b'h' => formats.push(OutputFormat::Hex(2)),
-                        b'i' => formats.push(OutputFormat::SignedDec(4)),
-                        b'l' => formats.push(OutputFormat::SignedDec(8)),
-                        b'o' => formats.push(OutputFormat::Octal(2)),
-                        b's' => formats.push(OutputFormat::SignedDec(2)),
-                        b'x' => formats.push(OutputFormat::Hex(2)),
+                        b'a' => {
+                            formats.push(OutputFormat::NamedChar);
+                            z_flags.push(false);
+                        }
+                        b'b' => {
+                            formats.push(OutputFormat::Octal(1));
+                            z_flags.push(false);
+                        }
+                        b'c' => {
+                            formats.push(OutputFormat::PrintableChar);
+                            z_flags.push(false);
+                        }
+                        b'd' => {
+                            formats.push(OutputFormat::UnsignedDec(2));
+                            z_flags.push(false);
+                        }
+                        b'e' => {
+                            formats.push(OutputFormat::Float(8));
+                            z_flags.push(false);
+                        }
+                        b'f' => {
+                            formats.push(OutputFormat::Float(4));
+                            z_flags.push(false);
+                        }
+                        b'h' => {
+                            formats.push(OutputFormat::Hex(2));
+                            z_flags.push(false);
+                        }
+                        b'i' => {
+                            formats.push(OutputFormat::SignedDec(4));
+                            z_flags.push(false);
+                        }
+                        b'l' => {
+                            formats.push(OutputFormat::SignedDec(8));
+                            z_flags.push(false);
+                        }
+                        b'o' => {
+                            formats.push(OutputFormat::Octal(2));
+                            z_flags.push(false);
+                        }
+                        b's' => {
+                            formats.push(OutputFormat::SignedDec(2));
+                            z_flags.push(false);
+                        }
+                        b'x' => {
+                            formats.push(OutputFormat::Hex(2));
+                            z_flags.push(false);
+                        }
                         _ => {
                             eprintln!("{}: invalid option -- '{}'", TOOL_NAME, bytes[j] as char);
                             eprintln!("Try '{} --help' for more information.", TOOL_NAME);
@@ -217,6 +296,11 @@ fn main() {
             vec![OutputFormat::Octal(2)]
         } else {
             formats
+        },
+        z_flags: if z_flags.is_empty() {
+            vec![false]
+        } else {
+            z_flags
         },
         skip_bytes,
         read_bytes,
