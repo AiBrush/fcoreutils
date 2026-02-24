@@ -69,7 +69,7 @@ impl Default for NumfmtConfig {
             from_unit: 1.0,
             to_unit: 1.0,
             padding: None,
-            round: RoundMethod::Nearest,
+            round: RoundMethod::FromZero,
             suffix: None,
             format: None,
             field: vec![1],
@@ -93,6 +93,8 @@ const SI_SUFFIXES: &[(char, f64)] = &[
     ('E', 1e18),
     ('Z', 1e21),
     ('Y', 1e24),
+    ('R', 1e27),
+    ('Q', 1e30),
 ];
 
 /// IEC suffix table: suffix char -> multiplier (powers of 1024).
@@ -105,6 +107,8 @@ const IEC_SUFFIXES: &[(char, f64)] = &[
     ('E', 1_152_921_504_606_846_976.0),
     ('Z', 1_180_591_620_717_411_303_424.0),
     ('Y', 1_208_925_819_614_629_174_706_176.0),
+    ('R', 1_237_940_039_285_380_274_899_124_224.0),
+    ('Q', 1_267_650_600_228_229_401_496_703_205_376.0),
 ];
 
 /// Parse a scale unit string.
@@ -275,7 +279,7 @@ fn parse_number_with_suffix(s: &str, unit: ScaleUnit) -> Result<f64, String> {
 }
 
 fn is_scale_suffix(c: char) -> bool {
-    matches!(c, 'K' | 'M' | 'G' | 'T' | 'P' | 'E' | 'Z' | 'Y')
+    matches!(c, 'K' | 'M' | 'G' | 'T' | 'P' | 'E' | 'Z' | 'Y' | 'R' | 'Q')
 }
 
 fn find_si_multiplier(c: char) -> Result<f64, String> {
@@ -348,6 +352,10 @@ fn format_plain_number(value: f64) -> String {
 }
 
 /// Format a number with appropriate scale suffix.
+/// Matches GNU numfmt behavior:
+/// - If scaled value < 10: display with 1 decimal place ("N.Nk")
+/// - If scaled value >= 10: display as integer ("NNk")
+/// - If integer would be >= 1000: promote to next suffix
 fn format_with_scale(
     value: f64,
     suffixes: &[(char, f64)],
@@ -358,50 +366,56 @@ fn format_with_scale(
     let sign = if value < 0.0 { "-" } else { "" };
 
     // Find the largest suffix that applies.
-    let mut chosen_suffix = None;
-    let mut chosen_mult = 1.0;
+    let mut chosen_idx: Option<usize> = None;
 
-    for &(suffix, mult) in suffixes.iter().rev() {
+    for (idx, &(_suffix, mult)) in suffixes.iter().enumerate().rev() {
         if abs_value >= mult {
-            chosen_suffix = Some(suffix);
-            chosen_mult = mult;
+            chosen_idx = Some(idx);
             break;
         }
     }
 
-    if let Some(suffix) = chosen_suffix {
-        let scaled = value / chosen_mult;
-        let scaled = apply_round_for_display(scaled, round);
-
-        // Check if rounding pushed the value to the next suffix level.
-        // E.g., 999.999k rounds to 1000.0k -> should become 1.0M.
-        let base = suffixes[0].1; // the base multiplier (e.g., 1000 for SI, 1024 for IEC)
-        if scaled.abs() >= base {
-            // Find the next suffix.
-            let mut found_current = false;
-            for &(next_suffix, next_mult) in suffixes.iter() {
-                if found_current {
-                    let re_scaled = value / next_mult;
-                    let re_scaled = apply_round_for_display(re_scaled, round);
-                    return format!("{sign}{:.1}{}{}", re_scaled.abs(), next_suffix, i_suffix);
-                }
-                if next_suffix == suffix {
-                    found_current = true;
-                }
-            }
-            // No next suffix available, just use what we have.
-        }
-
-        format!("{sign}{:.1}{}{}", scaled.abs(), suffix, i_suffix)
-    } else {
+    let Some(mut idx) = chosen_idx else {
         // Value is smaller than the smallest suffix, output as-is.
-        format_plain_number(value)
+        return format_plain_number(value);
+    };
+
+    loop {
+        let (suffix, mult) = suffixes[idx];
+        let scaled = value / mult;
+        let abs_scaled = scaled.abs();
+
+        if abs_scaled < 9.95 {
+            // Display with 1 decimal place: "N.Nk"
+            let rounded = apply_round_for_display(scaled, round);
+            if rounded.abs() >= 10.0 {
+                // Rounding pushed it past 10, switch to integer display
+                let int_val = apply_round_int(scaled, round);
+                if int_val.unsigned_abs() >= 1000 && idx + 1 < suffixes.len() {
+                    idx += 1;
+                    continue;
+                }
+                return format!("{sign}{}{}{}", int_val.unsigned_abs(), suffix, i_suffix);
+            }
+            return format!("{sign}{:.1}{}{}", rounded.abs(), suffix, i_suffix);
+        } else {
+            // Display as integer: "NNk"
+            let int_val = apply_round_int(scaled, round);
+            if int_val.unsigned_abs() >= 1000 {
+                if idx + 1 < suffixes.len() {
+                    idx += 1;
+                    continue;
+                }
+                // No next suffix, just output what we have.
+            }
+            return format!("{sign}{}{}{}", int_val.unsigned_abs(), suffix, i_suffix);
+        }
     }
 }
 
 /// Apply rounding for display purposes (when formatting scaled output).
+/// Rounds to 1 decimal place.
 fn apply_round_for_display(value: f64, method: RoundMethod) -> f64 {
-    // For display, we round to 1 decimal place.
     let factor = 10.0;
     let shifted = value * factor;
     let rounded = match method {
@@ -424,6 +438,29 @@ fn apply_round_for_display(value: f64, method: RoundMethod) -> f64 {
         RoundMethod::Nearest => shifted.round(),
     };
     rounded / factor
+}
+
+/// Apply rounding to get an integer value for display.
+fn apply_round_int(value: f64, method: RoundMethod) -> i64 {
+    match method {
+        RoundMethod::Up => value.ceil() as i64,
+        RoundMethod::Down => value.floor() as i64,
+        RoundMethod::FromZero => {
+            if value >= 0.0 {
+                value.ceil() as i64
+            } else {
+                value.floor() as i64
+            }
+        }
+        RoundMethod::TowardsZero => {
+            if value >= 0.0 {
+                value.floor() as i64
+            } else {
+                value.ceil() as i64
+            }
+        }
+        RoundMethod::Nearest => value.round() as i64,
+    }
 }
 
 /// Insert thousands grouping separators.

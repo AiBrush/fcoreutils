@@ -534,10 +534,8 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
     if config.show_mesg {
         let status = if entry.ut_type == USER_PROCESS {
             mesg_status(&entry.ut_line)
-        } else if entry.ut_type == LOGIN_PROCESS || entry.ut_type == DEAD_PROCESS {
-            '?'
         } else {
-            // BOOT_TIME, RUN_LVL, NEW_TIME, OLD_TIME: no terminal, show space
+            // BOOT_TIME, RUN_LVL, LOGIN_PROCESS, DEAD_PROCESS, etc: show space
             ' '
         };
         let _ = write!(out, " {}", status);
@@ -559,7 +557,7 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
                 let _ = write!(out, " {:>11}", entry.ut_pid);
             }
             LOGIN_PROCESS => {
-                let _ = write!(out, "   ?  {:>10}", entry.ut_pid);
+                let _ = write!(out, " {:>5} {:>11}", "?", entry.ut_pid);
             }
             DEAD_PROCESS => {
                 let _ = write!(out, "      {:>10}", entry.ut_pid);
@@ -571,14 +569,14 @@ pub fn format_entry(entry: &UtmpxEntry, config: &WhoConfig) -> String {
     // For LOGIN_PROCESS, always show id
     if entry.ut_type == LOGIN_PROCESS {
         if !(config.show_users || config.show_all) {
-            // Without -u, show PID with extra spacing
-            let _ = write!(out, "          {:>5}", entry.ut_pid);
+            // Without -u, show PID right-aligned to match column position
+            let _ = write!(out, "{:>18}", entry.ut_pid);
         }
         let _ = write!(out, " id={}", entry.ut_id);
     }
 
-    // COMMENT (host) column
-    if !entry.ut_host.is_empty() {
+    // COMMENT (host) column — skip host for boot/runlevel entries (GNU compat)
+    if !entry.ut_host.is_empty() && entry.ut_type != BOOT_TIME && entry.ut_type != RUN_LVL {
         if config.show_ips {
             let _ = write!(out, " ({})", entry.ut_host);
         } else if config.show_lookup {

@@ -271,7 +271,7 @@ fn test_numfmt_round() {
 
     let result = process_line("1001", &config).unwrap();
     // 1001/1000 = 1.001, rounded up to 1 decimal => 1.1
-    assert_eq!(result, "1.1k"); // lowercase 'k' for SI kilo
+    assert_eq!(result, "1.1k");
 }
 
 #[test]
@@ -283,7 +283,7 @@ fn test_numfmt_round_down() {
 
     let result = process_line("1999", &config).unwrap();
     // 1999/1000 = 1.999, rounded down to 1 decimal => 1.9
-    assert_eq!(result, "1.9k"); // lowercase 'k' for SI kilo
+    assert_eq!(result, "1.9k");
 }
 
 #[test]
@@ -295,7 +295,7 @@ fn test_numfmt_round_nearest() {
 
     let result = process_line("1450", &config).unwrap();
     // 1450/1000 = 1.45, rounded nearest to 1 decimal => 1.5
-    assert_eq!(result, "1.5k"); // lowercase 'k' for SI kilo
+    assert_eq!(result, "1.5k");
 }
 
 #[test]
@@ -318,6 +318,39 @@ fn test_numfmt_round_from_zero() {
 
     let result = process_line("1999", &config).unwrap();
     assert_eq!(result, "1999");
+}
+
+// GNU numfmt display format tests: integer display for values >= 10
+#[test]
+fn test_numfmt_gnu_integer_display() {
+    let config = NumfmtConfig {
+        from: ScaleUnit::None,
+        to: ScaleUnit::Si,
+        ..default_config()
+    };
+
+    // Values >= 10 after scaling should display as integer
+    assert_eq!(process_line("9999", &config).unwrap(), "10k");
+    assert_eq!(process_line("35000", &config).unwrap(), "35k");
+    assert_eq!(process_line("99999", &config).unwrap(), "100k");
+    assert_eq!(process_line("998123", &config).unwrap(), "999k");
+    assert_eq!(process_line("999000000000", &config).unwrap(), "999G");
+    assert_eq!(process_line("123600000000000", &config).unwrap(), "124T");
+    assert_eq!(process_line("35000001", &config).unwrap(), "36M");
+}
+
+#[test]
+fn test_numfmt_gnu_iec_integer_display() {
+    let config = NumfmtConfig {
+        from: ScaleUnit::None,
+        to: ScaleUnit::Iec,
+        ..default_config()
+    };
+
+    assert_eq!(process_line("99999", &config).unwrap(), "98K");
+    assert_eq!(process_line("35000", &config).unwrap(), "35K");
+    assert_eq!(process_line("35000000", &config).unwrap(), "34M");
+    assert_eq!(process_line("102399", &config).unwrap(), "100K");
 }
 
 // ──────────────────────────────────────────────────

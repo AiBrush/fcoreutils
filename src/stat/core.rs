@@ -266,7 +266,7 @@ fn format_fs_default(path: &str, sfs: &libc::statfs) -> String {
     let frsize = sfs.f_bsize as u64; // fallback to bsize
 
     format!(
-        "  File: \"{}\"\n    ID: {:016x} Namelen: {}     Type: {}\nBlock size: {:<10} Fundamental block size: {}\nBlocks: Total: {:<10} Free: {:<10} Available: {}\nInodes: Total: {:<10} Free: {}\n",
+        "  File: \"{}\"\n    ID: {:x} Namelen: {}     Type: {}\nBlock size: {:<10} Fundamental block size: {}\nBlocks: Total: {:<10} Free: {:<10} Available: {}\nInodes: Total: {:<10} Free: {}\n",
         path,
         fsid_val,
         namelen,

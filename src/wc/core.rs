@@ -59,15 +59,25 @@ const BYTE_CLASS_C: [u8; 256] = make_byte_class_c();
 
 /// 2-state single-byte classification for UTF-8 locale.
 /// Multi-byte UTF-8 sequences are handled by the state machine separately.
+///
+/// GNU wc 9.4 uses 3-state logic: iswspace() → word-break, iswprint() → word
+/// content, neither → word-break. For single bytes (ASCII), only 0x21-0x7E are
+/// printable and non-space. NUL, control chars, and DEL are word-break.
+/// High bytes (0x80-0xFF) are UTF-8 continuation/start — handled by the
+/// multi-byte decoder, so they stay class=0 in this table.
 const fn make_byte_class_utf8() -> [u8; 256] {
-    let mut t = [0u8; 256]; // default: word content
-    // Spaces (only these break words — everything else including NUL is word content)
-    t[0x09] = 1; // \t
-    t[0x0A] = 1; // \n
-    t[0x0B] = 1; // \v
-    t[0x0C] = 1; // \f
-    t[0x0D] = 1; // \r
+    let mut t = [0u8; 256]; // default: word content (for high bytes: UTF-8 multi-byte)
+    // NUL and all C0 control characters (0x00-0x1F) are word-break
+    let mut b = 0u8;
+    loop {
+        t[b as usize] = 1;
+        if b == 0x1F {
+            break;
+        }
+        b += 1;
+    }
     t[0x20] = 1; // space
+    t[0x7F] = 1; // DEL
     t
 }
 

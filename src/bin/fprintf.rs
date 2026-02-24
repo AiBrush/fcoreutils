@@ -72,8 +72,16 @@ fn main() {
         _ => {}
     }
 
-    let format = &args[0];
-    let remaining = &args[1..];
+    // Handle -- as argument separator (GNU compat)
+    let arg_start = if args[0] == "--" { 1 } else { 0 };
+    if arg_start >= args.len() {
+        eprintln!("{}: missing operand", TOOL_NAME);
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(1);
+    }
+
+    let format = &args[arg_start];
+    let remaining = &args[arg_start + 1..];
     let arg_strs: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
 
     coreutils_rs::printf::reset_conv_error();

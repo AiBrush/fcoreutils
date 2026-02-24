@@ -127,17 +127,17 @@ fn test_count_words_crlf_separated() {
 }
 
 #[test]
-fn test_count_words_binary_data_nul_word_content() {
-    // NUL bytes are word content (not whitespace) — verified: printf '\x00hello\x00world' | wc -w = 1
-    // NUL does NOT break words — "hello" and "world" merge into 1 word
-    assert_eq!(count_words(b"\x00hello\x00world"), 1);
+fn test_count_words_binary_data_nul_word_break() {
+    // GNU wc 9.4 UTF-8 mode: NUL is not printable (iswprint false) → word-break.
+    // So NUL breaks words: "hello" and "world" are 2 separate words.
+    assert_eq!(count_words(b"\x00hello\x00world"), 2);
 }
 
 #[test]
 fn test_count_words_nul_between_spaces() {
-    // NUL between spaces: spaces break words, NUL is word content
-    // "hello" = word 1, " " breaks, "\x00" = word 2 (NUL is word content), " " breaks, "world" = word 3
-    assert_eq!(count_words(b"hello \x00 world"), 3);
+    // NUL between spaces: both space and NUL are word-break.
+    // "hello" = word 1, " " breaks, "\x00" = word-break, " " breaks, "world" = word 2
+    assert_eq!(count_words(b"hello \x00 world"), 2);
 }
 
 #[test]
@@ -156,34 +156,35 @@ fn test_count_words_all_whitespace_types() {
 // ──────────────────────────────────────────────────
 
 #[test]
-fn test_2state_nul_is_word_content() {
-    // NUL alone: word content → 1 word — verified: printf '\x00\x00' | wc -w = 1
-    assert_eq!(count_words(b"\x00"), 1);
+fn test_2state_nul_is_word_break() {
+    // GNU wc 9.4 UTF-8 mode: NUL is not printable → word-break
+    assert_eq!(count_words(b"\x00"), 0);
+    assert_eq!(count_words(b"\x00\x00"), 0);
 }
 
 #[test]
-fn test_2state_control_chars_are_word_content() {
-    // Control chars (0x01-0x08, 0x0E-0x1F, 0x7F) are word content (matches GNU wc)
-    assert_eq!(count_words(b"\x01"), 1);
-    assert_eq!(count_words(b"\x08"), 1);
-    assert_eq!(count_words(b"\x0E"), 1);
-    assert_eq!(count_words(b"\x1F"), 1);
-    assert_eq!(count_words(b"\x7f"), 1);
+fn test_2state_control_chars_are_word_break() {
+    // GNU wc 9.4 UTF-8 mode: control chars are not printable → word-break
+    assert_eq!(count_words(b"\x01"), 0);
+    assert_eq!(count_words(b"\x08"), 0);
+    assert_eq!(count_words(b"\x0E"), 0);
+    assert_eq!(count_words(b"\x1F"), 0);
+    assert_eq!(count_words(b"\x7f"), 0);
 }
 
 #[test]
-fn test_2state_nonspace_doesnt_break_words() {
-    // Non-space bytes (including NUL) between printable chars don't break words
-    assert_eq!(count_words(b"hello\x01world"), 1);
-    assert_eq!(count_words(b"hello\x7fworld"), 1);
-    assert_eq!(count_words(b"hello\x00world"), 1);
+fn test_2state_control_chars_break_words() {
+    // Control chars (including NUL, DEL) break words in UTF-8 mode
+    assert_eq!(count_words(b"hello\x01world"), 2);
+    assert_eq!(count_words(b"hello\x7fworld"), 2);
+    assert_eq!(count_words(b"hello\x00world"), 2);
 }
 
 #[test]
-fn test_2state_nonspace_starts_words() {
-    // NUL is word content, so \x00\x01\x02 is 1 continuous word
-    assert_eq!(count_words(b"\x00\x01\x02"), 1);
-    // NUL at start is word content, "hello" continues the same word
+fn test_2state_nonprintable_starts_nothing() {
+    // Non-printable bytes don't start words — all are word-break
+    assert_eq!(count_words(b"\x00\x01\x02"), 0);
+    // NUL at start is word-break, "hello" starts a new word
     assert_eq!(count_words(b"\x00hello"), 1);
 }
 
@@ -523,10 +524,10 @@ fn test_gnu_trailing_newline() {
 
 #[test]
 fn test_gnu_word_definition() {
-    // UTF-8 mode: NUL and all non-space bytes are word content
-    assert_eq!(count_words(b"\x00"), 1); // NUL: word content in UTF-8
-    assert_eq!(count_words(b"\x01"), 1); // SOH: word content in UTF-8
-    assert_eq!(count_words(b"\x7f"), 1); // DEL: word content in UTF-8
+    // GNU wc 9.4 UTF-8 mode: iswprint() true → word content, else word-break
+    assert_eq!(count_words(b"\x00"), 0); // NUL: not printable → word-break
+    assert_eq!(count_words(b"\x01"), 0); // SOH: not printable → word-break
+    assert_eq!(count_words(b"\x7f"), 0); // DEL: not printable → word-break
     // Printable ASCII is always word content
     assert_eq!(count_words(b"!"), 1);
     assert_eq!(count_words(b"hello"), 1);

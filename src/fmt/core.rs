@@ -195,14 +195,18 @@ fn format_paragraph_str(
     }
 
     // Collect words directly from source text — zero-copy &str references.
+    // Also track which words are sentence endings based on original spacing:
+    // A word ending in .?! is a sentence end if followed by 2+ spaces or end of line.
     let total_chars: usize = lines.iter().map(|l| l.len()).sum();
     let mut all_words: Vec<&str> = Vec::with_capacity(total_chars / 5 + 16);
+    let mut sentence_ends: Vec<bool> = Vec::with_capacity(total_chars / 5 + 16);
+
     for line in &lines {
         let s = match prefix_str {
             Some(pfx) => line.strip_prefix(pfx).unwrap_or(line),
             None => line,
         };
-        all_words.extend(s.split_whitespace());
+        collect_words_with_sentence_info(s, &mut all_words, &mut sentence_ends);
     }
 
     if all_words.is_empty() {
@@ -213,6 +217,7 @@ fn format_paragraph_str(
     let pfx = prefix_str.unwrap_or("");
     reflow_paragraph(
         &all_words,
+        &sentence_ends,
         pfx,
         first_line_indent,
         cont_indent,
@@ -227,10 +232,94 @@ fn leading_indent(line: &str) -> &str {
     &line[..line.len() - trimmed.len()]
 }
 
-/// Check if a word ends a sentence (ends with '.', '!', or '?').
-fn is_sentence_end(word: &str) -> bool {
-    matches!(word.as_bytes().last(), Some(b'.' | b'!' | b'?'))
+/// Check if a word has sentence-ending punctuation (ends with '.', '!', or '?',
+/// possibly followed by closing quotes/brackets).
+fn has_sentence_ending_punct(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    // Walk backwards past closing punctuation
+    let mut i = bytes.len();
+    while i > 0 && matches!(bytes[i - 1], b'"' | b'\'' | b')' | b']') {
+        i -= 1;
+    }
+    i > 0 && matches!(bytes[i - 1], b'.' | b'!' | b'?')
 }
+
+/// Check if a word ends a sentence, considering original input context.
+/// GNU fmt rules: a word ending in .?! is a sentence end if:
+/// 1. It was followed by 2+ spaces in the original input, OR
+/// 2. It was at the end of a line
+/// Additionally, single uppercase letters (like "E.") are abbreviations, not sentence ends.
+fn is_sentence_end_contextual(word: &str, followed_by_double_space_or_eol: bool) -> bool {
+    if !has_sentence_ending_punct(word) {
+        return false;
+    }
+    if !followed_by_double_space_or_eol {
+        return false;
+    }
+    // Strip trailing punctuation to find the "core" word
+    let bytes = word.as_bytes();
+    let mut end = bytes.len();
+    while end > 0
+        && matches!(
+            bytes[end - 1],
+            b'.' | b'!' | b'?' | b'"' | b'\'' | b')' | b']'
+        )
+    {
+        end -= 1;
+    }
+    // A single uppercase letter followed by '.' is an abbreviation, not a sentence end
+    if end == 1 && bytes[0].is_ascii_uppercase() {
+        return false;
+    }
+    // Empty core (e.g., just "." or "...") is not a sentence end
+    end > 0
+}
+
+/// Collect words from a line, tracking which words are sentence endings
+/// based on the original spacing context.
+fn collect_words_with_sentence_info<'a>(
+    line: &'a str,
+    words: &mut Vec<&'a str>,
+    sentence_ends: &mut Vec<bool>,
+) {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    // Skip leading whitespace
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+
+    while i < len {
+        // Find end of word
+        let word_start = i;
+        while i < len && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let word = &line[word_start..i];
+
+        // Count spaces after this word
+        let space_start = i;
+        while i < len && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let space_count = i - space_start;
+
+        // Sentence end: at end of line (i >= len) or followed by 2+ spaces
+        let at_eol = i >= len;
+        let double_space = space_count >= 2;
+
+        // If there was a previous word, mark it
+        // (the sentence_ends entry corresponds to the PREVIOUS word)
+        // But we need to record for THIS word
+        let is_sent_end = is_sentence_end_contextual(word, at_eol || double_space);
+
+        words.push(word);
+        sentence_ends.push(is_sent_end);
+    }
+}
+
 
 /// Reflow words into lines that fit within the configured width.
 ///
@@ -240,6 +329,7 @@ fn is_sentence_end(word: &str) -> bool {
 /// are all computed inline to reduce memory footprint and improve cache performance.
 fn reflow_paragraph<W: Write>(
     words: &[&str],
+    sentence_ends: &[bool],
     prefix: &str,
     first_indent: &str,
     cont_indent: &str,
@@ -255,7 +345,7 @@ fn reflow_paragraph<W: Write>(
     let cont_base = prefix.len() + cont_indent.len();
     let goal = config.goal as i64;
     let width = config.width;
-    let uniform = config.uniform_spacing;
+    let _uniform = config.uniform_spacing;
 
     // GNU fmt cost model: SHORT_COST(n) = EQUIV(n*10) = (n*10)^2 = n^2 * 100
     // RAGGED_COST(n) = SHORT_COST(n) / 2 = n^2 * 50
@@ -271,9 +361,10 @@ fn reflow_paragraph<W: Write>(
     // This is 4 bytes/word vs 16 bytes/word for fat pointers — much better cache usage.
     let winfo: Vec<u32> = words
         .iter()
-        .map(|w| {
+        .enumerate()
+        .map(|(i, w)| {
             let len = w.len() as u32;
-            let sent = if matches!(w.as_bytes().last(), Some(b'.' | b'!' | b'?')) {
+            let sent = if sentence_ends.get(i).copied().unwrap_or(false) {
                 SENT_FLAG
             } else {
                 0
@@ -307,7 +398,8 @@ fn reflow_paragraph<W: Write>(
 
         for j in i..n {
             if j > i {
-                let sep = if uniform && unsafe { *winfo_ptr.add(j - 1) & SENT_FLAG != 0 } {
+                // GNU fmt always uses 2 spaces after sentence-ending punctuation
+                let sep = if unsafe { *winfo_ptr.add(j - 1) & SENT_FLAG != 0 } {
                     2
                 } else {
                     1
@@ -384,7 +476,9 @@ fn reflow_paragraph<W: Write>(
         output.write_all(words[i].as_bytes())?;
 
         for k in (i + 1)..=j {
-            if uniform && is_sentence_end(words[k - 1]) {
+            // GNU fmt uses 2 spaces after sentence-ending punctuation
+            // (only when the original input had 2+ spaces or end-of-line after it)
+            if sentence_ends.get(k - 1).copied().unwrap_or(false) {
                 output.write_all(b"  ")?;
             } else {
                 output.write_all(b" ")?;

@@ -177,11 +177,12 @@ fn main() {
         if show_machine {
             parts.push(machine);
         }
-        // On Linux, -p (processor) and -i (hardware platform) return "unknown",
-        // matching GNU coreutils behavior. GNU skips "unknown" values in -a mode.
+        // On Linux, -p (processor) and -i (hardware platform) use the machine
+        // architecture from uname(2), matching GNU coreutils on most distros.
+        // GNU skips "unknown" values in -a mode.
         // On macOS, GNU uname maps arm64 -> "arm" and x86_64 -> "i386".
         #[cfg(target_os = "linux")]
-        let processor = "unknown";
+        let processor = machine;
         #[cfg(target_os = "macos")]
         let processor = match machine {
             "arm64" => "arm",
@@ -191,7 +192,7 @@ fn main() {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let processor = "unknown";
         #[cfg(target_os = "linux")]
-        let hardware = "unknown";
+        let hardware = machine;
         #[cfg(target_os = "macos")]
         let hardware = match machine {
             "arm64" => "arm",

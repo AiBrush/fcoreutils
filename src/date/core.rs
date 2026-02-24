@@ -475,7 +475,7 @@ pub fn file_mod_time(path: &str) -> Result<SystemTime, String> {
 }
 
 /// Get the default date format (matches GNU date default output).
-/// Uses %r (12-hour clock with AM/PM) to match GNU behavior.
+/// Uses %H:%M:%S (24-hour clock) to match GNU behavior.
 pub fn default_format() -> &'static str {
-    "%a %b %e %r %Z %Y"
+    "%a %b %e %H:%M:%S %Z %Y"
 }
