@@ -131,15 +131,13 @@ fn read_loadavg() -> (f64, f64, f64) {
 
 #[cfg(unix)]
 fn count_users() -> usize {
-    // Count logged-in users by reading utmp
-    // Simplified: count entries in /var/run/utmp
-    // For a simpler approach, just return what `who | wc -l` would give
-    if let Ok(output) = std::process::Command::new("who").output()
-        && output.status.success()
-    {
-        return output.stdout.iter().filter(|&&b| b == b'\n').count();
-    }
-    0
+    // Read utmpx directly (with systemd session fallback).
+    // uptime doesn't filter by PID liveness (unlike who), matching GNU behavior.
+    let entries = coreutils_rs::who::read_utmpx_with_systemd_fallback_no_pid_check();
+    entries
+        .iter()
+        .filter(|e| e.ut_type == libc::USER_PROCESS)
+        .count()
 }
 
 #[cfg(unix)]
@@ -161,8 +159,10 @@ fn format_uptime(secs: f64) -> String {
         } else {
             format!("{} day{}", days, if days != 1 { "s" } else { "" })
         }
-    } else {
+    } else if hours > 0 {
         format!("{:2}:{:02}", hours, minutes)
+    } else {
+        format!("{} min", minutes)
     }
 }
 

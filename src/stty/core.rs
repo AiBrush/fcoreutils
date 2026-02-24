@@ -109,8 +109,30 @@ pub fn format_cc(c: libc::cc_t) -> String {
     }
 }
 
-/// Special character names and their termios indices (portable).
-const SPECIAL_CHARS: &[(&str, usize)] = &[
+/// Special character names and their termios indices (GNU order).
+#[cfg(target_os = "linux")]
+const SPECIAL_CHARS_ALL: &[(&str, usize)] = &[
+    ("intr", libc::VINTR as usize),
+    ("quit", libc::VQUIT as usize),
+    ("erase", libc::VERASE as usize),
+    ("kill", libc::VKILL as usize),
+    ("eof", libc::VEOF as usize),
+    ("eol", libc::VEOL as usize),
+    ("eol2", libc::VEOL2 as usize),
+    ("swtch", libc::VSWTC as usize),
+    ("start", libc::VSTART as usize),
+    ("stop", libc::VSTOP as usize),
+    ("susp", libc::VSUSP as usize),
+    ("rprnt", libc::VREPRINT as usize),
+    ("werase", libc::VWERASE as usize),
+    ("lnext", libc::VLNEXT as usize),
+    ("discard", libc::VDISCARD as usize),
+    ("min", libc::VMIN as usize),
+    ("time", libc::VTIME as usize),
+];
+
+#[cfg(not(target_os = "linux"))]
+const SPECIAL_CHARS_ALL: &[(&str, usize)] = &[
     ("intr", libc::VINTR as usize),
     ("quit", libc::VQUIT as usize),
     ("erase", libc::VERASE as usize),
@@ -129,14 +151,27 @@ const SPECIAL_CHARS: &[(&str, usize)] = &[
     ("time", libc::VTIME as usize),
 ];
 
-/// Linux-only special characters.
+/// Input flags and their names (GNU order).
 #[cfg(target_os = "linux")]
-const SPECIAL_CHARS_LINUX: &[(&str, usize)] = &[("swtch", libc::VSWTC as usize)];
+const INPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
+    ("ignbrk", libc::IGNBRK),
+    ("brkint", libc::BRKINT),
+    ("ignpar", libc::IGNPAR),
+    ("parmrk", libc::PARMRK),
+    ("inpck", libc::INPCK),
+    ("istrip", libc::ISTRIP),
+    ("inlcr", libc::INLCR),
+    ("igncr", libc::IGNCR),
+    ("icrnl", libc::ICRNL),
+    ("ixon", libc::IXON),
+    ("ixoff", libc::IXOFF),
+    ("iuclc", libc::IUCLC),
+    ("ixany", libc::IXANY),
+    ("imaxbel", libc::IMAXBEL),
+    ("iutf8", libc::IUTF8),
+];
 
 #[cfg(not(target_os = "linux"))]
-const SPECIAL_CHARS_LINUX: &[(&str, usize)] = &[];
-
-/// Input flags and their names (portable).
 const INPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
     ("ignbrk", libc::IGNBRK),
     ("brkint", libc::BRKINT),
@@ -153,15 +188,20 @@ const INPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
     ("imaxbel", libc::IMAXBEL),
 ];
 
-/// Linux-only input flags.
+/// Output flags and their names (GNU order).
 #[cfg(target_os = "linux")]
-const INPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] =
-    &[("iuclc", libc::IUCLC), ("iutf8", libc::IUTF8)];
+const OUTPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
+    ("opost", libc::OPOST),
+    ("olcuc", libc::OLCUC),
+    ("ocrnl", libc::OCRNL),
+    ("onlcr", libc::ONLCR),
+    ("onocr", libc::ONOCR),
+    ("onlret", libc::ONLRET),
+    ("ofill", libc::OFILL),
+    ("ofdel", libc::OFDEL),
+];
 
 #[cfg(not(target_os = "linux"))]
-const INPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
-
-/// Output flags and their names (portable).
 const OUTPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
     ("opost", libc::OPOST),
     ("onlcr", libc::ONLCR),
@@ -172,24 +212,50 @@ const OUTPUT_FLAGS: &[(&str, libc::tcflag_t)] = &[
     ("ofdel", libc::OFDEL),
 ];
 
-/// Linux-only output flags.
+/// Output delay flags (displayed but not negatable).
 #[cfg(target_os = "linux")]
-const OUTPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[("olcuc", libc::OLCUC)];
-
-#[cfg(not(target_os = "linux"))]
-const OUTPUT_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
-
-/// Control flags and their names.
-const CONTROL_FLAGS: &[(&str, libc::tcflag_t)] = &[
-    ("cread", libc::CREAD),
-    ("clocal", libc::CLOCAL),
-    ("hupcl", libc::HUPCL),
-    ("cstopb", libc::CSTOPB),
-    ("parenb", libc::PARENB),
-    ("parodd", libc::PARODD),
+const OUTPUT_DELAY_FLAGS: &[(&str, libc::tcflag_t, libc::tcflag_t)] = &[
+    ("nl0", libc::NL0, libc::NLDLY),
+    ("nl1", libc::NL1, libc::NLDLY),
+    ("cr0", libc::CR0, libc::CRDLY),
+    ("cr1", libc::CR1, libc::CRDLY),
+    ("cr2", libc::CR2, libc::CRDLY),
+    ("cr3", libc::CR3, libc::CRDLY),
+    ("tab0", libc::TAB0, libc::TABDLY),
+    ("tab1", libc::TAB1, libc::TABDLY),
+    ("tab2", libc::TAB2, libc::TABDLY),
+    ("tab3", libc::TAB3, libc::TABDLY),
+    ("bs0", libc::BS0, libc::BSDLY),
+    ("bs1", libc::BS1, libc::BSDLY),
+    ("vt0", libc::VT0, libc::VTDLY),
+    ("vt1", libc::VT1, libc::VTDLY),
+    ("ff0", libc::FF0, libc::FFDLY),
+    ("ff1", libc::FF1, libc::FFDLY),
 ];
 
-/// Local flags and their names (portable).
+#[cfg(not(target_os = "linux"))]
+const OUTPUT_DELAY_FLAGS: &[(&str, libc::tcflag_t, libc::tcflag_t)] = &[];
+
+/// Control flags and their names (GNU order for -a output).
+const CONTROL_FLAGS: &[(&str, libc::tcflag_t)] = &[
+    ("parenb", libc::PARENB),
+    ("parodd", libc::PARODD),
+    ("hupcl", libc::HUPCL),
+    ("cstopb", libc::CSTOPB),
+    ("cread", libc::CREAD),
+    ("clocal", libc::CLOCAL),
+];
+
+/// Linux-only control flags.
+#[cfg(target_os = "linux")]
+const CONTROL_FLAGS_LINUX: &[(&str, libc::tcflag_t)] =
+    &[("cmspar", libc::CMSPAR), ("crtscts", libc::CRTSCTS)];
+
+#[cfg(not(target_os = "linux"))]
+const CONTROL_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
+
+/// Local flags and their names (GNU order).
+#[cfg(target_os = "linux")]
 const LOCAL_FLAGS: &[(&str, libc::tcflag_t)] = &[
     ("isig", libc::ISIG),
     ("icanon", libc::ICANON),
@@ -198,19 +264,32 @@ const LOCAL_FLAGS: &[(&str, libc::tcflag_t)] = &[
     ("echoe", libc::ECHOE),
     ("echok", libc::ECHOK),
     ("echonl", libc::ECHONL),
-    ("echoctl", libc::ECHOCTL),
-    ("echoprt", libc::ECHOPRT),
-    ("echoke", libc::ECHOKE),
     ("noflsh", libc::NOFLSH),
+    ("xcase", libc::XCASE),
     ("tostop", libc::TOSTOP),
+    ("echoprt", libc::ECHOPRT),
+    ("echoctl", libc::ECHOCTL),
+    ("echoke", libc::ECHOKE),
+    ("flusho", libc::FLUSHO),
+    ("extproc", libc::EXTPROC),
 ];
 
-/// Linux-only local flags.
-#[cfg(target_os = "linux")]
-const LOCAL_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[("xcase", libc::XCASE)];
-
 #[cfg(not(target_os = "linux"))]
-const LOCAL_FLAGS_LINUX: &[(&str, libc::tcflag_t)] = &[];
+const LOCAL_FLAGS: &[(&str, libc::tcflag_t)] = &[
+    ("isig", libc::ISIG),
+    ("icanon", libc::ICANON),
+    ("iexten", libc::IEXTEN),
+    ("echo", libc::ECHO),
+    ("echoe", libc::ECHOE),
+    ("echok", libc::ECHOK),
+    ("echonl", libc::ECHONL),
+    ("noflsh", libc::NOFLSH),
+    ("tostop", libc::TOSTOP),
+    ("echoprt", libc::ECHOPRT),
+    ("echoctl", libc::ECHOCTL),
+    ("echoke", libc::ECHOKE),
+    ("flusho", libc::FLUSHO),
+];
 
 /// Character size names.
 fn csize_str(cflag: libc::tcflag_t) -> &'static str {
@@ -224,13 +303,8 @@ fn csize_str(cflag: libc::tcflag_t) -> &'static str {
 }
 
 /// Helper: iterate all flag entries (portable + linux-specific).
-fn print_flags(
-    parts: &mut Vec<String>,
-    flags: libc::tcflag_t,
-    entries: &[(&str, libc::tcflag_t)],
-    extra: &[(&str, libc::tcflag_t)],
-) {
-    for &(name, flag) in entries.iter().chain(extra.iter()) {
+fn print_flags(parts: &mut Vec<String>, flags: libc::tcflag_t, entries: &[(&str, libc::tcflag_t)]) {
+    for &(name, flag) in entries {
         if flags & flag != 0 {
             parts.push(name.to_string());
         } else {
@@ -239,12 +313,45 @@ fn print_flags(
     }
 }
 
-/// Print all terminal settings (stty -a).
+/// Wrap a list of items into lines at approximately `max_cols` columns,
+/// joining items with `sep` and ending each line.
+fn print_wrapped(items: &[String], sep: &str, max_cols: usize) {
+    let mut line = String::new();
+    for item in items {
+        let add_len = if line.is_empty() {
+            item.len()
+        } else {
+            sep.len() + item.len()
+        };
+        if !line.is_empty() && line.len() + add_len > max_cols {
+            println!("{}", line);
+            line.clear();
+        }
+        if line.is_empty() {
+            line.push_str(item);
+        } else {
+            line.push_str(sep);
+            line.push_str(item);
+        }
+    }
+    if !line.is_empty() {
+        println!("{}", line);
+    }
+}
+
+/// Print all terminal settings (stty -a), matching GNU output format.
 pub fn print_all(termios: &libc::termios, fd: i32) {
     let ispeed = unsafe { libc::cfgetispeed(termios) };
     let ospeed = unsafe { libc::cfgetospeed(termios) };
 
-    // Line 1: speed and window size
+    // Query terminal width for line wrapping (GNU uses stdout tty width, falls back to 80)
+    let wrap_cols = if unsafe { libc::isatty(1) } == 1 {
+        get_winsize(1).map(|ws| ws.ws_col as usize).unwrap_or(80)
+    } else {
+        80
+    };
+
+    // Line 1: speed, window size, and line discipline
     let speed_str = if ispeed == ospeed {
         format!("speed {} baud", baud_to_num(ospeed))
     } else {
@@ -255,44 +362,106 @@ pub fn print_all(termios: &libc::termios, fd: i32) {
             baud_to_num(ospeed)
         )
     };
-    if let Ok(ws) = get_winsize(fd) {
-        println!("{}; rows {}; columns {};", speed_str, ws.ws_row, ws.ws_col);
+    let ws_str = if let Ok(ws) = get_winsize(fd) {
+        format!("; rows {}; columns {}", ws.ws_row, ws.ws_col)
     } else {
-        println!("{};", speed_str);
-    }
+        String::new()
+    };
+    // Line discipline (Linux only)
+    #[cfg(target_os = "linux")]
+    let line_str = format!("; line = {}", termios.c_line);
+    #[cfg(not(target_os = "linux"))]
+    let line_str = String::new();
+    println!("{}{}{};", speed_str, ws_str, line_str);
 
-    // Line 2: special characters
+    // Special characters (wrapped at ~80 columns)
     let mut cc_parts: Vec<String> = Vec::new();
-    for &(name, idx) in SPECIAL_CHARS.iter().chain(SPECIAL_CHARS_LINUX.iter()) {
-        cc_parts.push(format!("{} = {}", name, format_cc(termios.c_cc[idx])));
+    for &(name, idx) in SPECIAL_CHARS_ALL.iter() {
+        // min and time are numeric values, not control chars
+        let formatted = if name == "min" || name == "time" {
+            termios.c_cc[idx].to_string()
+        } else {
+            format_cc(termios.c_cc[idx])
+        };
+        cc_parts.push(format!("{} = {};", name, formatted));
     }
-    println!("{};", cc_parts.join("; "));
+    print_wrapped(&cc_parts, " ", wrap_cols);
+
+    // GNU order: control, input, output, local
+
+    // Control flags (with csize before other flags, matching GNU)
+    let mut parts: Vec<String> = Vec::new();
+    // GNU order: -parenb -parodd [-cmspar] cs8 -hupcl -cstopb cread -clocal [-crtscts]
+    let mut control_items: Vec<String> = Vec::new();
+    // parenb, parodd first
+    for &(name, flag) in &[("parenb", libc::PARENB), ("parodd", libc::PARODD)] {
+        if termios.c_cflag & flag != 0 {
+            control_items.push(name.to_string());
+        } else {
+            control_items.push(format!("-{}", name));
+        }
+    }
+    // cmspar (Linux only) - between parodd and cs8
+    #[cfg(target_os = "linux")]
+    {
+        if termios.c_cflag & libc::CMSPAR != 0 {
+            control_items.push("cmspar".to_string());
+        } else {
+            control_items.push("-cmspar".to_string());
+        }
+    }
+    // cs5-cs8
+    control_items.push(csize_str(termios.c_cflag).to_string());
+    // hupcl, cstopb, cread, clocal
+    for &(name, flag) in &[
+        ("hupcl", libc::HUPCL),
+        ("cstopb", libc::CSTOPB),
+        ("cread", libc::CREAD),
+        ("clocal", libc::CLOCAL),
+    ] {
+        if termios.c_cflag & flag != 0 {
+            control_items.push(name.to_string());
+        } else {
+            control_items.push(format!("-{}", name));
+        }
+    }
+    // crtscts (Linux only) - at the end
+    #[cfg(target_os = "linux")]
+    {
+        if termios.c_cflag & libc::CRTSCTS != 0 {
+            control_items.push("crtscts".to_string());
+        } else {
+            control_items.push("-crtscts".to_string());
+        }
+    }
+    print_wrapped(&control_items, " ", wrap_cols);
 
     // Input flags
-    let mut parts: Vec<String> = Vec::new();
-    print_flags(&mut parts, termios.c_iflag, INPUT_FLAGS, INPUT_FLAGS_LINUX);
-    println!("{}", parts.join(" "));
-
-    // Output flags
     parts.clear();
-    print_flags(
-        &mut parts,
-        termios.c_oflag,
-        OUTPUT_FLAGS,
-        OUTPUT_FLAGS_LINUX,
-    );
-    println!("{}", parts.join(" "));
+    print_flags(&mut parts, termios.c_iflag, INPUT_FLAGS);
+    print_wrapped(&parts, " ", wrap_cols);
 
-    // Control flags
+    // Output flags (with delay flags on Linux)
     parts.clear();
-    parts.push(csize_str(termios.c_cflag).to_string());
-    print_flags(&mut parts, termios.c_cflag, CONTROL_FLAGS, &[]);
-    println!("{}", parts.join(" "));
+    print_flags(&mut parts, termios.c_oflag, OUTPUT_FLAGS);
+    // Add delay flags (nl0, cr0, tab0, bs0, vt0, ff0)
+    #[cfg(target_os = "linux")]
+    {
+        // For each delay category, show the active delay value
+        let mut seen_masks: Vec<libc::tcflag_t> = Vec::new();
+        for &(name, val, mask) in OUTPUT_DELAY_FLAGS {
+            if !seen_masks.contains(&mask) && (termios.c_oflag & mask) == val {
+                parts.push(name.to_string());
+                seen_masks.push(mask);
+            }
+        }
+    }
+    print_wrapped(&parts, " ", wrap_cols);
 
     // Local flags
     parts.clear();
-    print_flags(&mut parts, termios.c_lflag, LOCAL_FLAGS, LOCAL_FLAGS_LINUX);
-    println!("{}", parts.join(" "));
+    print_flags(&mut parts, termios.c_lflag, LOCAL_FLAGS);
+    print_wrapped(&parts, " ", wrap_cols);
 }
 
 /// Parse a control character specification like "^C", "^?", "^-", or a literal.
@@ -418,7 +587,7 @@ pub fn open_device(path: &str) -> io::Result<i32> {
 
 /// Look up a special character name and return its index.
 pub fn find_special_char(name: &str) -> Option<usize> {
-    for &(n, idx) in SPECIAL_CHARS.iter().chain(SPECIAL_CHARS_LINUX.iter()) {
+    for &(n, idx) in SPECIAL_CHARS_ALL.iter() {
         if n == name {
             return Some(idx);
         }
@@ -435,7 +604,7 @@ pub fn apply_flag(termios: &mut libc::termios, name: &str) -> bool {
     };
 
     // Check input flags
-    for &(n, flag) in INPUT_FLAGS.iter().chain(INPUT_FLAGS_LINUX.iter()) {
+    for &(n, flag) in INPUT_FLAGS.iter() {
         if n == flag_name {
             if negate {
                 termios.c_iflag &= !flag;
@@ -447,7 +616,7 @@ pub fn apply_flag(termios: &mut libc::termios, name: &str) -> bool {
     }
 
     // Check output flags
-    for &(n, flag) in OUTPUT_FLAGS.iter().chain(OUTPUT_FLAGS_LINUX.iter()) {
+    for &(n, flag) in OUTPUT_FLAGS.iter() {
         if n == flag_name {
             if negate {
                 termios.c_oflag &= !flag;
@@ -459,7 +628,7 @@ pub fn apply_flag(termios: &mut libc::termios, name: &str) -> bool {
     }
 
     // Check control flags
-    for &(n, flag) in CONTROL_FLAGS {
+    for &(n, flag) in CONTROL_FLAGS.iter().chain(CONTROL_FLAGS_LINUX.iter()) {
         if n == flag_name {
             if negate {
                 termios.c_cflag &= !flag;
@@ -471,7 +640,7 @@ pub fn apply_flag(termios: &mut libc::termios, name: &str) -> bool {
     }
 
     // Check local flags
-    for &(n, flag) in LOCAL_FLAGS.iter().chain(LOCAL_FLAGS_LINUX.iter()) {
+    for &(n, flag) in LOCAL_FLAGS.iter() {
         if n == flag_name {
             if negate {
                 termios.c_lflag &= !flag;
