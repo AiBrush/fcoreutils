@@ -495,6 +495,7 @@ fn parse_signal(name: &str) -> Option<libc::c_int> {
     }
 }
 
+#[cfg(unix)]
 fn signal_number_to_name(sig: libc::c_int) -> Option<&'static str> {
     match sig {
         libc::SIGHUP => Some("HUP"),
