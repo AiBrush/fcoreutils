@@ -785,10 +785,8 @@ fn compute_widths(header: &[String], rows: &[Vec<String>], config: &DfConfig) ->
                 _ => {}
             }
         }
-    } else {
-        if !widths.is_empty() {
-            widths[0] = widths[0].max(14);
-        }
+    } else if !widths.is_empty() {
+        widths[0] = widths[0].max(14);
         let start_col = if config.print_type { 2 } else { 1 };
         for i in start_col..start_col + 3 {
             if i < num_cols {

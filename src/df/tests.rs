@@ -572,3 +572,44 @@ fn test_print_table_long_source_alignment() {
         blocks_pos
     );
 }
+
+#[test]
+fn test_print_table_min5_size_columns() {
+    // GNU df enforces minimum width of 5 for numeric size columns.
+    // With --output=used and value "0" (1 char), the column must still be 5 wide.
+    let config = DfConfig {
+        output_fields: Some(vec!["source".to_string(), "used".to_string()]),
+        ..DfConfig::default()
+    };
+    let header = build_header_row(&config);
+    let info = FsInfo {
+        source: "tmpfs".to_string(),
+        fstype: "tmpfs".to_string(),
+        target: "/dev/shm".to_string(),
+        total: 0,
+        used: 0,
+        available: 0,
+        use_percent: 0.0,
+        itotal: 0,
+        iused: 0,
+        iavail: 0,
+        iuse_percent: 0.0,
+    };
+    let rows = vec![build_row(&info, &config)];
+    let mut buf = Vec::new();
+    print_table(&header, &rows, &config, &mut buf).unwrap();
+    let output = String::from_utf8(buf).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines.len(), 2);
+    // Header "Used" (4 chars) should be right-aligned in a 5-wide column.
+    // The "Used" header should occupy at least 5 characters of space.
+    let header_line = lines[0];
+    let used_start = header_line.find("Used").unwrap();
+    // "Used" at position N means column goes from N to at least N+4.
+    // With min-5, the right-aligned "Used" should have a leading space.
+    assert!(
+        used_start > 14,
+        "Used header should be after 14-char source column, got pos: {}",
+        used_start
+    );
+}
