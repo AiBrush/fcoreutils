@@ -205,11 +205,7 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
 /// Only expands tabs in the leading whitespace of each line, bulk-copying the rest.
 /// Uses memchr (SIMD) to find line boundaries. Leading-whitespace expansion is scalar.
 /// Handles backspace per-line: lines containing \x08 fall back to generic expand.
-fn expand_initial_fast(
-    data: &[u8],
-    tab_size: usize,
-    out: &mut impl Write,
-) -> std::io::Result<()> {
+fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
     debug_assert!(tab_size > 0, "tab_size must be > 0");
     let tabs = TabStops::Regular(tab_size);
     let mut pos: usize = 0;
