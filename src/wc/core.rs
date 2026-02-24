@@ -254,23 +254,24 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_break = _mm256_or_si256(in_tab_range, is_space);
             let break_mask = _mm256_movemask_epi8(is_break) as u32;
 
-            // 3-state per-bit processing: scan break and word masks to count
-            // word transitions, with transparent bytes preserving in_word state.
-            let mut iw = prev_in_word;
-            let mut w_count = 0u32;
-            let mut bm = 0u32;
-            while bm < 32 {
-                let bit = 1u32 << bm;
-                if break_mask & bit != 0 {
-                    iw = false;
-                } else if word_mask & bit != 0 && !iw {
-                    w_count += 1;
-                    iw = true;
-                }
-                bm += 1;
-            }
-            total_words += w_count as u64;
-            prev_in_word = iw;
+            // 3-state carry-propagation: compute word starts in O(1) per chunk.
+            // Transparent bytes (neither break nor word) propagate in_word state.
+            // 1. Seed carry with word_mask bits and previous in_word state
+            // 2. Clear carry at break positions
+            // 3. Flood-fill carry rightward through transparent positions (5 doubling steps)
+            // 4. Word starts = word_mask positions where carry was NOT set from the left
+            let transparent = !break_mask & !word_mask;
+            let mut carry = word_mask | if prev_in_word { 1u32 } else { 0u32 };
+            carry &= !break_mask;
+            carry |= (carry << 1) & transparent;
+            carry |= (carry << 2) & transparent;
+            carry |= (carry << 4) & transparent;
+            carry |= (carry << 8) & transparent;
+            carry |= (carry << 16) & transparent;
+            let prev_carry = (carry << 1) | if prev_in_word { 1u32 } else { 0u32 };
+            let starts = word_mask & !prev_carry;
+            total_words += starts.count_ones() as u64;
+            prev_in_word = (carry >> 31) & 1 == 1;
 
             batch += 1;
             if batch >= 255 {
@@ -349,22 +350,18 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_break = _mm_or_si128(in_tab_range, is_space);
             let break_mask = (_mm_movemask_epi8(is_break) as u32) & 0xFFFF;
 
-            // 3-state per-bit processing
-            let mut w_count = 0u32;
-            let mut bm = 0u32;
-            while bm < 16 {
-                let bit = 1u32 << bm;
-                if break_mask & bit != 0 {
-                    prev_in_word = false;
-                } else if word_mask & bit != 0 {
-                    if !prev_in_word {
-                        w_count += 1;
-                        prev_in_word = true;
-                    }
-                }
-                bm += 1;
-            }
-            total_words += w_count as u64;
+            // 3-state carry-propagation (16-bit variant, 4 doubling steps)
+            let transparent = !break_mask & !word_mask & 0xFFFF;
+            let mut carry = (word_mask | if prev_in_word { 1u32 } else { 0u32 }) & 0xFFFF;
+            carry &= !break_mask;
+            carry |= (carry << 1) & transparent;
+            carry |= (carry << 2) & transparent;
+            carry |= (carry << 4) & transparent;
+            carry |= (carry << 8) & transparent;
+            let prev_carry = ((carry << 1) | if prev_in_word { 1u32 } else { 0u32 }) & 0xFFFF;
+            let starts = word_mask & !prev_carry & 0xFFFF;
+            total_words += starts.count_ones() as u64;
+            prev_in_word = (carry >> 15) & 1 == 1;
 
             batch += 1;
             if batch >= 255 {
