@@ -188,11 +188,15 @@ fn numbered_backup_candidate(dst: &Path, n: u64) -> std::path::PathBuf {
 
 // ---- attribute preservation ----
 
-/// Preserve file attributes (mode, timestamps, ownership) from `src` on `dst`
-/// according to the configuration.
-fn preserve_attributes(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
-    let meta = std::fs::symlink_metadata(src)?;
-
+/// Preserve file attributes (mode, timestamps, ownership) on `dst` using
+/// pre-fetched source metadata (avoids redundant stat calls).
+fn preserve_attributes_from_meta(
+    meta: &std::fs::Metadata,
+    dst: &Path,
+    config: &CpConfig,
+) -> io::Result<()> {
+    // Only chmod when -p/--preserve=mode is set. Without it, the destination
+    // keeps its O_CREAT permissions (source_mode & ~umask), matching GNU cp.
     #[cfg(unix)]
     if config.preserve_mode {
         let mode = meta.mode();
@@ -239,16 +243,69 @@ fn preserve_attributes(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<
     // Suppress unused-variable warnings on non-unix platforms.
     #[cfg(not(unix))]
     {
-        let _ = (&meta, config);
+        let _ = (meta, config);
     }
 
     Ok(())
 }
 
+// ---- large-buffer fallback copy ----
+
+/// Copy file data using a thread-local buffer (up to 4MB, capped to file size).
+/// Avoids stdlib's 64KB default buffer and amortizes allocation across files.
+/// Creates the destination with `src_mode` so the kernel applies the process umask.
+fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64, src_mode: u32) -> io::Result<()> {
+    use std::cell::RefCell;
+    use std::io::{Read, Write};
+    const MAX_BUF: usize = 4 * 1024 * 1024; // 4 MB
+    /// Shrink the thread-local buffer when it exceeds this size and the current
+    /// file needs much less, to avoid holding 4 MB per Rayon thread permanently.
+    const SHRINK_THRESHOLD: usize = 512 * 1024; // 512 KB
+
+    thread_local! {
+        static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
+
+    // Safe on 32-bit: clamp via u64 before casting to usize.
+    let buf_size = src_len.min(MAX_BUF as u64).max(8192) as usize;
+
+    let mut reader = std::fs::File::open(src)?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(src_mode);
+    }
+    #[cfg(not(unix))]
+    let _ = src_mode;
+    let mut writer = opts.open(dst)?;
+
+    BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        // Shrink if buffer is much larger than needed to limit per-thread memory.
+        if buf.len() > SHRINK_THRESHOLD && buf_size < buf.len() / 4 {
+            buf.resize(buf_size, 0);
+            buf.shrink_to_fit();
+        } else if buf.len() < buf_size {
+            buf.resize(buf_size, 0);
+        }
+        loop {
+            let n = reader.read(&mut buf[..buf_size])?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n])?;
+        }
+        Ok(())
+    })
+}
+
 // ---- Linux copy_file_range optimisation ----
 
 #[cfg(target_os = "linux")]
-fn copy_file_range_linux(src: &Path, dst: &Path) -> io::Result<()> {
+fn copy_file_range_linux(src: &Path, dst: &Path, src_mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
     let src_file = std::fs::File::open(src)?;
@@ -259,6 +316,7 @@ fn copy_file_range_linux(src: &Path, dst: &Path) -> io::Result<()> {
         .write(true)
         .create(true)
         .truncate(true)
+        .mode(src_mode)
         .open(dst)?;
 
     let mut remaining = len as i64;
@@ -302,6 +360,16 @@ pub fn copy_file(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
         std::fs::symlink_metadata(src)?
     };
 
+    copy_file_with_meta(src, dst, &src_meta, config)
+}
+
+/// Copy a single file using pre-fetched metadata (avoids redundant stat).
+fn copy_file_with_meta(
+    src: &Path,
+    dst: &Path,
+    src_meta: &std::fs::Metadata,
+    config: &CpConfig,
+) -> io::Result<()> {
     // Handle symlink when not dereferencing.
     if src_meta.file_type().is_symlink() && config.dereference == DerefMode::Never {
         let target = std::fs::read_link(src)?;
@@ -360,7 +428,7 @@ pub fn copy_file(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
                     let ret =
                         unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) };
                     if ret == 0 {
-                        preserve_attributes(src, dst, config)?;
+                        preserve_attributes_from_meta(src_meta, dst, config)?;
                         return Ok(());
                     }
                     if config.reflink == ReflinkMode::Always {
@@ -382,10 +450,12 @@ pub fn copy_file(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
 
     // Try Linux copy_file_range for zero-copy.
     #[cfg(target_os = "linux")]
+    let src_mode_bits = src_meta.mode();
+    #[cfg(target_os = "linux")]
     {
-        match copy_file_range_linux(src, dst) {
+        match copy_file_range_linux(src, dst, src_mode_bits) {
             Ok(()) => {
-                preserve_attributes(src, dst, config)?;
+                preserve_attributes_from_meta(src_meta, dst, config)?;
                 return Ok(());
             }
             Err(e)
@@ -394,21 +464,25 @@ pub fn copy_file(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
                     Some(libc::EINVAL | libc::ENOSYS | libc::EXDEV)
                 ) =>
             {
-                // Unsupported/cross-device — fall through to std::fs::copy
+                // Unsupported/cross-device — fall through to large-buffer copy
             }
             Err(e) => return Err(e),
         }
     }
 
-    // Fallback: standard copy.
-    std::fs::copy(src, dst)?;
-    preserve_attributes(src, dst, config)?;
+    // Fallback: large-buffer copy (up to 4MB vs stdlib's 64KB).
+    #[cfg(unix)]
+    let mode = src_meta.mode();
+    #[cfg(not(unix))]
+    let mode = 0o666u32;
+    copy_data_large_buf(src, dst, src_meta.len(), mode)?;
+    preserve_attributes_from_meta(src_meta, dst, config)?;
     Ok(())
 }
 
 // ---- recursive copy ----
 
-/// Recursively copy `src` to `dst`.
+/// Recursively copy `src` to `dst`, using parallel file copies within each directory.
 fn copy_recursive(
     src: &Path,
     dst: &Path,
@@ -430,17 +504,71 @@ fn copy_recursive(
         if !dst.exists() {
             std::fs::create_dir_all(dst)?;
         }
+
+        #[cfg(unix)]
+        let next_dev = Some(root_dev.unwrap_or(src_meta.dev()));
+        #[cfg(not(unix))]
+        let next_dev: Option<u64> = None;
+
+        // Collect entries and partition into files and directories.
+        let mut files: Vec<(std::path::PathBuf, std::path::PathBuf, std::fs::Metadata)> =
+            Vec::new();
+        let mut dirs: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
+            let child_src = entry.path();
             let child_dst = dst.join(entry.file_name());
+            // Respect dereference mode: follow symlinks when Always.
+            let meta = if config.dereference == DerefMode::Always {
+                std::fs::metadata(&child_src)?
+            } else {
+                std::fs::symlink_metadata(&child_src)?
+            };
+            // Check --one-file-system for all entries (not just directories).
             #[cfg(unix)]
-            let next_dev = Some(root_dev.unwrap_or(src_meta.dev()));
-            #[cfg(not(unix))]
-            let next_dev: Option<u64> = None;
-            copy_recursive(&entry.path(), &child_dst, config, next_dev)?;
+            if config.one_file_system {
+                if let Some(dev) = root_dev {
+                    if meta.dev() != dev {
+                        continue;
+                    }
+                }
+            }
+            if meta.is_dir() {
+                dirs.push((child_src, child_dst));
+            } else {
+                files.push((child_src, child_dst, meta));
+            }
         }
+
+        /// Minimum number of files before we parallelize copies within a directory.
+        /// Rayon dispatch overhead dominates below this threshold (empirical).
+        const PARALLEL_FILE_THRESHOLD: usize = 8;
+
+        // Copy files in parallel using Rayon when there are enough to benefit.
+        if files.len() >= PARALLEL_FILE_THRESHOLD {
+            use rayon::prelude::*;
+            let result: Result<(), io::Error> =
+                files
+                    .par_iter()
+                    .try_for_each(|(child_src, child_dst, meta)| {
+                        copy_file_with_meta(child_src, child_dst, meta, config)
+                    });
+            result?;
+        } else {
+            for (child_src, child_dst, meta) in &files {
+                copy_file_with_meta(child_src, child_dst, meta, config)?;
+            }
+        }
+
+        // Recurse into subdirectories sequentially (they may create dirs that
+        // need to exist before their children can be copied).
+        for (child_src, child_dst) in &dirs {
+            copy_recursive(child_src, child_dst, config, next_dev)?;
+        }
+
         // Preserve directory attributes after copying contents.
-        preserve_attributes(src, dst, config)?;
+        preserve_attributes_from_meta(&src_meta, dst, config)?;
     } else {
         // If parent directory does not exist, create it.
         if let Some(parent) = dst.parent() {
@@ -448,7 +576,7 @@ fn copy_recursive(
                 std::fs::create_dir_all(parent)?;
             }
         }
-        copy_file(src, dst, config)?;
+        copy_file_with_meta(src, dst, &src_meta, config)?;
     }
     Ok(())
 }
