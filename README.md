@@ -14,7 +14,7 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 
 **Summary:** 107 tools tracked · **2201/2213 tests passed (99.5%)** · 94 tools at 100% · fastest: wc at 25.5x vs GNU
 
-> Sizes are stripped release binaries. Compat is GNU test pass rate (skipped tests excluded). Speedup is peak across all benchmark scenarios. `-` = no data or not applicable.
+> Sizes are stripped release binaries. Compat is GNU test pass rate (skipped tests excluded). Speedup is peak across all benchmark scenarios. `-` = no data or not applicable. `SKIP` = requires root or SELinux, or GNU baseline not available.
 
 | Tool | f\* size | GNU size | uutils size | Compat | f\* vs GNU | f\* vs uutils |
 |------|--------:|---------:|------------:|-------:|-----------:|--------------:|
@@ -234,16 +234,16 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 We are pursuing a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. We started with `yes` — it is simple enough to implement completely and serves as a proof-of-concept for the approach.
 
-Our assembly `yes` achieves **~2.6 GB/s** (1.89x faster than GNU yes, 1.25x faster than our Rust implementation) while compiling to under 1,300 bytes with no runtime dependencies.
+Our assembly `yes` achieves **~2.6 GB/s** (1.89x faster than GNU yes, 1.25x faster than our Rust implementation) while compiling to under 1,900 bytes with no runtime dependencies.
 
 | Binary         | Size          | Throughput  | Memory (RSS) | Startup  |
 |----------------|---------------|-------------|--------------|----------|
-| fyes (asm)     | 1,701 bytes   | 2,060 MB/s  | 28 KB        | 0.24 ms  |
-| GNU yes (C)    | 43,432 bytes  | 2,189 MB/s  | 1,956 KB     | 0.75 ms  |
+| fyes (asm)     | 1,853 bytes   | 2,060 MB/s  | 28 KB        | 0.24 ms  |
+| GNU yes (C)    | 35,208 bytes  | 2,189 MB/s  | 1,956 KB     | 0.75 ms  |
 | fyes (Rust)    | ~435 KB       | ~2,190 MB/s | ~2,000 KB    | ~0.75 ms |
 
 Benchmarked on Linux x86_64. At pipe-limited throughput all three write at ~2.1 GB/s.
-The assembly wins on binary size (25x smaller), memory (70x less RSS), and startup latency (3x faster).
+The assembly wins on binary size (19x smaller), memory (70x less RSS), and startup latency (3x faster).
 
 On **Linux x86_64** and **Linux ARM64**, releases ship the assembly binary. All other platforms (macOS, Windows) use the Rust implementation. The assembly binary is a static ELF with only two syscalls (`write` and `exit`/`exit_group`), no dynamic linker, and a non-executable stack.
 
