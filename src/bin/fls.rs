@@ -527,6 +527,7 @@ fn main() {
     unsafe {
         libc::setlocale(libc::LC_ALL, c"".as_ptr());
     }
+    coreutils_rs::ls::detect_c_locale();
 
     let (config, paths) = parse_args();
 

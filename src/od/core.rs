@@ -65,16 +65,6 @@ const NAMED_CHARS: [&str; 128] = [
     "v", "w", "x", "y", "z", "{", "|", "}", "~", "del",
 ];
 
-/// Format an address according to the radix.
-fn format_address(offset: u64, radix: AddressRadix) -> String {
-    match radix {
-        AddressRadix::Octal => format!("{:07o}", offset),
-        AddressRadix::Decimal => format!("{:07}", offset),
-        AddressRadix::Hex => format!("{:06x}", offset),
-        AddressRadix::None => String::new(),
-    }
-}
-
 /// Return the field width for a single value of the given format.
 /// This matches GNU od's column widths.
 fn field_width(fmt: OutputFormat) -> usize {
@@ -112,111 +102,6 @@ fn element_size(fmt: OutputFormat) -> usize {
         | OutputFormat::Octal(s)
         | OutputFormat::UnsignedDec(s)
         | OutputFormat::Hex(s) => s,
-    }
-}
-
-/// Format a single value for the given format.
-fn format_value(bytes: &[u8], fmt: OutputFormat, width: usize) -> String {
-    match fmt {
-        OutputFormat::NamedChar => {
-            let b = bytes[0];
-            if b < 128 {
-                format!("{:>w$}", NAMED_CHARS[b as usize], w = width)
-            } else {
-                format!("{:>w$}", format!("{:03o}", b), w = width)
-            }
-        }
-        OutputFormat::PrintableChar => {
-            let b = bytes[0];
-            let s = match b {
-                0x00 => "\\0".to_string(),
-                0x07 => "\\a".to_string(),
-                0x08 => "\\b".to_string(),
-                0x09 => "\\t".to_string(),
-                0x0a => "\\n".to_string(),
-                0x0b => "\\v".to_string(),
-                0x0c => "\\f".to_string(),
-                0x0d => "\\r".to_string(),
-                0x20..=0x7e => format!("{}", b as char),
-                _ => format!("{:03o}", b),
-            };
-            format!("{:>w$}", s, w = width)
-        }
-        OutputFormat::Octal(size) => match size {
-            1 => format!("{:>w$}", format!("{:03o}", bytes[0]), w = width),
-            2 => {
-                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-                format!("{:>w$}", format!("{:06o}", v), w = width)
-            }
-            4 => {
-                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-                format!("{:>w$}", format!("{:011o}", v), w = width)
-            }
-            8 => {
-                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                format!("{:>w$}", format!("{:022o}", v), w = width)
-            }
-            _ => String::new(),
-        },
-        OutputFormat::Hex(size) => match size {
-            1 => format!("{:>w$}", format!("{:02x}", bytes[0]), w = width),
-            2 => {
-                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-                format!("{:>w$}", format!("{:04x}", v), w = width)
-            }
-            4 => {
-                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-                format!("{:>w$}", format!("{:08x}", v), w = width)
-            }
-            8 => {
-                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                format!("{:>w$}", format!("{:016x}", v), w = width)
-            }
-            _ => String::new(),
-        },
-        OutputFormat::UnsignedDec(size) => match size {
-            1 => format!("{:>w$}", bytes[0], w = width),
-            2 => {
-                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-                format!("{:>w$}", v, w = width)
-            }
-            4 => {
-                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-                format!("{:>w$}", v, w = width)
-            }
-            8 => {
-                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                format!("{:>w$}", v, w = width)
-            }
-            _ => String::new(),
-        },
-        OutputFormat::SignedDec(size) => match size {
-            1 => format!("{:>w$}", bytes[0] as i8, w = width),
-            2 => {
-                let v = i16::from_le_bytes(bytes[..2].try_into().unwrap());
-                format!("{:>w$}", v, w = width)
-            }
-            4 => {
-                let v = i32::from_le_bytes(bytes[..4].try_into().unwrap());
-                format!("{:>w$}", v, w = width)
-            }
-            8 => {
-                let v = i64::from_le_bytes(bytes[..8].try_into().unwrap());
-                format!("{:>w$}", v, w = width)
-            }
-            _ => String::new(),
-        },
-        OutputFormat::Float(size) => match size {
-            4 => {
-                let v = f32::from_le_bytes(bytes[..4].try_into().unwrap());
-                format!("{:>w$}", format_float_f32(v), w = width)
-            }
-            8 => {
-                let v = f64::from_le_bytes(bytes[..8].try_into().unwrap());
-                format!("{:>w$}", format_float_f64(v), w = width)
-            }
-            _ => String::new(),
-        },
     }
 }
 
@@ -283,40 +168,160 @@ fn format_float_f64(v: f64) -> String {
     snprintf_g(v, 17)
 }
 
-/// Format one line of output for a given format type.
-fn format_line(
+/// Write a formatted value directly to the output, avoiding String allocation.
+#[inline]
+fn write_value(
+    out: &mut impl Write,
+    bytes: &[u8],
+    fmt: OutputFormat,
+    width: usize,
+) -> io::Result<()> {
+    match fmt {
+        OutputFormat::NamedChar => {
+            let b = bytes[0];
+            if b < 128 {
+                write!(out, "{:>w$}", NAMED_CHARS[b as usize], w = width)
+            } else {
+                write!(out, "{:>w$o}", b, w = width)
+            }
+        }
+        OutputFormat::PrintableChar => {
+            let b = bytes[0];
+            let s: &str = match b {
+                0x00 => "\\0",
+                0x07 => "\\a",
+                0x08 => "\\b",
+                0x09 => "\\t",
+                0x0a => "\\n",
+                0x0b => "\\v",
+                0x0c => "\\f",
+                0x0d => "\\r",
+                _ => "",
+            };
+            if !s.is_empty() {
+                write!(out, "{:>w$}", s, w = width)
+            } else if (0x20..=0x7e).contains(&b) {
+                write!(out, "{:>w$}", b as char, w = width)
+            } else {
+                // Octal for non-printable: format as \ooo within width
+                let mut buf = [0u8; 3];
+                buf[0] = b'0' + (b >> 6);
+                buf[1] = b'0' + ((b >> 3) & 7);
+                buf[2] = b'0' + (b & 7);
+                let s = unsafe { std::str::from_utf8_unchecked(&buf) };
+                write!(out, "{:>w$}", s, w = width)
+            }
+        }
+        OutputFormat::Octal(size) => match size {
+            1 => write!(out, " {:03o}", bytes[0]),
+            2 => {
+                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
+                write!(out, " {:06o}", v)
+            }
+            4 => {
+                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+                write!(out, " {:011o}", v)
+            }
+            8 => {
+                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                write!(out, " {:022o}", v)
+            }
+            _ => Ok(()),
+        },
+        OutputFormat::Hex(size) => match size {
+            1 => write!(out, " {:02x}", bytes[0]),
+            2 => {
+                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
+                write!(out, " {:04x}", v)
+            }
+            4 => {
+                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+                write!(out, " {:08x}", v)
+            }
+            8 => {
+                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                write!(out, " {:016x}", v)
+            }
+            _ => Ok(()),
+        },
+        OutputFormat::UnsignedDec(size) => match size {
+            1 => write!(out, "{:>w$}", bytes[0], w = width),
+            2 => {
+                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
+                write!(out, "{:>w$}", v, w = width)
+            }
+            4 => {
+                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+                write!(out, "{:>w$}", v, w = width)
+            }
+            8 => {
+                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                write!(out, "{:>w$}", v, w = width)
+            }
+            _ => Ok(()),
+        },
+        OutputFormat::SignedDec(size) => match size {
+            1 => write!(out, "{:>w$}", bytes[0] as i8, w = width),
+            2 => {
+                let v = i16::from_le_bytes(bytes[..2].try_into().unwrap());
+                write!(out, "{:>w$}", v, w = width)
+            }
+            4 => {
+                let v = i32::from_le_bytes(bytes[..4].try_into().unwrap());
+                write!(out, "{:>w$}", v, w = width)
+            }
+            8 => {
+                let v = i64::from_le_bytes(bytes[..8].try_into().unwrap());
+                write!(out, "{:>w$}", v, w = width)
+            }
+            _ => Ok(()),
+        },
+        OutputFormat::Float(size) => match size {
+            4 => {
+                let v = f32::from_le_bytes(bytes[..4].try_into().unwrap());
+                write!(out, "{:>w$}", format_float_f32(v), w = width)
+            }
+            8 => {
+                let v = f64::from_le_bytes(bytes[..8].try_into().unwrap());
+                write!(out, "{:>w$}", format_float_f64(v), w = width)
+            }
+            _ => Ok(()),
+        },
+    }
+}
+
+/// Write one line of output for a given format type directly to the writer.
+fn write_format_line(
+    out: &mut impl Write,
     chunk: &[u8],
     fmt: OutputFormat,
     line_width: usize,
     is_first_format: bool,
     radix: AddressRadix,
     offset: u64,
-) -> String {
-    let mut line = String::new();
-
+) -> io::Result<()> {
     // Address prefix
     if is_first_format {
-        line.push_str(&format_address(offset, radix));
+        match radix {
+            AddressRadix::Octal => write!(out, "{:07o}", offset)?,
+            AddressRadix::Decimal => write!(out, "{:07}", offset)?,
+            AddressRadix::Hex => write!(out, "{:06x}", offset)?,
+            AddressRadix::None => {}
+        }
     } else if radix != AddressRadix::None {
-        // Continuation lines: pad with spaces to match address width
         let addr_width = match radix {
-            AddressRadix::Octal => 7,
-            AddressRadix::Decimal => 7,
+            AddressRadix::Octal | AddressRadix::Decimal => 7,
             AddressRadix::Hex => 6,
             AddressRadix::None => 0,
         };
         for _ in 0..addr_width {
-            line.push(' ');
+            out.write_all(b" ")?;
         }
     }
 
     let elem_sz = element_size(fmt);
     let fw = field_width(fmt);
-
-    // Number of full elements in this chunk
     let num_elems = line_width / elem_sz;
-
-    // How many elements we can actually format from this (possibly short) chunk
     let actual_full = chunk.len() / elem_sz;
     let remainder = chunk.len() % elem_sz;
 
@@ -324,17 +329,17 @@ fn format_line(
         if i < actual_full {
             let start = i * elem_sz;
             let end = start + elem_sz;
-            line.push_str(&format_value(&chunk[start..end], fmt, fw));
+            write_value(out, &chunk[start..end], fmt, fw)?;
         } else if i == actual_full && remainder > 0 {
-            // Partial element at the end: pad with zeros
             let start = i * elem_sz;
-            let mut padded = vec![0u8; elem_sz];
+            let mut padded = [0u8; 8]; // max element size is 8
             padded[..remainder].copy_from_slice(&chunk[start..]);
-            line.push_str(&format_value(&padded, fmt, fw));
+            write_value(out, &padded[..elem_sz], fmt, fw)?;
         }
     }
 
-    line
+    writeln!(out)?;
+    Ok(())
 }
 
 /// Parse a format type string (the TYPE argument of -t).
@@ -496,8 +501,15 @@ pub fn od_process<R: Read, W: Write>(
         star_printed = false;
 
         for (i, fmt) in config.formats.iter().enumerate() {
-            let line = format_line(chunk, *fmt, width, i == 0, config.address_radix, offset);
-            writeln!(output, "{}", line)?;
+            write_format_line(
+                output,
+                chunk,
+                *fmt,
+                width,
+                i == 0,
+                config.address_radix,
+                offset,
+            )?;
         }
 
         prev_chunk = Some(chunk.to_vec());
@@ -507,13 +519,13 @@ pub fn od_process<R: Read, W: Write>(
 
     // Final address line
     if config.address_radix != AddressRadix::None {
-        // The final offset is skip_bytes + actual data length
         let final_offset = config.skip_bytes + data.len() as u64;
-        writeln!(
-            output,
-            "{}",
-            format_address(final_offset, config.address_radix)
-        )?;
+        match config.address_radix {
+            AddressRadix::Octal => writeln!(output, "{:07o}", final_offset)?,
+            AddressRadix::Decimal => writeln!(output, "{:07}", final_offset)?,
+            AddressRadix::Hex => writeln!(output, "{:06x}", final_offset)?,
+            AddressRadix::None => {}
+        }
     }
 
     Ok(())
