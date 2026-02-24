@@ -2885,28 +2885,40 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                         .iter()
                         .any(|&(sa, ea)| memchr::memchr(0, &data[sa..ea]).is_some());
 
-                if is_locale_only && !has_null_keys {
-                    // Pre-compute strxfrm collation keys, then sort with memcmp.
-                    let xfrm_keys: Vec<Vec<u8>> = if num_lines > 10_000 {
+                // Attempt strxfrm pre-computation for locale-only sorts.
+                // Returns None if any key fails (invalid multibyte, etc.),
+                // in which case we fall back to per-comparison strcoll.
+                let xfrm_keys: Option<Vec<Vec<u8>>> = if is_locale_only && !has_null_keys {
+                    // SAFETY: strxfrm reads LC_COLLATE global state.
+                    // Parallel calls are safe as long as setlocale is not called
+                    // concurrently, which we guarantee since locale is set once
+                    // at startup.
+                    let keys: Vec<Option<Vec<u8>>> = if num_lines > 10_000 {
                         key_offs
                             .par_iter()
-                            .map(|&(sa, ea)| {
-                                let key = &data[sa..ea];
-                                // unwrap is safe: we verified no null bytes above
-                                compute_xfrm_key(key).unwrap_or_default()
-                            })
+                            .map(|&(sa, ea)| compute_xfrm_key(&data[sa..ea]))
                             .collect()
                     } else {
                         let mut c_buf = vec![0u8; 512];
                         key_offs
                             .iter()
                             .map(|&(sa, ea)| {
-                                let key = &data[sa..ea];
-                                compute_xfrm_key_reuse(key, &mut c_buf).unwrap_or_default()
+                                compute_xfrm_key_reuse(&data[sa..ea], &mut c_buf)
                             })
                             .collect()
                     };
+                    // If any strxfrm failed (e.g. invalid multibyte sequence),
+                    // abandon the strxfrm path to avoid silent sort corruption.
+                    if keys.iter().all(|k| k.is_some()) {
+                        Some(keys.into_iter().map(|k| k.unwrap()).collect())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
+                if let Some(xfrm_keys) = xfrm_keys {
                     let mut indices: Vec<usize> = (0..num_lines).collect();
                     let dp_sk = data.as_ptr() as usize;
                     do_sort(&mut indices, stable, |&a, &b| {
@@ -3064,23 +3076,28 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     return None;
                 }
                 let ko = &per_key_offs[ki];
-                let xfrm = if num_lines > 10_000 {
+                // SAFETY: strxfrm reads LC_COLLATE global state.
+                // Parallel calls are safe since locale is set once at startup.
+                let keys: Vec<Option<Vec<u8>>> = if num_lines > 10_000 {
                     ko.par_iter()
-                        .map(|&(sa, ea)| {
-                            let key = &data[sa..ea];
-                            compute_xfrm_key(key).unwrap_or_default()
-                        })
+                        .map(|&(sa, ea)| compute_xfrm_key(&data[sa..ea]))
                         .collect()
                 } else {
                     let mut c_buf = vec![0u8; 512];
                     ko.iter()
                         .map(|&(sa, ea)| {
-                            let key = &data[sa..ea];
-                            compute_xfrm_key_reuse(key, &mut c_buf).unwrap_or_default()
+                            compute_xfrm_key_reuse(&data[sa..ea], &mut c_buf)
                         })
                         .collect()
                 };
-                Some(xfrm)
+                // If any key in this column failed strxfrm (e.g. invalid
+                // multibyte), disable strxfrm for the entire column to avoid
+                // silent sort corruption from empty-key substitution.
+                if keys.iter().all(|k| k.is_some()) {
+                    Some(keys.into_iter().map(|k| k.unwrap()).collect())
+                } else {
+                    None
+                }
             })
             .collect();
 
