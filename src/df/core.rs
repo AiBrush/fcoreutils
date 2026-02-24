@@ -857,7 +857,11 @@ pub(crate) fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Resul
 }
 
 #[cfg(test)]
-pub(crate) fn print_fs_line(info: &FsInfo, config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
+pub(crate) fn print_fs_line(
+    info: &FsInfo,
+    config: &DfConfig,
+    out: &mut impl Write,
+) -> io::Result<()> {
     let header = build_header_row(config);
     let row = build_row(info, config);
     let rows = [row];
