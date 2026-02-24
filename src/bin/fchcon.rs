@@ -46,7 +46,10 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let mut opts = ParseOpts { traverse_mode: b'P', ..Default::default() };
+    let mut opts = ParseOpts {
+        traverse_mode: b'P',
+        ..Default::default()
+    };
     let mut reference: Option<String> = None;
     let mut preserve_root = false;
     let mut positional: Vec<String> = Vec::new();
@@ -130,7 +133,8 @@ fn main() {
         i += 1;
     }
 
-    let has_partial = opts.user.is_some() || opts.role.is_some() || opts.typ.is_some() || opts.range.is_some();
+    let has_partial =
+        opts.user.is_some() || opts.role.is_some() || opts.typ.is_some() || opts.range.is_some();
 
     // Determine context and files
     let (context, files): (Option<String>, Vec<String>) = if reference.is_some() || has_partial {
@@ -166,17 +170,26 @@ fn main() {
     // Read reference context if needed
     let ref_context: Option<String> = reference.as_ref().map(|rfile| {
         get_file_context(rfile, opts.no_dereference).unwrap_or_else(|e| {
-            eprintln!("chcon: failed to get security context of '{}': {}", rfile, e);
+            eprintln!(
+                "chcon: failed to get security context of '{}': {}",
+                rfile, e
+            );
             std::process::exit(1);
         })
     });
 
     let cfg = ChconConfig {
-        context, ref_context,
-        user: opts.user, role: opts.role, typ: opts.typ, range: opts.range,
+        context,
+        ref_context,
+        user: opts.user,
+        role: opts.role,
+        typ: opts.typ,
+        range: opts.range,
         has_partial,
-        recursive: opts.recursive, verbose: opts.verbose,
-        no_dereference: opts.no_dereference, traverse_mode: opts.traverse_mode,
+        recursive: opts.recursive,
+        verbose: opts.verbose,
+        no_dereference: opts.no_dereference,
+        traverse_mode: opts.traverse_mode,
     };
 
     let mut had_error = false;
@@ -242,19 +255,22 @@ fn parse_short_opts(s: &str, args: &[String], i: &mut usize, opts: &mut ParseOpt
 
 #[cfg(unix)]
 fn process_file(path: &str, cfg: &ChconConfig) -> Result<(), ()> {
-    let metadata = if cfg.no_dereference {
+    let md = if cfg.no_dereference {
         std::fs::symlink_metadata(path)
     } else {
         std::fs::metadata(path)
     };
-    if let Err(e) = metadata {
-        eprintln!(
-            "chcon: cannot access '{}': {}",
-            path,
-            coreutils_rs::common::io_error_msg(&e)
-        );
-        return Err(());
-    }
+    let md = match md {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!(
+                "chcon: cannot access '{}': {}",
+                path,
+                coreutils_rs::common::io_error_msg(&e)
+            );
+            return Err(());
+        }
+    };
 
     let mut had_error = false;
 
@@ -262,7 +278,7 @@ fn process_file(path: &str, cfg: &ChconConfig) -> Result<(), ()> {
         had_error = true;
     }
 
-    if cfg.recursive && metadata.unwrap().is_dir() && recurse_dir(path, cfg).is_err() {
+    if cfg.recursive && md.is_dir() && recurse_dir(path, cfg).is_err() {
         had_error = true;
     }
 
@@ -335,21 +351,30 @@ fn change_context(path: &str, cfg: &ChconConfig) -> Result<(), ()> {
         let current = match get_file_context(path, cfg.no_dereference) {
             Ok(ctx) => ctx,
             Err(_) => {
-                eprintln!("chcon: can't apply partial context to unlabeled file '{}'", path);
+                eprintln!(
+                    "chcon: can't apply partial context to unlabeled file '{}'",
+                    path
+                );
                 return Err(());
             }
         };
 
         let parts: Vec<&str> = current.splitn(4, ':').collect();
         if parts.len() < 3 {
-            eprintln!("chcon: can't apply partial context to unlabeled file '{}'", path);
+            eprintln!(
+                "chcon: can't apply partial context to unlabeled file '{}'",
+                path
+            );
             return Err(());
         }
 
         let new_user = cfg.user.as_deref().unwrap_or(parts[0]);
         let new_role = cfg.role.as_deref().unwrap_or(parts[1]);
         let new_type = cfg.typ.as_deref().unwrap_or(parts[2]);
-        let new_range = cfg.range.as_deref().unwrap_or(if parts.len() > 3 { parts[3] } else { "s0" });
+        let new_range =
+            cfg.range
+                .as_deref()
+                .unwrap_or(if parts.len() > 3 { parts[3] } else { "s0" });
 
         let new_ctx = format!("{}:{}:{}:{}", new_user, new_role, new_type, new_range);
         return set_file_context(path, &new_ctx, cfg.no_dereference, cfg.verbose);
@@ -366,23 +391,24 @@ fn get_file_context(path: &str, no_dereference: bool) -> Result<String, String> 
 
     let c_path = CString::new(path).map_err(|_| "invalid path".to_string())?;
     let c_name = CString::new("security.selinux").unwrap();
-    let mut buf = vec![0u8; 256];
 
-    let len = if no_dereference {
-        unsafe {
-            libc::lgetxattr(
-                c_path.as_ptr(), c_name.as_ptr(),
-                buf.as_mut_ptr() as *mut libc::c_void, buf.len(),
-            )
-        }
-    } else {
-        unsafe {
-            libc::getxattr(
-                c_path.as_ptr(), c_name.as_ptr(),
-                buf.as_mut_ptr() as *mut libc::c_void, buf.len(),
-            )
+    // Two-pass approach: query required size first, then read
+    let get_xattr = |buf: *mut libc::c_void, size: usize| -> isize {
+        if no_dereference {
+            unsafe { libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), buf, size) }
+        } else {
+            unsafe { libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), buf, size) }
         }
     };
+
+    let needed = get_xattr(std::ptr::null_mut(), 0);
+    if needed < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(coreutils_rs::common::io_error_msg(&err));
+    }
+
+    let mut buf = vec![0u8; needed as usize];
+    let len = get_xattr(buf.as_mut_ptr() as *mut libc::c_void, buf.len());
 
     parse_xattr_result(&buf, len)
 }
@@ -393,17 +419,26 @@ fn get_file_context(path: &str, no_dereference: bool) -> Result<String, String> 
 
     let c_path = CString::new(path).map_err(|_| "invalid path".to_string())?;
     let c_name = CString::new("security.selinux").unwrap();
-    let mut buf = vec![0u8; 256];
 
-    let options: libc::c_int = if no_dereference { 0x0001 /* XATTR_NOFOLLOW */ } else { 0 };
-    let len = unsafe {
-        libc::getxattr(
-            c_path.as_ptr(), c_name.as_ptr(),
-            buf.as_mut_ptr() as *mut libc::c_void, buf.len(),
-            0, // position
-            options,
-        )
+    let options: libc::c_int = if no_dereference {
+        0x0001 /* XATTR_NOFOLLOW */
+    } else {
+        0
     };
+
+    // Two-pass approach: query required size first, then read
+    let get_xattr = |buf: *mut libc::c_void, size: usize| -> isize {
+        unsafe { libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), buf, size, 0, options) }
+    };
+
+    let needed = get_xattr(std::ptr::null_mut(), 0);
+    if needed < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(coreutils_rs::common::io_error_msg(&err));
+    }
+
+    let mut buf = vec![0u8; needed as usize];
+    let len = get_xattr(buf.as_mut_ptr() as *mut libc::c_void, buf.len());
 
     parse_xattr_result(&buf, len)
 }
@@ -431,7 +466,12 @@ fn parse_xattr_result(buf: &[u8], len: isize) -> Result<String, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn set_file_context(path: &str, context: &str, no_dereference: bool, verbose: bool) -> Result<(), ()> {
+fn set_file_context(
+    path: &str,
+    context: &str,
+    no_dereference: bool,
+    verbose: bool,
+) -> Result<(), ()> {
     use std::ffi::CString;
 
     let c_path = CString::new(path).map_err(|_| ())?;
@@ -441,15 +481,21 @@ fn set_file_context(path: &str, context: &str, no_dereference: bool, verbose: bo
     let ret = if no_dereference {
         unsafe {
             libc::lsetxattr(
-                c_path.as_ptr(), c_name.as_ptr(),
-                c_value.as_ptr() as *const libc::c_void, c_value.len(), 0,
+                c_path.as_ptr(),
+                c_name.as_ptr(),
+                c_value.as_ptr() as *const libc::c_void,
+                c_value.len(),
+                0,
             )
         }
     } else {
         unsafe {
             libc::setxattr(
-                c_path.as_ptr(), c_name.as_ptr(),
-                c_value.as_ptr() as *const libc::c_void, c_value.len(), 0,
+                c_path.as_ptr(),
+                c_name.as_ptr(),
+                c_value.as_ptr() as *const libc::c_void,
+                c_value.len(),
+                0,
             )
         }
     };
@@ -458,18 +504,29 @@ fn set_file_context(path: &str, context: &str, no_dereference: bool, verbose: bo
 }
 
 #[cfg(target_os = "macos")]
-fn set_file_context(path: &str, context: &str, no_dereference: bool, verbose: bool) -> Result<(), ()> {
+fn set_file_context(
+    path: &str,
+    context: &str,
+    no_dereference: bool,
+    verbose: bool,
+) -> Result<(), ()> {
     use std::ffi::CString;
 
     let c_path = CString::new(path).map_err(|_| ())?;
     let c_name = CString::new("security.selinux").unwrap();
     let c_value = context.as_bytes();
 
-    let options: libc::c_int = if no_dereference { 0x0001 /* XATTR_NOFOLLOW */ } else { 0 };
+    let options: libc::c_int = if no_dereference {
+        0x0001 /* XATTR_NOFOLLOW */
+    } else {
+        0
+    };
     let ret = unsafe {
         libc::setxattr(
-            c_path.as_ptr(), c_name.as_ptr(),
-            c_value.as_ptr() as *const libc::c_void, c_value.len(),
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            c_value.as_ptr() as *const libc::c_void,
+            c_value.len(),
             0, // position
             options,
         )
@@ -479,7 +536,12 @@ fn set_file_context(path: &str, context: &str, no_dereference: bool, verbose: bo
 }
 
 #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
-fn set_file_context(path: &str, context: &str, _no_dereference: bool, _verbose: bool) -> Result<(), ()> {
+fn set_file_context(
+    path: &str,
+    context: &str,
+    _no_dereference: bool,
+    _verbose: bool,
+) -> Result<(), ()> {
     eprintln!(
         "chcon: failed to change context of '{}' to '{}': Operation not supported",
         path, context
@@ -493,13 +555,14 @@ fn report_set_result(ret: libc::c_int, path: &str, context: &str, verbose: bool)
         let err = std::io::Error::last_os_error();
         eprintln!(
             "chcon: failed to change context of '{}' to '{}': {}",
-            path, context,
+            path,
+            context,
             coreutils_rs::common::io_error_msg(&err)
         );
         return Err(());
     }
     if verbose {
-        eprintln!("changing security context of '{}'", path);
+        println!("changing security context of '{}'", path);
     }
     Ok(())
 }

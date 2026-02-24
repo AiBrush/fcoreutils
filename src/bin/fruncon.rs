@@ -131,7 +131,12 @@ fn main() {
         }
     }
 
-    let has_partial = user.is_some() || role.is_some() || typ.is_some() || range.is_some() || compute;
+    if compute {
+        eprintln!("runcon: warning: -c/--compute requires libselinux and is not yet supported");
+        std::process::exit(125);
+    }
+
+    let has_partial = user.is_some() || role.is_some() || typ.is_some() || range.is_some();
 
     // Determine context and command
     let (context, command_start): (Option<String>, usize) = if let Some(start) = positional_start {
@@ -148,14 +153,10 @@ fn main() {
             (Some(args[start].clone()), start + 1)
         }
     } else {
-        // No positional args but had partial options
-        if has_partial {
-            eprintln!("runcon: missing operand");
-            eprintln!("Try 'runcon --help' for more information.");
-            std::process::exit(125);
-        } else {
-            unreachable!();
-        }
+        // No positional args (with or without partial options)
+        eprintln!("runcon: missing operand");
+        eprintln!("Try 'runcon --help' for more information.");
+        std::process::exit(125);
     };
 
     if command_start >= args.len() {
@@ -192,14 +193,19 @@ fn main() {
         let new_user = user.as_deref().unwrap_or(parts[0]);
         let new_role = role.as_deref().unwrap_or(parts[1]);
         let new_type = typ.as_deref().unwrap_or(parts[2]);
-        let new_range = range.as_deref().unwrap_or(if parts.len() > 3 { parts[3] } else { "s0" });
+        let new_range = range
+            .as_deref()
+            .unwrap_or(if parts.len() > 3 { parts[3] } else { "s0" });
 
         format!("{}:{}:{}:{}", new_user, new_role, new_type, new_range)
     };
 
     // Set the exec context via /proc/self/attr/exec
     if let Err(e) = set_exec_context(&new_context) {
-        eprintln!("runcon: failed to set exec context to '{}': {}", new_context, e);
+        eprintln!(
+            "runcon: failed to set exec context to '{}': {}",
+            new_context, e
+        );
         std::process::exit(125);
     }
 
@@ -226,8 +232,7 @@ fn main() {
 
 #[cfg(unix)]
 fn is_selinux_enabled() -> bool {
-    std::path::Path::new("/sys/fs/selinux").exists()
-        || std::path::Path::new("/selinux").exists()
+    std::path::Path::new("/sys/fs/selinux").exists() || std::path::Path::new("/selinux").exists()
 }
 
 #[cfg(unix)]
@@ -333,10 +338,7 @@ mod tests {
             .args(["foo_context", "/bin/true"])
             .output();
         if let Ok(gnu) = gnu {
-            let ours = cmd()
-                .args(["foo_context", "/bin/true"])
-                .output()
-                .unwrap();
+            let ours = cmd().args(["foo_context", "/bin/true"]).output().unwrap();
             assert_eq!(ours.status.code(), gnu.status.code());
         }
     }

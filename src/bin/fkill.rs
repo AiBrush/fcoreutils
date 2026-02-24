@@ -187,8 +187,10 @@ fn main() {
             Ok(pid) => {
                 if let Err(e) = send_signal(pid, signal) {
                     eprintln!(
-                        "{}: sending signal to {} failed: {}",
-                        TOOL_NAME, pid, e
+                        "{}: ({}): {}",
+                        TOOL_NAME,
+                        pid,
+                        coreutils_rs::common::io_error_msg(&e)
                     );
                     had_error = true;
                 }
@@ -225,9 +227,9 @@ fn name_to_signal(s: &str) -> Option<i32> {
     }
     // Aliases
     match name {
-        "IOT" => Some(6),   // SIGIOT = SIGABRT
-        "CLD" => Some(17),  // SIGCLD = SIGCHLD
-        "IO" => Some(29),   // SIGIO = SIGPOLL
+        "IOT" => Some(6),  // SIGIOT = SIGABRT
+        "CLD" => Some(17), // SIGCLD = SIGCHLD
+        "IO" => Some(29),  // SIGIO = SIGPOLL
         _ => None,
     }
 }
@@ -407,6 +409,6 @@ mod tests {
         let output = cmd().args(["99999999"]).output().unwrap();
         assert_ne!(output.status.code(), Some(0));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("sending signal"));
+        assert!(stderr.contains("(99999999)"));
     }
 }
