@@ -150,7 +150,7 @@ fn main() {
                 if let Ok(num) = spec.parse::<i32>() {
                     // Number → name (handle exit status: num > 128 → num - 128)
                     let signum = if num > 128 { num - 128 } else { num };
-                    if signum >= 1 && signum <= 31 {
+                    if (1..=31).contains(&signum) {
                         println!("{}", SIGNALS[signum as usize]);
                     } else {
                         eprintln!("{}: unknown signal: {}", TOOL_NAME, spec);
@@ -218,8 +218,8 @@ fn parse_signal_or_die(s: &str) -> i32 {
 fn name_to_signal(s: &str) -> Option<i32> {
     let upper = s.to_uppercase();
     let name = upper.strip_prefix("SIG").unwrap_or(&upper);
-    for i in 1..SIGNALS.len() {
-        if SIGNALS[i] == name {
+    for (i, sig) in SIGNALS.iter().enumerate().skip(1) {
+        if *sig == name {
             return Some(i as i32);
         }
     }
