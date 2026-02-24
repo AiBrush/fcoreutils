@@ -524,3 +524,51 @@ fn test_output_mode_source_column_min_width() {
         lines[1]
     );
 }
+
+#[test]
+fn test_print_table_long_source_alignment() {
+    // When a source name exceeds the minimum width (14), print_table computes
+    // widths over all rows at once so header and data remain aligned.
+    let config = DfConfig::default();
+    let header = build_header_row(&config);
+    let info = FsInfo {
+        source: "/dev/mmcblk0p17".to_string(),
+        fstype: "ext4".to_string(),
+        target: "/".to_string(),
+        total: 100 * 1024 * 1024,
+        used: 60 * 1024 * 1024,
+        available: 40 * 1024 * 1024,
+        use_percent: 60.0,
+        itotal: 0,
+        iused: 0,
+        iavail: 0,
+        iuse_percent: 0.0,
+    };
+    let rows = vec![build_row(&info, &config)];
+    let mut buf = Vec::new();
+    print_table(&header, &rows, &config, &mut buf).unwrap();
+    let output = String::from_utf8(buf).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines.len(), 2);
+    // Source is 15 chars, exceeds min-14 → column should be 15 wide.
+    // Header "Filesystem" (10 chars) padded to 15 with trailing spaces.
+    assert!(
+        lines[0].starts_with("Filesystem      "),
+        "header should expand source column for long name, got: {:?}",
+        lines[0]
+    );
+    // Data line should have full source name followed by a space separator.
+    assert!(
+        lines[1].starts_with("/dev/mmcblk0p17 "),
+        "data should contain the full source name with separator, got: {:?}",
+        lines[1]
+    );
+    // Verify the "1K-blocks" header starts at position 16 (15 for column + 1 separator),
+    // not position 15 (which would mean 14-char minimum was used instead of 15).
+    let blocks_pos = lines[0].find("1K-blocks").unwrap();
+    assert!(
+        blocks_pos >= 16,
+        "1K-blocks should start at offset >= 16 (source=15+sep), got: {}",
+        blocks_pos
+    );
+}

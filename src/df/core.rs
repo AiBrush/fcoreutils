@@ -513,7 +513,7 @@ fn size_header(config: &DfConfig) -> String {
 }
 
 /// Build a row of string values for a filesystem entry.
-fn build_row(info: &FsInfo, config: &DfConfig) -> Vec<String> {
+pub(crate) fn build_row(info: &FsInfo, config: &DfConfig) -> Vec<String> {
     if let Some(ref fields) = config.output_fields {
         return fields
             .iter()
@@ -567,7 +567,7 @@ fn build_row(info: &FsInfo, config: &DfConfig) -> Vec<String> {
 }
 
 /// Build the header row.
-fn build_header_row(config: &DfConfig) -> Vec<String> {
+pub(crate) fn build_header_row(config: &DfConfig) -> Vec<String> {
     if let Some(ref fields) = config.output_fields {
         return fields
             .iter()
@@ -801,7 +801,7 @@ fn compute_widths(header: &[String], rows: &[Vec<String>], config: &DfConfig) ->
 }
 
 /// Print all rows with auto-sized columns, matching GNU df output format.
-fn print_table(
+pub(crate) fn print_table(
     header: &[String],
     rows: &[Vec<String>],
     config: &DfConfig,
@@ -851,7 +851,7 @@ fn print_row(
 /// Print the df output header only (one line).
 /// Note: widths are computed from header alone. For aligned output with data,
 /// use `print_table()` which computes widths over all rows at once.
-pub fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
+pub(crate) fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
     let header = build_header_row(config);
     let widths = compute_widths(&header, &[], config);
     let aligns = get_col_alignments(config, header.len());
@@ -859,7 +859,7 @@ pub fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
 }
 
 /// Print a single filesystem info line only (one line, no header).
-pub fn print_fs_line(info: &FsInfo, config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
+pub(crate) fn print_fs_line(info: &FsInfo, config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
     let header = build_header_row(config);
     let row = build_row(info, config);
     let rows = [row];
@@ -869,7 +869,7 @@ pub fn print_fs_line(info: &FsInfo, config: &DfConfig, out: &mut impl Write) -> 
 }
 
 /// Print a total line only (one line, no header).
-pub fn print_total_line(
+pub(crate) fn print_total_line(
     filesystems: &[FsInfo],
     config: &DfConfig,
     out: &mut impl Write,
