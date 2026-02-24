@@ -230,6 +230,10 @@ fn main() {
         eprintln!("{}: invalid signal '{}'", TOOL_NAME, signal_name);
         process::exit(EXIT_FAILURE);
     });
+    // Resolve to canonical name for verbose output (e.g. "9" -> "KILL")
+    let signal_name = signal_number_to_name(sig)
+        .map(|s| s.to_string())
+        .unwrap_or(signal_name);
 
     // Fork
     let pid = unsafe { libc::fork() };
@@ -487,6 +491,42 @@ fn parse_signal(name: &str) -> Option<libc::c_int> {
         "WINCH" => Some(libc::SIGWINCH),
         "IO" | "POLL" => Some(libc::SIGIO),
         "SYS" => Some(libc::SIGSYS),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+fn signal_number_to_name(sig: libc::c_int) -> Option<&'static str> {
+    match sig {
+        libc::SIGHUP => Some("HUP"),
+        libc::SIGINT => Some("INT"),
+        libc::SIGQUIT => Some("QUIT"),
+        libc::SIGILL => Some("ILL"),
+        libc::SIGTRAP => Some("TRAP"),
+        libc::SIGABRT => Some("ABRT"),
+        libc::SIGBUS => Some("BUS"),
+        libc::SIGFPE => Some("FPE"),
+        libc::SIGKILL => Some("KILL"),
+        libc::SIGUSR1 => Some("USR1"),
+        libc::SIGSEGV => Some("SEGV"),
+        libc::SIGUSR2 => Some("USR2"),
+        libc::SIGPIPE => Some("PIPE"),
+        libc::SIGALRM => Some("ALRM"),
+        libc::SIGTERM => Some("TERM"),
+        libc::SIGCHLD => Some("CHLD"),
+        libc::SIGCONT => Some("CONT"),
+        libc::SIGSTOP => Some("STOP"),
+        libc::SIGTSTP => Some("TSTP"),
+        libc::SIGTTIN => Some("TTIN"),
+        libc::SIGTTOU => Some("TTOU"),
+        libc::SIGURG => Some("URG"),
+        libc::SIGXCPU => Some("XCPU"),
+        libc::SIGXFSZ => Some("XFSZ"),
+        libc::SIGVTALRM => Some("VTALRM"),
+        libc::SIGPROF => Some("PROF"),
+        libc::SIGWINCH => Some("WINCH"),
+        libc::SIGIO => Some("IO"),
+        libc::SIGSYS => Some("SYS"),
         _ => None,
     }
 }

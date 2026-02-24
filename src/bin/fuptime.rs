@@ -224,7 +224,7 @@ fn print_pretty(uptime_secs: f64) {
 #[cfg(unix)]
 fn print_since(uptime_secs: f64) {
     let now = unsafe { libc::time(std::ptr::null_mut()) };
-    let boot_time = now - uptime_secs as libc::time_t;
+    let boot_time = now - uptime_secs.round() as libc::time_t;
     let tm = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&boot_time, &mut tm);
