@@ -114,16 +114,22 @@ fn snprintf_g(v: f64, precision: usize) -> String {
     let precision = precision.min(50);
     #[cfg(unix)]
     {
+        // Pre-built format strings for common precisions to avoid allocation
+        static FMT_STRINGS: &[&std::ffi::CStr] = &[
+            c"%.0g", c"%.1g", c"%.2g", c"%.3g", c"%.4g", c"%.5g", c"%.6g", c"%.7g", c"%.8g",
+            c"%.9g", c"%.10g", c"%.11g", c"%.12g", c"%.13g", c"%.14g", c"%.15g", c"%.16g",
+            c"%.17g", c"%.18g", c"%.19g", c"%.20g",
+        ];
         let mut buf = [0u8; 64];
-        let fmt = std::ffi::CString::new(format!("%.{}g", precision)).unwrap();
-        let len = unsafe {
-            libc::snprintf(
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-                fmt.as_ptr(),
-                v,
-            )
+        let fmt_cstr: std::ffi::CString;
+        let fmt_ptr = if precision < FMT_STRINGS.len() {
+            FMT_STRINGS[precision].as_ptr()
+        } else {
+            fmt_cstr = std::ffi::CString::new(format!("%.{}g", precision)).unwrap();
+            fmt_cstr.as_ptr()
         };
+        let len =
+            unsafe { libc::snprintf(buf.as_mut_ptr() as *mut libc::c_char, buf.len(), fmt_ptr, v) };
         if len > 0 && (len as usize) < buf.len() {
             return String::from_utf8_lossy(&buf[..len as usize]).into_owned();
         }

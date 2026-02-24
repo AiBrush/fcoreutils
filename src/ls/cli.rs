@@ -513,6 +513,12 @@ pub fn parse_ls_args(flavor: LsFlavor) -> (LsConfig, Vec<String>) {
 
 /// Run ls / dir / vdir with the given flavor.
 pub fn run_ls(flavor: LsFlavor) {
+    // Initialize locale for proper collation ordering (shared by ls, dir, vdir)
+    unsafe {
+        libc::setlocale(libc::LC_ALL, c"".as_ptr());
+    }
+    super::detect_c_locale();
+
     let (config, paths) = parse_ls_args(flavor);
     let prog = flavor.name();
 
