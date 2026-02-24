@@ -316,7 +316,11 @@ fn main() {
             match read_file_mmap(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("fmt: {}: {}", filename, io_error_msg(&e));
+                    eprintln!(
+                        "fmt: cannot open '{}' for reading: {}",
+                        filename,
+                        io_error_msg(&e)
+                    );
                     had_error = true;
                     continue;
                 }
