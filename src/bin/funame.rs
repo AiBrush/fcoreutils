@@ -177,12 +177,13 @@ fn main() {
         if show_machine {
             parts.push(machine);
         }
-        // On Linux, -p (processor) and -i (hardware platform) use the machine
-        // architecture from uname(2), matching GNU coreutils on most distros.
+        // On Linux, -p (processor) and -i (hardware platform) return "unknown" in
+        // canonical GNU coreutils. Distro patches (Debian/Ubuntu/Fedora) override
+        // this to return the machine arch, but we follow upstream.
         // GNU skips "unknown" values in -a mode.
         // On macOS, GNU uname maps arm64 -> "arm" and x86_64 -> "i386".
         #[cfg(target_os = "linux")]
-        let processor = machine;
+        let processor = "unknown";
         #[cfg(target_os = "macos")]
         let processor = match machine {
             "arm64" => "arm",
@@ -192,7 +193,7 @@ fn main() {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let processor = "unknown";
         #[cfg(target_os = "linux")]
-        let hardware = machine;
+        let hardware = "unknown";
         #[cfg(target_os = "macos")]
         let hardware = match machine {
             "arm64" => "arm",

@@ -390,7 +390,8 @@ fn format_with_scale(
             let rounded = apply_round_for_display(scaled, round);
             if rounded.abs() >= 10.0 {
                 // Rounding pushed it past 10, switch to integer display
-                let int_val = apply_round_int(scaled, round);
+                // Use rounded (not raw scaled) for consistent precision
+                let int_val = apply_round_int(rounded, round);
                 if int_val.unsigned_abs() >= 1000 && idx + 1 < suffixes.len() {
                     idx += 1;
                     continue;
