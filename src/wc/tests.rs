@@ -271,12 +271,13 @@ fn test_3state_utf8_valid_multibyte_is_word() {
 }
 
 #[test]
-fn test_utf8_invalid_encoding_breaks_word() {
-    // Standalone continuation bytes (0x80-0xBF) in UTF-8: encoding error → breaks word
+fn test_utf8_invalid_encoding_is_transparent() {
+    // Standalone continuation bytes (0x80-0xBF) in UTF-8: transparent (no word started)
     assert_eq!(count_words(b"\x80\x81\x82"), 0);
-    // Encoding error between printable text: breaks word into two
-    assert_eq!(count_words(b"hello\x80world"), 2);
-    // Invalid bytes >= 0xF5
+    // Encoding error between printable text: transparent → stays in word → 1 word
+    // (matches GNU mbrtowc which skips 1 byte on error without changing in_word)
+    assert_eq!(count_words(b"hello\x80world"), 1);
+    // Invalid bytes >= 0xF5: transparent
     assert_eq!(count_words(b"\xF5\xF6\xFF"), 0);
     // null_bytes.bin: all non-printable/invalid bytes → 0 words
     assert_eq!(count_words(b"\x00\x01\x02\x80\x81\xfe\xff"), 0);

@@ -26,9 +26,10 @@ pub struct WcCounts {
 //   2 = word content: printable ASCII (0x21-0x7E)
 // Transparent bytes don't start, continue, or break words.
 //
-// UTF-8 locale: 2-state model. 0x09-0x0D, 0x20 (ASCII spaces) break words;
-// multi-byte Unicode spaces are detected via codepoint lookup.
-// Everything else (including NUL, controls, DEL) is word content.
+// UTF-8 locale: 3-state model (matching GNU wc 9.4 mbrtowc behavior).
+// ASCII uses same BYTE_CLASS_C table (controls transparent, spaces break, printable content).
+// Multi-byte Unicode spaces are detected via codepoint lookup.
+// Invalid UTF-8 encoding errors are transparent (GNU mbrtowc skips on error).
 
 /// Byte classification for C/POSIX locale word counting (matching GNU wc 9.4).
 /// GNU wc uses isprint() as a gatekeeper: only printable bytes (0x21-0x7E) can
@@ -445,7 +446,8 @@ fn count_lw_c_chunk(data: &[u8]) -> (u64, u64, bool, bool) {
 /// - ASCII printable (0x21-0x7E): word content
 /// - Valid UTF-8 multi-byte Unicode spaces (U+00A0, U+2000-U+200A, etc.): word break
 /// - Valid UTF-8 multi-byte printable chars: word content
-/// - Invalid UTF-8 encoding errors: word break (matches GNU mbrtowc error handling)
+/// - Invalid UTF-8 encoding errors: transparent (matches GNU mbrtowc which skips
+///   1 byte on error without changing in_word state)
 ///
 /// Optimized with ASCII run skipping: when inside a word of printable ASCII,
 /// skips remaining non-space ASCII bytes without per-byte table lookups.
@@ -472,8 +474,8 @@ fn count_words_utf8(data: &[u8]) -> u64 {
             i += 1;
         } else if b < 0xC2 {
             // Invalid UTF-8: bare continuation byte (0x80-0xBF) or overlong (0xC0-0xC1)
-            // Encoding error breaks word state (matching GNU mbrtowc error handling)
-            in_word = false;
+            // Encoding error is transparent — matches GNU mbrtowc which skips 1 byte
+            // without changing in_word state on error
             i += 1;
         } else if b < 0xE0 {
             if i + 1 < len && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80 {
@@ -487,8 +489,7 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                 }
                 i += 2;
             } else {
-                // Invalid sequence — encoding error breaks word
-                in_word = false;
+                // Incomplete sequence — transparent (skip 1 byte, no state change)
                 i += 1;
             }
         } else if b < 0xF0 {
@@ -507,8 +508,7 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                 }
                 i += 3;
             } else {
-                // Encoding error breaks word
-                in_word = false;
+                // Incomplete sequence — transparent (skip 1 byte, no state change)
                 i += 1;
             }
         } else if b < 0xF5 {
@@ -529,13 +529,11 @@ fn count_words_utf8(data: &[u8]) -> u64 {
                 }
                 i += 4;
             } else {
-                // Encoding error breaks word
-                in_word = false;
+                // Incomplete sequence — transparent (skip 1 byte, no state change)
                 i += 1;
             }
         } else {
-            // Invalid byte >= 0xF5 — encoding error breaks word
-            in_word = false;
+            // Invalid byte >= 0xF5 — transparent (skip, no state change)
             i += 1;
         }
     }
@@ -558,7 +556,8 @@ pub fn count_lines_words(data: &[u8], utf8: bool) -> (u64, u64) {
 /// Fused lines+words counting in UTF-8 mode (single pass).
 /// Avoids separate memchr pass for newlines by counting them inline with words.
 /// Uses 3-state logic for ASCII (matching GNU wc 9.4) plus UTF-8 decoding:
-///   - Encoding errors break words (matching GNU mbrtowc error handling)
+///   - Encoding errors are transparent (matching GNU mbrtowc which skips 1 byte
+///     on error without changing in_word state)
 ///   - ASCII control chars are transparent (don't affect word state)
 ///   - Printable ASCII and valid multi-byte chars are word content
 fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
@@ -587,8 +586,7 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
             // class == 0: transparent — no state change
             i += 1;
         } else if b < 0xC2 {
-            // Invalid UTF-8: bare continuation or overlong — encoding error breaks word
-            in_word = false;
+            // Invalid UTF-8: bare continuation or overlong — transparent (skip, no state change)
             i += 1;
         } else if b < 0xE0 {
             if i + 1 < len && (unsafe { *data.get_unchecked(i + 1) } & 0xC0) == 0x80 {
@@ -602,7 +600,7 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                 }
                 i += 2;
             } else {
-                in_word = false;
+                // Incomplete sequence — transparent (skip 1 byte, no state change)
                 i += 1;
             }
         } else if b < 0xF0 {
@@ -621,7 +619,7 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                 }
                 i += 3;
             } else {
-                in_word = false;
+                // Incomplete sequence — transparent (skip 1 byte, no state change)
                 i += 1;
             }
         } else if b < 0xF5 {
@@ -642,12 +640,11 @@ fn count_lines_words_utf8_fused(data: &[u8]) -> (u64, u64) {
                 }
                 i += 4;
             } else {
-                in_word = false;
+                // Incomplete sequence — transparent (skip 1 byte, no state change)
                 i += 1;
             }
         } else {
-            // Invalid byte >= 0xF5 — encoding error breaks word
-            in_word = false;
+            // Invalid byte >= 0xF5 — transparent (skip, no state change)
             i += 1;
         }
     }
