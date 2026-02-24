@@ -102,7 +102,6 @@ fn main() {
                             show_processor = true;
                             show_hardware = true;
                             show_os = true;
-            
                         }
                         's' => show_sysname = true,
                         'n' => show_nodename = true,
