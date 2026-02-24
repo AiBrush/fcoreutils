@@ -25,10 +25,12 @@ static SIGPIPE_WAS_IGNORED: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 #[inline(always)]
 unsafe fn probe_sigpipe() {
-    let mut old: libc::sigaction = std::mem::zeroed();
-    libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut old);
-    if old.sa_sigaction == libc::SIG_IGN {
-        SIGPIPE_WAS_IGNORED.store(true, Ordering::Relaxed);
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut old);
+        if old.sa_sigaction == libc::SIG_IGN {
+            SIGPIPE_WAS_IGNORED.store(true, Ordering::Relaxed);
+        }
     }
 }
 
