@@ -738,6 +738,10 @@ fn compute_xfrm_key(key: &[u8]) -> Option<Vec<u8>> {
     c_buf[..key.len()].copy_from_slice(key);
     // c_buf is zero-terminated from vec init
     let needed = unsafe { libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0) };
+    // strxfrm returns (size_t)-1 on error (e.g. invalid multibyte sequence)
+    if needed == usize::MAX {
+        return None;
+    }
     let mut out = vec![0u8; needed + 1];
     unsafe {
         libc::strxfrm(
@@ -751,7 +755,7 @@ fn compute_xfrm_key(key: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Compute a strxfrm collation key, reusing `c_buf` to reduce allocations.
-/// Returns `None` if the key contains interior null bytes.
+/// Returns `None` if the key contains interior null bytes or strxfrm fails.
 fn compute_xfrm_key_reuse(key: &[u8], c_buf: &mut Vec<u8>) -> Option<Vec<u8>> {
     if key.is_empty() {
         return Some(Vec::new());
@@ -765,6 +769,10 @@ fn compute_xfrm_key_reuse(key: &[u8], c_buf: &mut Vec<u8>) -> Option<Vec<u8>> {
     c_buf[..key.len()].copy_from_slice(key);
     c_buf[key.len()] = 0;
     let needed = unsafe { libc::strxfrm(std::ptr::null_mut(), c_buf.as_ptr() as *const _, 0) };
+    // strxfrm returns (size_t)-1 on error (e.g. invalid multibyte sequence)
+    if needed == usize::MAX {
+        return None;
+    }
     let mut out = vec![0u8; needed + 1];
     unsafe {
         libc::strxfrm(
@@ -2869,15 +2877,23 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     && !opts.has_sort_type()
                     && !is_c_locale();
 
-                if is_locale_only {
+                // Check if any key contains null bytes (strxfrm can't handle them).
+                // If so, skip the strxfrm path entirely to avoid comparing
+                // strxfrm output against raw bytes (incompatible domains).
+                let has_null_keys = is_locale_only
+                    && key_offs
+                        .iter()
+                        .any(|&(sa, ea)| memchr::memchr(0, &data[sa..ea]).is_some());
+
+                if is_locale_only && !has_null_keys {
                     // Pre-compute strxfrm collation keys, then sort with memcmp.
-                    // Keys containing null bytes get raw bytes (strxfrm can't handle them).
                     let xfrm_keys: Vec<Vec<u8>> = if num_lines > 10_000 {
                         key_offs
                             .par_iter()
                             .map(|&(sa, ea)| {
                                 let key = &data[sa..ea];
-                                compute_xfrm_key(key).unwrap_or_else(|| key.to_vec())
+                                // unwrap is safe: we verified no null bytes above
+                                compute_xfrm_key(key).unwrap_or_default()
                             })
                             .collect()
                     } else {
@@ -2886,8 +2902,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                             .iter()
                             .map(|&(sa, ea)| {
                                 let key = &data[sa..ea];
-                                compute_xfrm_key_reuse(key, &mut c_buf)
-                                    .unwrap_or_else(|| key.to_vec())
+                                compute_xfrm_key_reuse(key, &mut c_buf).unwrap_or_default()
                             })
                             .collect()
                     };
@@ -3030,10 +3045,22 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             .collect();
 
         // Pre-compute strxfrm collation keys for locale-aware keys (parallel).
-        // Keys containing null bytes fall back to raw bytes (strxfrm can't handle them).
-        let per_key_xfrm: Vec<Option<Vec<Vec<u8>>>> = (0..num_keys)
+        // If any key in a locale-key column has null bytes, disable strxfrm
+        // for that column to avoid comparing strxfrm output against raw bytes.
+        let key_has_nulls: Vec<bool> = (0..num_keys)
             .map(|ki| {
                 if !key_needs_locale[ki] {
+                    return false;
+                }
+                per_key_offs[ki]
+                    .iter()
+                    .any(|&(sa, ea)| memchr::memchr(0, &data[sa..ea]).is_some())
+            })
+            .collect();
+
+        let per_key_xfrm: Vec<Option<Vec<Vec<u8>>>> = (0..num_keys)
+            .map(|ki| {
+                if !key_needs_locale[ki] || key_has_nulls[ki] {
                     return None;
                 }
                 let ko = &per_key_offs[ki];
@@ -3041,7 +3068,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     ko.par_iter()
                         .map(|&(sa, ea)| {
                             let key = &data[sa..ea];
-                            compute_xfrm_key(key).unwrap_or_else(|| key.to_vec())
+                            compute_xfrm_key(key).unwrap_or_default()
                         })
                         .collect()
                 } else {
@@ -3049,7 +3076,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     ko.iter()
                         .map(|&(sa, ea)| {
                             let key = &data[sa..ea];
-                            compute_xfrm_key_reuse(key, &mut c_buf).unwrap_or_else(|| key.to_vec())
+                            compute_xfrm_key_reuse(key, &mut c_buf).unwrap_or_default()
                         })
                         .collect()
                 };
