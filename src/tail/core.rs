@@ -516,6 +516,8 @@ pub fn tail_file(
                 }
             }
             TailMode::LinesFrom(n) => {
+                // Flush BufWriter before sendfile may bypass it
+                out.flush()?;
                 // Streaming forward: skip N-1 lines, output rest
                 match tail_lines_from_streaming_file(path, *n, delimiter, out) {
                     Ok(_) => return Ok(true),
@@ -685,13 +687,13 @@ pub fn follow_file(filename: &str, config: &TailConfig, out: &mut impl Write) ->
             let stdout = io::stdout();
             let out_fd = stdout.as_raw_fd();
             let mut offset = last_size as libc::off_t;
-            let mut remaining = (current_size - last_size) as usize;
+            let mut remaining = current_size - last_size; // u64, safe on 32-bit
 
             while remaining > 0 {
-                let chunk = remaining.min(0x7ffff000);
+                let chunk = remaining.min(0x7fff_f000) as usize;
                 let ret = unsafe { libc::sendfile(out_fd, in_fd, &mut offset, chunk) };
                 if ret > 0 {
-                    remaining -= ret as usize;
+                    remaining -= ret as u64;
                 } else if ret == 0 {
                     break;
                 } else {
