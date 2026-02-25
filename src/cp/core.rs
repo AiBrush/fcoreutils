@@ -424,6 +424,7 @@ fn copy_file_with_meta(
     #[cfg(target_os = "linux")]
     {
         if matches!(config.reflink, ReflinkMode::Auto | ReflinkMode::Always) {
+            use std::os::unix::fs::OpenOptionsExt;
             use std::os::unix::io::AsRawFd;
             // FICLONE = _IOW(0x94, 9, int) from linux/fs.h
             const FICLONE: libc::c_ulong = 0x40049409;
@@ -439,6 +440,7 @@ fn copy_file_with_meta(
                         .write(true)
                         .create(true)
                         .truncate(true)
+                        .mode(src_meta.mode())
                         .open(dst);
                     if let Ok(dst_file) = dst_file {
                         // SAFETY: Both file descriptors are valid (files are open),

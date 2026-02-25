@@ -1702,9 +1702,16 @@ pub fn hash_files_auto(paths: &[&Path], algo: HashAlgorithm) -> Vec<io::Result<S
         return vec![hash_file_nostat(algo, paths[0])];
     }
 
-    // Sample first file to estimate workload. One stat (~2µs) to save
-    // potentially 3-6ms of thread overhead for small-file workloads.
-    let sample_size = std::fs::metadata(paths[0]).map(|m| m.len()).unwrap_or(0);
+    // Sample up to 3 files (max size) to correctly dispatch mixed workloads
+    // like `md5sum small.txt big1.gb big2.gb`. Costs at most 3 stat calls (~6µs)
+    // to save potentially 3-6ms of thread overhead for small-file workloads.
+    let sample_size = paths
+        .iter()
+        .take(3)
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .max()
+        .unwrap_or(0);
 
     if sample_size < 65536 {
         // Small files: sequential loop with hash_file_nostat (no fstat per file).
