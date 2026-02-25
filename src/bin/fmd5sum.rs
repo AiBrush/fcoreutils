@@ -451,9 +451,12 @@ fn main() {
                     }
                     Err(e) => {
                         // Bypass BufWriter — output_buf is already a batch buffer.
-                        // out.flush() is a no-op here (multi-file path never
-                        // writes to BufWriter directly).
                         if !output_buf.is_empty() {
+                            debug_assert_eq!(
+                                out.buffer().len(),
+                                0,
+                                "BufWriter had buffered data before bypass write"
+                            );
                             let _ = out.get_mut().write_all(&output_buf);
                             output_buf.clear();
                         }
@@ -464,10 +467,12 @@ fn main() {
             }
             if !output_buf.is_empty() {
                 // Bypass BufWriter — output_buf is already a batch buffer.
-                // out.flush() is a no-op (multi-file path never writes to
-                // BufWriter directly).
+                debug_assert_eq!(
+                    out.buffer().len(),
+                    0,
+                    "BufWriter had buffered data before bypass write"
+                );
                 let _ = out.get_mut().write_all(&output_buf);
-                output_buf.clear();
             }
         }
     }
