@@ -252,7 +252,12 @@ fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
         }
     }
     if start < line.len() {
-        output.extend_from_slice(&line[start..]);
+        let tail = &line[start..];
+        if is_ascii_simple(tail) {
+            output.extend_from_slice(tail);
+        } else {
+            fold_one_line_column(tail, width, true, output);
+        }
     }
 }
 
