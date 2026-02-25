@@ -507,13 +507,13 @@ fn split_by_number(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io:
         ));
     }
 
-    // Read input data
-    let data = if input_path == "-" {
+    // Read input data (mmap for regular files, read for stdin)
+    let data: crate::common::io::FileData = if input_path == "-" {
         let mut buf = Vec::new();
         io::stdin().lock().read_to_end(&mut buf)?;
-        buf
+        crate::common::io::FileData::Owned(buf)
     } else {
-        fs::read(input_path)?
+        crate::common::io::read_file(Path::new(input_path))?
     };
 
     let total = data.len() as u64;

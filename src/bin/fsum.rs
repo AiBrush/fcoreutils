@@ -87,8 +87,72 @@ fn parse_args() -> Cli {
     cli
 }
 
-/// Streaming checksum using BufReader with 8MB buffer.
-/// Avoids loading entire file into memory.
+/// Single BSD checksum step: rotate right through carry, add byte, mask to 16 bits.
+/// Serial: each step depends on the previous checksum value.
+#[inline(always)]
+fn bsd_step(checksum: u32, byte: u8) -> u32 {
+    let rotated = (checksum >> 1) + ((checksum & 1) << 15);
+    (rotated + u32::from(byte)) & 0xFFFF
+}
+
+/// Sum all bytes in a slice using 8-wide unrolled additions for auto-vectorization.
+#[inline(always)]
+fn sysv_sum_bytes(data: &[u8]) -> u64 {
+    let mut sum: u64 = 0;
+    let chunks = data.chunks_exact(8);
+    let remainder = chunks.remainder();
+    for chunk in chunks {
+        sum += u64::from(chunk[0])
+            + u64::from(chunk[1])
+            + u64::from(chunk[2])
+            + u64::from(chunk[3])
+            + u64::from(chunk[4])
+            + u64::from(chunk[5])
+            + u64::from(chunk[6])
+            + u64::from(chunk[7]);
+    }
+    for &byte in remainder {
+        sum += u64::from(byte);
+    }
+    sum
+}
+
+/// Fold a 64-bit byte sum into a 16-bit SysV checksum.
+#[inline(always)]
+fn sysv_fold(sum: u64) -> u32 {
+    let mut r = sum as u32;
+    r = (r & 0xFFFF) + (r >> 16);
+    r = (r & 0xFFFF) + (r >> 16);
+    r
+}
+
+/// Compute a complete SysV checksum for a slice: sum bytes then fold.
+#[inline(always)]
+fn sysv_checksum(data: &[u8]) -> u32 {
+    sysv_fold(sysv_sum_bytes(data))
+}
+
+/// Checksum a slice (used for all regular files via read_file).
+fn process_slice(data: &[u8], algorithm: Algorithm) -> (u32, u64) {
+    let total_bytes = data.len() as u64;
+    match algorithm {
+        Algorithm::Bsd => {
+            let mut checksum: u32 = 0;
+            for &byte in data {
+                checksum = bsd_step(checksum, byte);
+            }
+            let blocks = total_bytes.div_ceil(1024);
+            (checksum, blocks)
+        }
+        Algorithm::SysV => {
+            let checksum = sysv_checksum(data);
+            let blocks = total_bytes.div_ceil(512);
+            (checksum, blocks)
+        }
+    }
+}
+
+/// Streaming checksum using BufReader with 8MB buffer (for stdin).
 /// Unrolled inner loops enable auto-vectorization for higher throughput.
 fn process_streaming<R: io::Read>(reader: R, algorithm: Algorithm) -> io::Result<(u32, u64)> {
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
@@ -104,22 +168,8 @@ fn process_streaming<R: io::Read>(reader: R, algorithm: Algorithm) -> io::Result
                 }
                 let n = buf.len();
                 total_bytes += n as u64;
-                // Unrolled 4x for better instruction-level parallelism
-                let chunks = buf.chunks_exact(4);
-                let remainder = chunks.remainder();
-                for chunk in chunks {
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(chunk[0])) & 0xFFFF;
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(chunk[1])) & 0xFFFF;
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(chunk[2])) & 0xFFFF;
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(chunk[3])) & 0xFFFF;
-                }
-                for &byte in remainder {
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(byte)) & 0xFFFF;
+                for &byte in buf {
+                    checksum = bsd_step(checksum, byte);
                 }
                 reader.consume(n);
             }
@@ -127,7 +177,7 @@ fn process_streaming<R: io::Read>(reader: R, algorithm: Algorithm) -> io::Result
             Ok((checksum, blocks))
         }
         Algorithm::SysV => {
-            let mut sum: u32 = 0;
+            let mut sum: u64 = 0;
             loop {
                 let buf = reader.fill_buf()?;
                 if buf.is_empty() {
@@ -135,29 +185,12 @@ fn process_streaming<R: io::Read>(reader: R, algorithm: Algorithm) -> io::Result
                 }
                 let n = buf.len();
                 total_bytes += n as u64;
-                // Unrolled 8-wide accumulation enables auto-vectorization
-                let chunks = buf.chunks_exact(8);
-                let remainder = chunks.remainder();
-                for chunk in chunks {
-                    sum += u32::from(chunk[0])
-                        + u32::from(chunk[1])
-                        + u32::from(chunk[2])
-                        + u32::from(chunk[3])
-                        + u32::from(chunk[4])
-                        + u32::from(chunk[5])
-                        + u32::from(chunk[6])
-                        + u32::from(chunk[7]);
-                }
-                for &byte in remainder {
-                    sum += u32::from(byte);
-                }
+                sum += sysv_sum_bytes(buf);
                 reader.consume(n);
             }
-            let mut r = sum;
-            r = (r & 0xFFFF) + (r >> 16);
-            r = (r & 0xFFFF) + (r >> 16);
+            let checksum = sysv_fold(sum);
             let blocks = total_bytes.div_ceil(512);
-            Ok((r, blocks))
+            Ok((checksum, blocks))
         }
     }
 }
@@ -175,8 +208,8 @@ fn main() {
         let result = if filename == "-" {
             process_streaming(io::stdin().lock(), cli.algorithm)
         } else {
-            match std::fs::File::open(filename) {
-                Ok(file) => process_streaming(file, cli.algorithm),
+            match coreutils_rs::common::io::read_file(std::path::Path::new(filename)) {
+                Ok(data) => Ok(process_slice(&data, cli.algorithm)),
                 Err(e) => {
                     eprintln!(
                         "{}: {}: {}",

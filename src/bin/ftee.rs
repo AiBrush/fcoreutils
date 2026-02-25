@@ -11,7 +11,9 @@ fn main() {
 #[cfg(unix)]
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 #[cfg(unix)]
 use std::process;
 
@@ -140,8 +142,8 @@ fn main() {
         output_error = OutputErrorMode::WarnNoPipe;
     }
 
-    // Open all output files
-    let mut outputs: Vec<(String, BufWriter<File>)> = Vec::new();
+    // Open all output files — store raw fds for direct syscall writes
+    let mut outputs: Vec<(String, File)> = Vec::new();
     let mut exit_code = 0;
 
     for path in &files {
@@ -151,7 +153,7 @@ fn main() {
             File::create(path)
         };
         match result {
-            Ok(f) => outputs.push((path.clone(), BufWriter::new(f))),
+            Ok(f) => outputs.push((path.clone(), f)),
             Err(e) => {
                 eprintln!(
                     "{}: {}: {}",
@@ -164,83 +166,81 @@ fn main() {
         }
     }
 
-    let stdin = io::stdin();
-    let mut reader = BufReader::new(stdin.lock());
-    let stdout = io::stdout();
-    let mut stdout_writer = BufWriter::new(stdout.lock());
+    // Raw fd I/O: bypass BufReader/BufWriter overhead entirely.
+    // Uses a 1MB buffer with direct libc::read/write syscalls.
+    let stdin_fd = libc::STDIN_FILENO;
+    let stdout_fd = libc::STDOUT_FILENO;
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut stdout_ok = true;
+    let mut to_remove = Vec::new();
 
     loop {
-        let len = {
-            let buf = match reader.fill_buf() {
-                Ok(buf) => {
-                    if buf.is_empty() {
-                        break;
-                    }
-                    buf
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => {
-                    eprintln!("{}: read error: {}", TOOL_NAME, e);
-                    process::exit(1);
-                }
-            };
+        let n = unsafe { libc::read(stdin_fd, buf.as_mut_ptr().cast(), buf.len() as _) };
+        if n == 0 {
+            break;
+        }
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            eprintln!("{}: read error: {}", TOOL_NAME, err);
+            process::exit(1);
+        }
+        let data = &buf[..n as usize];
 
-            // Write to stdout
-            if let Err(e) = stdout_writer.write_all(buf) {
-                if handle_write_error(TOOL_NAME, "standard output", &e, output_error) {
+        // Write to stdout
+        // Under --output-error=warn, GNU tee keeps writing and warns on each chunk,
+        // so only permanently suppress stdout writes for BrokenPipe (unrecoverable).
+        if stdout_ok && let Err(e) = write_all_raw(stdout_fd, data) {
+            if handle_write_error(TOOL_NAME, "standard output", &e, output_error) {
+                process::exit(1);
+            }
+            exit_code = 1;
+            if e.kind() == io::ErrorKind::BrokenPipe {
+                stdout_ok = false;
+            }
+        }
+
+        // Write to each file
+        to_remove.clear();
+        for (idx, (path, file)) in outputs.iter().enumerate() {
+            if let Err(e) = write_all_raw(file.as_raw_fd(), data) {
+                if handle_write_error(TOOL_NAME, path, &e, output_error) {
                     process::exit(1);
                 }
                 exit_code = 1;
+                to_remove.push(idx);
             }
-
-            // Write to each file
-            let mut to_remove = Vec::new();
-            for (idx, (path, writer)) in outputs.iter_mut().enumerate() {
-                if let Err(e) = writer.write_all(buf) {
-                    if handle_write_error(TOOL_NAME, path, &e, output_error) {
-                        process::exit(1);
-                    }
-                    exit_code = 1;
-                    to_remove.push(idx);
-                }
-            }
-            // Remove failed outputs (iterate in reverse to preserve indices)
-            for idx in to_remove.into_iter().rev() {
-                outputs.remove(idx);
-            }
-
-            buf.len()
-        };
-
-        reader.consume(len);
-    }
-
-    // Flush stdout
-    if let Err(e) = stdout_writer.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe
-    {
-        eprintln!(
-            "{}: standard output: {}",
-            TOOL_NAME,
-            coreutils_rs::common::io_error_msg(&e)
-        );
-        exit_code = 1;
-    }
-
-    // Flush all files
-    for (path, mut writer) in outputs {
-        if let Err(e) = writer.flush() {
-            eprintln!(
-                "{}: {}: {}",
-                TOOL_NAME,
-                path,
-                coreutils_rs::common::io_error_msg(&e)
-            );
-            exit_code = 1;
+        }
+        for idx in to_remove.iter().rev() {
+            outputs.remove(*idx);
         }
     }
 
     process::exit(exit_code);
+}
+
+/// Write all bytes to a raw fd, retrying on short writes and EINTR.
+#[cfg(unix)]
+fn write_all_raw(fd: i32, mut data: &[u8]) -> io::Result<()> {
+    while !data.is_empty() {
+        let ret = unsafe { libc::write(fd, data.as_ptr().cast(), data.len() as _) };
+        if ret > 0 {
+            data = &data[ret as usize..];
+        } else if ret == 0 {
+            // POSIX: blocking write(2) with non-zero count cannot return 0 on pipes/regular files.
+            // Defensive guard only — should be unreachable in practice.
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

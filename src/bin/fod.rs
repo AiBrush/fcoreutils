@@ -3,7 +3,6 @@
 // Usage: od [OPTION]... [FILE]...
 //        od [-abcdfilosx] [FILE] [[+]OFFSET[.][b]]
 
-use std::fs::File;
 use std::io::{self, Read};
 use std::process;
 
@@ -323,8 +322,23 @@ fn main() {
             eprintln!("{}: {}", TOOL_NAME, e);
             process::exit(1);
         }
+    } else if operands.len() == 1 && operands[0] != "-" {
+        // Single file: read_file uses O_NOATIME + exact-size preallocation
+        match coreutils_rs::common::io::read_file(std::path::Path::new(&operands[0])) {
+            Ok(data) => {
+                if let Err(e) = od_process(data.as_ref(), &mut out, &config) {
+                    eprintln!("{}: {}", TOOL_NAME, e);
+                    process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("{}: {}: {}", TOOL_NAME, operands[0], e);
+                process::exit(1);
+            }
+        }
     } else {
-        // Concatenate all files
+        // Multiple files: concatenate via std::fs::read (avoids mmap overhead since data
+        // is immediately copied into combined buffer anyway).
         let mut combined = Vec::new();
         for path in &operands {
             if path == "-" {
@@ -338,14 +352,9 @@ fn main() {
                     });
                 combined.extend_from_slice(&buf);
             } else {
-                match File::open(path) {
-                    Ok(mut f) => {
-                        let mut buf = Vec::new();
-                        f.read_to_end(&mut buf).unwrap_or_else(|e| {
-                            eprintln!("{}: {}: {}", TOOL_NAME, path, e);
-                            process::exit(1);
-                        });
-                        combined.extend_from_slice(&buf);
+                match std::fs::read(path) {
+                    Ok(data) => {
+                        combined.extend_from_slice(&data);
                     }
                     Err(e) => {
                         eprintln!("{}: {}: {}", TOOL_NAME, path, e);
