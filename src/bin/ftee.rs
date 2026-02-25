@@ -172,6 +172,7 @@ fn main() {
     let stdout_fd = io::stdout().as_raw_fd();
     let mut buf = vec![0u8; 1024 * 1024];
     let mut stdout_ok = true;
+    let mut to_remove = Vec::new();
 
     loop {
         let n = unsafe { libc::read(stdin_fd, buf.as_mut_ptr().cast(), buf.len() as _) };
@@ -188,17 +189,23 @@ fn main() {
         }
         let data = &buf[..n as usize];
 
-        // Write to stdout (skip if a previous write failed to avoid repeated EPIPE)
-        if stdout_ok && let Err(e) = write_all_raw(stdout_fd, data) {
-            if handle_write_error(TOOL_NAME, "standard output", &e, output_error) {
-                process::exit(1);
+        // Write to stdout
+        // Under --output-error=warn, GNU tee keeps writing and warns on each chunk,
+        // so only permanently suppress stdout writes for BrokenPipe (unrecoverable).
+        if stdout_ok {
+            if let Err(e) = write_all_raw(stdout_fd, data) {
+                if handle_write_error(TOOL_NAME, "standard output", &e, output_error) {
+                    process::exit(1);
+                }
+                exit_code = 1;
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    stdout_ok = false;
+                }
             }
-            exit_code = 1;
-            stdout_ok = false;
         }
 
         // Write to each file
-        let mut to_remove = Vec::new();
+        to_remove.clear();
         for (idx, (path, file)) in outputs.iter().enumerate() {
             if let Err(e) = write_all_raw(file.as_raw_fd(), data) {
                 if handle_write_error(TOOL_NAME, path, &e, output_error) {
@@ -208,8 +215,8 @@ fn main() {
                 to_remove.push(idx);
             }
         }
-        for idx in to_remove.into_iter().rev() {
-            outputs.remove(idx);
+        for idx in to_remove.iter().rev() {
+            outputs.remove(*idx);
         }
     }
 
