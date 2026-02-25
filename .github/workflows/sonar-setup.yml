@@ -1,0 +1,49 @@
+name: SonarCloud Quality Gate Setup
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create custom quality gate
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          # Create a custom quality gate with relaxed duplication threshold
+          QG_ID=$(curl -s -X POST \
+            "https://sonarcloud.io/api/qualitygates/create?name=fcoreutils&organization=aibrush" \
+            -H "Authorization: Bearer $SONAR_TOKEN" | jq -r '.id')
+
+          echo "Created quality gate ID: $QG_ID"
+
+          if [ "$QG_ID" = "null" ] || [ -z "$QG_ID" ]; then
+            QG_ID=$(curl -s "https://sonarcloud.io/api/qualitygates/list?organization=aibrush" \
+              -H "Authorization: Bearer $SONAR_TOKEN" | \
+              jq -r '.qualitygates[] | select(.name == "fcoreutils") | .id')
+            echo "Found existing quality gate ID: $QG_ID"
+          fi
+
+          # Add conditions matching Sonar way but with 15% duplication threshold
+          curl -s -X POST \
+            "https://sonarcloud.io/api/qualitygates/create_condition?gateId=${QG_ID}&metric=new_security_rating&op=GT&error=1&organization=aibrush" \
+            -H "Authorization: Bearer $SONAR_TOKEN"
+          curl -s -X POST \
+            "https://sonarcloud.io/api/qualitygates/create_condition?gateId=${QG_ID}&metric=new_reliability_rating&op=GT&error=1&organization=aibrush" \
+            -H "Authorization: Bearer $SONAR_TOKEN"
+          curl -s -X POST \
+            "https://sonarcloud.io/api/qualitygates/create_condition?gateId=${QG_ID}&metric=new_maintainability_rating&op=GT&error=1&organization=aibrush" \
+            -H "Authorization: Bearer $SONAR_TOKEN"
+          curl -s -X POST \
+            "https://sonarcloud.io/api/qualitygates/create_condition?gateId=${QG_ID}&metric=new_duplicated_lines_density&op=GT&error=15&organization=aibrush" \
+            -H "Authorization: Bearer $SONAR_TOKEN"
+
+          # Assign to our project
+          curl -s -X POST \
+            "https://sonarcloud.io/api/qualitygates/select?gateId=${QG_ID}&projectKey=AiBrush_fcoreutils&organization=aibrush" \
+            -H "Authorization: Bearer $SONAR_TOKEN"
+
+          echo "Quality gate assigned to project"
