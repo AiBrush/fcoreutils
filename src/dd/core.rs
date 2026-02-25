@@ -354,7 +354,9 @@ fn has_conversions(conv: &DdConv) -> bool {
     conv.lcase || conv.ucase || conv.swab || conv.sync
 }
 
-/// Check if any iflag/oflag fields are non-default.
+/// Check if any iflag/oflag fields require the generic path.
+/// Note: noatime is excluded because the raw path already uses O_NOATIME.
+/// fullblock is excluded because the raw read loop already reads full blocks.
 #[cfg(target_os = "linux")]
 fn has_flags(flags: &DdFlags) -> bool {
     flags.append
@@ -362,9 +364,7 @@ fn has_flags(flags: &DdFlags) -> bool {
         || flags.directory
         || flags.dsync
         || flags.sync
-        || flags.fullblock
         || flags.nonblock
-        || flags.noatime
         || flags.nocache
         || flags.noctty
         || flags.nofollow
@@ -421,12 +421,17 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         )
     };
     let in_fd = if in_fd < 0 {
-        // Retry without O_NOATIME (fails on files we don't own)
-        let fd = unsafe { libc::open(in_cstr.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-        if fd < 0 {
-            return Some(Err(io::Error::last_os_error()));
+        let first_err = io::Error::last_os_error();
+        if first_err.raw_os_error() == Some(libc::EPERM) {
+            // Retry without O_NOATIME — only EPERM means "file not owned by us"
+            let fd = unsafe { libc::open(in_cstr.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                return Some(Err(io::Error::last_os_error()));
+            }
+            fd
+        } else {
+            return Some(Err(first_err));
         }
-        fd
     } else {
         in_fd
     };
@@ -487,9 +492,9 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
                         if err.kind() == io::ErrorKind::Interrupted {
                             continue;
                         }
-                        // Non-EINTR error during skip — log and continue
+                        // Non-EINTR error during skip — log and abort skip phase
                         eprintln!("dd: error skipping input: {}", err);
-                        break;
+                        break 'skip;
                     }
                 }
             }
@@ -512,14 +517,12 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
             }
         };
         if unsafe { libc::lseek(out_fd, offset, libc::SEEK_SET) } < 0 {
+            let err = io::Error::last_os_error();
             unsafe {
                 libc::close(in_fd);
                 libc::close(out_fd);
             }
-            return Some(Err(io::Error::new(
-                io::ErrorKind::Other,
-                "failed to seek output",
-            )));
+            return Some(Err(err));
         }
     }
 
