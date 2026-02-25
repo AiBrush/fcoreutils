@@ -239,6 +239,30 @@ fn decode_utf8_at(data: &[u8], pos: usize) -> (Option<char>, usize) {
     }
 }
 
+/// Insert a line break, preferring the last space position when -s is active.
+/// Returns the new column position after the break.
+#[inline]
+fn insert_line_break(
+    output: &mut Vec<u8>,
+    last_space_out_pos: &mut Option<usize>,
+    break_at_spaces: bool,
+) -> usize {
+    if break_at_spaces {
+        if let Some(sp_pos) = *last_space_out_pos {
+            let tail_start = sp_pos + 1;
+            let tail_end = output.len();
+            output.push(0);
+            output.copy_within(tail_start..tail_end, tail_start + 1);
+            output[tail_start] = b'\n';
+            *last_space_out_pos = None;
+            return recalc_column(&output[tail_start + 1..]);
+        }
+    }
+    output.push(b'\n');
+    *last_space_out_pos = None;
+    0
+}
+
 /// Process a single line (no newlines) in column mode, writing to output.
 /// Handles UTF-8 characters with proper display width.
 fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
@@ -254,30 +278,14 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
             let tab_width = ((col / 8) + 1) * 8 - col;
 
             if col + tab_width > width && tab_width > 0 {
-                if break_at_spaces {
-                    if let Some(sp_pos) = last_space_out_pos {
-                        let tail_start = sp_pos + 1;
-                        let tail_end = output.len();
-                        output.push(0);
-                        output.copy_within(tail_start..tail_end, tail_start + 1);
-                        output[tail_start] = b'\n';
-                        col = recalc_column(&output[tail_start + 1..]);
-                        last_space_out_pos = None;
-                    } else {
-                        output.push(b'\n');
-                        col = 0;
-                    }
-                } else {
-                    output.push(b'\n');
-                    col = 0;
-                }
+                col = insert_line_break(output, &mut last_space_out_pos, break_at_spaces);
             }
 
             if break_at_spaces {
                 last_space_out_pos = Some(output.len());
             }
             output.push(byte);
-            // Recompute tab_width: col may have changed from recalc_column after space-break
+            // Recompute tab_width: col may have changed after space-break insertion
             col += ((col / 8) + 1) * 8 - col;
             i += 1;
             continue;
@@ -298,23 +306,7 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
 
         // Check if adding this character would exceed width
         if col + cw > width && cw > 0 {
-            if break_at_spaces {
-                if let Some(sp_pos) = last_space_out_pos {
-                    let tail_start = sp_pos + 1;
-                    let tail_end = output.len();
-                    output.push(0);
-                    output.copy_within(tail_start..tail_end, tail_start + 1);
-                    output[tail_start] = b'\n';
-                    col = recalc_column(&output[tail_start + 1..]);
-                    last_space_out_pos = None;
-                } else {
-                    output.push(b'\n');
-                    col = 0;
-                }
-            } else {
-                output.push(b'\n');
-                col = 0;
-            }
+            col = insert_line_break(output, &mut last_space_out_pos, break_at_spaces);
         }
 
         if break_at_spaces && byte == b' ' {
