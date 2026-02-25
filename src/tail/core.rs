@@ -211,7 +211,12 @@ pub fn sendfile_tail_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool>
     use std::os::unix::io::AsRawFd;
     let in_fd = file.as_raw_fd();
     let _ = unsafe {
-        libc::posix_fadvise(in_fd, start as libc::off_t, n as libc::off_t, libc::POSIX_FADV_SEQUENTIAL)
+        libc::posix_fadvise(
+            in_fd,
+            start as libc::off_t,
+            n as libc::off_t,
+            libc::POSIX_FADV_SEQUENTIAL,
+        )
     };
     let mut offset: libc::off_t = start as libc::off_t;
     let mut remaining = n;
@@ -653,7 +658,12 @@ fn sendfile_tail_bytes_from(path: &Path, n: u64, out_fd: i32) -> io::Result<bool
     let in_fd = file.as_raw_fd();
     let output_len = file_size - start;
     let _ = unsafe {
-        libc::posix_fadvise(in_fd, start as libc::off_t, output_len as libc::off_t, libc::POSIX_FADV_SEQUENTIAL)
+        libc::posix_fadvise(
+            in_fd,
+            start as libc::off_t,
+            output_len as libc::off_t,
+            libc::POSIX_FADV_SEQUENTIAL,
+        )
     };
     let mut offset: libc::off_t = start as libc::off_t;
     let mut remaining = output_len;
