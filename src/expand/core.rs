@@ -159,17 +159,22 @@ pub fn expand_bytes(
         }
     }
 
-    // Generic path for backspace handling or tab lists
-    expand_generic(data, tabs, initial_only, out)
+    // Generic path for backspace handling or tab lists.
+    // We already know backspaces are present if we reach here via the Regular path
+    // (the memchr check at line 157 failed), so pass has_backspace=true to avoid
+    // a redundant O(n) scan inside expand_generic.
+    let has_backspace = true;
+    expand_generic(data, tabs, initial_only, has_backspace, out)
 }
 
 /// Fast expand for regular tab stops without -i flag.
-/// Accumulates output into a Vec buffer to minimize write syscalls, then flushes once.
+/// Accumulates output into a buffer and flushes periodically (every 256KB) to bound memory.
 /// Uses memchr2 SIMD scanning to skip non-tab/non-newline runs in bulk.
 fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
     debug_assert!(tab_size > 0, "tab_size must be > 0");
-    // Estimate: tabs expand to tab_size/2 spaces on average
-    let mut output = Vec::with_capacity(data.len() + data.len() / 8);
+    const FLUSH_THRESHOLD: usize = 256 * 1024;
+    let cap = data.len().min(FLUSH_THRESHOLD) + data.len().min(FLUSH_THRESHOLD) / 8;
+    let mut output = Vec::with_capacity(cap);
     let mut column: usize = 0;
     let mut pos: usize = 0;
 
@@ -202,6 +207,12 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
                     push_spaces(&mut output, spaces);
                     column += spaces;
                 }
+
+                // Flush periodically to bound memory usage
+                if output.len() >= FLUSH_THRESHOLD {
+                    out.write_all(&output)?;
+                    output.clear();
+                }
             }
             None => {
                 output.extend_from_slice(&data[pos..]);
@@ -210,7 +221,10 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
         }
     }
 
-    out.write_all(&output)
+    if !output.is_empty() {
+        out.write_all(&output)?;
+    }
+    Ok(())
 }
 
 /// Fast expand for --initial mode with regular tab stops.
@@ -241,7 +255,7 @@ fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
 
         // If this line contains a backspace, fall back to generic for this line only
         if memchr::memchr(b'\x08', line).is_some() {
-            expand_generic(line, &tabs, true, out)?;
+            expand_generic(line, &tabs, true, true, out)?;
             pos = line_end;
             continue;
         }
@@ -283,16 +297,20 @@ fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
 
 /// Generic expand with support for -i flag and tab lists.
 /// Uses memchr2 SIMD scanning when no backspaces are present.
+/// `has_backspace` hint avoids a redundant O(n) scan when the caller already knows.
 fn expand_generic(
     data: &[u8],
     tabs: &TabStops,
     initial_only: bool,
+    has_backspace: bool,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
-    let mut output = Vec::with_capacity(data.len() + data.len() / 8);
+    const FLUSH_THRESHOLD: usize = 256 * 1024;
+    let cap = data.len().min(FLUSH_THRESHOLD) + data.len().min(FLUSH_THRESHOLD) / 8;
+    let mut output = Vec::with_capacity(cap);
 
     // If no backspaces present and not initial-only, use SIMD bulk scanning
-    if !initial_only && memchr::memchr(b'\x08', data).is_none() {
+    if !initial_only && !has_backspace {
         let mut column: usize = 0;
         let mut pos: usize = 0;
 
@@ -313,6 +331,10 @@ fn expand_generic(
                         let spaces = tabs.spaces_to_next(column);
                         push_spaces(&mut output, spaces);
                         column += spaces;
+                    }
+                    if output.len() >= FLUSH_THRESHOLD {
+                        out.write_all(&output)?;
+                        output.clear();
                     }
                 }
                 None => {
@@ -342,6 +364,10 @@ fn expand_generic(
                     output.push(b'\n');
                     column = 0;
                     in_initial = true;
+                    if output.len() >= FLUSH_THRESHOLD {
+                        out.write_all(&output)?;
+                        output.clear();
+                    }
                 }
                 b'\x08' => {
                     output.push(b'\x08');
@@ -360,7 +386,10 @@ fn expand_generic(
         }
     }
 
-    out.write_all(&output)
+    if !output.is_empty() {
+        out.write_all(&output)?;
+    }
+    Ok(())
 }
 
 /// Unexpand spaces to tabs.

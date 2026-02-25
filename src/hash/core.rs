@@ -907,6 +907,13 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         // This is faster than streaming I/O for files that fit in RAM because it
         // avoids thread synchronization, buffer management, and data copying.
         // Falls back to streaming I/O if mmap fails (FUSE, NFS, etc.).
+        //
+        // SAFETY: mmap is safe for regular local files. If the file is truncated
+        // or the backing storage disappears after mapping (e.g. NFS disconnect),
+        // the kernel delivers SIGBUS which will crash the process. This matches
+        // the behavior of other mmap-using tools (wc, cat). The fallback to
+        // streaming I/O (read()) handles mmap failures at map time, but cannot
+        // protect against post-map truncation.
         if file_size >= SMALL_FILE_LIMIT {
             let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
             if let Ok(mmap) = mmap_result {
@@ -929,7 +936,7 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
             }
             #[cfg(not(target_os = "linux"))]
             {
-                // On non-Linux, fall through to hash_file_small for medium or stream for large
+                // On non-Linux, fall through to hash_reader (streaming fallback)
             }
         }
         // Small files (8KB..16MB): single read into thread-local buffer, then single-shot hash.
