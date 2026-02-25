@@ -413,11 +413,16 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         }
     };
 
-    // Open input
-    let in_fd = unsafe { libc::open(in_cstr.as_ptr(), libc::O_RDONLY | libc::O_NOATIME) };
+    // Open input (O_CLOEXEC prevents FD inheritance in child processes)
+    let in_fd = unsafe {
+        libc::open(
+            in_cstr.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOATIME,
+        )
+    };
     let in_fd = if in_fd < 0 {
         // Retry without O_NOATIME (fails on files we don't own)
-        let fd = unsafe { libc::open(in_cstr.as_ptr(), libc::O_RDONLY) };
+        let fd = unsafe { libc::open(in_cstr.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if fd < 0 {
             return Some(Err(io::Error::last_os_error()));
         }
@@ -426,8 +431,8 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         in_fd
     };
 
-    // Open output
-    let mut oflags = libc::O_WRONLY;
+    // Open output (O_CLOEXEC prevents FD inheritance)
+    let mut oflags = libc::O_WRONLY | libc::O_CLOEXEC;
     if config.conv.excl {
         oflags |= libc::O_CREAT | libc::O_EXCL;
     } else if config.conv.nocreat {
@@ -461,19 +466,31 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
             }
         };
         if unsafe { libc::lseek(in_fd, offset, libc::SEEK_SET) } < 0 {
-            // lseek failed (e.g. char device) — read and discard, retrying on EINTR
+            // lseek failed (e.g. char device) — read and discard full blocks
             let mut discard = vec![0u8; config.ibs];
-            for _ in 0..config.skip {
-                loop {
-                    let n =
-                        unsafe { libc::read(in_fd, discard.as_mut_ptr() as *mut _, discard.len()) };
-                    if n < 0 {
+            'skip: for _ in 0..config.skip {
+                let mut skipped = 0usize;
+                while skipped < config.ibs {
+                    let n = unsafe {
+                        libc::read(
+                            in_fd,
+                            discard[skipped..].as_mut_ptr() as *mut _,
+                            config.ibs - skipped,
+                        )
+                    };
+                    if n > 0 {
+                        skipped += n as usize;
+                    } else if n == 0 {
+                        break 'skip; // EOF
+                    } else {
                         let err = io::Error::last_os_error();
                         if err.kind() == io::ErrorKind::Interrupted {
                             continue;
                         }
+                        // Non-EINTR error during skip — log and continue
+                        eprintln!("dd: error skipping input: {}", err);
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -520,6 +537,7 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
 
         // Raw read — retry on EINTR, loop for full block
         let mut total_read = 0usize;
+        let mut read_error = false;
         while total_read < bs {
             let ret = unsafe {
                 libc::read(
@@ -539,6 +557,7 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
                 }
                 if config.conv.noerror {
                     eprintln!("dd: error reading '{}': {}", in_path, err);
+                    read_error = true;
                     break;
                 }
                 unsafe {
@@ -547,6 +566,12 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
                 }
                 return Some(Err(err));
             }
+        }
+
+        // conv=noerror: skip entire bad block (GNU behavior)
+        if read_error {
+            stats.records_in_partial += 1;
+            continue;
         }
 
         if total_read == 0 {
@@ -623,9 +648,10 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         }
     }
 
-    unsafe {
-        libc::close(in_fd);
-        libc::close(out_fd);
+    unsafe { libc::close(in_fd) };
+    // Check close(out_fd) — on NFS, close can report deferred write errors
+    if unsafe { libc::close(out_fd) } < 0 {
+        return Some(Err(io::Error::last_os_error()));
     }
 
     if config.status != StatusLevel::None {
