@@ -316,15 +316,13 @@ fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64, src_mode: u32) -> i
 // ---- Linux copy_file_range optimisation ----
 
 #[cfg(target_os = "linux")]
-fn copy_file_range_linux(src: &Path, dst: &Path, src_mode: u32, src_len: u64) -> io::Result<()> {
+fn copy_file_range_linux(src: &Path, dst: &Path, src_mode: u32) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
     let src_file = std::fs::File::open(src)?;
-    // Use pre-fetched length to avoid redundant fstat syscall.
-    // copy_file_range returns 0 at EOF, so if the file was truncated
-    // between the stat and here, the copy will stop gracefully.
-    let len = src_len;
+    let src_meta = src_file.metadata()?;
+    let len = src_meta.len();
 
     let dst_file = std::fs::OpenOptions::new()
         .write(true)
@@ -470,9 +468,10 @@ fn copy_file_with_meta(
                             ));
                         }
                         // Auto mode: mark FICLONE as unsupported to skip future attempts.
-                        // EOPNOTSUPP (95) and ENOTSUP (same on Linux) indicate the fs
-                        // doesn't support reflinks. Other errors might be transient.
-                        if errno == libc::EOPNOTSUPP || errno == libc::ENOTSUP {
+                        // EOPNOTSUPP: fs doesn't support reflinks (ext4, tmpfs).
+                        // ENOTTY: kernel doesn't recognize FICLONE ioctl (older kernels).
+                        // EINVAL: some configurations return this for unsupported ioctls.
+                        if matches!(errno, libc::EOPNOTSUPP | libc::ENOTTY | libc::EINVAL) {
                             FICLONE_SUPPORTED
                                 .store(FICLONE_UNSUPPORTED, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -489,7 +488,7 @@ fn copy_file_with_meta(
     let src_mode_bits = src_meta.mode();
     #[cfg(target_os = "linux")]
     {
-        match copy_file_range_linux(src, dst, src_mode_bits, src_meta.len()) {
+        match copy_file_range_linux(src, dst, src_mode_bits) {
             Ok(()) => {
                 preserve_attributes_from_meta(src_meta, dst, config)?;
                 return Ok(());
