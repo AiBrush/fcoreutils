@@ -163,6 +163,21 @@ fn test_backspace_column_mode() {
 }
 
 #[test]
+fn test_carriage_return_column_mode() {
+    // CR resets column to 0 (GNU adjust_column compat).
+    // "abcde\rxy\n" with width 4: a=1, b=2, c=3, d=4, e would exceed ->
+    // break before e, then e=1, \r resets to 0, x=1, y=2.
+    let mut out = Vec::new();
+    fold_bytes(b"abcde\rxy\n", 4, false, false, &mut out).unwrap();
+    assert_eq!(out, b"abcd\ne\rxy\n");
+
+    // CR mid-line shouldn't cause a break on its own — just resets column.
+    out.clear();
+    fold_bytes(b"ab\rcd\n", 4, false, false, &mut out).unwrap();
+    assert_eq!(out, b"ab\rcd\n");
+}
+
+#[test]
 fn test_multibyte_utf8_column() {
     // GNU fold on glibc counts each byte as 1 column (multibyte path disabled).
     // é (U+00E9) = 0xC3 0xA9 = 2 bytes.
@@ -191,7 +206,8 @@ fn test_cjk_column_width() {
     fold_bytes("中文\n".as_bytes(), 3, false, false, &mut out).unwrap();
     assert_eq!(out, "中\n文\n".as_bytes());
 
-    // Width 4: breaks mid-character (GNU compat behavior on glibc)
+    // Width 4: breaks mid-character (GNU compat behavior on glibc).
+    // Output is intentionally invalid UTF-8 — this matches GNU fold exactly.
     out.clear();
     fold_bytes("中文\n".as_bytes(), 4, false, false, &mut out).unwrap();
     assert_eq!(out, b"\xe4\xb8\xad\xe6\n\x96\x87\n");

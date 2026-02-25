@@ -184,10 +184,11 @@ fn is_ascii_simple(data: &[u8]) -> bool {
 /// Get the column width and byte length of a byte at `data[pos]`.
 /// Returns (column_width, byte_length) — always (1, 1) for non-special bytes.
 ///
-/// GNU fold on glibc processes bytes individually through adjust_column():
-/// the multibyte code path is disabled by `#if !defined __GLIBC__`.
-/// Each non-special byte increments column by 1 — same as -b mode but with
-/// tab/backspace/CR handling (those are checked by the caller).
+/// GNU fold's multibyte path is guarded by:
+///   `#if HAVE_MBRTOC32 && (! defined __GLIBC__ || defined __UCLIBC__)`
+/// On glibc (every mainstream Linux distro), that condition is false, so
+/// fold counts bytes — one column per byte, same as -b mode.
+/// Tab, backspace, and CR are handled by the caller.
 #[inline]
 fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
     let b = data[pos];
@@ -256,6 +257,14 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
             continue;
         }
 
+        // Handle carriage return: resets column to 0 (GNU adjust_column compat)
+        if byte == b'\r' {
+            output.push(byte);
+            col = 0;
+            i += 1;
+            continue;
+        }
+
         // Handle backspace
         if byte == b'\x08' {
             output.push(byte);
@@ -290,7 +299,10 @@ fn recalc_column(data: &[u8]) -> usize {
     let mut i = 0;
     while i < data.len() {
         let b = data[i];
-        if b == b'\t' {
+        if b == b'\r' {
+            col = 0;
+            i += 1;
+        } else if b == b'\t' {
             col = ((col / 8) + 1) * 8;
             i += 1;
         } else if b == b'\x08' {
