@@ -314,7 +314,7 @@ fn main() {
     };
 
     let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
+    let mut out = io::BufWriter::with_capacity(256 * 1024, stdout.lock());
 
     if operands.is_empty() || (operands.len() == 1 && operands[0] == "-") {
         let stdin = io::stdin();

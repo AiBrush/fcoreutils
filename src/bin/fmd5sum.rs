@@ -256,11 +256,11 @@ fn main() {
     #[cfg(unix)]
     let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
     #[cfg(unix)]
-    let mut out = BufWriter::new(&mut *raw);
+    let mut out = BufWriter::with_capacity(8 * 1024, &mut *raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(8 * 1024, stdout.lock());
     let mut had_error = false;
 
     if cli.check {
@@ -450,19 +450,29 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        // Flush buffered output before writing error to stderr
+                        // Bypass BufWriter — output_buf is already a batch buffer.
                         if !output_buf.is_empty() {
-                            let _ = out.write_all(&output_buf);
+                            debug_assert_eq!(
+                                out.buffer().len(),
+                                0,
+                                "BufWriter had buffered data before bypass write"
+                            );
+                            let _ = out.get_mut().write_all(&output_buf);
                             output_buf.clear();
                         }
-                        let _ = out.flush();
                         eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
                         had_error = true;
                     }
                 }
             }
             if !output_buf.is_empty() {
-                let _ = out.write_all(&output_buf);
+                // Bypass BufWriter — output_buf is already a batch buffer.
+                debug_assert_eq!(
+                    out.buffer().len(),
+                    0,
+                    "BufWriter had buffered data before bypass write"
+                );
+                let _ = out.get_mut().write_all(&output_buf);
             }
         }
     }
