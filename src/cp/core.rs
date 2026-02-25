@@ -6,6 +6,18 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+// FICLONE support cache: avoids repeated failed ioctl attempts on non-reflink filesystems.
+// State: UNKNOWN (0) = not yet tried, YES (1) = reflink works, UNSUPPORTED (2) = skip.
+#[cfg(target_os = "linux")]
+static FICLONE_SUPPORTED: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(FICLONE_UNKNOWN);
+#[cfg(target_os = "linux")]
+const FICLONE_UNKNOWN: u8 = 0;
+#[cfg(target_os = "linux")]
+const FICLONE_YES: u8 = 1;
+#[cfg(target_os = "linux")]
+const FICLONE_UNSUPPORTED: u8 = 2;
+
 /// How to dereference (follow) symbolic links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DerefMode {
@@ -304,13 +316,15 @@ fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64, src_mode: u32) -> i
 // ---- Linux copy_file_range optimisation ----
 
 #[cfg(target_os = "linux")]
-fn copy_file_range_linux(src: &Path, dst: &Path, src_mode: u32) -> io::Result<()> {
+fn copy_file_range_linux(src: &Path, dst: &Path, src_mode: u32, src_len: u64) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
     let src_file = std::fs::File::open(src)?;
-    let src_meta = src_file.metadata()?;
-    let len = src_meta.len();
+    // Use pre-fetched length to avoid redundant fstat syscall.
+    // copy_file_range returns 0 at EOF, so if the file was truncated
+    // between the stat and here, the copy will stop gracefully.
+    let len = src_len;
 
     let dst_file = std::fs::OpenOptions::new()
         .write(true)
@@ -409,6 +423,8 @@ fn copy_file_with_meta(
     }
 
     // Try reflink (FICLONE ioctl) for instant CoW copy on btrfs/XFS.
+    // Uses a cached flag to skip FICLONE attempts after the first failure on
+    // non-reflink filesystems (ext4, tmpfs, etc.), avoiding 3 wasted syscalls per file.
     #[cfg(target_os = "linux")]
     {
         if matches!(config.reflink, ReflinkMode::Auto | ReflinkMode::Always) {
@@ -416,33 +432,53 @@ fn copy_file_with_meta(
             // FICLONE = _IOW(0x94, 9, int) from linux/fs.h
             const FICLONE: libc::c_ulong = 0x40049409;
 
-            if let Ok(src_file) = std::fs::File::open(src) {
-                let dst_file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(dst);
-                if let Ok(dst_file) = dst_file {
-                    // SAFETY: Both file descriptors are valid (files are open),
-                    // FICLONE takes an fd as argument, and we check the return value.
-                    let ret =
-                        unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) };
-                    if ret == 0 {
-                        preserve_attributes_from_meta(src_meta, dst, config)?;
-                        return Ok(());
+            // In Auto mode, skip FICLONE if a previous attempt on this filesystem failed.
+            // This avoids redundant open+open+ioctl syscalls per file during recursive copies.
+            let should_try = config.reflink == ReflinkMode::Always
+                || FICLONE_SUPPORTED.load(std::sync::atomic::Ordering::Relaxed)
+                    != FICLONE_UNSUPPORTED;
+
+            if should_try {
+                if let Ok(src_file) = std::fs::File::open(src) {
+                    let dst_file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(dst);
+                    if let Ok(dst_file) = dst_file {
+                        // SAFETY: Both file descriptors are valid (files are open),
+                        // FICLONE takes an fd as argument, and we check the return value.
+                        let ret = unsafe {
+                            libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd())
+                        };
+                        if ret == 0 {
+                            FICLONE_SUPPORTED
+                                .store(FICLONE_YES, std::sync::atomic::Ordering::Relaxed);
+                            preserve_attributes_from_meta(src_meta, dst, config)?;
+                            return Ok(());
+                        }
+                        let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                        if config.reflink == ReflinkMode::Always {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Unsupported,
+                                format!(
+                                    "failed to clone '{}' to '{}': {}",
+                                    src.display(),
+                                    dst.display(),
+                                    io::Error::from_raw_os_error(errno)
+                                ),
+                            ));
+                        }
+                        // Auto mode: mark FICLONE as unsupported to skip future attempts.
+                        // EOPNOTSUPP (95) and ENOTSUP (same on Linux) indicate the fs
+                        // doesn't support reflinks. Other errors might be transient.
+                        if errno == libc::EOPNOTSUPP || errno == libc::ENOTSUP {
+                            FICLONE_SUPPORTED
+                                .store(FICLONE_UNSUPPORTED, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        // Fall through — dst was created+truncated, so copy_file_range
+                        // below will overwrite the empty file.
                     }
-                    if config.reflink == ReflinkMode::Always {
-                        return Err(io::Error::new(
-                            io::ErrorKind::Unsupported,
-                            format!(
-                                "failed to clone '{}' to '{}': {}",
-                                src.display(),
-                                dst.display(),
-                                io::Error::last_os_error()
-                            ),
-                        ));
-                    }
-                    // Auto mode: fall through to other copy methods
                 }
             }
         }
@@ -453,7 +489,7 @@ fn copy_file_with_meta(
     let src_mode_bits = src_meta.mode();
     #[cfg(target_os = "linux")]
     {
-        match copy_file_range_linux(src, dst, src_mode_bits) {
+        match copy_file_range_linux(src, dst, src_mode_bits, src_meta.len()) {
             Ok(()) => {
                 preserve_attributes_from_meta(src_meta, dst, config)?;
                 return Ok(());

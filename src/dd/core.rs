@@ -492,11 +492,16 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
     }
     let start_time = Instant::now();
 
+    // Only clone file handles when skip/seek are needed (avoids 2 dup() syscalls otherwise)
+    let needs_seek = config.skip > 0 || config.seek > 0;
+
     let mut input_file: Option<File> = None;
     let mut input: Box<dyn Read> = if let Some(ref path) = config.input {
         let file = File::open(path)
             .map_err(|e| io::Error::new(e.kind(), format!("failed to open '{}': {}", path, e)))?;
-        input_file = Some(file.try_clone()?);
+        if needs_seek {
+            input_file = Some(file.try_clone()?);
+        }
         Box::new(file)
     } else {
         Box::new(io::stdin())
@@ -529,7 +534,9 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
         let file = opts
             .open(path)
             .map_err(|e| io::Error::new(e.kind(), format!("failed to open '{}': {}", path, e)))?;
-        output_file = Some(file.try_clone()?);
+        if needs_seek || config.conv.fsync || config.conv.fdatasync {
+            output_file = Some(file.try_clone()?);
+        }
         Box::new(file)
     } else {
         Box::new(io::stdout())
