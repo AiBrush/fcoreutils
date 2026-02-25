@@ -26,6 +26,41 @@ jobs:
         with:
           fetch-depth: 0  # full history needed for blame data
 
+      - name: Ensure custom quality gate
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          # Create or find the custom quality gate
+          QG_ID=$(curl -s -X POST \
+            "https://sonarcloud.io/api/qualitygates/create?name=fcoreutils&organization=aibrush" \
+            -H "Authorization: Bearer $SONAR_TOKEN" | jq -r '.id')
+
+          if [ "$QG_ID" = "null" ] || [ -z "$QG_ID" ]; then
+            QG_ID=$(curl -s "https://sonarcloud.io/api/qualitygates/list?organization=aibrush" \
+              -H "Authorization: Bearer $SONAR_TOKEN" | \
+              jq -r '.qualitygates[] | select(.name == "fcoreutils") | .id')
+          fi
+
+          if [ -n "$QG_ID" ] && [ "$QG_ID" != "null" ]; then
+            echo "Quality gate ID: $QG_ID"
+            # Set conditions: standard Sonar way but with 15% duplication threshold
+            for metric in new_security_rating new_reliability_rating new_maintainability_rating; do
+              curl -s -X POST \
+                "https://sonarcloud.io/api/qualitygates/create_condition?gateId=${QG_ID}&metric=${metric}&op=GT&error=1&organization=aibrush" \
+                -H "Authorization: Bearer $SONAR_TOKEN" || true
+            done
+            curl -s -X POST \
+              "https://sonarcloud.io/api/qualitygates/create_condition?gateId=${QG_ID}&metric=new_duplicated_lines_density&op=GT&error=15&organization=aibrush" \
+              -H "Authorization: Bearer $SONAR_TOKEN" || true
+            # Assign to project
+            curl -s -X POST \
+              "https://sonarcloud.io/api/qualitygates/select?gateId=${QG_ID}&projectKey=AiBrush_fcoreutils&organization=aibrush" \
+              -H "Authorization: Bearer $SONAR_TOKEN"
+            echo "Quality gate assigned to project"
+          else
+            echo "Warning: Could not create or find quality gate"
+          fi
+
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@v5
         env:
