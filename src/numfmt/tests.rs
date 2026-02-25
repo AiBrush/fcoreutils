@@ -32,6 +32,10 @@ fn test_numfmt_si_to_none() {
 
     let result = process_line("1T", &config).unwrap();
     assert_eq!(result, "1000000000000");
+
+    // GNU numfmt --from=si accepts lowercase 'k' as input even though it outputs 'K'
+    let result = process_line("1k", &config).unwrap();
+    assert_eq!(result, "1000");
 }
 
 // ──────────────────────────────────────────────────
