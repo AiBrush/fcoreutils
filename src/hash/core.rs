@@ -1714,10 +1714,20 @@ pub fn hash_files_auto(paths: &[&Path], algo: HashAlgorithm) -> Vec<io::Result<S
         .unwrap_or(0);
 
     if sample_size < 65536 {
-        // Small files: sequential loop with hash_file_nostat (no fstat per file).
-        // Avoids: thread spawn (~400µs), readahead_files_all (N×open+stat+fadvise+close),
-        // and redundant stat() inside hash_file.
-        paths.iter().map(|&p| hash_file_nostat(algo, p)).collect()
+        // Small files: sequential loop avoiding thread spawn overhead.
+        #[cfg(target_os = "linux")]
+        {
+            // Raw syscall path: reuses CString buffer, avoids OpenOptions/File overhead
+            let mut c_path_buf = Vec::with_capacity(256);
+            paths
+                .iter()
+                .map(|&p| hash_file_raw_nostat(algo, p, &mut c_path_buf))
+                .collect()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            paths.iter().map(|&p| hash_file_nostat(algo, p)).collect()
+        }
     } else if n >= 20 {
         hash_files_batch(paths, algo)
     } else {
@@ -2136,6 +2146,92 @@ pub fn hash_file_nostat(algo: HashAlgorithm, path: &Path) -> io::Result<String> 
             }
         }
         Err(e) => return Err(e),
+    }
+}
+
+/// Hash a small file using raw Linux syscalls without fstat.
+/// For the multi-file sequential path where we already know files are small.
+/// Avoids: OpenOptions builder, CString per-file alloc (reuses caller's buffer),
+/// fstat overhead (unnecessary when we just need open+read+close).
+/// Returns hash as hex string.
+#[cfg(target_os = "linux")]
+fn hash_file_raw_nostat(
+    algo: HashAlgorithm,
+    path: &Path,
+    c_path_buf: &mut Vec<u8>,
+) -> io::Result<String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_bytes = path.as_os_str().as_bytes();
+
+    // Reuse caller's buffer for null-terminated path (avoids heap alloc per file)
+    c_path_buf.clear();
+    c_path_buf.reserve(path_bytes.len() + 1);
+    c_path_buf.extend_from_slice(path_bytes);
+    c_path_buf.push(0);
+
+    let mut flags = libc::O_RDONLY | libc::O_CLOEXEC;
+    if NOATIME_SUPPORTED.load(Ordering::Relaxed) {
+        flags |= libc::O_NOATIME;
+    }
+
+    let fd = unsafe { libc::open(c_path_buf.as_ptr() as *const libc::c_char, flags) };
+    if fd < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EPERM) && flags & libc::O_NOATIME != 0 {
+            NOATIME_SUPPORTED.store(false, Ordering::Relaxed);
+            let fd2 = unsafe {
+                libc::open(
+                    c_path_buf.as_ptr() as *const libc::c_char,
+                    libc::O_RDONLY | libc::O_CLOEXEC,
+                )
+            };
+            if fd2 < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return hash_fd_small(algo, fd2);
+        }
+        return Err(err);
+    }
+    hash_fd_small(algo, fd)
+}
+
+/// Read a small file from fd, hash it, close fd. No fstat needed.
+#[cfg(target_os = "linux")]
+#[inline]
+fn hash_fd_small(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
+    let mut buf = [0u8; 4096];
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    if n < 0 {
+        let err = io::Error::last_os_error();
+        unsafe { libc::close(fd); }
+        return Err(err);
+    }
+    let n = n as usize;
+    if n < buf.len() {
+        // File fits in 4KB — common case for small files
+        unsafe { libc::close(fd); }
+        return hash_bytes(algo, &buf[..n]);
+    }
+    // File > 4KB: fall back to hash_file_nostat-style reading
+    // Wrap fd in File for RAII close
+    use std::os::unix::io::FromRawFd;
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let mut big_buf = [0u8; 65536];
+    big_buf[..n].copy_from_slice(&buf[..n]);
+    let mut total = n;
+    loop {
+        match std::io::Read::read(&mut file, &mut big_buf[total..]) {
+            Ok(0) => return hash_bytes(algo, &big_buf[..total]),
+            Ok(n) => {
+                total += n;
+                if total >= big_buf.len() {
+                    return hash_stream_with_prefix(algo, &big_buf[..total], file);
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
     }
 }
 
