@@ -189,9 +189,7 @@ fn main() {
         let data = &buf[..n as usize];
 
         // Write to stdout (skip if a previous write failed to avoid repeated EPIPE)
-        if stdout_ok
-            && let Err(e) = write_all_raw(stdout_fd, data)
-        {
+        if stdout_ok && let Err(e) = write_all_raw(stdout_fd, data) {
             if handle_write_error(TOOL_NAME, "standard output", &e, output_error) {
                 process::exit(1);
             }
