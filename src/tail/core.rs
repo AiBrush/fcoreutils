@@ -196,13 +196,7 @@ pub fn tail_bytes_from(data: &[u8], n: u64, out: &mut impl Write) -> io::Result<
 /// Use sendfile for zero-copy byte output on Linux (last N bytes)
 #[cfg(target_os = "linux")]
 pub fn sendfile_tail_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOATIME)
-        .open(path)
-        .or_else(|_| std::fs::File::open(path))?;
+    let file = open_noatime(path)?;
 
     let metadata = file.metadata()?;
     let file_size = metadata.len();
@@ -318,6 +312,10 @@ fn tail_lines_streaming_file(
 
 /// Streaming tail -n +N for regular files: skip N-1 lines from start.
 /// Caller opens the file.
+///
+/// **Precondition**: On Linux, the `n <= 1` path uses `sendfile` which writes
+/// directly to stdout (bypassing `out`). The caller MUST `out.flush()` before
+/// calling this function to avoid interleaved output.
 fn tail_lines_from_streaming_file(
     file: std::fs::File,
     n: u64,
@@ -457,7 +455,18 @@ pub fn tail_file(
                         return Ok(false);
                     }
                 };
-                let file_size = file.metadata()?.len();
+                let file_size = match file.metadata() {
+                    Ok(m) => m.len(),
+                    Err(e) => {
+                        eprintln!(
+                            "{}: error reading '{}': {}",
+                            tool_name,
+                            filename,
+                            crate::common::io_error_msg(&e)
+                        );
+                        return Ok(false);
+                    }
+                };
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
@@ -602,13 +611,7 @@ pub fn tail_file(
 /// sendfile from byte N onward (1-indexed)
 #[cfg(target_os = "linux")]
 fn sendfile_tail_bytes_from(path: &Path, n: u64, out_fd: i32) -> io::Result<bool> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOATIME)
-        .open(path)
-        .or_else(|_| std::fs::File::open(path))?;
+    let file = open_noatime(path)?;
 
     let metadata = file.metadata()?;
     let file_size = metadata.len();
