@@ -1685,6 +1685,39 @@ pub fn blake2b_hash_files_parallel(
     })
 }
 
+/// Auto-dispatch multi-file hashing: picks sequential or parallel based on workload.
+///
+/// For small files (<64KB sample), sequential avoids thread spawn + readahead overhead
+/// that dominates for tiny files. On the "100 × 55-byte files" benchmark, this saves
+/// ~5ms of overhead (thread creation + 200 stat() calls + 100 fadvise() calls).
+///
+/// For large files (>=64KB), parallel processing amortizes thread spawn cost over
+/// substantial per-file hash work. Returns results in input order.
+pub fn hash_files_auto(paths: &[&Path], algo: HashAlgorithm) -> Vec<io::Result<String>> {
+    let n = paths.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![hash_file_nostat(algo, paths[0])];
+    }
+
+    // Sample first file to estimate workload. One stat (~2µs) to save
+    // potentially 3-6ms of thread overhead for small-file workloads.
+    let sample_size = std::fs::metadata(paths[0]).map(|m| m.len()).unwrap_or(0);
+
+    if sample_size < 65536 {
+        // Small files: sequential loop with hash_file_nostat (no fstat per file).
+        // Avoids: thread spawn (~400µs), readahead_files_all (N×open+stat+fadvise+close),
+        // and redundant stat() inside hash_file.
+        paths.iter().map(|&p| hash_file_nostat(algo, p)).collect()
+    } else if n >= 20 {
+        hash_files_batch(paths, algo)
+    } else {
+        hash_files_parallel_fast(paths, algo)
+    }
+}
+
 /// Batch-hash multiple files with SHA-256/MD5 using work-stealing parallelism.
 /// Files are sorted by size (largest first) so the biggest files start processing
 /// immediately. Each worker thread grabs the next unprocessed file via atomic index,

@@ -470,8 +470,7 @@ fn copy_file_with_meta(
                         // NOT EINVAL: can be file-specific (block size mismatch, inode flags)
                         // and shouldn't suppress FICLONE for other files on the same fs.
                         if matches!(errno, libc::EOPNOTSUPP | libc::ENOTTY | libc::ENOSYS) {
-                            FICLONE_UNSUPPORTED
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            FICLONE_UNSUPPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                         // Fall through — dst was created+truncated, so copy_file_range
                         // below will overwrite the empty file.
