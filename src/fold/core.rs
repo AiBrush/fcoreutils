@@ -104,7 +104,7 @@ fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std
 fn fold_segment_bytes_spaces(output: &mut Vec<u8>, segment: &[u8], width: usize) {
     let mut start = 0;
     while start + width < segment.len() {
-        // Check if the character at start+width is a newline (end of line)
+        // SAFETY: loop guard ensures start + width < segment.len()
         if segment[start + width] == b'\n' {
             output.extend_from_slice(&segment[start..start + width + 1]);
             return;
@@ -136,7 +136,7 @@ fn fold_segment_bytes_spaces(output: &mut Vec<u8>, segment: &[u8], width: usize)
 fn fold_segment_bytes(output: &mut Vec<u8>, segment: &[u8], width: usize) {
     let mut start = 0;
     while start + width < segment.len() {
-        // Check if the character at start+width is a newline (end of line)
+        // SAFETY: loop guard ensures start + width < segment.len()
         if segment[start + width] == b'\n' {
             output.extend_from_slice(&segment[start..start + width + 1]);
             return;
@@ -231,6 +231,9 @@ fn fold_column_mode_spaces(data: &[u8], width: usize, output: &mut Vec<u8>) {
 /// Fold a line with -s, checking each chunk for non-simple bytes.
 /// For ASCII-simple chunks (the common case), uses memrchr for fast space search.
 /// Falls back to the full column-mode handler when non-simple bytes are found.
+///
+/// Note: worst case O(n·width) when spaces cluster at chunk offset 0.
+/// Typical ASCII prose converges to O(n/width) iterations.
 fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
     let mut start = 0;
     while start + width < line.len() {
@@ -243,7 +246,9 @@ fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
         // the two-pass cost is negligible for the common ASCII-only case.
         if !is_ascii_simple(chunk) {
             // Non-simple byte found: fall back to slow path for the rest.
-            // col=0 here: every advance of `start` emits b'\n' first.
+            // col=0 invariant: either start=0 (beginning of this input
+            // line, outer loop consumed previous \n) or a prior
+            // space/hard-break emitted b'\n'.
             fold_one_line_column(&line[start..], width, true, output);
             return;
         }
@@ -267,7 +272,9 @@ fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
         if is_ascii_simple(tail) {
             output.extend_from_slice(tail);
         } else {
-            // col=0 here: every advance of `start` emits b'\n' first.
+            // col=0 invariant: either start=0 (beginning of this input
+            // line, outer loop consumed previous \n) or a prior
+            // space/hard-break emitted b'\n'.
             fold_one_line_column(tail, width, true, output);
         }
     }
@@ -319,8 +326,9 @@ fn word_is_ascii_simple(word: u64) -> bool {
     // Subtracting 0x01 from each byte never underflows (all >= 0x01), so
     // no borrow propagates between bytes and has_zero stays 0.
     // When a 0x7F IS present its xored byte is 0x00, which the formula
-    // flags; borrow effects on adjacent bytes don't matter because
-    // has_zero is already non-zero from the real detection.
+    // flags; borrow may produce false positives in adjacent bytes of
+    // has_zero, but never false negatives — has_zero is already non-zero
+    // from the real detection, so the overall return value is correct.
     let xored = word ^ 0x7F7F7F7F7F7F7F7F;
     let has_zero = xored.wrapping_sub(0x0101010101010101) & !xored & 0x8080808080808080;
     has_zero == 0
