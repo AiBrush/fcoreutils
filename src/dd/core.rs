@@ -354,6 +354,207 @@ fn has_conversions(conv: &DdConv) -> bool {
     conv.lcase || conv.ucase || conv.swab || conv.sync
 }
 
+/// Raw-syscall fast path: when both input and output are file paths,
+/// ibs == obs, and no conversions are needed, bypass Box<dyn Read/Write>
+/// and use libc::read/write directly. Handles char devices (e.g. /dev/zero)
+/// that copy_file_range can't handle.
+#[cfg(target_os = "linux")]
+fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
+    if config.input.is_none() || config.output.is_none() {
+        return None;
+    }
+    if has_conversions(&config.conv) || config.ibs != config.obs {
+        return None;
+    }
+
+    let start_time = Instant::now();
+    let in_path = config.input.as_ref().unwrap();
+    let out_path = config.output.as_ref().unwrap();
+
+    // Open input
+    let in_fd = unsafe {
+        libc::open(
+            std::ffi::CString::new(in_path.as_str()).ok()?.as_ptr(),
+            libc::O_RDONLY | libc::O_NOATIME,
+        )
+    };
+    let in_fd = if in_fd < 0 {
+        // Retry without O_NOATIME (fails on files we don't own)
+        let fd = unsafe {
+            libc::open(
+                std::ffi::CString::new(in_path.as_str()).ok()?.as_ptr(),
+                libc::O_RDONLY,
+            )
+        };
+        if fd < 0 {
+            return Some(Err(io::Error::last_os_error()));
+        }
+        fd
+    } else {
+        in_fd
+    };
+
+    // Open output
+    let mut oflags = libc::O_WRONLY;
+    if config.conv.excl {
+        oflags |= libc::O_CREAT | libc::O_EXCL;
+    } else if config.conv.nocreat {
+        // don't create
+    } else {
+        oflags |= libc::O_CREAT;
+    }
+    if !config.conv.notrunc && !config.conv.excl {
+        oflags |= libc::O_TRUNC;
+    }
+
+    let out_fd = unsafe {
+        libc::open(
+            std::ffi::CString::new(out_path.as_str()).ok()?.as_ptr(),
+            oflags,
+            0o666 as libc::mode_t,
+        )
+    };
+    if out_fd < 0 {
+        unsafe { libc::close(in_fd) };
+        return Some(Err(io::Error::last_os_error()));
+    }
+
+    // Handle skip (seek input)
+    if config.skip > 0 {
+        let offset = config.skip as i64 * config.ibs as i64;
+        if unsafe { libc::lseek(in_fd, offset, libc::SEEK_SET) } < 0 {
+            // lseek failed (e.g. char device) — read and discard
+            let mut discard = vec![0u8; config.ibs];
+            for _ in 0..config.skip {
+                let n = unsafe { libc::read(in_fd, discard.as_mut_ptr() as *mut _, discard.len()) };
+                if n <= 0 {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Handle seek (seek output)
+    if config.seek > 0 {
+        let offset = config.seek as i64 * config.obs as i64;
+        if unsafe { libc::lseek(out_fd, offset, libc::SEEK_SET) } < 0 {
+            unsafe {
+                libc::close(in_fd);
+                libc::close(out_fd);
+            }
+            return Some(Err(io::Error::new(
+                io::ErrorKind::Other,
+                "failed to seek output",
+            )));
+        }
+    }
+
+    let mut stats = DdStats::default();
+    let bs = config.ibs;
+    let mut ibuf = vec![0u8; bs];
+    let count_limit = config.count;
+
+    loop {
+        if let Some(limit) = count_limit {
+            if stats.records_in_full + stats.records_in_partial >= limit {
+                break;
+            }
+        }
+
+        // Raw read — retry on EINTR, loop for full block
+        let mut total_read = 0usize;
+        while total_read < bs {
+            let ret = unsafe {
+                libc::read(
+                    in_fd,
+                    ibuf[total_read..].as_mut_ptr() as *mut _,
+                    bs - total_read,
+                )
+            };
+            if ret > 0 {
+                total_read += ret as usize;
+            } else if ret == 0 {
+                break; // EOF
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if config.conv.noerror {
+                    break;
+                }
+                unsafe {
+                    libc::close(in_fd);
+                    libc::close(out_fd);
+                }
+                return Some(Err(err));
+            }
+        }
+
+        if total_read == 0 {
+            break;
+        }
+
+        if total_read == bs {
+            stats.records_in_full += 1;
+        } else {
+            stats.records_in_partial += 1;
+        }
+
+        // Raw write — retry on EINTR
+        let mut written = 0usize;
+        while written < total_read {
+            let ret = unsafe {
+                libc::write(
+                    out_fd,
+                    ibuf[written..].as_ptr() as *const _,
+                    total_read - written,
+                )
+            };
+            if ret > 0 {
+                written += ret as usize;
+            } else if ret == 0 {
+                break;
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                unsafe {
+                    libc::close(in_fd);
+                    libc::close(out_fd);
+                }
+                return Some(Err(err));
+            }
+        }
+
+        stats.bytes_copied += written as u64;
+        if written == bs {
+            stats.records_out_full += 1;
+        } else {
+            stats.records_out_partial += 1;
+        }
+    }
+
+    // fsync / fdatasync
+    if config.conv.fsync {
+        unsafe { libc::fsync(out_fd) };
+    } else if config.conv.fdatasync {
+        unsafe { libc::fdatasync(out_fd) };
+    }
+
+    unsafe {
+        libc::close(in_fd);
+        libc::close(out_fd);
+    }
+
+    if config.status != StatusLevel::None {
+        print_stats(&stats, start_time.elapsed());
+    }
+
+    Some(Ok(stats))
+}
+
 /// Fast path: use copy_file_range when both input and output are files
 /// and no conversions are needed. This is zero-copy in the kernel.
 #[cfg(target_os = "linux")]
@@ -483,10 +684,17 @@ fn try_copy_file_range_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
 
 /// Perform the dd copy operation.
 pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
-    // Try zero-copy fast path on Linux
+    // Try zero-copy fast path on Linux (file-to-file)
     #[cfg(target_os = "linux")]
     {
         if let Some(result) = try_copy_file_range_dd(config) {
+            return result;
+        }
+    }
+    // Raw syscall fast path: handles devices like /dev/zero where copy_file_range fails
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(result) = try_raw_dd(config) {
             return result;
         }
     }
