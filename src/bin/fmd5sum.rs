@@ -457,7 +457,6 @@ fn main() {
                             let _ = out.get_mut().write_all(&output_buf);
                             output_buf.clear();
                         }
-                        let _ = out.flush();
                         eprintln!("{}: {}: {}", TOOL_NAME, filename, io_error_msg(&e));
                         had_error = true;
                     }
