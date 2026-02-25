@@ -375,11 +375,16 @@ fn copy_data_linux(
             if matches!(errno, libc::EOPNOTSUPP | libc::ENOTTY | libc::ENOSYS) {
                 FICLONE_UNSUPPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+            if errno == libc::EXDEV {
+                // Cross-device: copy_file_range will also fail with EXDEV; skip to read/write.
+                return copy_readwrite_fallback(src_file, dst_file, src_fd, len);
+            }
             // Auto mode: fall through to copy_file_range on the same fds.
         }
     }
 
     // Step 2: Try copy_file_range (zero-copy in kernel, same fds).
+    debug_assert!(len <= i64::MAX as u64, "file size exceeds i64::MAX; remaining cast wraps");
     let mut remaining = len as i64;
     let mut cfr_failed = false;
     while remaining > 0 {
@@ -419,25 +424,42 @@ fn copy_data_linux(
 
     // Step 3: Fallback — read/write on the same fds with large buffer.
     // Reset file positions since copy_file_range may have partially transferred.
-    use std::io::{Read, Seek, Write};
+    use std::io::Seek;
     let mut src_file = src_file;
     let mut dst_file = dst_file;
     src_file.seek(std::io::SeekFrom::Start(0))?;
     dst_file.seek(std::io::SeekFrom::Start(0))?;
     dst_file.set_len(0)?;
 
+    readwrite_with_buffer(src_file, dst_file, len)
+}
+
+/// Read/write copy with thread-local buffer reuse (shared by all Linux fallback paths).
+#[cfg(target_os = "linux")]
+fn readwrite_with_buffer(
+    mut src_file: std::fs::File,
+    mut dst_file: std::fs::File,
+    len: u64,
+) -> io::Result<()> {
+    use std::cell::RefCell;
+    use std::io::{Read, Write};
+
     const MAX_BUF: usize = 4 * 1024 * 1024;
+    /// Shrink when buffer is >512KB and 4x larger than needed (matches non-Linux path).
+    const SHRINK_THRESHOLD: usize = 512 * 1024;
+
     // Clamp while still u64 to avoid 32-bit truncation on large files.
     let buf_size = (len.min(MAX_BUF as u64) as usize).max(8192);
 
-    // Reuse a thread-local buffer to avoid per-file heap allocation under Rayon.
-    use std::cell::RefCell;
     thread_local! {
         static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
     BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
-        if buf.len() < buf_size {
+        if buf.len() > SHRINK_THRESHOLD && buf_size < buf.len() / 4 {
+            buf.resize(buf_size, 0);
+            buf.shrink_to_fit();
+        } else if buf.len() < buf_size {
             buf.resize(buf_size, 0);
         }
         loop {
@@ -449,6 +471,21 @@ fn copy_data_linux(
         }
         Ok(())
     })
+}
+
+/// EXDEV short-circuit: skip copy_file_range and go straight to read/write.
+#[cfg(target_os = "linux")]
+fn copy_readwrite_fallback(
+    src_file: std::fs::File,
+    dst_file: std::fs::File,
+    src_fd: i32,
+    len: u64,
+) -> io::Result<()> {
+    // SAFETY: src_fd is a valid fd; advisory hint for sequential readahead.
+    unsafe {
+        let _ = libc::posix_fadvise(src_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    }
+    readwrite_with_buffer(src_file, dst_file, len)
 }
 
 // ---- single-file copy ----
