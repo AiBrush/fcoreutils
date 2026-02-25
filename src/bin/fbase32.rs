@@ -152,9 +152,8 @@ fn parse_args() -> Cli {
     cli
 }
 
-/// Encode binary data to Base32 bytes.
-/// Optimized: process full 5-byte chunks in a tight branch-free loop,
-/// then handle the last partial chunk with padding.
+/// Encode binary data to Base32 bytes (used only by tests; streaming path uses encode_5_to_8).
+#[cfg(test)]
 fn base32_encode(data: &[u8]) -> Vec<u8> {
     if data.is_empty() {
         return Vec::new();
@@ -334,43 +333,131 @@ fn base32_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
     Ok(result)
 }
 
-/// Encode and write with line wrapping in chunks to avoid large allocations.
-/// Processes input in ~64KB chunks (aligned to 5 bytes), encodes each chunk
-/// into a fixed output buffer, wraps, and writes immediately.
+/// Encode 5 bytes into 8 base32 characters directly into output buffer.
+/// Returns 8 (bytes written). Caller must ensure `out` has at least 8 bytes.
+#[inline(always)]
+fn encode_5_to_8(b0: u8, b1: u8, b2: u8, b3: u8, b4: u8, out: &mut [u8]) {
+    out[0] = BASE32_ALPHABET[(b0 >> 3) as usize];
+    out[1] = BASE32_ALPHABET[((b0 & 0x07) << 2 | b1 >> 6) as usize];
+    out[2] = BASE32_ALPHABET[((b1 >> 1) & 0x1F) as usize];
+    out[3] = BASE32_ALPHABET[((b1 & 0x01) << 4 | b2 >> 4) as usize];
+    out[4] = BASE32_ALPHABET[((b2 & 0x0F) << 1 | b3 >> 7) as usize];
+    out[5] = BASE32_ALPHABET[((b3 >> 2) & 0x1F) as usize];
+    out[6] = BASE32_ALPHABET[((b3 & 0x03) << 3 | b4 >> 5) as usize];
+    out[7] = BASE32_ALPHABET[(b4 & 0x1F) as usize];
+}
+
+/// Copy encoded bytes into output buffer, inserting newlines at wrap boundaries.
+#[inline(always)]
+fn copy_with_wrap(
+    encoded: &[u8],
+    buf: &mut [u8],
+    offset: &mut usize,
+    col: &mut usize,
+    wrap: usize,
+) {
+    let mut i = 0;
+    while i < encoded.len() {
+        let space_in_line = wrap - *col;
+        let to_copy = space_in_line.min(encoded.len() - i);
+        buf[*offset..*offset + to_copy].copy_from_slice(&encoded[i..i + to_copy]);
+        *offset += to_copy;
+        *col += to_copy;
+        i += to_copy;
+        if *col == wrap {
+            buf[*offset] = b'\n';
+            *offset += 1;
+            *col = 0;
+        }
+    }
+}
+
+/// Encode and write with line wrapping using a fixed output buffer.
+/// Encodes into a temp 8-byte buffer per group, then copies to output
+/// with wrapping interleaved. No per-chunk Vec allocation.
 fn encode_streaming(data: &[u8], wrap: usize, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
 
-    // Process in chunks of 65535 bytes (divisible by 5)
-    const CHUNK_SIZE: usize = 65535; // 65535 / 5 = 13107 full groups
+    // Output buffer: 256KB + margin for partial group + newlines
+    const FLUSH_AT: usize = 256 * 1024;
+    let mut buf = vec![0u8; FLUSH_AT + 256];
+    let mut offset = 0usize;
     let mut col = 0usize;
 
-    for input_chunk in data.chunks(CHUNK_SIZE) {
-        let encoded = base32_encode(input_chunk);
-        if wrap == 0 {
-            out.write_all(&encoded)?;
-        } else {
-            // Write with wrapping, tracking column position across chunks
-            let mut pos = 0;
-            while pos < encoded.len() {
-                let remaining_in_line = wrap - col;
-                let available = encoded.len() - pos;
-                let to_write = remaining_in_line.min(available);
-                out.write_all(&encoded[pos..pos + to_write])?;
-                pos += to_write;
-                col += to_write;
-                if col == wrap {
-                    out.write_all(b"\n")?;
-                    col = 0;
-                }
+    let full_chunks = data.len() / 5;
+    let remainder = data.len() % 5;
+    let full_end = full_chunks * 5;
+
+    if wrap == 0 {
+        // No wrapping: encode directly into output buffer, 8 bytes at a time
+        for chunk in data[..full_end].chunks_exact(5) {
+            encode_5_to_8(
+                chunk[0],
+                chunk[1],
+                chunk[2],
+                chunk[3],
+                chunk[4],
+                &mut buf[offset..],
+            );
+            offset += 8;
+            if offset >= FLUSH_AT {
+                out.write_all(&buf[..offset])?;
+                offset = 0;
             }
+        }
+    } else {
+        // With wrapping: encode to temp, then copy with newline insertion
+        let mut temp = [0u8; 8];
+        for chunk in data[..full_end].chunks_exact(5) {
+            encode_5_to_8(chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], &mut temp);
+            copy_with_wrap(&temp, &mut buf, &mut offset, &mut col, wrap);
+            if offset >= FLUSH_AT {
+                out.write_all(&buf[..offset])?;
+                offset = 0;
+            }
+        }
+    }
+
+    // Handle the last partial chunk with padding
+    if remainder > 0 {
+        let chunk = &data[full_end..];
+        let mut padded = [0u8; 5];
+        padded[..chunk.len()].copy_from_slice(chunk);
+        let (b0, b1, b2, b3, b4) = (padded[0], padded[1], padded[2], padded[3], padded[4]);
+
+        let mut partial = [b'='; 8];
+        partial[0] = BASE32_ALPHABET[(b0 >> 3) as usize];
+        partial[1] = BASE32_ALPHABET[((b0 & 0x07) << 2 | b1 >> 6) as usize];
+        if remainder >= 2 {
+            partial[2] = BASE32_ALPHABET[((b1 >> 1) & 0x1F) as usize];
+            partial[3] = BASE32_ALPHABET[((b1 & 0x01) << 4 | b2 >> 4) as usize];
+        }
+        if remainder >= 3 {
+            partial[4] = BASE32_ALPHABET[((b2 & 0x0F) << 1 | b3 >> 7) as usize];
+        }
+        if remainder >= 4 {
+            partial[5] = BASE32_ALPHABET[((b3 >> 2) & 0x1F) as usize];
+            partial[6] = BASE32_ALPHABET[((b3 & 0x03) << 3 | b4 >> 5) as usize];
+        }
+
+        if wrap == 0 {
+            buf[offset..offset + 8].copy_from_slice(&partial);
+            offset += 8;
+        } else {
+            copy_with_wrap(&partial, &mut buf, &mut offset, &mut col, wrap);
         }
     }
 
     // Final newline if there's a partial line
     if wrap > 0 && col > 0 {
-        out.write_all(b"\n")?;
+        buf[offset] = b'\n';
+        offset += 1;
+    }
+
+    if offset > 0 {
+        out.write_all(&buf[..offset])?;
     }
 
     Ok(())

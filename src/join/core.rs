@@ -194,32 +194,73 @@ fn compare_keys(a: &[u8], b: &[u8], case_insensitive: bool) -> Ordering {
 }
 
 /// Write a paired output line (default format: join_key + other fields).
-fn write_paired_default(
-    fields1: &[&[u8]],
-    fields2: &[&[u8]],
+/// Zero-copy: writes directly from line slices without allocating field Vecs.
+fn write_paired_default_zerocopy(
+    line1: &[u8],
+    line2: &[u8],
     join_key: &[u8],
     field1: usize,
     field2: usize,
+    separator: Option<u8>,
     out_sep: u8,
     delim: u8,
     buf: &mut Vec<u8>,
 ) {
     buf.extend_from_slice(join_key);
-    for (i, f) in fields1.iter().enumerate() {
-        if i == field1 {
-            continue;
-        }
-        buf.push(out_sep);
-        buf.extend_from_slice(f);
-    }
-    for (i, f) in fields2.iter().enumerate() {
-        if i == field2 {
-            continue;
-        }
-        buf.push(out_sep);
-        buf.extend_from_slice(f);
-    }
+    write_other_fields(line1, field1, separator, out_sep, buf);
+    write_other_fields(line2, field2, separator, out_sep, buf);
     buf.push(delim);
+}
+
+/// Write all fields from a line except the join field, prefixed by out_sep.
+/// Avoids allocating a Vec<&[u8]> for field splitting.
+#[inline]
+fn write_other_fields(
+    line: &[u8],
+    skip_field: usize,
+    separator: Option<u8>,
+    out_sep: u8,
+    buf: &mut Vec<u8>,
+) {
+    if let Some(sep) = separator {
+        let mut field_idx = 0;
+        let mut start = 0;
+        for pos in memchr::memchr_iter(sep, line) {
+            if field_idx != skip_field {
+                buf.push(out_sep);
+                buf.extend_from_slice(&line[start..pos]);
+            }
+            field_idx += 1;
+            start = pos + 1;
+        }
+        // Last field (no trailing separator)
+        if field_idx != skip_field {
+            buf.push(out_sep);
+            buf.extend_from_slice(&line[start..]);
+        }
+    } else {
+        // Whitespace-delimited
+        let mut field_idx = 0;
+        let mut i = 0;
+        let len = line.len();
+        while i < len {
+            while i < len && (line[i] == b' ' || line[i] == b'\t') {
+                i += 1;
+            }
+            if i >= len {
+                break;
+            }
+            let start = i;
+            while i < len && line[i] != b' ' && line[i] != b'\t' {
+                i += 1;
+            }
+            if field_idx != skip_field {
+                buf.push(out_sep);
+                buf.extend_from_slice(&line[start..i]);
+            }
+            field_idx += 1;
+        }
+    }
 }
 
 /// Write a paired output line with -o format.
@@ -252,23 +293,18 @@ fn write_paired_format(
     buf.push(delim);
 }
 
-/// Write an unpaired output line (default format).
-fn write_unpaired_default(
-    fields: &[&[u8]],
+/// Write an unpaired output line (default format), zero-copy from line.
+fn write_unpaired_default_zerocopy(
+    line: &[u8],
     join_field: usize,
+    separator: Option<u8>,
     out_sep: u8,
     delim: u8,
     buf: &mut Vec<u8>,
 ) {
-    let key = fields.get(join_field).copied().unwrap_or(b"");
+    let key = extract_field(line, join_field, separator);
     buf.extend_from_slice(key);
-    for (i, f) in fields.iter().enumerate() {
-        if i == join_field {
-            continue;
-        }
-        buf.push(out_sep);
-        buf.extend_from_slice(f);
-    }
+    write_other_fields(line, join_field, separator, out_sep, buf);
     buf.push(delim);
 }
 
@@ -382,21 +418,22 @@ pub fn join(
 
     // Handle --header: join first lines without sort check
     if config.header && !lines1.is_empty() && !lines2.is_empty() {
-        let fields1 = split_fields(lines1[0], config.separator);
-        let fields2 = split_fields(lines2[0], config.separator);
-        let key = fields1.get(config.field1).copied().unwrap_or(b"");
+        let key = extract_field(lines1[0], config.field1, config.separator);
 
         if let Some(specs) = format {
+            let fields1 = split_fields(lines1[0], config.separator);
+            let fields2 = split_fields(lines2[0], config.separator);
             write_paired_format(
                 &fields1, &fields2, key, specs, empty, out_sep, delim, &mut buf,
             );
         } else {
-            write_paired_default(
-                &fields1,
-                &fields2,
+            write_paired_default_zerocopy(
+                lines1[0],
+                lines2[0],
                 key,
                 config.field1,
                 config.field2,
+                config.separator,
                 out_sep,
                 delim,
                 &mut buf,
@@ -464,8 +501,8 @@ pub fn join(
         match compare_keys(key1, key2, ci) {
             Ordering::Less => {
                 if show_unpaired1 {
-                    let fields1 = split_fields(lines1[i1], config.separator);
                     if let Some(specs) = format {
+                        let fields1 = split_fields(lines1[i1], config.separator);
                         write_unpaired_format(
                             &fields1,
                             0,
@@ -477,7 +514,14 @@ pub fn join(
                             &mut buf,
                         );
                     } else {
-                        write_unpaired_default(&fields1, config.field1, out_sep, delim, &mut buf);
+                        write_unpaired_default_zerocopy(
+                            lines1[i1],
+                            config.field1,
+                            config.separator,
+                            out_sep,
+                            delim,
+                            &mut buf,
+                        );
                     }
                 }
                 i1 += 1;
@@ -488,8 +532,8 @@ pub fn join(
             }
             Ordering::Greater => {
                 if show_unpaired2 {
-                    let fields2 = split_fields(lines2[i2], config.separator);
                     if let Some(specs) = format {
+                        let fields2 = split_fields(lines2[i2], config.separator);
                         write_unpaired_format(
                             &fields2,
                             1,
@@ -501,7 +545,14 @@ pub fn join(
                             &mut buf,
                         );
                     } else {
-                        write_unpaired_default(&fields2, config.field2, out_sep, delim, &mut buf);
+                        write_unpaired_default_zerocopy(
+                            lines2[i2],
+                            config.field2,
+                            config.separator,
+                            out_sep,
+                            delim,
+                            &mut buf,
+                        );
                     }
                 }
                 i2 += 1;
@@ -527,8 +578,8 @@ pub fn join(
                     i2 += 1;
                 }
 
-                // Pre-cache file2 group fields to avoid re-splitting in cross-product
-                let group2_fields: Vec<Vec<&[u8]>> = if print_paired {
+                // Pre-cache file2 group fields only for -o format (cross-product needs re-access)
+                let group2_fields: Vec<Vec<&[u8]>> = if print_paired && format.is_some() {
                     (group_start..i2)
                         .map(|j| split_fields(lines2[j], config.separator))
                         .collect()
@@ -539,20 +590,24 @@ pub fn join(
                 // For each file1 line with the same key, cross-product with file2 group
                 loop {
                     if print_paired {
-                        let fields1 = split_fields(lines1[i1], config.separator);
-                        let key = fields1.get(config.field1).copied().unwrap_or(b"");
-                        for fields2 in &group2_fields {
-                            if let Some(specs) = format {
+                        let key = extract_field(lines1[i1], config.field1, config.separator);
+                        if let Some(specs) = format {
+                            let fields1 = split_fields(lines1[i1], config.separator);
+                            for fields2 in &group2_fields {
                                 write_paired_format(
                                     &fields1, fields2, key, specs, empty, out_sep, delim, &mut buf,
                                 );
-                            } else {
-                                write_paired_default(
-                                    &fields1,
-                                    fields2,
+                            }
+                        } else {
+                            // Zero-copy path: no field Vec allocation
+                            for j in group_start..i2 {
+                                write_paired_default_zerocopy(
+                                    lines1[i1],
+                                    lines2[j],
                                     key,
                                     config.field1,
                                     config.field2,
+                                    config.separator,
                                     out_sep,
                                     delim,
                                     &mut buf,
@@ -626,8 +681,8 @@ pub fn join(
             }
         }
         if show_unpaired1 {
-            let fields1 = split_fields(lines1[i1], config.separator);
             if let Some(specs) = format {
+                let fields1 = split_fields(lines1[i1], config.separator);
                 write_unpaired_format(
                     &fields1,
                     0,
@@ -639,7 +694,14 @@ pub fn join(
                     &mut buf,
                 );
             } else {
-                write_unpaired_default(&fields1, config.field1, out_sep, delim, &mut buf);
+                write_unpaired_default_zerocopy(
+                    lines1[i1],
+                    config.field1,
+                    config.separator,
+                    out_sep,
+                    delim,
+                    &mut buf,
+                );
             }
         }
         i1 += 1;
@@ -671,8 +733,8 @@ pub fn join(
             }
         }
         if show_unpaired2 {
-            let fields2 = split_fields(lines2[i2], config.separator);
             if let Some(specs) = format {
+                let fields2 = split_fields(lines2[i2], config.separator);
                 write_unpaired_format(
                     &fields2,
                     1,
@@ -684,7 +746,14 @@ pub fn join(
                     &mut buf,
                 );
             } else {
-                write_unpaired_default(&fields2, config.field2, out_sep, delim, &mut buf);
+                write_unpaired_default_zerocopy(
+                    lines2[i2],
+                    config.field2,
+                    config.separator,
+                    out_sep,
+                    delim,
+                    &mut buf,
+                );
             }
         }
         i2 += 1;
