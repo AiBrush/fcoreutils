@@ -903,19 +903,43 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         if file_size < TINY_FILE_LIMIT {
             return hash_file_tiny(algo, file, file_size as usize);
         }
-        // Large files (>=16MB): use I/O pipelining on Linux to overlap read + hash
+        // Large files (>=16MB): mmap with huge pages for zero-copy single-shot hash.
+        // This is faster than streaming I/O for files that fit in RAM because it
+        // avoids thread synchronization, buffer management, and data copying.
+        // Falls back to streaming I/O if mmap fails (FUSE, NFS, etc.).
+        //
+        // SAFETY: mmap is safe for regular local files. If the file is truncated
+        // or the backing storage disappears after mapping (e.g. NFS disconnect),
+        // the kernel delivers SIGBUS which will crash the process. This matches
+        // the behavior of other mmap-using tools (wc, cat). The fallback to
+        // streaming I/O (read()) handles mmap failures at map time, but cannot
+        // protect against post-map truncation.
         if file_size >= SMALL_FILE_LIMIT {
+            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
+            if let Ok(mmap) = mmap_result {
+                #[cfg(target_os = "linux")]
+                {
+                    if file_size >= 2 * 1024 * 1024 {
+                        let _ = mmap.advise(memmap2::Advice::HugePage);
+                    }
+                    let _ = mmap.advise(memmap2::Advice::Sequential);
+                    // PopulateRead (Linux 5.14+) synchronously faults all pages before
+                    // returning, giving warm TLB entries for hash_bytes. WillNeed is
+                    // async and best-effort — pages may still fault during hashing.
+                    if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                        let _ = mmap.advise(memmap2::Advice::WillNeed);
+                    }
+                }
+                return hash_bytes(algo, &mmap);
+            }
+            // mmap failed — fall back to streaming I/O
             #[cfg(target_os = "linux")]
             {
                 return hash_file_pipelined(algo, file, file_size);
             }
-            // Non-Linux: mmap fallback
             #[cfg(not(target_os = "linux"))]
             {
-                let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
-                if let Ok(mmap) = mmap_result {
-                    return hash_bytes(algo, &mmap);
-                }
+                // On non-Linux, fall through to hash_reader (streaming fallback)
             }
         }
         // Small files (8KB..16MB): single read into thread-local buffer, then single-shot hash.

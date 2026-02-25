@@ -105,8 +105,8 @@ pub fn parse_tab_stops(spec: &str) -> Result<TabStops, String> {
 }
 
 // Pre-computed spaces buffer for fast tab expansion (avoids per-tab allocation)
-// Larger buffer (256 bytes) means most tabs can be served in a single memcpy
-const SPACES: [u8; 256] = [b' '; 256];
+// 4KB buffer covers even very large tab stops in a single memcpy
+const SPACES: [u8; 4096] = [b' '; 4096];
 
 /// Write N spaces to a Vec efficiently using pre-computed buffer.
 #[inline]
@@ -159,45 +159,74 @@ pub fn expand_bytes(
         }
     }
 
-    // Generic path for backspace handling or tab lists
-    expand_generic(data, tabs, initial_only, out)
+    // Generic path for backspace handling or tab lists.
+    // For Regular tabs, we only reach here when the memchr check at line 157 found
+    // backspaces, so has_backspace=true avoids a redundant O(n) scan.
+    // For List tabs, we haven't scanned yet, so check now.
+    let has_backspace = match tabs {
+        TabStops::Regular(_) => true,
+        TabStops::List(_) => memchr::memchr(b'\x08', data).is_some(),
+    };
+    expand_generic(data, tabs, initial_only, has_backspace, out)
 }
 
 /// Fast expand for regular tab stops without -i flag.
-/// Writes directly from source data for non-tab runs, avoiding intermediate buffer copies.
+/// Accumulates output into a buffer and flushes periodically (every 256KB) to bound memory.
+/// Uses memchr2 SIMD scanning to skip non-tab/non-newline runs in bulk.
 fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
     debug_assert!(tab_size > 0, "tab_size must be > 0");
+    const FLUSH_THRESHOLD: usize = 256 * 1024;
+    let cap = data.len().min(FLUSH_THRESHOLD) + data.len().min(FLUSH_THRESHOLD) / 8;
+    let mut output = Vec::with_capacity(cap);
     let mut column: usize = 0;
     let mut pos: usize = 0;
+
+    // For power-of-2 tab sizes, use bitwise AND instead of modulo (avoids DIV instruction)
+    let is_pow2 = tab_size.is_power_of_two();
+    let mask = tab_size - 1; // only valid when is_pow2
 
     while pos < data.len() {
         match memchr::memchr2(b'\t', b'\n', &data[pos..]) {
             Some(offset) => {
-                // Write non-special bytes directly from source (zero-copy)
+                // Copy non-special bytes in bulk
                 if offset > 0 {
-                    out.write_all(&data[pos..pos + offset])?;
+                    output.extend_from_slice(&data[pos..pos + offset]);
                     column += offset;
                 }
                 let byte = data[pos + offset];
                 pos += offset + 1;
 
                 if byte == b'\n' {
-                    out.write_all(b"\n")?;
+                    output.push(b'\n');
                     column = 0;
                 } else {
-                    // Tab: write spaces
-                    let spaces = tab_size - (column % tab_size);
-                    write_spaces(out, spaces)?;
+                    // Tab: append spaces to buffer
+                    let rem = if is_pow2 {
+                        column & mask
+                    } else {
+                        column % tab_size
+                    };
+                    let spaces = tab_size - rem;
+                    push_spaces(&mut output, spaces);
                     column += spaces;
+                }
+
+                // Flush periodically to bound memory usage
+                if output.len() >= FLUSH_THRESHOLD {
+                    out.write_all(&output)?;
+                    output.clear();
                 }
             }
             None => {
-                out.write_all(&data[pos..])?;
+                output.extend_from_slice(&data[pos..]);
                 break;
             }
         }
     }
 
+    if !output.is_empty() {
+        out.write_all(&output)?;
+    }
     Ok(())
 }
 
@@ -229,7 +258,7 @@ fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
 
         // If this line contains a backspace, fall back to generic for this line only
         if memchr::memchr(b'\x08', line).is_some() {
-            expand_generic(line, &tabs, true, out)?;
+            expand_generic(line, &tabs, true, true, out)?;
             pos = line_end;
             continue;
         }
@@ -270,50 +299,100 @@ fn expand_initial_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
 }
 
 /// Generic expand with support for -i flag and tab lists.
+/// Uses memchr2 SIMD scanning when no backspaces are present.
+/// `has_backspace` hint avoids a redundant O(n) scan when the caller already knows.
 fn expand_generic(
     data: &[u8],
     tabs: &TabStops,
     initial_only: bool,
+    has_backspace: bool,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
-    let mut output = Vec::with_capacity(data.len() + data.len() / 8);
-    let mut column: usize = 0;
-    let mut in_initial = true;
+    const FLUSH_THRESHOLD: usize = 256 * 1024;
+    let cap = data.len().min(FLUSH_THRESHOLD) + data.len().min(FLUSH_THRESHOLD) / 8;
+    let mut output = Vec::with_capacity(cap);
 
-    for &byte in data {
-        match byte {
-            b'\t' => {
-                if initial_only && !in_initial {
-                    output.push(b'\t');
-                    column = tabs.next_tab_stop(column);
-                } else {
-                    let spaces = tabs.spaces_to_next(column);
-                    push_spaces(&mut output, spaces);
-                    column += spaces;
+    // If no backspaces present and not initial-only, use SIMD bulk scanning
+    if !initial_only && !has_backspace {
+        let mut column: usize = 0;
+        let mut pos: usize = 0;
+
+        while pos < data.len() {
+            match memchr::memchr2(b'\t', b'\n', &data[pos..]) {
+                Some(offset) => {
+                    if offset > 0 {
+                        output.extend_from_slice(&data[pos..pos + offset]);
+                        column += offset;
+                    }
+                    let byte = data[pos + offset];
+                    pos += offset + 1;
+
+                    if byte == b'\n' {
+                        output.push(b'\n');
+                        column = 0;
+                    } else {
+                        let spaces = tabs.spaces_to_next(column);
+                        push_spaces(&mut output, spaces);
+                        column += spaces;
+                    }
+                    if output.len() >= FLUSH_THRESHOLD {
+                        out.write_all(&output)?;
+                        output.clear();
+                    }
+                }
+                None => {
+                    output.extend_from_slice(&data[pos..]);
+                    break;
                 }
             }
-            b'\n' => {
-                output.push(b'\n');
-                column = 0;
-                in_initial = true;
-            }
-            b'\x08' => {
-                output.push(b'\x08');
-                if column > 0 {
-                    column -= 1;
+        }
+    } else {
+        // Byte-by-byte fallback for backspace handling or initial-only mode
+        let mut column: usize = 0;
+        let mut in_initial = true;
+
+        for &byte in data {
+            match byte {
+                b'\t' => {
+                    if initial_only && !in_initial {
+                        output.push(b'\t');
+                        column = tabs.next_tab_stop(column);
+                    } else {
+                        let spaces = tabs.spaces_to_next(column);
+                        push_spaces(&mut output, spaces);
+                        column += spaces;
+                    }
                 }
-            }
-            _ => {
-                if initial_only && in_initial && byte != b' ' {
-                    in_initial = false;
+                b'\n' => {
+                    output.push(b'\n');
+                    column = 0;
+                    in_initial = true;
+                    if output.len() >= FLUSH_THRESHOLD {
+                        out.write_all(&output)?;
+                        output.clear();
+                    }
                 }
-                output.push(byte);
-                column += 1;
+                b'\x08' => {
+                    output.push(b'\x08');
+                    if column > 0 {
+                        column -= 1;
+                    }
+                }
+                _ => {
+                    if initial_only && in_initial && byte != b' ' {
+                        in_initial = false;
+                    }
+                    output.push(byte);
+                    column += 1;
+                }
             }
         }
     }
 
-    out.write_all(&output)
+    if !output.is_empty() {
+        out.write_all(&output)?;
+    }
+    Ok(())
 }
 
 /// Unexpand spaces to tabs.
