@@ -102,6 +102,10 @@ fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std
 /// `segment` must contain at most one `\n`, and only as its final byte.
 #[inline]
 fn fold_segment_bytes_spaces(output: &mut Vec<u8>, segment: &[u8], width: usize) {
+    debug_assert!(
+        !segment[..segment.len().saturating_sub(1)].contains(&b'\n'),
+        "fold_segment_bytes_spaces: invariant violated — internal newline in segment"
+    );
     let mut start = 0;
     while start + width < segment.len() {
         // SAFETY: loop guard ensures start + width < segment.len()
@@ -134,6 +138,10 @@ fn fold_segment_bytes_spaces(output: &mut Vec<u8>, segment: &[u8], width: usize)
 /// Fold a single line segment (no internal newlines except possibly trailing) by bytes.
 #[inline]
 fn fold_segment_bytes(output: &mut Vec<u8>, segment: &[u8], width: usize) {
+    debug_assert!(
+        !segment[..segment.len().saturating_sub(1)].contains(&b'\n'),
+        "fold_segment_bytes: invariant violated — internal newline in segment"
+    );
     let mut start = 0;
     while start + width < segment.len() {
         // SAFETY: loop guard ensures start + width < segment.len()
@@ -232,7 +240,8 @@ fn fold_column_mode_spaces(data: &[u8], width: usize, output: &mut Vec<u8>) {
 /// For ASCII-simple chunks (the common case), uses memrchr for fast space search.
 /// Falls back to the full column-mode handler when non-simple bytes are found.
 ///
-/// Note: worst case O(n·width) when spaces cluster at chunk offset 0.
+/// Note: worst case O(n·width/8) SWAR word-ops when spaces cluster at chunk offset 0
+/// (start advances 1 byte per iteration, each paying O(width/8) for is_ascii_simple).
 /// Typical ASCII prose converges to O(n/width) iterations.
 fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
     let mut start = 0;
@@ -322,13 +331,10 @@ fn word_is_ascii_simple(word: u64) -> bool {
     // Check 3: no byte == 0x7F (DEL)
     // XOR with 0x7F turns 0x7F bytes into 0x00; we then detect zero bytes via
     // the standard (x - 0x01) & !x & 0x80 trick.
-    // When no input byte is 0x7F, every xored byte is in [0x01..0x5F].
-    // Subtracting 0x01 from each byte never underflows (all >= 0x01), so
-    // no borrow propagates between bytes and has_zero stays 0.
-    // When a 0x7F IS present its xored byte is 0x00, which the formula
-    // flags; borrow may produce false positives in adjacent bytes of
-    // has_zero, but never false negatives — has_zero is already non-zero
-    // from the real detection, so the overall return value is correct.
+    // When no 0x7F is present, all xored bytes are in [0x01..0x5F] — none
+    // underflow on -0x01 — so no inter-byte borrow occurs and has_zero == 0.
+    // When a 0x7F IS present, the zero byte flags correctly; adjacent bytes
+    // may show false positives in has_zero but the overall != 0 is still correct.
     let xored = word ^ 0x7F7F7F7F7F7F7F7F;
     let has_zero = xored.wrapping_sub(0x0101010101010101) & !xored & 0x8080808080808080;
     has_zero == 0
@@ -380,7 +386,7 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
         if byte == b'\t' {
             let tab_width = ((col / 8) + 1) * 8 - col;
 
-            if col > 0 && col + tab_width > width && tab_width > 0 {
+            if col > 0 && col + tab_width > width {
                 // Need to break before this tab (skip when col==0: can't break before first char)
                 if break_at_spaces {
                     if let Some(sp_after) = last_space_in {
