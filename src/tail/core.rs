@@ -165,13 +165,13 @@ pub fn sendfile_tail_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool>
     use std::os::unix::io::AsRawFd;
     let in_fd = file.as_raw_fd();
     let mut offset: libc::off_t = start as libc::off_t;
-    let mut remaining = n as usize;
+    let mut remaining = n;
 
     while remaining > 0 {
-        let chunk = remaining.min(0x7ffff000);
+        let chunk = remaining.min(0x7fff_f000) as usize;
         let ret = unsafe { libc::sendfile(out_fd, in_fd, &mut offset, chunk) };
         if ret > 0 {
-            remaining -= ret as usize;
+            remaining -= ret as u64;
         } else if ret == 0 {
             break;
         } else {
@@ -215,9 +215,7 @@ fn sendfile_tail_lines(path: &Path, n: u64, delimiter: u8, out_fd: i32) -> io::R
     let in_fd = file.as_raw_fd();
 
     // Disable forward readahead — we scan backward from EOF
-    unsafe {
-        libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_RANDOM);
-    }
+    let _ = unsafe { libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_RANDOM) };
 
     // Scan backward in chunks to find the start offset of the last N lines
     const CHUNK: u64 = 262144; // 256KB — typically contains far more than 10 lines
@@ -259,23 +257,23 @@ fn sendfile_tail_lines(path: &Path, n: u64, delimiter: u8, out_fd: i32) -> io::R
 
     // Enable forward readahead from the output start point
     let remaining = file_size - start_byte;
-    unsafe {
+    let _ = unsafe {
         libc::posix_fadvise(
             in_fd,
             start_byte as libc::off_t,
             remaining as libc::off_t,
             libc::POSIX_FADV_SEQUENTIAL,
-        );
-    }
+        )
+    };
 
     // Zero-copy output via sendfile
     let mut offset = start_byte as libc::off_t;
-    let mut left = remaining as usize;
+    let mut left = remaining;
     while left > 0 {
-        let chunk = left.min(0x7ffff000);
+        let chunk = left.min(0x7fff_f000) as usize;
         let ret = unsafe { libc::sendfile(out_fd, in_fd, &mut offset, chunk) };
         if ret > 0 {
-            left -= ret as usize;
+            left -= ret as u64;
         } else if ret == 0 {
             break;
         } else {
@@ -383,7 +381,7 @@ fn tail_lines_from_streaming_file(
             let in_fd = file.as_raw_fd();
             let stdout = io::stdout();
             let out_fd = stdout.as_raw_fd();
-            let file_size = file.metadata()?.len() as usize;
+            let file_size = file.metadata()?.len();
             return sendfile_to_stdout_raw(in_fd, file_size, out_fd);
         }
         #[cfg(not(target_os = "linux"))]
@@ -442,14 +440,14 @@ fn tail_lines_from_streaming_file(
 
 /// Raw sendfile helper
 #[cfg(target_os = "linux")]
-fn sendfile_to_stdout_raw(in_fd: i32, file_size: usize, out_fd: i32) -> io::Result<bool> {
+fn sendfile_to_stdout_raw(in_fd: i32, file_size: u64, out_fd: i32) -> io::Result<bool> {
     let mut offset: libc::off_t = 0;
     let mut remaining = file_size;
     while remaining > 0 {
-        let chunk = remaining.min(0x7ffff000);
+        let chunk = remaining.min(0x7fff_f000) as usize;
         let ret = unsafe { libc::sendfile(out_fd, in_fd, &mut offset, chunk) };
         if ret > 0 {
-            remaining -= ret as usize;
+            remaining -= ret as u64;
         } else if ret == 0 {
             break;
         } else {
@@ -463,7 +461,11 @@ fn sendfile_to_stdout_raw(in_fd: i32, file_size: usize, out_fd: i32) -> io::Resu
     Ok(true)
 }
 
-/// Process a single file/stdin for tail
+/// Process a single file/stdin for tail.
+///
+/// On Linux, the sendfile fast paths bypass `out` and write directly to stdout
+/// (fd 1). Callers MUST ensure `out` wraps stdout when these paths are active.
+/// The `out.flush()` call drains any buffered data before sendfile takes over.
 pub fn tail_file(
     filename: &str,
     config: &TailConfig,
@@ -485,7 +487,7 @@ pub fn tail_file(
                     let stdout = io::stdout();
                     let out_fd = stdout.as_raw_fd();
                     match sendfile_tail_lines(path, *n, delimiter, out_fd) {
-                        Ok(true) => return Ok(true),
+                        Ok(_) => return Ok(true),
                         Err(e) => {
                             eprintln!(
                                 "{}: cannot open '{}' for reading: {}",
@@ -495,13 +497,12 @@ pub fn tail_file(
                             );
                             return Ok(false);
                         }
-                        _ => {}
                     }
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
                     match tail_lines_streaming_file(path, *n, delimiter, out) {
-                        Ok(true) => return Ok(true),
+                        Ok(_) => return Ok(true),
                         Err(e) => {
                             eprintln!(
                                 "{}: cannot open '{}' for reading: {}",
@@ -511,14 +512,13 @@ pub fn tail_file(
                             );
                             return Ok(false);
                         }
-                        _ => {}
                     }
                 }
             }
             TailMode::LinesFrom(n) => {
                 // Streaming forward: skip N-1 lines, output rest
                 match tail_lines_from_streaming_file(path, *n, delimiter, out) {
-                    Ok(true) => return Ok(true),
+                    Ok(_) => return Ok(true),
                     Err(e) => {
                         eprintln!(
                             "{}: cannot open '{}' for reading: {}",
@@ -528,7 +528,6 @@ pub fn tail_file(
                         );
                         return Ok(false);
                     }
-                    _ => {}
                 }
             }
             TailMode::Bytes(_n) => {
@@ -623,13 +622,13 @@ fn sendfile_tail_bytes_from(path: &Path, n: u64, out_fd: i32) -> io::Result<bool
     use std::os::unix::io::AsRawFd;
     let in_fd = file.as_raw_fd();
     let mut offset: libc::off_t = start as libc::off_t;
-    let mut remaining = (file_size - start) as usize;
+    let mut remaining = file_size - start;
 
     while remaining > 0 {
-        let chunk = remaining.min(0x7ffff000);
+        let chunk = remaining.min(0x7fff_f000) as usize;
         let ret = unsafe { libc::sendfile(out_fd, in_fd, &mut offset, chunk) };
         if ret > 0 {
-            remaining -= ret as usize;
+            remaining -= ret as u64;
         } else if ret == 0 {
             break;
         } else {
