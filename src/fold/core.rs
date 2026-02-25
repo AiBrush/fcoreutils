@@ -151,9 +151,16 @@ fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &m
             None => &data[pos..],
         };
 
-        // Fast path: pure ASCII, no tabs/backspaces, and byte count <= width
-        if line_data.len() <= width && is_ascii_simple(line_data) {
-            output.extend_from_slice(line_data);
+        // Fast path: pure ASCII, no tabs/backspaces — column == byte count
+        if is_ascii_simple(line_data) {
+            if line_data.len() <= width {
+                // Short line: no wrapping needed
+                output.extend_from_slice(line_data);
+            } else if break_at_spaces {
+                fold_ascii_line_spaces(line_data, width, output);
+            } else {
+                fold_segment_bytes(output, line_data, width);
+            }
             if let Some(nl) = line_end {
                 output.push(b'\n');
                 pos = nl + 1;
@@ -171,6 +178,35 @@ fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &m
         } else {
             break;
         }
+    }
+}
+
+/// Fast fold an ASCII line with -s (break at spaces).
+/// Since it's pure ASCII, column == byte position.
+fn fold_ascii_line_spaces(line: &[u8], width: usize, output: &mut Vec<u8>) {
+    let mut start = 0;
+    while start + width < line.len() {
+        // Look for the last space within the width
+        let chunk = &line[start..start + width];
+        match memchr::memrchr(b' ', chunk) {
+            Some(sp_offset) => {
+                // Break after the space (include the space, then newline)
+                let break_at = start + sp_offset + 1;
+                output.extend_from_slice(&line[start..break_at]);
+                output.push(b'\n');
+                start = break_at;
+            }
+            None => {
+                // No space found: hard break at width
+                output.extend_from_slice(&line[start..start + width]);
+                output.push(b'\n');
+                start += width;
+            }
+        }
+    }
+    // Remaining bytes
+    if start < line.len() {
+        output.extend_from_slice(&line[start..]);
     }
 }
 
@@ -205,35 +241,19 @@ fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
     }
 }
 
-/// Insert a line break, preferring the last space position when -s is active.
-/// Returns the new column position after the break.
-#[inline]
-fn insert_line_break(
-    output: &mut Vec<u8>,
-    last_space_out_pos: &mut Option<usize>,
-    break_at_spaces: bool,
-) -> usize {
-    if break_at_spaces {
-        if let Some(sp_pos) = *last_space_out_pos {
-            let tail_start = sp_pos + 1;
-            let tail_end = output.len();
-            output.push(0);
-            output.copy_within(tail_start..tail_end, tail_start + 1);
-            output[tail_start] = b'\n';
-            *last_space_out_pos = None;
-            return recalc_column(&output[tail_start + 1..]);
-        }
-    }
-    output.push(b'\n');
-    *last_space_out_pos = None;
-    0
-}
-
 /// Process a single line (no newlines) in column mode, writing to output.
-/// Handles UTF-8 characters with proper display width.
+///
+/// Uses a scan-and-flush approach: tracks break points in the INPUT data,
+/// then writes complete segments. Avoids copy_within for -s mode.
 fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
     let mut col: usize = 0;
-    let mut last_space_out_pos: Option<usize> = None;
+    // For -s mode: track last space in input, not output
+    let mut last_space_in: Option<usize> = None; // byte index in `line` AFTER the space
+    let mut col_at_space: usize = 0;
+    // CR/backspace change col non-linearly, invalidating `col - col_at_space`.
+    // When set, we must use recalc_column() to replay from the space marker.
+    let mut needs_recalc = false;
+    let mut seg_start: usize = 0; // start of current unflushed segment in `line`
     let mut i = 0;
 
     while i < line.len() {
@@ -244,32 +264,67 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
             let tab_width = ((col / 8) + 1) * 8 - col;
 
             if col + tab_width > width && tab_width > 0 {
-                col = insert_line_break(output, &mut last_space_out_pos, break_at_spaces);
+                // Need to break before this tab
+                if break_at_spaces {
+                    if let Some(sp_after) = last_space_in {
+                        // Flush up to and including the space, then newline
+                        output.extend_from_slice(&line[seg_start..sp_after]);
+                        output.push(b'\n');
+                        seg_start = sp_after;
+                        col = if needs_recalc {
+                            recalc_column(&line[sp_after..i])
+                        } else {
+                            col - col_at_space
+                        };
+                        last_space_in = None;
+                        needs_recalc = false;
+                        // Re-evaluate this tab with the new col — it may
+                        // still exceed width after the space break.
+                        continue;
+                    } else {
+                        output.extend_from_slice(&line[seg_start..i]);
+                        output.push(b'\n');
+                        seg_start = i;
+                        col = 0;
+                    }
+                } else {
+                    output.extend_from_slice(&line[seg_start..i]);
+                    output.push(b'\n');
+                    seg_start = i;
+                    col = 0;
+                }
             }
 
             if break_at_spaces {
-                last_space_out_pos = Some(output.len());
+                last_space_in = Some(i + 1);
+                col_at_space = col + ((col / 8) + 1) * 8 - col;
+                needs_recalc = false;
             }
-            output.push(byte);
-            // Recompute tab_width: col may have changed after space-break insertion
             col += ((col / 8) + 1) * 8 - col;
             i += 1;
             continue;
         }
 
-        // Handle carriage return: resets column to 0 (GNU adjust_column compat)
+        // Handle carriage return: resets column to 0 (GNU adjust_column compat).
+        // Invalidates `col - col_at_space` but keeps the space marker —
+        // GNU fold still breaks at the last space even after CR.
         if byte == b'\r' {
-            output.push(byte);
             col = 0;
+            if last_space_in.is_some() {
+                needs_recalc = true;
+            }
             i += 1;
             continue;
         }
 
-        // Handle backspace
+        // Handle backspace: decrements column non-linearly.
+        // Invalidates `col - col_at_space` but keeps the space marker.
         if byte == b'\x08' {
-            output.push(byte);
             if col > 0 {
                 col -= 1;
+            }
+            if last_space_in.is_some() {
+                needs_recalc = true;
             }
             i += 1;
             continue;
@@ -280,20 +335,54 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
 
         // Check if adding this character would exceed width
         if col + cw > width && cw > 0 {
-            col = insert_line_break(output, &mut last_space_out_pos, break_at_spaces);
+            if break_at_spaces {
+                if let Some(sp_after) = last_space_in {
+                    output.extend_from_slice(&line[seg_start..sp_after]);
+                    output.push(b'\n');
+                    seg_start = sp_after;
+                    col = if needs_recalc {
+                        recalc_column(&line[sp_after..i])
+                    } else {
+                        col - col_at_space
+                    };
+                    last_space_in = None;
+                    needs_recalc = false;
+                    // Re-evaluate this character with the new col — it may
+                    // still exceed width after the space break.
+                    continue;
+                } else {
+                    output.extend_from_slice(&line[seg_start..i]);
+                    output.push(b'\n');
+                    seg_start = i;
+                    col = 0;
+                }
+            } else {
+                output.extend_from_slice(&line[seg_start..i]);
+                output.push(b'\n');
+                seg_start = i;
+                col = 0;
+            }
         }
 
         if break_at_spaces && byte == b' ' {
-            last_space_out_pos = Some(output.len());
+            last_space_in = Some(i + 1);
+            col_at_space = col + cw;
+            needs_recalc = false;
         }
 
-        output.extend_from_slice(&line[i..i + byte_len]);
         col += cw;
         i += byte_len;
     }
+
+    // Flush remaining segment
+    if seg_start < line.len() {
+        output.extend_from_slice(&line[seg_start..]);
+    }
 }
 
-/// Recalculate column position for a segment of output (UTF-8 aware).
+/// Recalculate column position by replaying a segment (handles tabs, CR, backspace).
+/// Used when non-linear column operations (CR, backspace) invalidate the fast
+/// `col - col_at_space` delta formula.
 fn recalc_column(data: &[u8]) -> usize {
     let mut col = 0;
     let mut i = 0;
