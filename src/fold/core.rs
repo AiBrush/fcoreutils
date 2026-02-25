@@ -207,12 +207,14 @@ fn fold_column_mode_spaces(data: &[u8], width: usize, output: &mut Vec<u8>) {
             None => &data[pos..],
         };
 
-        if line_data.len() <= width && is_ascii_simple(line_data) {
-            // Short ASCII-simple line: byte length == display width, no wrapping needed
-            output.extend_from_slice(line_data);
-        } else if line_data.len() <= width {
-            // Short but contains tabs/control chars: display width may exceed byte length
-            fold_one_line_column(line_data, width, true, output);
+        if line_data.len() <= width {
+            if is_ascii_simple(line_data) {
+                // Short ASCII-simple line: byte length == display width, no wrapping needed
+                output.extend_from_slice(line_data);
+            } else {
+                // Short but contains tabs/control chars: display width may exceed byte length
+                fold_one_line_column(line_data, width, true, output);
+            }
         } else {
             fold_line_spaces_checked(line_data, width, output);
         }
@@ -241,8 +243,7 @@ fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
         // the two-pass cost is negligible for the common ASCII-only case.
         if !is_ascii_simple(chunk) {
             // Non-simple byte found: fall back to slow path for the rest.
-            // col is 0 here: every chunk boundary is preceded by a line break
-            // or line start, so fold_one_line_column's initial col=0 is correct.
+            // col=0 here: every advance of `start` emits b'\n' first.
             fold_one_line_column(&line[start..], width, true, output);
             return;
         }
@@ -266,8 +267,7 @@ fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
         if is_ascii_simple(tail) {
             output.extend_from_slice(tail);
         } else {
-            // col is 0 here: every chunk boundary is preceded by a line break
-            // or line start, so fold_one_line_column's initial col=0 is correct.
+            // col=0 here: every advance of `start` emits b'\n' first.
             fold_one_line_column(tail, width, true, output);
         }
     }
@@ -316,11 +316,11 @@ fn word_is_ascii_simple(word: u64) -> bool {
     // XOR with 0x7F turns 0x7F bytes into 0x00; we then detect zero bytes via
     // the standard (x - 0x01) & !x & 0x80 trick.
     // When no input byte is 0x7F, every xored byte is in [0x01..0x5F].
-    // Subtracting 0x0101... byte-by-byte never underflows (each byte >= 0x01),
-    // so no borrow propagates between bytes, and has_zero stays 0.
-    // A true 0x7F input creates a 0x00 xored byte, which the zero-detect
-    // formula correctly flags (borrow from that byte may set bits in adjacent
-    // bytes, but those are masked out by the final &!xored & 0x8080... check).
+    // Subtracting 0x01 from each byte never underflows (all >= 0x01), so
+    // no borrow propagates between bytes and has_zero stays 0.
+    // When a 0x7F IS present its xored byte is 0x00, which the formula
+    // flags; borrow effects on adjacent bytes don't matter because
+    // has_zero is already non-zero from the real detection.
     let xored = word ^ 0x7F7F7F7F7F7F7F7F;
     let has_zero = xored.wrapping_sub(0x0101010101010101) & !xored & 0x8080808080808080;
     has_zero == 0
