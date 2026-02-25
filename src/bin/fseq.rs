@@ -7,7 +7,8 @@
 use std::process;
 
 /// Write buffer directly to fd 1, bypassing BufWriter overhead.
-fn write_all_fd1(buf: &[u8]) {
+/// Returns false on unrecoverable error (caller should stop generating output).
+fn write_all_fd1(buf: &[u8]) -> bool {
     let mut pos = 0;
     while pos < buf.len() {
         let ret = unsafe {
@@ -24,11 +25,12 @@ fn write_all_fd1(buf: &[u8]) {
             if err.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            break;
+            return false;
         } else {
-            break;
+            return false;
         }
     }
+    true
 }
 
 const TOOL_NAME: &str = "seq";
@@ -509,15 +511,15 @@ fn main() {
         let inc_i = increment as i64;
         let last_i = last as i64;
 
-        const BUF_SIZE: usize = 256 * 1024;
+        const BUF_SIZE: usize = 1024 * 1024;
         const FLUSH_AT: usize = BUF_SIZE - 32; // 32 bytes margin for max i64 + newline
-        let mut buf = [0u8; BUF_SIZE];
+        let mut buf = vec![0u8; BUF_SIZE];
         let mut offset: usize = 0;
 
-        // Try to enlarge pipe buffer for higher throughput
+        // Enlarge pipe buffer to match our write size for minimal syscalls
         #[cfg(target_os = "linux")]
         unsafe {
-            libc::fcntl(1, libc::F_SETPIPE_SZ, 1024 * 1024);
+            libc::fcntl(1, libc::F_SETPIPE_SZ, BUF_SIZE as libc::c_int);
         }
 
         let mut current = first_i;
@@ -549,7 +551,9 @@ fn main() {
                 buf[offset] = b'\n';
                 offset += 1;
                 if offset >= FLUSH_AT {
-                    write_all_fd1(&buf[..offset]);
+                    if !write_all_fd1(&buf[..offset]) {
+                        return;
+                    }
                     offset = 0;
                 }
                 current += 1;
@@ -572,7 +576,7 @@ fn main() {
                 }
             }
             if offset > 0 {
-                write_all_fd1(&buf[..offset]);
+                let _ = write_all_fd1(&buf[..offset]);
             }
         } else if inc_i > 0 && sep_is_newline {
             // Positive increment with newline separator (non-1 increment)
@@ -592,13 +596,15 @@ fn main() {
                 buf[offset] = b'\n';
                 offset += 1;
                 if offset >= FLUSH_AT {
-                    write_all_fd1(&buf[..offset]);
+                    if !write_all_fd1(&buf[..offset]) {
+                        return;
+                    }
                     offset = 0;
                 }
                 current += inc_i;
             }
             if offset > 0 {
-                write_all_fd1(&buf[..offset]);
+                let _ = write_all_fd1(&buf[..offset]);
             }
         } else if inc_i > 0 {
             let mut vbuf = Vec::with_capacity(BUF_SIZE);
@@ -611,7 +617,9 @@ fn main() {
                 let s = itoa_buf2.format(current);
                 vbuf.extend_from_slice(s.as_bytes());
                 if vbuf.len() >= FLUSH_AT {
-                    write_all_fd1(&vbuf);
+                    if !write_all_fd1(&vbuf) {
+                        return;
+                    }
                     vbuf.clear();
                 }
                 current += inc_i;
@@ -620,7 +628,7 @@ fn main() {
                 vbuf.push(b'\n');
             }
             if !vbuf.is_empty() {
-                write_all_fd1(&vbuf);
+                let _ = write_all_fd1(&vbuf);
             }
         } else {
             let mut vbuf = Vec::with_capacity(BUF_SIZE);
@@ -633,7 +641,9 @@ fn main() {
                 let s = itoa_buf2.format(current);
                 vbuf.extend_from_slice(s.as_bytes());
                 if vbuf.len() >= FLUSH_AT {
-                    write_all_fd1(&vbuf);
+                    if !write_all_fd1(&vbuf) {
+                        return;
+                    }
                     vbuf.clear();
                 }
                 current += inc_i;
@@ -642,7 +652,7 @@ fn main() {
                 vbuf.push(b'\n');
             }
             if !vbuf.is_empty() {
-                write_all_fd1(&vbuf);
+                let _ = write_all_fd1(&vbuf);
             }
         }
     } else if use_int && !fmt.is_empty() {
@@ -686,7 +696,9 @@ fn main() {
                     buf.extend_from_slice(s.as_bytes());
                 }
                 if buf.len() >= flush_threshold {
-                    write_all_fd1(&buf);
+                    if !write_all_fd1(&buf) {
+                        return;
+                    }
                     buf.clear();
                 }
                 current += inc_i;
@@ -720,7 +732,9 @@ fn main() {
                     buf.extend_from_slice(s.as_bytes());
                 }
                 if buf.len() >= flush_threshold {
-                    write_all_fd1(&buf);
+                    if !write_all_fd1(&buf) {
+                        return;
+                    }
                     buf.clear();
                 }
                 current += inc_i;
@@ -730,9 +744,8 @@ fn main() {
             buf.push(b'\n');
         }
         if !buf.is_empty() {
-            write_all_fd1(&buf);
+            let _ = write_all_fd1(&buf);
         }
-        // output already flushed via write_all_fd1
     } else {
         // Float path
         // Use a step counter to avoid accumulation errors
@@ -757,7 +770,9 @@ fn main() {
                     buf.extend_from_slice(s.as_bytes());
                 }
                 if buf.len() >= flush_threshold {
-                    write_all_fd1(&buf);
+                    if !write_all_fd1(&buf) {
+                        return;
+                    }
                     buf.clear();
                 }
                 step += 1;
@@ -780,7 +795,9 @@ fn main() {
                     buf.extend_from_slice(s.as_bytes());
                 }
                 if buf.len() >= flush_threshold {
-                    write_all_fd1(&buf);
+                    if !write_all_fd1(&buf) {
+                        return;
+                    }
                     buf.clear();
                 }
                 step += 1;
@@ -792,9 +809,8 @@ fn main() {
             buf.push(b'\n');
         }
         if !buf.is_empty() {
-            write_all_fd1(&buf);
+            let _ = write_all_fd1(&buf);
         }
-        // output already flushed via write_all_fd1
     }
 }
 

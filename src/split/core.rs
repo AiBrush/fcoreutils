@@ -564,7 +564,16 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
                 ),
             ));
         }
-        Box::new(File::open(path)?)
+        let file = File::open(path)?;
+        // Hint kernel to readahead sequentially for better I/O throughput
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+            }
+        }
+        Box::new(file)
     };
 
     match config.mode {
