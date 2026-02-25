@@ -203,15 +203,15 @@ fn test_utf8_space_still_breaks() {
 
 #[test]
 fn test_c_locale_high_bytes_are_word_content() {
-    // GNU wc 9.7 C locale: high bytes are word content (non-space)
+    // GNU wc 9.4 C locale: ALL high bytes (0x80-0xFF) are word content (non-space)
     assert_eq!(count_words_locale(b"\x80", false), 1);
     assert_eq!(count_words_locale(b"\xFF", false), 1);
     // High bytes between printable ASCII: word content, doesn't split word
     assert_eq!(count_words_locale(b"hello\x80world", false), 1);
     // High bytes between spaces: word content, counted as separate word
     assert_eq!(count_words_locale(b"hello \x80 world", false), 3);
-    // 0xA0 (NBSP) is whitespace in C locale (GNU wc iswnbspace via glibc Latin-1 mapping)
-    assert_eq!(count_words_locale(b"hello\xa0world", false), 2);
+    // 0xA0 is NOT space in C locale (GNU wc 9.4 isspace(0xa0) = false)
+    assert_eq!(count_words_locale(b"hello\xa0world", false), 1);
 }
 
 #[test]
@@ -556,7 +556,7 @@ fn test_gnu_word_definition() {
 
 #[test]
 fn test_c_locale_cjk_word_count() {
-    // GNU wc 9.7 C locale: high bytes are word content (non-space).
+    // GNU wc 9.4 C locale: ALL high bytes (including 0xA0) are word content.
     // "世界" bytes: e4 b8 96 e7 95 8c — all non-space in C locale → 1 word.
     let data = "世界".as_bytes();
     assert_eq!(count_words_locale(data, false), 1);
@@ -568,13 +568,13 @@ fn test_c_locale_cjk_word_count() {
     let multi = "こんにちは\nさようなら\n".as_bytes();
     assert_eq!(count_words_locale(multi, false), 2);
     // Full test data: "Hello, 世界!\n你好世界\nこんにちは\n"
-    // Line 1: "Hello," (word 1) + space + "世界!" (e4 b8 96 e7 95 8c 21, no 0xa0) = word 2 + \n
-    // Line 2: "你好世界" (e4 bd [a0] e5 a5 bd e4 b8 96 e7 95 8c)
-    //         0xa0 in 你(E4 BD A0) acts as space → "e4 bd" = word 3, rest = word 4 + \n
-    // Line 3: "こんにちは" (no 0xa0) = word 5 + \n
-    // Total: 5 (matches GNU wc 9.7).
+    // Line 1: "Hello," (word 1) + space + "世界!" = word 2 + \n
+    // Line 2: "你好世界" (e4 bd a0 e5 a5 bd e4 b8 96 e7 95 8c)
+    //         0xa0 in 你(E4 BD A0) is NOT space in C locale → all one word = word 3 + \n
+    // Line 3: "こんにちは" = word 4 + \n
+    // Total: 4 (matches GNU wc 9.4).
     let full = "Hello, 世界!\n你好世界\nこんにちは\n".as_bytes();
-    assert_eq!(count_words_locale(full, false), 5);
+    assert_eq!(count_words_locale(full, false), 4);
 }
 
 #[test]

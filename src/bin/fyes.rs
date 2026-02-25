@@ -8,8 +8,8 @@ use std::process;
 const TOOL_NAME: &str = "yes";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Buffer size for bulk writes.
-const BUF_SIZE: usize = 128 * 1024;
+/// Buffer size for bulk writes (1MB matches F_SETPIPE_SZ for minimal syscalls).
+const BUF_SIZE: usize = 1024 * 1024;
 
 /// Handle write error: print message to stderr and exit with code 1.
 /// Matches GNU yes behavior: "yes: standard output: <error>"
@@ -108,45 +108,37 @@ fn main() {
         buf.extend_from_slice(line_bytes);
     }
 
-    // Try to enlarge pipe buffer for higher throughput
+    // Enlarge pipe buffer to match our write size for minimal syscalls
     #[cfg(target_os = "linux")]
     unsafe {
-        libc::fcntl(1, libc::F_SETPIPE_SZ, 1024 * 1024);
+        libc::fcntl(1, libc::F_SETPIPE_SZ, BUF_SIZE as libc::c_int);
     }
 
-    // Try vmsplice for zero-copy pipe output on Linux
-    #[cfg(target_os = "linux")]
-    {
-        let iov = libc::iovec {
-            iov_base: buf.as_ptr() as *mut libc::c_void,
-            iov_len: buf.len(),
-        };
-        // Test if stdout is a pipe that supports vmsplice
-        let ret = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-        if ret > 0 {
-            // vmsplice works - use it for maximum throughput
-            loop {
-                let ret = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-                if ret <= 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() == std::io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    write_error_exit(err);
-                }
-            }
-        }
-    }
-
-    // Fallback: raw write(2) to fd 1
+    // Raw write(2) loop — simpler and faster than vmsplice (which without
+    // SPLICE_F_GIFT copies into pipe buffers anyway, with extra overhead)
+    let ptr = buf.as_ptr();
+    let total = buf.len();
     loop {
-        let ret = unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, buf.len() as _) };
-        if ret <= 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
+        let mut written = 0usize;
+        while written < total {
+            let ret = unsafe {
+                libc::write(
+                    1,
+                    ptr.add(written) as *const libc::c_void,
+                    (total - written) as _,
+                )
+            };
+            if ret > 0 {
+                written += ret as usize;
+            } else if ret == 0 {
+                break;
+            } else {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                write_error_exit(err);
             }
-            write_error_exit(err);
         }
     }
 }
