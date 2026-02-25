@@ -354,10 +354,28 @@ fn has_conversions(conv: &DdConv) -> bool {
     conv.lcase || conv.ucase || conv.swab || conv.sync
 }
 
+/// Check if any iflag/oflag fields are non-default.
+#[cfg(target_os = "linux")]
+fn has_flags(flags: &DdFlags) -> bool {
+    flags.append
+        || flags.direct
+        || flags.directory
+        || flags.dsync
+        || flags.sync
+        || flags.fullblock
+        || flags.nonblock
+        || flags.noatime
+        || flags.nocache
+        || flags.noctty
+        || flags.nofollow
+        || flags.count_bytes
+        || flags.skip_bytes
+}
+
 /// Raw-syscall fast path: when both input and output are file paths,
-/// ibs == obs, and no conversions are needed, bypass Box<dyn Read/Write>
-/// and use libc::read/write directly. Handles char devices (e.g. /dev/zero)
-/// that copy_file_range can't handle.
+/// ibs == obs, no conversions, and no iflag/oflag are set, bypass
+/// Box<dyn Read/Write> and use libc::read/write directly. Handles
+/// char devices (e.g. /dev/zero) that copy_file_range can't handle.
 #[cfg(target_os = "linux")]
 fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
     if config.input.is_none() || config.output.is_none() {
@@ -366,26 +384,40 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
     if has_conversions(&config.conv) || config.ibs != config.obs {
         return None;
     }
+    // Bail out if any iflag/oflag is set — we don't apply open() flags here
+    if has_flags(&config.iflag) || has_flags(&config.oflag) {
+        return None;
+    }
 
     let start_time = Instant::now();
     let in_path = config.input.as_ref().unwrap();
     let out_path = config.output.as_ref().unwrap();
 
-    // Open input
-    let in_fd = unsafe {
-        libc::open(
-            std::ffi::CString::new(in_path.as_str()).ok()?.as_ptr(),
-            libc::O_RDONLY | libc::O_NOATIME,
-        )
+    // Build CStrings before opening any FDs to avoid leaks on interior NUL
+    let in_cstr = match std::ffi::CString::new(in_path.as_str()) {
+        Ok(c) => c,
+        Err(_) => {
+            return Some(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("input path contains NUL byte: '{}'", in_path),
+            )));
+        }
     };
+    let out_cstr = match std::ffi::CString::new(out_path.as_str()) {
+        Ok(c) => c,
+        Err(_) => {
+            return Some(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("output path contains NUL byte: '{}'", out_path),
+            )));
+        }
+    };
+
+    // Open input
+    let in_fd = unsafe { libc::open(in_cstr.as_ptr(), libc::O_RDONLY | libc::O_NOATIME) };
     let in_fd = if in_fd < 0 {
         // Retry without O_NOATIME (fails on files we don't own)
-        let fd = unsafe {
-            libc::open(
-                std::ffi::CString::new(in_path.as_str()).ok()?.as_ptr(),
-                libc::O_RDONLY,
-            )
-        };
+        let fd = unsafe { libc::open(in_cstr.as_ptr(), libc::O_RDONLY) };
         if fd < 0 {
             return Some(Err(io::Error::last_os_error()));
         }
@@ -407,36 +439,65 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         oflags |= libc::O_TRUNC;
     }
 
-    let out_fd = unsafe {
-        libc::open(
-            std::ffi::CString::new(out_path.as_str()).ok()?.as_ptr(),
-            oflags,
-            0o666 as libc::mode_t,
-        )
-    };
+    let out_fd = unsafe { libc::open(out_cstr.as_ptr(), oflags, 0o666 as libc::mode_t) };
     if out_fd < 0 {
         unsafe { libc::close(in_fd) };
         return Some(Err(io::Error::last_os_error()));
     }
 
-    // Handle skip (seek input)
+    // Handle skip (seek input) — use checked_mul to prevent overflow
     if config.skip > 0 {
-        let offset = config.skip as i64 * config.ibs as i64;
+        let offset = match (config.skip as u64).checked_mul(config.ibs as u64) {
+            Some(o) if o <= i64::MAX as u64 => o as i64,
+            _ => {
+                unsafe {
+                    libc::close(in_fd);
+                    libc::close(out_fd);
+                }
+                return Some(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "skip offset overflow",
+                )));
+            }
+        };
         if unsafe { libc::lseek(in_fd, offset, libc::SEEK_SET) } < 0 {
-            // lseek failed (e.g. char device) — read and discard
+            // lseek failed (e.g. char device) — read and discard, retrying on EINTR
             let mut discard = vec![0u8; config.ibs];
             for _ in 0..config.skip {
-                let n = unsafe { libc::read(in_fd, discard.as_mut_ptr() as *mut _, discard.len()) };
-                if n <= 0 {
-                    break;
+                loop {
+                    let n =
+                        unsafe { libc::read(in_fd, discard.as_mut_ptr() as *mut _, discard.len()) };
+                    if n > 0 {
+                        break;
+                    } else if n == 0 {
+                        break;
+                    } else {
+                        let err = io::Error::last_os_error();
+                        if err.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        break;
+                    }
                 }
             }
         }
     }
 
-    // Handle seek (seek output)
+    // Handle seek (seek output) — use checked_mul to prevent overflow
     if config.seek > 0 {
-        let offset = config.seek as i64 * config.obs as i64;
+        let offset = match (config.seek as u64).checked_mul(config.obs as u64) {
+            Some(o) if o <= i64::MAX as u64 => o as i64,
+            _ => {
+                unsafe {
+                    libc::close(in_fd);
+                    libc::close(out_fd);
+                }
+                return Some(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "seek offset overflow",
+                )));
+            }
+        };
         if unsafe { libc::lseek(out_fd, offset, libc::SEEK_SET) } < 0 {
             unsafe {
                 libc::close(in_fd);
@@ -481,6 +542,7 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
                     continue;
                 }
                 if config.conv.noerror {
+                    eprintln!("dd: error reading '{}': {}", in_path, err);
                     break;
                 }
                 unsafe {
@@ -501,7 +563,7 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
             stats.records_in_partial += 1;
         }
 
-        // Raw write — retry on EINTR
+        // Raw write — retry on EINTR, treat write(0) as error
         let mut written = 0usize;
         while written < total_read {
             let ret = unsafe {
@@ -514,7 +576,15 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
             if ret > 0 {
                 written += ret as usize;
             } else if ret == 0 {
-                break;
+                // write() returning 0 is abnormal — treat as error
+                unsafe {
+                    libc::close(in_fd);
+                    libc::close(out_fd);
+                }
+                return Some(Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write returned 0",
+                )));
             } else {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::Interrupted {
@@ -536,11 +606,25 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         }
     }
 
-    // fsync / fdatasync
+    // fsync / fdatasync — propagate errors
     if config.conv.fsync {
-        unsafe { libc::fsync(out_fd) };
+        if unsafe { libc::fsync(out_fd) } < 0 {
+            let err = io::Error::last_os_error();
+            unsafe {
+                libc::close(in_fd);
+                libc::close(out_fd);
+            }
+            return Some(Err(err));
+        }
     } else if config.conv.fdatasync {
-        unsafe { libc::fdatasync(out_fd) };
+        if unsafe { libc::fdatasync(out_fd) } < 0 {
+            let err = io::Error::last_os_error();
+            unsafe {
+                libc::close(in_fd);
+                libc::close(out_fd);
+            }
+            return Some(Err(err));
+        }
     }
 
     unsafe {
