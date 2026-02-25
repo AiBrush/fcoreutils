@@ -384,7 +384,10 @@ fn copy_data_linux(
     }
 
     // Step 2: Try copy_file_range (zero-copy in kernel, same fds).
-    debug_assert!(len <= i64::MAX as u64, "file size exceeds i64::MAX; remaining cast wraps");
+    debug_assert!(
+        len <= i64::MAX as u64,
+        "file size exceeds i64::MAX; remaining cast wraps"
+    );
     let mut remaining = len as i64;
     let mut cfr_failed = false;
     while remaining > 0 {
