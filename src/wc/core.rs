@@ -225,7 +225,7 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             // 2-state: non-space = word content, space = break
             // Word starts = positions where byte is non-space AND previous byte was space
             let nonspace_mask = !space_mask;
-            // Build "previous was space" mask: shift space_mask right by 1, inject prev state
+            // Build "previous was space" mask: shift space_mask left by 1, inject prev state
             let prev_space = (space_mask << 1) | if prev_in_word { 0u32 } else { 1u32 };
             let starts = nonspace_mask & prev_space;
             total_words += starts.count_ones() as u64;

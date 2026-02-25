@@ -407,7 +407,9 @@ fn main() {
                     }
                     libc::kill(libc::getpid(), sig);
                     // Signal should terminate us before we get here.
-                    // Loop on pause() as safety net.
+                    // Loop on pause() as safety net. Note: SIGSTOP will stop
+                    // the process here until SIGCONT, then loop — this matches
+                    // GNU timeout behavior for the degenerate --signal=STOP case.
                     loop {
                         libc::pause();
                     }
