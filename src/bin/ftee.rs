@@ -192,15 +192,13 @@ fn main() {
         // Write to stdout
         // Under --output-error=warn, GNU tee keeps writing and warns on each chunk,
         // so only permanently suppress stdout writes for BrokenPipe (unrecoverable).
-        if stdout_ok {
-            if let Err(e) = write_all_raw(stdout_fd, data) {
-                if handle_write_error(TOOL_NAME, "standard output", &e, output_error) {
-                    process::exit(1);
-                }
-                exit_code = 1;
-                if e.kind() == io::ErrorKind::BrokenPipe {
-                    stdout_ok = false;
-                }
+        if stdout_ok && let Err(e) = write_all_raw(stdout_fd, data) {
+            if handle_write_error(TOOL_NAME, "standard output", &e, output_error) {
+                process::exit(1);
+            }
+            exit_code = 1;
+            if e.kind() == io::ErrorKind::BrokenPipe {
+                stdout_ok = false;
             }
         }
 
