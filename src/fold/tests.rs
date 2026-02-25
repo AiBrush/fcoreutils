@@ -164,14 +164,43 @@ fn test_backspace_column_mode() {
 
 #[test]
 fn test_multibyte_utf8_column() {
-    // In column mode, each byte >= 0x20 (and != 0x7f) counts as 1 column.
-    // é is encoded as 0xC3 0xA9 (2 bytes), each counting as 1 column.
-    // Input "aéb\n" = bytes [0x61, 0xC3, 0xA9, 0x62, 0x0A] with width 3:
-    //   a -> col=1, 0xC3 -> col=2, 0xA9 -> col=3
-    //   b -> col+1=4 > 3, so break inserted before b
-    // This matches GNU fold behavior (byte-by-byte column counting).
+    // In UTF-8 locale column mode, é (U+00E9, 2 bytes) has display width 1.
+    // Input "aéb\n" with width 3:
+    //   a -> col=1, é -> col=2 (1 display column), b -> col=3
+    //   3 <= 3, so no break needed.
     let result = fold("a\u{e9}b\n", 3);
-    assert_eq!(result, "a\u{e9}\nb\n");
+    assert_eq!(result, "a\u{e9}b\n");
+}
+
+#[test]
+fn test_cjk_column_width() {
+    // CJK characters are fullwidth (2 display columns each).
+    // "中文" = 4 columns. With width 3, '中' fills cols 1-2, '文' needs
+    // cols 3-4 but only 1 left, so break before '文'.
+    let result = fold("中文\n", 3);
+    assert_eq!(result, "中\n文\n");
+
+    // With width 4, both fit: 中=2 + 文=2 = 4 columns.
+    let result = fold("中文\n", 4);
+    assert_eq!(result, "中文\n");
+
+    // CJK mixed with ASCII: "a中b" = 1+2+1 = 4 columns
+    let result = fold("a中b\n", 4);
+    assert_eq!(result, "a中b\n");
+
+    let result = fold("a中b\n", 3);
+    assert_eq!(result, "a中\nb\n");
+}
+
+#[test]
+fn test_emoji_column_width() {
+    // Common emoji are typically 2 display columns wide.
+    // "😀" (U+1F600) is 4 bytes in UTF-8 but 2 columns.
+    let result = fold("😀x\n", 3);
+    assert_eq!(result, "😀x\n"); // 2+1 = 3, fits
+
+    let result = fold("😀x\n", 2);
+    assert_eq!(result, "😀\nx\n"); // 2 columns for emoji, x doesn't fit
 }
 
 #[test]
