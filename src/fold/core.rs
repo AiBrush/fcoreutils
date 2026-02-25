@@ -250,7 +250,9 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
     // For -s mode: track last space in input, not output
     let mut last_space_in: Option<usize> = None; // byte index in `line` AFTER the space
     let mut col_at_space: usize = 0;
-    let mut has_tab_since_space = false;
+    // CR/backspace change col non-linearly, invalidating `col - col_at_space`.
+    // When set, we must use recalc_column() to replay from the space marker.
+    let mut needs_recalc = false;
     let mut seg_start: usize = 0; // start of current unflushed segment in `line`
     let mut i = 0;
 
@@ -269,14 +271,16 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
                         output.extend_from_slice(&line[seg_start..sp_after]);
                         output.push(b'\n');
                         seg_start = sp_after;
-                        // Recalculate col from sp_after to i
-                        col = if has_tab_since_space {
+                        col = if needs_recalc {
                             recalc_column(&line[sp_after..i])
                         } else {
                             col - col_at_space
                         };
                         last_space_in = None;
-                        has_tab_since_space = false;
+                        needs_recalc = false;
+                        // Re-evaluate this tab with the new col — it may
+                        // still exceed width after the space break.
+                        continue;
                     } else {
                         output.extend_from_slice(&line[seg_start..i]);
                         output.push(b'\n');
@@ -294,24 +298,33 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
             if break_at_spaces {
                 last_space_in = Some(i + 1);
                 col_at_space = col + ((col / 8) + 1) * 8 - col;
-                has_tab_since_space = false;
+                needs_recalc = false;
             }
             col += ((col / 8) + 1) * 8 - col;
             i += 1;
             continue;
         }
 
-        // Handle carriage return: resets column to 0 (GNU adjust_column compat)
+        // Handle carriage return: resets column to 0 (GNU adjust_column compat).
+        // Invalidates `col - col_at_space` but keeps the space marker —
+        // GNU fold still breaks at the last space even after CR.
         if byte == b'\r' {
             col = 0;
+            if last_space_in.is_some() {
+                needs_recalc = true;
+            }
             i += 1;
             continue;
         }
 
-        // Handle backspace
+        // Handle backspace: decrements column non-linearly.
+        // Invalidates `col - col_at_space` but keeps the space marker.
         if byte == b'\x08' {
             if col > 0 {
                 col -= 1;
+            }
+            if last_space_in.is_some() {
+                needs_recalc = true;
             }
             i += 1;
             continue;
@@ -327,13 +340,16 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
                     output.extend_from_slice(&line[seg_start..sp_after]);
                     output.push(b'\n');
                     seg_start = sp_after;
-                    col = if has_tab_since_space {
+                    col = if needs_recalc {
                         recalc_column(&line[sp_after..i])
                     } else {
                         col - col_at_space
                     };
                     last_space_in = None;
-                    has_tab_since_space = false;
+                    needs_recalc = false;
+                    // Re-evaluate this character with the new col — it may
+                    // still exceed width after the space break.
+                    continue;
                 } else {
                     output.extend_from_slice(&line[seg_start..i]);
                     output.push(b'\n');
@@ -351,9 +367,7 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
         if break_at_spaces && byte == b' ' {
             last_space_in = Some(i + 1);
             col_at_space = col + cw;
-            has_tab_since_space = false;
-        } else if break_at_spaces && last_space_in.is_some() && byte == b'\t' {
-            has_tab_since_space = true;
+            needs_recalc = false;
         }
 
         col += cw;
@@ -366,7 +380,9 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
     }
 }
 
-/// Recalculate column position for a segment of output (UTF-8 aware).
+/// Recalculate column position by replaying a segment (handles tabs, CR, backspace).
+/// Used when non-linear column operations (CR, backspace) invalidate the fast
+/// `col - col_at_space` delta formula.
 fn recalc_column(data: &[u8]) -> usize {
     let mut col = 0;
     let mut i = 0;

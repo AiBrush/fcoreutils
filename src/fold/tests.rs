@@ -178,6 +178,48 @@ fn test_carriage_return_column_mode() {
 }
 
 #[test]
+fn test_cr_after_space_column_mode() {
+    // CR after a space marker invalidates the `col - col_at_space` fast formula,
+    // but GNU fold keeps the space marker and uses column replay (recalc_column)
+    // to determine the column after breaking at the space.
+    // "hello \rxxxxxxxxxxxx" (12 x's) with width=10, -s:
+    //   h=1..o=5, ' '=6 (space marker), \r resets col=0,
+    //   x*10 -> col=10, x[11] exceeds width -> break at space marker.
+    //   After space: "\rxxxxxxxxxxxx", recalc gives: \r->0, x*10=10, x[11]>10 -> hard break.
+    let mut out = Vec::new();
+    fold_bytes(b"hello \rxxxxxxxxxxxx\n", 10, false, true, &mut out).unwrap();
+    // GNU output: "hello \n\rxxxxxxxxxx\nxx\n"
+    assert_eq!(out, b"hello \n\rxxxxxxxxxx\nxx\n");
+
+    // Verify it doesn't panic in debug mode (the main bug was usize underflow)
+    out.clear();
+    fold_bytes(b"ab cd\refghijklmno\n", 8, false, true, &mut out).unwrap();
+    assert!(out.len() > 0);
+}
+
+#[test]
+fn test_backspace_after_space_column_mode() {
+    // Backspace after a space marker invalidates `col - col_at_space` but
+    // GNU fold keeps the marker and uses column replay. Without the
+    // needs_recalc flag, `col - col_at_space` would underflow.
+    // "ab cd\x08\x08\x08\x08efghijklm" with width=8, -s:
+    //   a=1, b=2, ' '=3 (space), c=4, d=5, \x08->4, \x08->3, \x08->2, \x08->1,
+    //   e=2, f=3, g=4, h=5, i=6, j=7, k=8, l would be 9 > 8 -> break at space.
+    //   After space: "cd\x08\x08\x08\x08efghijklm", recalc -> ...
+    let mut out = Vec::new();
+    fold_bytes(
+        b"ab cd\x08\x08\x08\x08efghijklm\n",
+        8,
+        false,
+        true,
+        &mut out,
+    )
+    .unwrap();
+    // GNU output: "ab \ncd\x08\x08\x08\x08efghijkl\nm\n"
+    assert_eq!(out, b"ab \ncd\x08\x08\x08\x08efghijkl\nm\n");
+}
+
+#[test]
 fn test_multibyte_utf8_column() {
     // GNU fold on glibc counts each byte as 1 column (multibyte path disabled).
     // é (U+00E9) = 0xC3 0xA9 = 2 bytes.
