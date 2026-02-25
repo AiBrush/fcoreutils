@@ -193,7 +193,11 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
                     column = 0;
                 } else {
                     // Tab: append spaces to buffer
-                    let rem = if is_pow2 { column & mask } else { column % tab_size };
+                    let rem = if is_pow2 {
+                        column & mask
+                    } else {
+                        column % tab_size
+                    };
                     let spaces = tab_size - rem;
                     push_spaces(&mut output, spaces);
                     column += spaces;
