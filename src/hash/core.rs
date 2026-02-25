@@ -2201,14 +2201,20 @@ fn hash_file_raw_nostat(
 #[inline]
 fn hash_fd_small(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
     let mut buf = [0u8; 4096];
-    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-    if n < 0 {
+    let n = loop {
+        let ret = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if ret >= 0 {
+            break ret;
+        }
         let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
         unsafe {
             libc::close(fd);
         }
         return Err(err);
-    }
+    };
     let n = n as usize;
     if n < buf.len() {
         // File fits in 4KB — common case for small files

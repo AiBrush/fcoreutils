@@ -20,21 +20,22 @@ pub struct WcCounts {
 // Byte classification for word counting
 // ──────────────────────────────────────────────────
 //
-// GNU wc 9.7 uses a simple 2-state model for word counting:
-//   - Space (word-break): whitespace bytes (0x09-0x0D, 0x20)
-//   - Non-space (word content): everything else, including NUL, control chars,
-//     DEL, high bytes (0x80-0xFF), and encoding errors
+// GNU wc 9.4 uses a 3-state model for word counting in UTF-8 locales:
+//   - Space (word-break): whitespace bytes (0x09-0x0D, 0x20, 0xA0)
+//   - Printable (word content): printable characters (ASCII 0x21-0x7E, valid Unicode)
+//   - Transparent (no state change): NUL, control chars, DEL, invalid/overlong
+//     UTF-8, and non-printable Unicode characters
 //
-// This matches the GNU wc source which uses `!wc_isspace[c]` to determine
-// if a byte is word content. There is no "transparent" state — every byte
-// either breaks a word or is part of a word.
+// In the C locale fast path (IS_SPACE table):
+//   - 0x09-0x0D, 0x20: whitespace
+//   - 0xA0: whitespace (NBSP via glibc Latin-1 identity mapping)
+//   - All other high bytes (0x80-0xFF except 0xA0): not whitespace
 //
 // In UTF-8 locale with multibyte path:
-//   - ASCII bytes use the same wc_isspace table
-//   - Encoding errors (EILSEQ) are treated as word content
-//   - Valid multibyte chars: iswspace() determines break vs content
-//   - Non-breaking spaces (U+00A0, U+2007, U+202F, U+2060) are also
-//     treated as space (when POSIXLY_CORRECT is not set), matching GNU wc
+//   - ASCII bytes use the IS_SPACE table
+//   - Valid multibyte chars: iswspace() for space, iswprint() for word content
+//   - Non-printable Unicode: transparent (no state change)
+//   - Encoding errors (EILSEQ): transparent (no state change)
 
 /// Byte-level space table matching GNU wc 9.7 `wc_isspace[]`.
 /// true = whitespace (word break), false = word content.
@@ -160,9 +161,9 @@ pub fn count_words_locale(data: &[u8], utf8: bool) -> u64 {
     }
 }
 
-/// Count words in C/POSIX locale using 2-state logic matching GNU wc 9.7.
-/// Every byte is either whitespace (0x09-0x0D, 0x20) or word content (everything else).
-/// NUL bytes, control chars, DEL, and high bytes (0x80-0xFF) are all word content.
+/// Count words in C/POSIX locale using 2-state logic.
+/// Every byte is either whitespace (0x09-0x0D, 0x20, 0xA0) or word content.
+/// NUL bytes, control chars, DEL, and high bytes (0x80-0xFF except 0xA0) are word content.
 fn count_words_c(data: &[u8]) -> u64 {
     let mut words = 0u64;
     let mut in_word = false;

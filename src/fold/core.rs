@@ -209,8 +209,8 @@ fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
 #[inline]
 fn decode_utf8_at(data: &[u8], pos: usize) -> (Option<char>, usize) {
     let b = data[pos];
-    let (expected_len, mut code_point) = if b < 0xC0 {
-        return (None, 1); // continuation byte or invalid
+    let (expected_len, mut code_point) = if b < 0xC2 {
+        return (None, 1); // continuation byte, invalid, or overlong (0xC0/0xC1)
     } else if b < 0xE0 {
         (2, (b as u32) & 0x1F)
     } else if b < 0xF0 {
@@ -277,8 +277,8 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
                 last_space_out_pos = Some(output.len());
             }
             output.push(byte);
-            let tab_width = ((col / 8) + 1) * 8 - col;
-            col += tab_width;
+            // Recompute tab_width: col may have changed from recalc_column after space-break
+            col += ((col / 8) + 1) * 8 - col;
             i += 1;
             continue;
         }
