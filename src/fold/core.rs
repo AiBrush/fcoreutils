@@ -94,6 +94,7 @@ fn fold_segment_bytes(output: &mut Vec<u8>, segment: &[u8], width: usize) {
 }
 
 /// Fold by byte count with -s (break at spaces).
+/// When breaking at a space, uses copy_within instead of allocating a temporary Vec.
 fn fold_byte_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
     let mut col: usize = 0;
     let mut last_space_out_pos: Option<usize> = None;
@@ -109,11 +110,14 @@ fn fold_byte_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &mut
         if col >= width {
             if break_at_spaces {
                 if let Some(sp_pos) = last_space_out_pos {
-                    let after_space = output[sp_pos + 1..].to_vec();
-                    output.truncate(sp_pos + 1);
-                    output.push(b'\n');
-                    output.extend_from_slice(&after_space);
-                    col = after_space.len();
+                    // Insert newline after the space and shift trailing bytes forward
+                    let tail_start = sp_pos + 1;
+                    let tail_end = output.len();
+                    let after_len = tail_end - tail_start;
+                    output.push(0); // make room for the newline
+                    output.copy_within(tail_start..tail_end, tail_start + 1);
+                    output[tail_start] = b'\n';
+                    col = after_len;
                     last_space_out_pos = None;
                 } else {
                     output.push(b'\n');
@@ -206,11 +210,13 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
         if col + char_width > width && char_width > 0 {
             if break_at_spaces {
                 if let Some(sp_pos) = last_space_out_pos {
-                    let after_space = output[sp_pos + 1..].to_vec();
-                    output.truncate(sp_pos + 1);
-                    output.push(b'\n');
-                    col = recalc_column(&after_space);
-                    output.extend_from_slice(&after_space);
+                    // Insert newline after the space using copy_within (no allocation)
+                    let tail_start = sp_pos + 1;
+                    let tail_end = output.len();
+                    output.push(0); // make room for newline
+                    output.copy_within(tail_start..tail_end, tail_start + 1);
+                    output[tail_start] = b'\n';
+                    col = recalc_column(&output[tail_start + 1..]);
                     last_space_out_pos = None;
                 } else {
                     output.push(b'\n');
