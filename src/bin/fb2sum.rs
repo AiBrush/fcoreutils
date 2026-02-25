@@ -263,11 +263,11 @@ fn main() {
     #[cfg(unix)]
     let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
     #[cfg(unix)]
-    let mut out = BufWriter::with_capacity(256 * 1024,&mut *raw);
+    let mut out = BufWriter::with_capacity(256 * 1024, &mut *raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut out = BufWriter::with_capacity(256 * 1024,stdout.lock());
+    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
 
     let had_error = if cli.check {
         run_check_mode(&cli, &files, &mut out)
