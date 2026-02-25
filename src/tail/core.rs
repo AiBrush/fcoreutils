@@ -210,6 +210,9 @@ pub fn sendfile_tail_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool>
 
     use std::os::unix::io::AsRawFd;
     let in_fd = file.as_raw_fd();
+    let _ = unsafe {
+        libc::posix_fadvise(in_fd, start as libc::off_t, n as libc::off_t, libc::POSIX_FADV_SEQUENTIAL)
+    };
     let mut offset: libc::off_t = start as libc::off_t;
     let mut remaining = n;
 
@@ -547,11 +550,21 @@ pub fn tail_file(
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
-                    out.flush()?; // drain BufWriter before bypassing with sendfile
+                    out.flush()?;
                     let stdout = io::stdout();
                     let out_fd = stdout.as_raw_fd();
-                    if let Ok(true) = sendfile_tail_bytes(path, *_n, out_fd) {
-                        return Ok(true);
+                    match sendfile_tail_bytes(path, *_n, out_fd) {
+                        Ok(true) => return Ok(true),
+                        Ok(false) => {}
+                        Err(e) => {
+                            eprintln!(
+                                "{}: error reading '{}': {}",
+                                tool_name,
+                                filename,
+                                crate::common::io_error_msg(&e)
+                            );
+                            return Ok(false);
+                        }
                     }
                 }
             }
@@ -559,11 +572,21 @@ pub fn tail_file(
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
-                    out.flush()?; // drain BufWriter before bypassing with sendfile
+                    out.flush()?;
                     let stdout = io::stdout();
                     let out_fd = stdout.as_raw_fd();
-                    if let Ok(true) = sendfile_tail_bytes_from(path, *_n, out_fd) {
-                        return Ok(true);
+                    match sendfile_tail_bytes_from(path, *_n, out_fd) {
+                        Ok(true) => return Ok(true),
+                        Ok(false) => {}
+                        Err(e) => {
+                            eprintln!(
+                                "{}: error reading '{}': {}",
+                                tool_name,
+                                filename,
+                                crate::common::io_error_msg(&e)
+                            );
+                            return Ok(false);
+                        }
                     }
                 }
             }
@@ -628,8 +651,12 @@ fn sendfile_tail_bytes_from(path: &Path, n: u64, out_fd: i32) -> io::Result<bool
 
     use std::os::unix::io::AsRawFd;
     let in_fd = file.as_raw_fd();
+    let output_len = file_size - start;
+    let _ = unsafe {
+        libc::posix_fadvise(in_fd, start as libc::off_t, output_len as libc::off_t, libc::POSIX_FADV_SEQUENTIAL)
+    };
     let mut offset: libc::off_t = start as libc::off_t;
-    let mut remaining = file_size - start;
+    let mut remaining = output_len;
 
     while remaining > 0 {
         let chunk = remaining.min(0x7fff_f000) as usize;
