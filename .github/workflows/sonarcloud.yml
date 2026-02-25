@@ -52,11 +52,20 @@ jobs:
             curl -s -X POST \
               "https://sonarcloud.io/api/qualitygates/create_condition?gateId=${QG_ID}&metric=new_duplicated_lines_density&op=GT&error=15&organization=aibrush" \
               -H "Authorization: Bearer $SONAR_TOKEN" || true
-            # Assign to project
+            # Try multiple assignment methods
+            echo "Trying set_as_default..."
+            curl -s -X POST \
+              "https://sonarcloud.io/api/qualitygates/set_as_default?id=${QG_ID}&organization=aibrush" \
+              -H "Authorization: Bearer $SONAR_TOKEN"
+            echo ""
+            echo "Trying select (project-level)..."
             curl -s -X POST \
               "https://sonarcloud.io/api/qualitygates/select?gateId=${QG_ID}&projectKey=AiBrush_fcoreutils&organization=aibrush" \
               -H "Authorization: Bearer $SONAR_TOKEN"
-            echo "Quality gate assigned to project"
+            echo ""
+            echo "Verifying current quality gate..."
+            curl -s "https://sonarcloud.io/api/qualitygates/get_by_project?project=AiBrush_fcoreutils&organization=aibrush" \
+              -H "Authorization: Bearer $SONAR_TOKEN" | jq '.'
           else
             echo "Warning: Could not create or find quality gate"
           fi
