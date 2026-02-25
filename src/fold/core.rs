@@ -1,5 +1,4 @@
 use std::io::Write;
-use unicode_width::UnicodeWidthChar;
 
 /// Fold (wrap) lines to a given width.
 ///
@@ -182,8 +181,14 @@ fn is_ascii_simple(data: &[u8]) -> bool {
     data.iter().all(|&b| b >= 0x20 && b <= 0x7E)
 }
 
-/// Get the display width and byte length of the UTF-8 character starting at `data[pos]`.
-/// Returns (display_width, byte_length).
+/// Get the column width and byte length of a byte at `data[pos]`.
+/// Returns (column_width, byte_length) — always (1, 1) for non-special bytes.
+///
+/// GNU fold's multibyte path is guarded by:
+///   `#if HAVE_MBRTOC32 && (! defined __GLIBC__ || defined __UCLIBC__)`
+/// On glibc (every mainstream Linux distro), that condition is false, so
+/// fold counts bytes — one column per byte, same as -b mode.
+/// Tab, backspace, and CR are handled by the caller.
 #[inline]
 fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
     let b = data[pos];
@@ -195,47 +200,8 @@ fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
             (1, 1)
         }
     } else {
-        // UTF-8 multi-byte: decode the character
-        let (ch, len) = decode_utf8_at(data, pos);
-        match ch {
-            Some(c) => (UnicodeWidthChar::width(c).unwrap_or(0), len),
-            None => (1, 1), // Invalid UTF-8 byte: treat as 1 column (GNU compat)
-        }
-    }
-}
-
-/// Decode a UTF-8 character starting at data[pos].
-/// Returns (Some(char), byte_length) or (None, 1) for invalid sequences.
-#[inline]
-fn decode_utf8_at(data: &[u8], pos: usize) -> (Option<char>, usize) {
-    let b = data[pos];
-    let (expected_len, mut code_point) = if b < 0xC2 {
-        return (None, 1); // continuation byte, invalid, or overlong (0xC0/0xC1)
-    } else if b < 0xE0 {
-        (2, (b as u32) & 0x1F)
-    } else if b < 0xF0 {
-        (3, (b as u32) & 0x0F)
-    } else if b < 0xF8 {
-        (4, (b as u32) & 0x07)
-    } else {
-        return (None, 1);
-    };
-
-    if pos + expected_len > data.len() {
-        return (None, 1);
-    }
-
-    for i in 1..expected_len {
-        let cb = data[pos + i];
-        if cb & 0xC0 != 0x80 {
-            return (None, 1);
-        }
-        code_point = (code_point << 6) | ((cb as u32) & 0x3F);
-    }
-
-    match char::from_u32(code_point) {
-        Some(c) => (Some(c), expected_len),
-        None => (None, 1),
+        // High byte: count as 1 column, 1 byte (GNU glibc compat)
+        (1, 1)
     }
 }
 
@@ -291,6 +257,14 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
             continue;
         }
 
+        // Handle carriage return: resets column to 0 (GNU adjust_column compat)
+        if byte == b'\r' {
+            output.push(byte);
+            col = 0;
+            i += 1;
+            continue;
+        }
+
         // Handle backspace
         if byte == b'\x08' {
             output.push(byte);
@@ -325,7 +299,10 @@ fn recalc_column(data: &[u8]) -> usize {
     let mut i = 0;
     while i < data.len() {
         let b = data[i];
-        if b == b'\t' {
+        if b == b'\r' {
+            col = 0;
+            i += 1;
+        } else if b == b'\t' {
             col = ((col / 8) + 1) * 8;
             i += 1;
         } else if b == b'\x08' {
