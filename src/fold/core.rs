@@ -202,8 +202,12 @@ fn fold_column_mode_spaces(data: &[u8], width: usize, output: &mut Vec<u8>) {
             None => &data[pos..],
         };
 
-        if line_data.len() <= width {
+        if line_data.len() <= width && is_ascii_simple(line_data) {
+            // Short ASCII-simple line: byte length == display width, no wrapping needed
             output.extend_from_slice(line_data);
+        } else if line_data.len() <= width {
+            // Short but contains tabs/control chars: display width may exceed byte length
+            fold_one_line_column(line_data, width, true, output);
         } else {
             fold_line_spaces_checked(line_data, width, output);
         }
@@ -232,6 +236,7 @@ fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
             fold_one_line_column(&line[start..], width, true, output);
             return;
         }
+        // is_ascii_simple guarantees no tabs in this chunk; search for spaces only.
         match memchr::memrchr(b' ', chunk) {
             Some(sp_offset) => {
                 let break_at = start + sp_offset + 1;
@@ -341,8 +346,8 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
         if byte == b'\t' {
             let tab_width = ((col / 8) + 1) * 8 - col;
 
-            if col + tab_width > width && tab_width > 0 {
-                // Need to break before this tab
+            if col > 0 && col + tab_width > width && tab_width > 0 {
+                // Need to break before this tab (skip when col==0: can't break before first char)
                 if break_at_spaces {
                     if let Some(sp_after) = last_space_in {
                         // Flush up to and including the space, then newline
