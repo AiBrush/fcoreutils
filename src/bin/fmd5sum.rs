@@ -466,6 +466,7 @@ fn main() {
                 // Bypass BufWriter — output_buf is already a batch buffer.
                 let _ = out.flush();
                 let _ = out.get_mut().write_all(&output_buf);
+                output_buf.clear();
             }
         }
     }
