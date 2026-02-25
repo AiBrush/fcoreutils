@@ -377,18 +377,18 @@ fn copy_data_linux(
             }
             if errno == libc::EXDEV {
                 // Cross-device: copy_file_range will also fail with EXDEV; skip to read/write.
-                return copy_readwrite_fallback(src_file, dst_file, src_fd, len);
+                return copy_readwrite_fallback(src_file, dst_file, len);
             }
             // Auto mode: fall through to copy_file_range on the same fds.
         }
     }
 
     // Step 2: Try copy_file_range (zero-copy in kernel, same fds).
-    debug_assert!(
-        len <= i64::MAX as u64,
-        "file size exceeds i64::MAX; remaining cast wraps"
-    );
-    let mut remaining = len as i64;
+    let mut remaining = match i64::try_from(len) {
+        Ok(v) => v,
+        // File too large for copy_file_range offset arithmetic; skip to read/write.
+        Err(_) => return readwrite_with_buffer(src_file, dst_file, len),
+    };
     let mut cfr_failed = false;
     while remaining > 0 {
         let to_copy = (remaining as u64).min(isize::MAX as u64) as usize;
@@ -477,17 +477,14 @@ fn readwrite_with_buffer(
 }
 
 /// EXDEV short-circuit: skip copy_file_range and go straight to read/write.
+/// posix_fadvise is already issued by copy_data_linux before FICLONE, so no
+/// need to repeat it here.
 #[cfg(target_os = "linux")]
 fn copy_readwrite_fallback(
     src_file: std::fs::File,
     dst_file: std::fs::File,
-    src_fd: i32,
     len: u64,
 ) -> io::Result<()> {
-    // SAFETY: src_fd is a valid fd; advisory hint for sequential readahead.
-    unsafe {
-        let _ = libc::posix_fadvise(src_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-    }
     readwrite_with_buffer(src_file, dst_file, len)
 }
 
