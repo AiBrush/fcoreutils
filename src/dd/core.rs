@@ -467,17 +467,13 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
                 loop {
                     let n =
                         unsafe { libc::read(in_fd, discard.as_mut_ptr() as *mut _, discard.len()) };
-                    if n > 0 {
-                        break;
-                    } else if n == 0 {
-                        break;
-                    } else {
+                    if n < 0 {
                         let err = io::Error::last_os_error();
                         if err.kind() == io::ErrorKind::Interrupted {
                             continue;
                         }
-                        break;
                     }
+                    break;
                 }
             }
         }
