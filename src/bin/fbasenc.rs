@@ -649,10 +649,23 @@ fn encode_base64_simd(
     // Wrapped output: chunked SIMD encode + backward expansion.
     // Process in ~8MB input chunks to keep memory bounded.
     // bytes_per_line = how many input bytes produce exactly wrap encoded chars.
-    let bytes_per_line = wrap * 3 / 4;
+    let bytes_per_line = (wrap / 4) * 3;
     if bytes_per_line == 0 {
-        // Extremely small wrap (< 4 chars): fall back to generic path
-        return encode_streaming_generic(data, Encoding::Base64, wrap, out);
+        // Extremely small wrap (< 4 chars): character-level encode + wrap
+        let full_enc = engine.encode_to_string(data);
+        let mut col = 0;
+        for ch in full_enc.as_bytes().chunks(1) {
+            out.write_all(ch)?;
+            col += 1;
+            if col == wrap {
+                out.write_all(b"\n")?;
+                col = 0;
+            }
+        }
+        if col > 0 {
+            out.write_all(b"\n")?;
+        }
+        return Ok(());
     }
 
     // Process in chunks of N lines worth of input, where N lines fit in ~8MB
@@ -689,7 +702,12 @@ fn encode_base64_simd(
             }
             let real_out_len = num_full * (wrap + 1) + if rem > 0 { rem + 1 } else { 0 };
             let _ = engine.encode(chunk, buf[..enc_len].as_out());
-            expand_backward(buf.as_mut_ptr(), enc_len, real_out_len, wrap);
+            // SAFETY: buf was allocated with at least max_out bytes (or resized above),
+            // buf[..enc_len] contains the SIMD-encoded data, and real_out_len was
+            // calculated as the total bytes needed for encoded data with newlines.
+            unsafe {
+                expand_backward(buf.as_mut_ptr(), enc_len, real_out_len, wrap);
+            }
 
             // If this chunk has a partial last line, don't emit its trailing newline
             if rem > 0 {
@@ -704,23 +722,26 @@ fn encode_base64_simd(
         } else {
             // Unaligned: we have `col` chars on current line from previous chunk.
             // Encode this chunk, then manually wrap with column tracking.
+            // Reuse buf: encoded data in buf[..enc_len], build wrapped output in buf[enc_len..].
             let _ = engine.encode(chunk, buf[..enc_len].as_out());
-            let encoded = &buf[..enc_len];
-            let mut out_buf = Vec::with_capacity(enc_len + enc_len / wrap + 2);
+            let out_start = enc_len;
+            let mut wp = out_start;
             let mut pos = 0;
-            while pos < encoded.len() {
+            while pos < enc_len {
                 let remaining_in_line = wrap - col;
-                let available = encoded.len() - pos;
+                let available = enc_len - pos;
                 let to_write = remaining_in_line.min(available);
-                out_buf.extend_from_slice(&encoded[pos..pos + to_write]);
+                buf.copy_within(pos..pos + to_write, wp);
+                wp += to_write;
                 pos += to_write;
                 col += to_write;
                 if col == wrap {
-                    out_buf.push(b'\n');
+                    buf[wp] = b'\n';
+                    wp += 1;
                     col = 0;
                 }
             }
-            out.write_all(&out_buf)?;
+            out.write_all(&buf[out_start..wp])?;
         }
     }
 
@@ -733,8 +754,13 @@ fn encode_base64_simd(
 
 /// Expand encoded data in-place by inserting newlines at wrap boundaries.
 /// Processes backward so shifted data never overwrites unread source bytes.
+///
+/// # Safety
+/// - `ptr` must point to an allocation of at least `out_len` bytes.
+/// - `ptr[0..enc_len]` must contain the SIMD-encoded base64 data.
+/// - `out_len` must be calculated as the total bytes needed for encoded data with newlines inserted.
 #[inline]
-fn expand_backward(ptr: *mut u8, enc_len: usize, out_len: usize, wrap: usize) {
+unsafe fn expand_backward(ptr: *mut u8, enc_len: usize, out_len: usize, wrap: usize) {
     let num_full = enc_len / wrap;
     let rem = enc_len % wrap;
 
