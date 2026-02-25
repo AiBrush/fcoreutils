@@ -302,7 +302,7 @@ fn main() {
     let (config, files) = parse_args();
 
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
     let mut had_error = false;
     let mut grand_total: u64 = 0;
     let mut seen_inodes = std::collections::HashSet::new();

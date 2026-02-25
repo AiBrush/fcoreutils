@@ -230,7 +230,7 @@ fn main() {
         let stdin = io::stdin();
         let reader = stdin.lock();
         let stdout = io::stdout();
-        let writer = BufWriter::new(stdout.lock());
+        let writer = BufWriter::with_capacity(256 * 1024, stdout.lock());
 
         match numfmt::run_numfmt(reader, writer, &config) {
             Ok(()) => {}
@@ -239,7 +239,7 @@ fn main() {
     } else {
         // Process command-line arguments as numbers.
         let stdout = io::stdout();
-        let mut writer = BufWriter::new(stdout.lock());
+        let mut writer = BufWriter::with_capacity(256 * 1024, stdout.lock());
         let terminator = if config.zero_terminated { '\0' } else { '\n' };
         let mut had_error = false;
 
