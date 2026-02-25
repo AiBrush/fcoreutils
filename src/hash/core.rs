@@ -923,6 +923,9 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
                         let _ = mmap.advise(memmap2::Advice::HugePage);
                     }
                     let _ = mmap.advise(memmap2::Advice::Sequential);
+                    // PopulateRead (Linux 5.14+) synchronously faults all pages before
+                    // returning, giving warm TLB entries for hash_bytes. WillNeed is
+                    // async and best-effort — pages may still fault during hashing.
                     if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
                         let _ = mmap.advise(memmap2::Advice::WillNeed);
                     }

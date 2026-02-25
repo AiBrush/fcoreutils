@@ -160,10 +160,13 @@ pub fn expand_bytes(
     }
 
     // Generic path for backspace handling or tab lists.
-    // We already know backspaces are present if we reach here via the Regular path
-    // (the memchr check at line 157 failed), so pass has_backspace=true to avoid
-    // a redundant O(n) scan inside expand_generic.
-    let has_backspace = true;
+    // For Regular tabs, we only reach here when the memchr check at line 157 found
+    // backspaces, so has_backspace=true avoids a redundant O(n) scan.
+    // For List tabs, we haven't scanned yet, so check now.
+    let has_backspace = match tabs {
+        TabStops::Regular(_) => true,
+        TabStops::List(_) => memchr::memchr(b'\x08', data).is_some(),
+    };
     expand_generic(data, tabs, initial_only, has_backspace, out)
 }
 
