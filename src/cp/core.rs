@@ -7,16 +7,14 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 
 // FICLONE support cache: avoids repeated failed ioctl attempts on non-reflink filesystems.
-// State: UNKNOWN (0) = not yet tried, YES (1) = reflink works, UNSUPPORTED (2) = skip.
+// NOTE: this is per-process with no filesystem identity — it assumes all copies within a
+// single invocation target the same destination filesystem. A cross-filesystem recursive
+// copy (e.g. btrfs + ext4 mount points) may suppress FICLONE on the reflink-capable fs
+// after a failure on the non-reflink fs. This matches GNU cp's practical usage pattern
+// where --reflink=auto targets a single destination tree.
 #[cfg(target_os = "linux")]
-static FICLONE_SUPPORTED: std::sync::atomic::AtomicU8 =
-    std::sync::atomic::AtomicU8::new(FICLONE_UNKNOWN);
-#[cfg(target_os = "linux")]
-const FICLONE_UNKNOWN: u8 = 0;
-#[cfg(target_os = "linux")]
-const FICLONE_YES: u8 = 1;
-#[cfg(target_os = "linux")]
-const FICLONE_UNSUPPORTED: u8 = 2;
+static FICLONE_UNSUPPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// How to dereference (follow) symbolic links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,8 +431,7 @@ fn copy_file_with_meta(
             // In Auto mode, skip FICLONE if a previous attempt on this filesystem failed.
             // This avoids redundant open+open+ioctl syscalls per file during recursive copies.
             let should_try = config.reflink == ReflinkMode::Always
-                || FICLONE_SUPPORTED.load(std::sync::atomic::Ordering::Relaxed)
-                    != FICLONE_UNSUPPORTED;
+                || !FICLONE_UNSUPPORTED.load(std::sync::atomic::Ordering::Relaxed);
 
             if should_try {
                 if let Ok(src_file) = std::fs::File::open(src) {
@@ -450,8 +447,6 @@ fn copy_file_with_meta(
                             libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd())
                         };
                         if ret == 0 {
-                            FICLONE_SUPPORTED
-                                .store(FICLONE_YES, std::sync::atomic::Ordering::Relaxed);
                             preserve_attributes_from_meta(src_meta, dst, config)?;
                             return Ok(());
                         }
@@ -468,12 +463,15 @@ fn copy_file_with_meta(
                             ));
                         }
                         // Auto mode: mark FICLONE as unsupported to skip future attempts.
+                        // Only cache for definitive filesystem/kernel-level errors:
                         // EOPNOTSUPP: fs doesn't support reflinks (ext4, tmpfs).
                         // ENOTTY: kernel doesn't recognize FICLONE ioctl (older kernels).
-                        // EINVAL: some configurations return this for unsupported ioctls.
-                        if matches!(errno, libc::EOPNOTSUPP | libc::ENOTTY | libc::EINVAL) {
-                            FICLONE_SUPPORTED
-                                .store(FICLONE_UNSUPPORTED, std::sync::atomic::Ordering::Relaxed);
+                        // ENOSYS: kernel doesn't implement the ioctl at all.
+                        // NOT EINVAL: can be file-specific (block size mismatch, inode flags)
+                        // and shouldn't suppress FICLONE for other files on the same fs.
+                        if matches!(errno, libc::EOPNOTSUPP | libc::ENOTTY | libc::ENOSYS) {
+                            FICLONE_UNSUPPORTED
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                         // Fall through — dst was created+truncated, so copy_file_range
                         // below will overwrite the empty file.
