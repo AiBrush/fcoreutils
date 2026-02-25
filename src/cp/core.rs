@@ -343,9 +343,9 @@ fn copy_data_linux(
     let len = src_meta.len();
 
     // Hint sequential access for kernel readahead (benefits copy_file_range and read/write).
-    // SAFETY: src_fd is a valid fd; POSIX_FADV_SEQUENTIAL is advisory.
+    // posix_fadvise is advisory; failure (e.g. ESPIPE for pipes) is harmless.
     unsafe {
-        libc::posix_fadvise(src_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        let _ = libc::posix_fadvise(src_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
     }
 
     // Step 1: Try FICLONE (instant CoW clone on btrfs/XFS).
@@ -427,16 +427,28 @@ fn copy_data_linux(
     dst_file.set_len(0)?;
 
     const MAX_BUF: usize = 4 * 1024 * 1024;
-    let buf_size = (len as usize).clamp(8192, MAX_BUF);
-    let mut buf = vec![0u8; buf_size];
-    loop {
-        let n = src_file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        dst_file.write_all(&buf[..n])?;
+    // Clamp while still u64 to avoid 32-bit truncation on large files.
+    let buf_size = (len.min(MAX_BUF as u64) as usize).max(8192);
+
+    // Reuse a thread-local buffer to avoid per-file heap allocation under Rayon.
+    use std::cell::RefCell;
+    thread_local! {
+        static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
-    Ok(())
+    BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        if buf.len() < buf_size {
+            buf.resize(buf_size, 0);
+        }
+        loop {
+            let n = src_file.read(&mut buf[..buf_size])?;
+            if n == 0 {
+                break;
+            }
+            dst_file.write_all(&buf[..n])?;
+        }
+        Ok(())
+    })
 }
 
 // ---- single-file copy ----
