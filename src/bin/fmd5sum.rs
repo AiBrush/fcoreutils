@@ -256,11 +256,11 @@ fn main() {
     #[cfg(unix)]
     let mut raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
     #[cfg(unix)]
-    let mut out = BufWriter::with_capacity(256 * 1024, &mut *raw);
+    let mut out = BufWriter::with_capacity(8 * 1024, &mut *raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(8 * 1024, stdout.lock());
     let mut had_error = false;
 
     if cli.check {
@@ -450,10 +450,10 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        // Flush buffered output before writing error to stderr.
                         // Bypass BufWriter — output_buf is already a batch buffer.
+                        // out.flush() is a no-op here (multi-file path never
+                        // writes to BufWriter directly).
                         if !output_buf.is_empty() {
-                            let _ = out.flush();
                             let _ = out.get_mut().write_all(&output_buf);
                             output_buf.clear();
                         }
@@ -464,7 +464,8 @@ fn main() {
             }
             if !output_buf.is_empty() {
                 // Bypass BufWriter — output_buf is already a batch buffer.
-                let _ = out.flush();
+                // out.flush() is a no-op (multi-file path never writes to
+                // BufWriter directly).
                 let _ = out.get_mut().write_all(&output_buf);
                 output_buf.clear();
             }
