@@ -98,32 +98,33 @@ fn process_bytes(input: &[u8], out: &mut BufWriter<io::StdoutLock>) -> bool {
 
         let token = &input[start..pos];
 
-        // Fast inline parse: all digits → number
-        let mut valid = !token.is_empty();
-        if valid && token.len() <= 19 {
-            // u64 fast path: parse directly to u64, call write_factors_u64
+        // Try u64 fast path first (handles all numbers up to u64::MAX = 20 digits).
+        // On overflow, fall through to u128 path.
+        if !token.is_empty() {
             let mut n64: u64 = 0;
+            let mut valid_u64 = true;
+            let mut overflowed = false;
             for &b in token {
                 let d = b.wrapping_sub(b'0');
                 if d > 9 {
-                    valid = false;
+                    valid_u64 = false;
                     break;
                 }
                 n64 = match n64.checked_mul(10) {
                     Some(v) => match v.checked_add(d as u64) {
                         Some(v) => v,
                         None => {
-                            valid = false;
+                            overflowed = true;
                             break;
                         }
                     },
                     None => {
-                        valid = false;
+                        overflowed = true;
                         break;
                     }
                 };
             }
-            if valid {
+            if valid_u64 && !overflowed {
                 factor::write_factors_u64(n64, &mut out_buf);
                 if out_buf.len() >= 128 * 1024 {
                     if out.write_all(&out_buf).is_err() {
@@ -133,38 +134,43 @@ fn process_bytes(input: &[u8], out: &mut BufWriter<io::StdoutLock>) -> bool {
                 }
                 continue;
             }
-        } else if valid {
-            // u128 path for 20+ digit numbers
-            let mut n: u128 = 0;
-            for &b in token {
-                let d = b.wrapping_sub(b'0');
-                if d > 9 {
-                    valid = false;
-                    break;
-                }
-                n = match n.checked_mul(10) {
-                    Some(v) => match v.checked_add(d as u128) {
-                        Some(v) => v,
-                        None => {
-                            valid = false;
-                            break;
-                        }
-                    },
-                    None => {
-                        valid = false;
+            // Not valid digits → error (handled below)
+            if !valid_u64 && !overflowed {
+                // fall through to error
+            } else if overflowed {
+                // u128 path for numbers > u64::MAX
+                let mut n: u128 = 0;
+                let mut valid_u128 = true;
+                for &b in token {
+                    let d = b.wrapping_sub(b'0');
+                    if d > 9 {
+                        valid_u128 = false;
                         break;
                     }
-                };
-            }
-            if valid {
-                factor::write_factors(n, &mut out_buf);
-                if out_buf.len() >= 128 * 1024 {
-                    if out.write_all(&out_buf).is_err() {
-                        process::exit(0);
-                    }
-                    out_buf.clear();
+                    n = match n.checked_mul(10) {
+                        Some(v) => match v.checked_add(d as u128) {
+                            Some(v) => v,
+                            None => {
+                                valid_u128 = false;
+                                break;
+                            }
+                        },
+                        None => {
+                            valid_u128 = false;
+                            break;
+                        }
+                    };
                 }
-                continue;
+                if valid_u128 {
+                    factor::write_factors(n, &mut out_buf);
+                    if out_buf.len() >= 128 * 1024 {
+                        if out.write_all(&out_buf).is_err() {
+                            process::exit(0);
+                        }
+                        out_buf.clear();
+                    }
+                    continue;
+                }
             }
         }
 

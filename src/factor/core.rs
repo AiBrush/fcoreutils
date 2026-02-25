@@ -66,8 +66,8 @@ fn is_prime_u64(n: u64) -> bool {
     if n.is_multiple_of(2) || n.is_multiple_of(3) {
         return false;
     }
-    // Quick check against small primes
-    for &p in &SMALL_PRIMES_U64[3..15] {
+    // Quick check against small primes (5 through 47)
+    for &p in &SMALL_PRIMES_U64[2..15] {
         if n == p {
             return true;
         }
@@ -76,7 +76,7 @@ fn is_prime_u64(n: u64) -> bool {
         }
     }
     if n < 2809 {
-        return true; // All composites < 53² have a factor ≤ 47
+        return true; // All composites < 53² have a prime factor ≤ 47
     }
 
     let mut d = n - 1;
@@ -224,8 +224,14 @@ fn factorize_u64(n: u64) -> Vec<u128> {
     let mut factors = Vec::new();
     let mut n = n;
 
-    // Trial division by primes to 997 (covers sqrt up to ~994009)
-    for &p in &PRIMES_TO_997 {
+    // Special-case 2: bit shift is faster than hardware div
+    while n & 1 == 0 {
+        factors.push(2);
+        n >>= 1;
+    }
+
+    // Trial division by odd primes 3..997 (covers sqrt up to ~994009)
+    for &p in &PRIMES_TO_997[1..] {
         if p as u128 * p as u128 > n as u128 {
             break;
         }
