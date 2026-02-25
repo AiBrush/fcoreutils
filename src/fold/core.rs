@@ -97,6 +97,9 @@ fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std
 }
 
 /// Fold a single line segment by bytes with -s (break at spaces).
+///
+/// # Invariant
+/// `segment` must contain at most one `\n`, and only as its final byte.
 #[inline]
 fn fold_segment_bytes_spaces(output: &mut Vec<u8>, segment: &[u8], width: usize) {
     let mut start = 0;
@@ -107,6 +110,8 @@ fn fold_segment_bytes_spaces(output: &mut Vec<u8>, segment: &[u8], width: usize)
             return;
         }
         let chunk = &segment[start..start + width];
+        // In byte mode, tab is 1 byte; break after it just like a space.
+        // Column mode uses memrchr(b' ') only — tabs are handled via is_ascii_simple fallback.
         match memchr::memrchr2(b' ', b'\t', chunk) {
             Some(sp_offset) => {
                 let break_at = start + sp_offset + 1;
@@ -301,7 +306,8 @@ fn word_is_ascii_simple(word: u64) -> bool {
     // Check 2: all bytes >= 0x20
     // Since all bytes < 0x80 (check 1), adding 0x60 cannot carry between bytes.
     // byte + 0x60: [0x00..0x1F] -> [0x60..0x7F] (high bit clear = bad)
-    //              [0x20..0x7F] -> [0x80..0xDF] (high bit set = good)
+    //              [0x20..=0x7F] -> [0x80..0xDF] (high bit set = good)
+    // Note: 0x7F (DEL) passes here; check 3 rejects it.
     let added = word.wrapping_add(0x6060606060606060);
     if added & 0x8080808080808080 != 0x8080808080808080 {
         return false;
@@ -309,9 +315,12 @@ fn word_is_ascii_simple(word: u64) -> bool {
     // Check 3: no byte == 0x7F (DEL)
     // XOR with 0x7F turns 0x7F bytes into 0x00; we then detect zero bytes via
     // the standard (x - 0x01) & !x & 0x80 trick.
-    // Borrow from a 0x00 xored byte can propagate into the next byte, but this
-    // cannot create a false positive: if xored[k] != 0 then sub(0x01) at byte k
-    // doesn't borrow, so adjacent bytes are unaffected when no 0x7F is present.
+    // When no input byte is 0x7F, every xored byte is in [0x01..0x5F].
+    // Subtracting 0x0101... byte-by-byte never underflows (each byte >= 0x01),
+    // so no borrow propagates between bytes, and has_zero stays 0.
+    // A true 0x7F input creates a 0x00 xored byte, which the zero-detect
+    // formula correctly flags (borrow from that byte may set bits in adjacent
+    // bytes, but those are masked out by the final &!xored & 0x8080... check).
     let xored = word ^ 0x7F7F7F7F7F7F7F7F;
     let has_zero = xored.wrapping_sub(0x0101010101010101) & !xored & 0x8080808080808080;
     has_zero == 0
