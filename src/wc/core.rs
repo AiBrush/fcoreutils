@@ -38,7 +38,11 @@ pub struct WcCounts {
 
 /// Byte-level space table matching GNU wc 9.7 `wc_isspace[]`.
 /// true = whitespace (word break), false = word content.
-/// Only the 6 standard C locale whitespace bytes are spaces.
+/// Includes the 6 standard C locale whitespace bytes plus byte 0xa0 (NBSP).
+///
+/// GNU wc 9.7 uses: `wc_isspace[i] = isspace(i) || iswnbspace(btoc32(i))`
+/// where iswnbspace returns true for U+00A0 (NBSP) when POSIXLY_CORRECT is not set.
+/// In glibc's C locale, btoc32(0xa0) maps to U+00A0 via Latin-1 identity mapping.
 const fn make_is_space() -> [bool; 256] {
     let mut t = [false; 256];
     t[0x09] = true; // tab
@@ -47,6 +51,7 @@ const fn make_is_space() -> [bool; 256] {
     t[0x0C] = true; // form feed
     t[0x0D] = true; // carriage return
     t[0x20] = true; // space
+    t[0xA0] = true; // NBSP (non-breaking space, matches GNU wc iswnbspace)
     t
 }
 const IS_SPACE: [bool; 256] = make_is_space();
@@ -201,10 +206,11 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm256_set1_epi8(b'\n' as i8);
         let zero = _mm256_setzero_si256();
         let ones = _mm256_set1_epi8(1);
-        // Space detection: {0x09-0x0D, 0x20}
+        // Space detection: {0x09-0x0D, 0x20, 0xA0}
         let const_0x09 = _mm256_set1_epi8(0x09u8 as i8);
         let const_0x0d = _mm256_set1_epi8(0x0Du8 as i8);
         let const_0x20 = _mm256_set1_epi8(0x20u8 as i8);
+        let const_0xa0 = _mm256_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm256_setzero_si256();
         let mut batch = 0u32;
@@ -214,12 +220,13 @@ unsafe fn count_lw_c_chunk_avx2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm256_cmpeq_epi8(v, nl_byte);
             line_acc = _mm256_add_epi8(line_acc, _mm256_and_si256(is_nl, ones));
 
-            // Space check: byte in {0x09-0x0D, 0x20}
+            // Space check: byte in {0x09-0x0D, 0x20, 0xA0}
             let ge_09 = _mm256_cmpeq_epi8(_mm256_max_epu8(v, const_0x09), v);
             let le_0d = _mm256_cmpeq_epi8(_mm256_min_epu8(v, const_0x0d), v);
             let in_tab_range = _mm256_and_si256(ge_09, le_0d);
             let is_sp = _mm256_cmpeq_epi8(v, const_0x20);
-            let is_space = _mm256_or_si256(in_tab_range, is_sp);
+            let is_nbsp = _mm256_cmpeq_epi8(v, const_0xa0);
+            let is_space = _mm256_or_si256(_mm256_or_si256(in_tab_range, is_sp), is_nbsp);
             let space_mask = _mm256_movemask_epi8(is_space) as u32;
 
             // 2-state: non-space = word content, space = break
@@ -280,10 +287,11 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
         let nl_byte = _mm_set1_epi8(b'\n' as i8);
         let zero = _mm_setzero_si128();
         let ones = _mm_set1_epi8(1);
-        // Space detection: {0x09-0x0D, 0x20}
+        // Space detection: {0x09-0x0D, 0x20, 0xA0}
         let const_0x09 = _mm_set1_epi8(0x09u8 as i8);
         let const_0x0d = _mm_set1_epi8(0x0Du8 as i8);
         let const_0x20 = _mm_set1_epi8(0x20u8 as i8);
+        let const_0xa0 = _mm_set1_epi8(0xA0u8 as i8);
 
         let mut line_acc = _mm_setzero_si128();
         let mut batch = 0u32;
@@ -293,12 +301,13 @@ unsafe fn count_lw_c_chunk_sse2(data: &[u8]) -> (u64, u64, bool, bool) {
             let is_nl = _mm_cmpeq_epi8(v, nl_byte);
             line_acc = _mm_add_epi8(line_acc, _mm_and_si128(is_nl, ones));
 
-            // Space check: byte in {0x09-0x0D, 0x20}
+            // Space check: byte in {0x09-0x0D, 0x20, 0xA0}
             let ge_09 = _mm_cmpeq_epi8(_mm_max_epu8(v, const_0x09), v);
             let le_0d = _mm_cmpeq_epi8(_mm_min_epu8(v, const_0x0d), v);
             let in_tab_range = _mm_and_si128(ge_09, le_0d);
             let is_sp = _mm_cmpeq_epi8(v, const_0x20);
-            let is_space = _mm_or_si128(in_tab_range, is_sp);
+            let is_nbsp = _mm_cmpeq_epi8(v, const_0xa0);
+            let is_space = _mm_or_si128(_mm_or_si128(in_tab_range, is_sp), is_nbsp);
             let space_mask = (_mm_movemask_epi8(is_space) as u32) & 0xFFFF;
 
             // 2-state word start detection

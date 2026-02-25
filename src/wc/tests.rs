@@ -207,8 +207,8 @@ fn test_c_locale_high_bytes_are_word_content() {
     assert_eq!(count_words_locale(b"hello\x80world", false), 1);
     // High bytes between spaces: word content, counted as separate word
     assert_eq!(count_words_locale(b"hello \x80 world", false), 3);
-    // 0xA0 is also word content in C locale
-    assert_eq!(count_words_locale(b"hello\xa0world", false), 1);
+    // 0xA0 (NBSP) is whitespace in C locale (GNU wc iswnbspace via glibc Latin-1 mapping)
+    assert_eq!(count_words_locale(b"hello\xa0world", false), 2);
 }
 
 #[test]
@@ -564,12 +564,13 @@ fn test_c_locale_cjk_word_count() {
     let multi = "こんにちは\nさようなら\n".as_bytes();
     assert_eq!(count_words_locale(multi, false), 2);
     // Full test data: "Hello, 世界!\n你好世界\nこんにちは\n"
-    // Line 1: "Hello," (word 1) + space + CJK bytes + "!" (word 2) + \n
-    // Line 2: CJK bytes = word 3 + \n
-    // Line 3: CJK bytes = word 4 + \n
-    // Total: 4.
+    // Line 1: "Hello," (word 1) + space + "世界!" (e4 b8 96 e7 95 8c 21, no 0xa0) = word 2 + \n
+    // Line 2: "你好世界" (e4 bd [a0] e5 a5 bd e4 b8 96 e7 95 8c)
+    //         0xa0 in 你(E4 BD A0) acts as space → "e4 bd" = word 3, rest = word 4 + \n
+    // Line 3: "こんにちは" (no 0xa0) = word 5 + \n
+    // Total: 5 (matches GNU wc 9.7).
     let full = "Hello, 世界!\n你好世界\nこんにちは\n".as_bytes();
-    assert_eq!(count_words_locale(full, false), 4);
+    assert_eq!(count_words_locale(full, false), 5);
 }
 
 #[test]
