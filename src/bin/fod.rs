@@ -337,7 +337,8 @@ fn main() {
             }
         }
     } else {
-        // Multiple files: concatenate via read_file (O_NOATIME + exact-size preallocation)
+        // Multiple files: concatenate via std::fs::read (avoids mmap overhead since data
+        // is immediately copied into combined buffer anyway).
         let mut combined = Vec::new();
         for path in &operands {
             if path == "-" {
@@ -351,7 +352,7 @@ fn main() {
                     });
                 combined.extend_from_slice(&buf);
             } else {
-                match coreutils_rs::common::io::read_file(std::path::Path::new(path)) {
+                match std::fs::read(path) {
                     Ok(data) => {
                         combined.extend_from_slice(&data);
                     }

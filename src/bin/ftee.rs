@@ -168,8 +168,8 @@ fn main() {
 
     // Raw fd I/O: bypass BufReader/BufWriter overhead entirely.
     // Uses a 1MB buffer with direct libc::read/write syscalls.
-    let stdin_fd = io::stdin().as_raw_fd();
-    let stdout_fd = io::stdout().as_raw_fd();
+    let stdin_fd = libc::STDIN_FILENO;
+    let stdout_fd = libc::STDOUT_FILENO;
     let mut buf = vec![0u8; 1024 * 1024];
     let mut stdout_ok = true;
     let mut to_remove = Vec::new();
@@ -229,6 +229,8 @@ fn write_all_raw(fd: i32, mut data: &[u8]) -> io::Result<()> {
         if ret > 0 {
             data = &data[ret as usize..];
         } else if ret == 0 {
+            // POSIX: blocking write(2) with non-zero count cannot return 0 on pipes/regular files.
+            // Defensive guard only — should be unreachable in practice.
             return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
         } else {
             let err = io::Error::last_os_error();
