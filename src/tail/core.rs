@@ -5,6 +5,58 @@ use memchr::{memchr_iter, memrchr_iter};
 
 use crate::common::io::{FileData, read_file, read_stdin};
 
+/// Open a file with O_NOATIME on Linux, falling back if not permitted.
+#[cfg(target_os = "linux")]
+fn open_noatime(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOATIME)
+        .open(path)
+        .or_else(|_| std::fs::File::open(path))
+}
+
+/// Scan backward from EOF to find the byte offset where the last N delimited
+/// lines begin. Returns 0 when the file has fewer than N lines (output all).
+/// Platform-agnostic — tested on all CI targets.
+fn find_tail_start_byte(
+    reader: &mut (impl Read + Seek),
+    file_size: u64,
+    n: u64,
+    delimiter: u8,
+) -> io::Result<u64> {
+    const CHUNK: u64 = 262144;
+    let mut pos = file_size;
+    let mut count = 0u64;
+    let mut buf = vec![0u8; CHUNK as usize];
+
+    while pos > 0 {
+        let read_start = if pos > CHUNK { pos - CHUNK } else { 0 };
+        let read_len = (pos - read_start) as usize;
+
+        reader.seek(io::SeekFrom::Start(read_start))?;
+        reader.read_exact(&mut buf[..read_len])?;
+
+        // Skip trailing delimiter (don't count the file's final newline)
+        let search_end = if pos == file_size && read_len > 0 && buf[read_len - 1] == delimiter {
+            read_len - 1
+        } else {
+            read_len
+        };
+
+        for rpos in memrchr_iter(delimiter, &buf[..search_end]) {
+            count += 1;
+            if count == n {
+                return Ok(read_start + rpos as u64 + 1);
+            }
+        }
+
+        pos = read_start;
+    }
+
+    Ok(0)
+}
+
 /// Mode for tail operation
 #[derive(Clone, Debug)]
 pub enum TailMode {
@@ -186,29 +238,19 @@ pub fn sendfile_tail_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool>
     Ok(true)
 }
 
-/// Streaming tail -n N for regular files using sendfile on Linux.
-/// Seeks backward from EOF in 256KB chunks, SIMD-scans for N newlines,
-/// then uses sendfile for zero-copy output. Only reads the tail of the file,
-/// not the entire thing (a 100MB file typically needs only one 256KB read).
+/// Streaming tail -n N via sendfile on Linux. Caller opens the file so that
+/// open errors can be reported as "cannot open" and I/O errors as "error reading".
 #[cfg(target_os = "linux")]
-fn sendfile_tail_lines(path: &Path, n: u64, delimiter: u8, out_fd: i32) -> io::Result<bool> {
-    use std::os::unix::fs::OpenOptionsExt;
+fn sendfile_tail_lines(
+    file: std::fs::File,
+    file_size: u64,
+    n: u64,
+    delimiter: u8,
+    out_fd: i32,
+) -> io::Result<bool> {
     use std::os::unix::io::AsRawFd;
 
-    if n == 0 {
-        return Ok(true);
-    }
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOATIME)
-        .open(path)
-        .or_else(|_| std::fs::File::open(path))?;
-
-    let metadata = file.metadata()?;
-    let file_size = metadata.len();
-
-    if file_size == 0 {
+    if n == 0 || file_size == 0 {
         return Ok(true);
     }
 
@@ -217,43 +259,8 @@ fn sendfile_tail_lines(path: &Path, n: u64, delimiter: u8, out_fd: i32) -> io::R
     // Disable forward readahead — we scan backward from EOF
     let _ = unsafe { libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_RANDOM) };
 
-    // Scan backward in chunks to find the start offset of the last N lines
-    const CHUNK: u64 = 262144; // 256KB — typically contains far more than 10 lines
-    let mut pos = file_size;
-    let mut count = 0u64;
-    let mut start_byte: u64 = 0; // offset to start output from (0 = whole file)
-    let mut found = false;
     let mut reader = file;
-    let mut buf = vec![0u8; CHUNK as usize];
-
-    while pos > 0 {
-        let read_start = if pos > CHUNK { pos - CHUNK } else { 0 };
-        let read_len = (pos - read_start) as usize;
-
-        reader.seek(io::SeekFrom::Start(read_start))?;
-        reader.read_exact(&mut buf[..read_len])?;
-
-        // Skip trailing delimiter (don't count the file's final newline)
-        let search_end = if pos == file_size && read_len > 0 && buf[read_len - 1] == delimiter {
-            read_len - 1
-        } else {
-            read_len
-        };
-
-        for rpos in memrchr_iter(delimiter, &buf[..search_end]) {
-            count += 1;
-            if count == n {
-                start_byte = read_start + rpos as u64 + 1;
-                found = true;
-                break;
-            }
-        }
-
-        if found {
-            break;
-        }
-        pos = read_start;
-    }
+    let start_byte = find_tail_start_byte(&mut reader, file_size, n, delimiter)?;
 
     // Enable forward readahead from the output start point
     let remaining = file_size - start_byte;
@@ -288,91 +295,35 @@ fn sendfile_tail_lines(path: &Path, n: u64, delimiter: u8, out_fd: i32) -> io::R
     Ok(true)
 }
 
-/// Streaming tail -n N for regular files: read backward from EOF.
-/// Only reads enough of the file to find N lines, avoids mmapping entire file.
-/// Used on non-Linux platforms (macOS, Windows).
+/// Streaming tail -n N for regular files: read backward from EOF, then
+/// seek forward and copy. Caller opens the file. Used on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
 fn tail_lines_streaming_file(
-    path: &Path,
+    mut file: std::fs::File,
+    file_size: u64,
     n: u64,
     delimiter: u8,
     out: &mut impl Write,
 ) -> io::Result<bool> {
-    if n == 0 {
+    if n == 0 || file_size == 0 {
         return Ok(true);
     }
 
-    let file = std::fs::File::open(path)?;
-    let metadata = file.metadata()?;
-    let file_size = metadata.len();
-
-    if file_size == 0 {
-        return Ok(true);
-    }
-
-    // Read backward in chunks to find the start offset, then seek forward to output
-    const CHUNK: u64 = 262144;
-    let mut pos = file_size;
-    let mut count = 0u64;
-    let mut start_byte: u64 = 0;
-    let mut found = false;
-    let mut reader = file;
-    let mut buf = vec![0u8; CHUNK as usize];
-
-    while pos > 0 {
-        let read_start = if pos > CHUNK { pos - CHUNK } else { 0 };
-        let read_len = (pos - read_start) as usize;
-
-        reader.seek(io::SeekFrom::Start(read_start))?;
-        reader.read_exact(&mut buf[..read_len])?;
-
-        let search_end = if pos == file_size && read_len > 0 && buf[read_len - 1] == delimiter {
-            read_len - 1
-        } else {
-            read_len
-        };
-
-        for rpos in memrchr_iter(delimiter, &buf[..search_end]) {
-            count += 1;
-            if count == n {
-                start_byte = read_start + rpos as u64 + 1;
-                found = true;
-                break;
-            }
-        }
-
-        if found {
-            break;
-        }
-        pos = read_start;
-    }
-
-    // Seek to start_byte and copy to output
-    reader.seek(io::SeekFrom::Start(start_byte))?;
-    io::copy(&mut reader, out)?;
+    let start_byte = find_tail_start_byte(&mut file, file_size, n, delimiter)?;
+    file.seek(io::SeekFrom::Start(start_byte))?;
+    io::copy(&mut file, out)?;
 
     Ok(true)
 }
 
 /// Streaming tail -n +N for regular files: skip N-1 lines from start.
+/// Caller opens the file.
 fn tail_lines_from_streaming_file(
-    path: &Path,
+    file: std::fs::File,
     n: u64,
     delimiter: u8,
     out: &mut impl Write,
 ) -> io::Result<bool> {
-    #[cfg(target_os = "linux")]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOATIME)
-            .open(path)
-            .or_else(|_| std::fs::File::open(path))?
-    };
-    #[cfg(not(target_os = "linux"))]
-    let file = std::fs::File::open(path)?;
-
     if n <= 1 {
         // Output entire file via sendfile
         #[cfg(target_os = "linux")]
@@ -479,18 +430,45 @@ pub fn tail_file(
 
         match &config.mode {
             TailMode::Lines(n) => {
-                // Seek backward from EOF, SIMD-scan for N lines, sendfile output
+                // Open the file first so open errors get the right message
+                #[cfg(target_os = "linux")]
+                let file = match open_noatime(path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!(
+                            "{}: cannot open '{}' for reading: {}",
+                            tool_name,
+                            filename,
+                            crate::common::io_error_msg(&e)
+                        );
+                        return Ok(false);
+                    }
+                };
+                #[cfg(not(target_os = "linux"))]
+                let file = match std::fs::File::open(path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!(
+                            "{}: cannot open '{}' for reading: {}",
+                            tool_name,
+                            filename,
+                            crate::common::io_error_msg(&e)
+                        );
+                        return Ok(false);
+                    }
+                };
+                let file_size = file.metadata()?.len();
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
-                    out.flush()?; // drain BufWriter before bypassing it with sendfile
+                    out.flush()?;
                     let stdout = io::stdout();
                     let out_fd = stdout.as_raw_fd();
-                    match sendfile_tail_lines(path, *n, delimiter, out_fd) {
+                    match sendfile_tail_lines(file, file_size, *n, delimiter, out_fd) {
                         Ok(_) => return Ok(true),
                         Err(e) => {
                             eprintln!(
-                                "{}: cannot open '{}' for reading: {}",
+                                "{}: error reading '{}': {}",
                                 tool_name,
                                 filename,
                                 crate::common::io_error_msg(&e)
@@ -501,11 +479,11 @@ pub fn tail_file(
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    match tail_lines_streaming_file(path, *n, delimiter, out) {
+                    match tail_lines_streaming_file(file, file_size, *n, delimiter, out) {
                         Ok(_) => return Ok(true),
                         Err(e) => {
                             eprintln!(
-                                "{}: cannot open '{}' for reading: {}",
+                                "{}: error reading '{}': {}",
                                 tool_name,
                                 filename,
                                 crate::common::io_error_msg(&e)
@@ -516,14 +494,38 @@ pub fn tail_file(
                 }
             }
             TailMode::LinesFrom(n) => {
-                // Flush BufWriter before sendfile may bypass it
                 out.flush()?;
-                // Streaming forward: skip N-1 lines, output rest
-                match tail_lines_from_streaming_file(path, *n, delimiter, out) {
-                    Ok(_) => return Ok(true),
+                #[cfg(target_os = "linux")]
+                let file = match open_noatime(path) {
+                    Ok(f) => f,
                     Err(e) => {
                         eprintln!(
                             "{}: cannot open '{}' for reading: {}",
+                            tool_name,
+                            filename,
+                            crate::common::io_error_msg(&e)
+                        );
+                        return Ok(false);
+                    }
+                };
+                #[cfg(not(target_os = "linux"))]
+                let file = match std::fs::File::open(path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!(
+                            "{}: cannot open '{}' for reading: {}",
+                            tool_name,
+                            filename,
+                            crate::common::io_error_msg(&e)
+                        );
+                        return Ok(false);
+                    }
+                };
+                match tail_lines_from_streaming_file(file, *n, delimiter, out) {
+                    Ok(_) => return Ok(true),
+                    Err(e) => {
+                        eprintln!(
+                            "{}: error reading '{}': {}",
                             tool_name,
                             filename,
                             crate::common::io_error_msg(&e)
