@@ -127,17 +127,17 @@ fn test_count_words_crlf_separated() {
 }
 
 #[test]
-fn test_count_words_binary_data_nul_word_content() {
-    // GNU wc 9.7: NUL is word content (not a word-break).
-    // "\x00hello\x00world" is one continuous word.
+fn test_count_words_binary_data_nul_transparent() {
+    // GNU wc 9.4: NUL is transparent (no state change).
+    // "\x00hello\x00world" — NUL transparent, "hello" starts word, NUL transparent, "world" continues → 1 word
     assert_eq!(count_words(b"\x00hello\x00world"), 1);
 }
 
 #[test]
 fn test_count_words_nul_between_spaces() {
-    // GNU wc 9.7: NUL is word content (non-space).
-    // "hello" = word 1, " " breaks, "\x00" = word 2, " " breaks, "world" = word 3
-    assert_eq!(count_words(b"hello \x00 world"), 3);
+    // GNU wc 9.4: NUL is transparent (3-state model).
+    // "hello" = word 1, " " breaks, "\x00" is transparent, " " stays broken, "world" = word 2
+    assert_eq!(count_words(b"hello \x00 world"), 2);
 }
 
 #[test]
@@ -152,27 +152,29 @@ fn test_count_words_all_whitespace_types() {
 }
 
 // ──────────────────────────────────────────────────
-// UTF-8 2-state word counting (matching GNU wc 9.7):
-//   - Whitespace (0x09-0x0D, 0x20): word break
-//   - Everything else: word content (NUL, controls, DEL, printable, encoding errors)
-//   - Valid multi-byte: iswspace() / iswnbspace() determines break vs content
+// UTF-8 3-state word counting (matching GNU wc 9.4):
+//   - Whitespace (0x09-0x0D, 0x20, iswspace): word break (in_word = false)
+//   - Printable (0x21-0x7E, printable Unicode): word content (in_word = true)
+//   - Transparent (NUL, controls, DEL, invalid UTF-8, non-printable Unicode): no state change
 // ──────────────────────────────────────────────────
 
 #[test]
-fn test_utf8_nul_is_word_content() {
-    // GNU wc 9.7: NUL is word content (non-space)
-    assert_eq!(count_words(b"\x00"), 1);
-    assert_eq!(count_words(b"\x00\x00"), 1);
+fn test_utf8_nul_is_transparent() {
+    // GNU wc 9.4: NUL is transparent (no state change)
+    // NUL alone never enters in_word → 0 words
+    assert_eq!(count_words(b"\x00"), 0);
+    assert_eq!(count_words(b"\x00\x00"), 0);
 }
 
 #[test]
-fn test_utf8_control_chars_are_word_content() {
-    // GNU wc 9.7: ASCII control chars are word content (non-space)
-    assert_eq!(count_words(b"\x01"), 1);
-    assert_eq!(count_words(b"\x08"), 1);
-    assert_eq!(count_words(b"\x0E"), 1);
-    assert_eq!(count_words(b"\x1F"), 1);
-    assert_eq!(count_words(b"\x7f"), 1);
+fn test_utf8_control_chars_are_transparent() {
+    // GNU wc 9.4: ASCII control chars are transparent (no state change)
+    // Alone, they never enter in_word → 0 words
+    assert_eq!(count_words(b"\x01"), 0);
+    assert_eq!(count_words(b"\x08"), 0);
+    assert_eq!(count_words(b"\x0E"), 0);
+    assert_eq!(count_words(b"\x1F"), 0);
+    assert_eq!(count_words(b"\x7f"), 0);
 }
 
 #[test]
@@ -184,16 +186,17 @@ fn test_utf8_control_chars_dont_break_words() {
 }
 
 #[test]
-fn test_utf8_nonprintable_is_word_content() {
-    // GNU wc 9.7: non-printable control bytes are word content (1 word)
-    assert_eq!(count_words(b"\x00\x01\x02"), 1);
-    // NUL at start is word content, "hello" continues word
+fn test_utf8_nonprintable_is_transparent() {
+    // GNU wc 9.4: non-printable control bytes are transparent (no state change)
+    // All transparent alone → 0 words
+    assert_eq!(count_words(b"\x00\x01\x02"), 0);
+    // NUL at start is transparent, "hello" starts the word → 1 word
     assert_eq!(count_words(b"\x00hello"), 1);
 }
 
 #[test]
 fn test_utf8_space_still_breaks() {
-    // Space breaks words; NUL (word content) doesn't
+    // Space breaks words; NUL is transparent (doesn't break or start words)
     assert_eq!(count_words(b"hello\x00 world"), 2);
     assert_eq!(count_words(b"hello \x00world"), 2);
 }
@@ -207,8 +210,8 @@ fn test_c_locale_high_bytes_are_word_content() {
     assert_eq!(count_words_locale(b"hello\x80world", false), 1);
     // High bytes between spaces: word content, counted as separate word
     assert_eq!(count_words_locale(b"hello \x80 world", false), 3);
-    // 0xA0 is also word content in C locale
-    assert_eq!(count_words_locale(b"hello\xa0world", false), 1);
+    // 0xA0 (NBSP) is whitespace in C locale (GNU wc iswnbspace via glibc Latin-1 mapping)
+    assert_eq!(count_words_locale(b"hello\xa0world", false), 2);
 }
 
 #[test]
@@ -233,12 +236,12 @@ fn test_c_locale_word_counting() {
 }
 
 #[test]
-fn test_utf8_c1_controls_word_content() {
+fn test_utf8_c1_controls_transparent() {
     // C1 control characters (U+0080-U+009F) are valid 2-byte UTF-8 sequences.
-    // They are non-printable but valid — treated as word content per GNU wc.
-    // U+0080 = 0xC2 0x80 (PAD control)
-    assert_eq!(count_words(b"\xC2\x80"), 1);
-    // C1 control between words: word content, doesn't break
+    // They are non-printable → transparent per GNU wc 9.4 3-state model.
+    // U+0080 = 0xC2 0x80 (PAD control) — transparent alone → 0 words
+    assert_eq!(count_words(b"\xC2\x80"), 0);
+    // C1 control between words: transparent, doesn't break word → 1 word
     assert_eq!(count_words(b"hello\xC2\x80world"), 1);
 }
 
@@ -252,15 +255,16 @@ fn test_utf8_valid_multibyte_is_word() {
 }
 
 #[test]
-fn test_utf8_invalid_encoding_is_word_content() {
-    // Standalone continuation bytes (0x80-0xBF) in UTF-8: word content (encoding error)
-    assert_eq!(count_words(b"\x80\x81\x82"), 1);
-    // Encoding error between printable text: word content → stays in word → 1 word
+fn test_utf8_invalid_encoding_is_transparent() {
+    // Standalone continuation bytes (0x80-0xBF) in UTF-8: transparent (encoding error)
+    // Transparent alone → 0 words
+    assert_eq!(count_words(b"\x80\x81\x82"), 0);
+    // Encoding error between printable text: transparent → stays in word → 1 word
     assert_eq!(count_words(b"hello\x80world"), 1);
-    // Invalid bytes >= 0xF5: word content
-    assert_eq!(count_words(b"\xF5\xF6\xFF"), 1);
-    // All non-space bytes: 1 word (all word content, no breaks)
-    assert_eq!(count_words(b"\x00\x01\x02\x80\x81\xfe\xff"), 1);
+    // Invalid bytes >= 0xF5: transparent
+    assert_eq!(count_words(b"\xF5\xF6\xFF"), 0);
+    // All transparent bytes: 0 words (never enter in_word)
+    assert_eq!(count_words(b"\x00\x01\x02\x80\x81\xfe\xff"), 0);
 }
 
 #[test]
@@ -536,17 +540,17 @@ fn test_gnu_trailing_newline() {
 
 #[test]
 fn test_gnu_word_definition() {
-    // UTF-8 mode (matching GNU wc 9.7):
-    // NUL and control chars are word content (non-space)
-    assert_eq!(count_words(b"\x00"), 1); // NUL: word content
-    assert_eq!(count_words(b"\x01"), 1); // SOH: word content
-    assert_eq!(count_words(b"\x7f"), 1); // DEL: word content
+    // UTF-8 mode (matching GNU wc 9.4 3-state model):
+    // NUL and control chars are transparent (no state change)
+    assert_eq!(count_words(b"\x00"), 0); // NUL: transparent
+    assert_eq!(count_words(b"\x01"), 0); // SOH: transparent
+    assert_eq!(count_words(b"\x7f"), 0); // DEL: transparent
     // Printable ASCII is word content
     assert_eq!(count_words(b"!"), 1);
     assert_eq!(count_words(b"hello"), 1);
     // In UTF-8 mode, valid multi-byte sequences (>= U+00A0) are word content
     assert_eq!(count_words("café".as_bytes()), 1);
-    // text with embedded NULs: NUL is word content, text forms one word
+    // text with embedded NULs: NUL is transparent, text forms one word
     assert_eq!(count_words(b"text\x00with\x00nulls"), 1);
 }
 
@@ -564,12 +568,13 @@ fn test_c_locale_cjk_word_count() {
     let multi = "こんにちは\nさようなら\n".as_bytes();
     assert_eq!(count_words_locale(multi, false), 2);
     // Full test data: "Hello, 世界!\n你好世界\nこんにちは\n"
-    // Line 1: "Hello," (word 1) + space + CJK bytes + "!" (word 2) + \n
-    // Line 2: CJK bytes = word 3 + \n
-    // Line 3: CJK bytes = word 4 + \n
-    // Total: 4.
+    // Line 1: "Hello," (word 1) + space + "世界!" (e4 b8 96 e7 95 8c 21, no 0xa0) = word 2 + \n
+    // Line 2: "你好世界" (e4 bd [a0] e5 a5 bd e4 b8 96 e7 95 8c)
+    //         0xa0 in 你(E4 BD A0) acts as space → "e4 bd" = word 3, rest = word 4 + \n
+    // Line 3: "こんにちは" (no 0xa0) = word 5 + \n
+    // Total: 5 (matches GNU wc 9.7).
     let full = "Hello, 世界!\n你好世界\nこんにちは\n".as_bytes();
-    assert_eq!(count_words_locale(full, false), 4);
+    assert_eq!(count_words_locale(full, false), 5);
 }
 
 #[test]

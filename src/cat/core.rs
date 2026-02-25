@@ -446,15 +446,22 @@ pub fn cat_with_options(
         } else {
             // No character transformation needed
             if config.show_ends {
-                let content_end = if line.last() == Some(&b'\n') {
+                let has_newline = line.last() == Some(&b'\n');
+                let content_end = if has_newline {
                     line.len() - 1
                 } else {
                     line.len()
                 };
-                buf.extend_from_slice(&line[..content_end]);
-                if line.last() == Some(&b'\n') {
-                    buf.push(b'$');
-                    buf.push(b'\n');
+                // GNU cat -E: CR immediately before LF is shown as ^M
+                if has_newline && content_end > 0 && line[content_end - 1] == b'\r' {
+                    buf.extend_from_slice(&line[..content_end - 1]);
+                    buf.extend_from_slice(b"^M$\n");
+                } else {
+                    buf.extend_from_slice(&line[..content_end]);
+                    if has_newline {
+                        buf.push(b'$');
+                        buf.push(b'\n');
+                    }
                 }
             } else {
                 buf.extend_from_slice(line);

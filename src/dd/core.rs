@@ -492,18 +492,23 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
     }
     let start_time = Instant::now();
 
+    // Only clone file handles when skip/seek are needed (avoids dup() syscalls otherwise)
+    let needs_input_seek = config.skip > 0;
+    let needs_output_seek = config.seek > 0;
+
     let mut input_file: Option<File> = None;
     let mut input: Box<dyn Read> = if let Some(ref path) = config.input {
         let file = File::open(path)
             .map_err(|e| io::Error::new(e.kind(), format!("failed to open '{}': {}", path, e)))?;
-        input_file = Some(file.try_clone()?);
+        if needs_input_seek {
+            input_file = Some(file.try_clone()?);
+        }
         Box::new(file)
     } else {
         Box::new(io::stdin())
     };
 
     // Handle output file creation/opening
-    let have_output_file = config.output.is_some();
     let mut output_file: Option<File> = None;
     let mut output: Box<dyn Write> = if let Some(ref path) = config.output {
         let mut opts = OpenOptions::new();
@@ -529,7 +534,12 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
         let file = opts
             .open(path)
             .map_err(|e| io::Error::new(e.kind(), format!("failed to open '{}': {}", path, e)))?;
-        output_file = Some(file.try_clone()?);
+        if needs_output_seek || config.conv.fsync || config.conv.fdatasync {
+            // Clone for: (1) seek positioning (Box<dyn Write> can't seek directly),
+            // and (2) sync_all/sync_data at end. Safe because dup()-cloned fds
+            // share the same open file description.
+            output_file = Some(file.try_clone()?);
+        }
         Box::new(file)
     } else {
         Box::new(io::stdout())
@@ -655,14 +665,12 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
     // Flush output
     output.flush()?;
 
-    // fsync / fdatasync
-    if have_output_file {
-        if let Some(ref f) = output_file {
-            if config.conv.fsync {
-                f.sync_all()?;
-            } else if config.conv.fdatasync {
-                f.sync_data()?;
-            }
+    // fsync / fdatasync (output_file is Some when seek or sync was requested)
+    if let Some(ref f) = output_file {
+        if config.conv.fsync {
+            f.sync_all()?;
+        } else if config.conv.fdatasync {
+            f.sync_data()?;
         }
     }
 

@@ -412,14 +412,7 @@ fn main() {
             // Multi-file (2+): choose strategy based on file count.
             let paths: Vec<_> = files.iter().map(|f| Path::new(f.as_str())).collect();
 
-            let results = if files.len() >= 20 {
-                // Many files: batch I/O (pre-read all, then hash all in parallel).
-                // Separates I/O from compute for maximum throughput.
-                hash::hash_files_batch(&paths, algo)
-            } else {
-                // Moderate file count: fast parallel hash_file_nostat per worker.
-                hash::hash_files_parallel_fast(&paths, algo)
-            };
+            let results = hash::hash_files_auto(&paths, algo);
 
             // Batch output: build all output lines into one buffer, write once.
             // Reduces per-file write() overhead from ~100 syscalls to 1.

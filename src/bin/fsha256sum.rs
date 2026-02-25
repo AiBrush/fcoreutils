@@ -265,7 +265,7 @@ fn run_hash_mode(
     } else {
         // Multi-file (2+): use parallel hashing with thread::scope.
         let paths: Vec<_> = files.iter().map(|f| Path::new(f.as_str())).collect();
-        let results = hash::hash_files_parallel(&paths, algo);
+        let results = hash::hash_files_auto(&paths, algo);
 
         for (filename, result) in files.iter().zip(results) {
             match result {

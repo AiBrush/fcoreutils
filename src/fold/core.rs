@@ -1,4 +1,5 @@
 use std::io::Write;
+use unicode_width::UnicodeWidthChar;
 
 /// Fold (wrap) lines to a given width.
 ///
@@ -138,7 +139,7 @@ fn fold_byte_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &mut
     }
 }
 
-/// Fold by column count (default mode, handles tabs and backspaces).
+/// Fold by column count (default mode, handles tabs, backspaces, and UTF-8).
 fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
     let mut pos = 0;
 
@@ -151,8 +152,8 @@ fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &m
             None => &data[pos..],
         };
 
-        // Fast path: if the line has no tabs/backspaces and is <= width, copy verbatim
-        if line_data.len() <= width && !has_special_bytes(line_data) {
+        // Fast path: pure ASCII, no tabs/backspaces, and byte count <= width
+        if line_data.len() <= width && is_ascii_simple(line_data) {
             output.extend_from_slice(line_data);
             if let Some(nl) = line_end {
                 output.push(b'\n');
@@ -174,28 +175,121 @@ fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &m
     }
 }
 
-/// Check if a line contains tab or backspace (bytes that affect column counting).
+/// Check if a line is pure ASCII with no tabs or backspaces.
 #[inline]
-fn has_special_bytes(data: &[u8]) -> bool {
-    // memchr2 finds tab or backspace efficiently via SIMD
-    memchr::memchr2(b'\t', b'\x08', data).is_some()
+fn is_ascii_simple(data: &[u8]) -> bool {
+    // All bytes must be ASCII printable (0x20..=0x7E) or space
+    data.iter().all(|&b| b >= 0x20 && b <= 0x7E)
+}
+
+/// Get the display width and byte length of the UTF-8 character starting at `data[pos]`.
+/// Returns (display_width, byte_length).
+#[inline]
+fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
+    let b = data[pos];
+    if b < 0x80 {
+        // ASCII: tab/backspace handled by caller; control chars have 0 width
+        if b < 0x20 || b == 0x7f {
+            (0, 1)
+        } else {
+            (1, 1)
+        }
+    } else {
+        // UTF-8 multi-byte: decode the character
+        let (ch, len) = decode_utf8_at(data, pos);
+        match ch {
+            Some(c) => (UnicodeWidthChar::width(c).unwrap_or(0), len),
+            None => (1, 1), // Invalid UTF-8 byte: treat as 1 column (GNU compat)
+        }
+    }
+}
+
+/// Decode a UTF-8 character starting at data[pos].
+/// Returns (Some(char), byte_length) or (None, 1) for invalid sequences.
+#[inline]
+fn decode_utf8_at(data: &[u8], pos: usize) -> (Option<char>, usize) {
+    let b = data[pos];
+    let (expected_len, mut code_point) = if b < 0xC2 {
+        return (None, 1); // continuation byte, invalid, or overlong (0xC0/0xC1)
+    } else if b < 0xE0 {
+        (2, (b as u32) & 0x1F)
+    } else if b < 0xF0 {
+        (3, (b as u32) & 0x0F)
+    } else if b < 0xF8 {
+        (4, (b as u32) & 0x07)
+    } else {
+        return (None, 1);
+    };
+
+    if pos + expected_len > data.len() {
+        return (None, 1);
+    }
+
+    for i in 1..expected_len {
+        let cb = data[pos + i];
+        if cb & 0xC0 != 0x80 {
+            return (None, 1);
+        }
+        code_point = (code_point << 6) | ((cb as u32) & 0x3F);
+    }
+
+    match char::from_u32(code_point) {
+        Some(c) => (Some(c), expected_len),
+        None => (None, 1),
+    }
+}
+
+/// Insert a line break, preferring the last space position when -s is active.
+/// Returns the new column position after the break.
+#[inline]
+fn insert_line_break(
+    output: &mut Vec<u8>,
+    last_space_out_pos: &mut Option<usize>,
+    break_at_spaces: bool,
+) -> usize {
+    if break_at_spaces {
+        if let Some(sp_pos) = *last_space_out_pos {
+            let tail_start = sp_pos + 1;
+            let tail_end = output.len();
+            output.push(0);
+            output.copy_within(tail_start..tail_end, tail_start + 1);
+            output[tail_start] = b'\n';
+            *last_space_out_pos = None;
+            return recalc_column(&output[tail_start + 1..]);
+        }
+    }
+    output.push(b'\n');
+    *last_space_out_pos = None;
+    0
 }
 
 /// Process a single line (no newlines) in column mode, writing to output.
+/// Handles UTF-8 characters with proper display width.
 fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
     let mut col: usize = 0;
     let mut last_space_out_pos: Option<usize> = None;
+    let mut i = 0;
 
-    for &byte in line {
-        // Calculate display width of this byte
-        let char_width = if byte == b'\t' {
-            let next_stop = ((col / 8) + 1) * 8;
-            next_stop - col
-        } else if byte == b'\x08' || byte < 0x20 || byte == 0x7f {
-            0
-        } else {
-            1
-        };
+    while i < line.len() {
+        let byte = line[i];
+
+        // Handle tab specially
+        if byte == b'\t' {
+            let tab_width = ((col / 8) + 1) * 8 - col;
+
+            if col + tab_width > width && tab_width > 0 {
+                col = insert_line_break(output, &mut last_space_out_pos, break_at_spaces);
+            }
+
+            if break_at_spaces {
+                last_space_out_pos = Some(output.len());
+            }
+            output.push(byte);
+            // Recompute tab_width: col may have changed after space-break insertion
+            col += ((col / 8) + 1) * 8 - col;
+            i += 1;
+            continue;
+        }
 
         // Handle backspace
         if byte == b'\x08' {
@@ -203,52 +297,51 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
             if col > 0 {
                 col -= 1;
             }
+            i += 1;
             continue;
         }
 
+        // Get character info (display width + byte length)
+        let (cw, byte_len) = char_info(line, i);
+
         // Check if adding this character would exceed width
-        if col + char_width > width && char_width > 0 {
-            if break_at_spaces {
-                if let Some(sp_pos) = last_space_out_pos {
-                    // Insert newline after the space using copy_within (no allocation)
-                    let tail_start = sp_pos + 1;
-                    let tail_end = output.len();
-                    output.push(0); // make room for newline
-                    output.copy_within(tail_start..tail_end, tail_start + 1);
-                    output[tail_start] = b'\n';
-                    col = recalc_column(&output[tail_start + 1..]);
-                    last_space_out_pos = None;
-                } else {
-                    output.push(b'\n');
-                    col = 0;
-                }
-            } else {
-                output.push(b'\n');
-                col = 0;
-            }
+        if col + cw > width && cw > 0 {
+            col = insert_line_break(output, &mut last_space_out_pos, break_at_spaces);
         }
 
-        if break_at_spaces && (byte == b' ' || byte == b'\t') {
+        if break_at_spaces && byte == b' ' {
             last_space_out_pos = Some(output.len());
         }
 
-        output.push(byte);
-        col += char_width;
+        output.extend_from_slice(&line[i..i + byte_len]);
+        col += cw;
+        i += byte_len;
     }
 }
 
-/// Recalculate column position for a segment of output.
+/// Recalculate column position for a segment of output (UTF-8 aware).
 fn recalc_column(data: &[u8]) -> usize {
     let mut col = 0;
-    for &b in data {
+    let mut i = 0;
+    while i < data.len() {
+        let b = data[i];
         if b == b'\t' {
             col = ((col / 8) + 1) * 8;
+            i += 1;
         } else if b == b'\x08' {
             if col > 0 {
                 col -= 1;
             }
-        } else if b >= 0x20 && b != 0x7f {
-            col += 1;
+            i += 1;
+        } else if b < 0x80 {
+            if b >= 0x20 && b != 0x7f {
+                col += 1;
+            }
+            i += 1;
+        } else {
+            let (cw, byte_len) = char_info(data, i);
+            col += cw;
+            i += byte_len;
         }
     }
     col
