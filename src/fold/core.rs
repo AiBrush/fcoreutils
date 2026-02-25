@@ -230,9 +230,14 @@ fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
         let chunk = &line[start..start + width];
         // Lazy ASCII check: only examine this chunk, not the whole line.
         // Uses SWAR word-at-a-time processing for speed.
+        // NOTE: this scans `chunk` twice (is_ascii_simple + memrchr below).
+        // A fused memrchr2(b' ',b'\t',chunk) approach could reduce this to
+        // one pass, but benchmarks show the SWAR check is cheap enough that
+        // the two-pass cost is negligible for the common ASCII-only case.
         if !is_ascii_simple(chunk) {
             // Non-simple byte found: fall back to slow path for the rest.
-            // Column is 0 at start since we just inserted a break (or at line beginning).
+            // col is 0 here: every chunk boundary is preceded by a line break
+            // or line start, so fold_one_line_column's initial col=0 is correct.
             fold_one_line_column(&line[start..], width, true, output);
             return;
         }
@@ -256,6 +261,8 @@ fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
         if is_ascii_simple(tail) {
             output.extend_from_slice(tail);
         } else {
+            // col is 0 here: every chunk boundary is preceded by a line break
+            // or line start, so fold_one_line_column's initial col=0 is correct.
             fold_one_line_column(tail, width, true, output);
         }
     }
@@ -300,6 +307,11 @@ fn word_is_ascii_simple(word: u64) -> bool {
         return false;
     }
     // Check 3: no byte == 0x7F (DEL)
+    // XOR with 0x7F turns 0x7F bytes into 0x00; we then detect zero bytes via
+    // the standard (x - 0x01) & !x & 0x80 trick.
+    // Borrow from a 0x00 xored byte can propagate into the next byte, but this
+    // cannot create a false positive: if xored[k] != 0 then sub(0x01) at byte k
+    // doesn't borrow, so adjacent bytes are unaffected when no 0x7F is present.
     let xored = word ^ 0x7F7F7F7F7F7F7F7F;
     let has_zero = xored.wrapping_sub(0x0101010101010101) & !xored & 0x8080808080808080;
     has_zero == 0
