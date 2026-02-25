@@ -3,7 +3,6 @@
 // Usage: od [OPTION]... [FILE]...
 //        od [-abcdfilosx] [FILE] [[+]OFFSET[.][b]]
 
-use std::fs::File;
 use std::io::{self, Read};
 use std::process;
 
@@ -314,7 +313,7 @@ fn main() {
     };
 
     let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
+    let mut out = io::BufWriter::with_capacity(256 * 1024, stdout.lock());
 
     if operands.is_empty() || (operands.len() == 1 && operands[0] == "-") {
         let stdin = io::stdin();
@@ -323,8 +322,22 @@ fn main() {
             eprintln!("{}: {}", TOOL_NAME, e);
             process::exit(1);
         }
+    } else if operands.len() == 1 && operands[0] != "-" {
+        // Single file: use mmap for zero-copy
+        match coreutils_rs::common::io::read_file(std::path::Path::new(&operands[0])) {
+            Ok(data) => {
+                if let Err(e) = od_process(data.as_ref(), &mut out, &config) {
+                    eprintln!("{}: {}", TOOL_NAME, e);
+                    process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("{}: {}: {}", TOOL_NAME, operands[0], e);
+                process::exit(1);
+            }
+        }
     } else {
-        // Concatenate all files
+        // Multiple files: concatenate (mmap each, then combine)
         let mut combined = Vec::new();
         for path in &operands {
             if path == "-" {
@@ -338,14 +351,9 @@ fn main() {
                     });
                 combined.extend_from_slice(&buf);
             } else {
-                match File::open(path) {
-                    Ok(mut f) => {
-                        let mut buf = Vec::new();
-                        f.read_to_end(&mut buf).unwrap_or_else(|e| {
-                            eprintln!("{}: {}: {}", TOOL_NAME, path, e);
-                            process::exit(1);
-                        });
-                        combined.extend_from_slice(&buf);
+                match coreutils_rs::common::io::read_file(std::path::Path::new(path)) {
+                    Ok(data) => {
+                        combined.extend_from_slice(&data);
                     }
                     Err(e) => {
                         eprintln!("{}: {}: {}", TOOL_NAME, path, e);
