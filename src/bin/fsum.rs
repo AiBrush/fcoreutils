@@ -87,33 +87,29 @@ fn parse_args() -> Cli {
     cli
 }
 
-/// Checksum a memory-mapped slice (zero-copy for regular files).
+/// Single BSD checksum step: rotate right through carry, add byte, mask to 16 bits.
+/// Serial: each step depends on previous checksum; unrolled for ILP over small window.
+#[inline(always)]
+fn bsd_step(checksum: u32, byte: u8) -> u32 {
+    let rotated = (checksum >> 1) + ((checksum & 1) << 15);
+    (rotated + u32::from(byte)) & 0xFFFF
+}
+
+/// Checksum a slice (used for mmap'd regular files).
 fn process_slice(data: &[u8], algorithm: Algorithm) -> (u32, u64) {
     let total_bytes = data.len() as u64;
     match algorithm {
         Algorithm::Bsd => {
             let mut checksum: u32 = 0;
-            let chunks = data.chunks_exact(4);
-            let remainder = chunks.remainder();
-            for chunk in chunks {
-                checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                checksum = (checksum + u32::from(chunk[0])) & 0xFFFF;
-                checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                checksum = (checksum + u32::from(chunk[1])) & 0xFFFF;
-                checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                checksum = (checksum + u32::from(chunk[2])) & 0xFFFF;
-                checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                checksum = (checksum + u32::from(chunk[3])) & 0xFFFF;
-            }
-            for &byte in remainder {
-                checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                checksum = (checksum + u32::from(byte)) & 0xFFFF;
+            for &byte in data {
+                checksum = bsd_step(checksum, byte);
             }
             let blocks = total_bytes.div_ceil(1024);
             (checksum, blocks)
         }
         Algorithm::SysV => {
             let mut sum: u32 = 0;
+            // Independent per-byte additions enable auto-vectorization
             let chunks = data.chunks_exact(8);
             let remainder = chunks.remainder();
             for chunk in chunks {
@@ -154,22 +150,8 @@ fn process_streaming<R: io::Read>(reader: R, algorithm: Algorithm) -> io::Result
                 }
                 let n = buf.len();
                 total_bytes += n as u64;
-                // Unrolled 4x for better instruction-level parallelism
-                let chunks = buf.chunks_exact(4);
-                let remainder = chunks.remainder();
-                for chunk in chunks {
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(chunk[0])) & 0xFFFF;
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(chunk[1])) & 0xFFFF;
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(chunk[2])) & 0xFFFF;
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(chunk[3])) & 0xFFFF;
-                }
-                for &byte in remainder {
-                    checksum = (checksum >> 1) + ((checksum & 1) << 15);
-                    checksum = (checksum + u32::from(byte)) & 0xFFFF;
+                for &byte in buf {
+                    checksum = bsd_step(checksum, byte);
                 }
                 reader.consume(n);
             }
@@ -185,7 +167,7 @@ fn process_streaming<R: io::Read>(reader: R, algorithm: Algorithm) -> io::Result
                 }
                 let n = buf.len();
                 total_bytes += n as u64;
-                // Unrolled 8-wide accumulation enables auto-vectorization
+                // Independent per-byte additions enable auto-vectorization
                 let chunks = buf.chunks_exact(8);
                 let remainder = chunks.remainder();
                 for chunk in chunks {

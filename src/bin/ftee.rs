@@ -171,6 +171,7 @@ fn main() {
     let stdin_fd = io::stdin().as_raw_fd();
     let stdout_fd = io::stdout().as_raw_fd();
     let mut buf = vec![0u8; 1024 * 1024];
+    let mut stdout_ok = true;
 
     loop {
         let n = unsafe { libc::read(stdin_fd, buf.as_mut_ptr().cast(), buf.len() as _) };
@@ -187,12 +188,15 @@ fn main() {
         }
         let data = &buf[..n as usize];
 
-        // Write to stdout
-        if let Err(e) = write_all_raw(stdout_fd, data) {
-            if handle_write_error(TOOL_NAME, "standard output", &e, output_error) {
-                process::exit(1);
+        // Write to stdout (skip if a previous write failed to avoid repeated EPIPE)
+        if stdout_ok {
+            if let Err(e) = write_all_raw(stdout_fd, data) {
+                if handle_write_error(TOOL_NAME, "standard output", &e, output_error) {
+                    process::exit(1);
+                }
+                exit_code = 1;
+                stdout_ok = false;
             }
-            exit_code = 1;
         }
 
         // Write to each file
