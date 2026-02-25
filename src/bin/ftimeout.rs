@@ -397,10 +397,13 @@ fn main() {
                     libc::sigemptyset(&mut unblock);
                     libc::sigaddset(&mut unblock, sig);
                     libc::sigprocmask(libc::SIG_UNBLOCK, &unblock, std::ptr::null_mut());
-                    // Reset to default disposition; fall back to exit on failure.
-                    let prev = libc::signal(sig, libc::SIG_DFL);
-                    if prev == libc::SIG_ERR {
-                        process::exit(128 + sig as i32);
+                    // Reset to default disposition. SIGKILL/SIGSTOP are always SIG_DFL
+                    // and signal() returns SIG_ERR for them, so skip the call.
+                    if sig != libc::SIGKILL && sig != libc::SIGSTOP {
+                        let prev = libc::signal(sig, libc::SIG_DFL);
+                        if prev == libc::SIG_ERR {
+                            process::exit(128 + sig as i32);
+                        }
                     }
                     libc::kill(libc::getpid(), sig);
                     // Signal should terminate us before we get here.
