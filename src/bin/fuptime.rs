@@ -221,10 +221,34 @@ fn print_pretty(uptime_secs: f64) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn read_btime() -> Option<libc::time_t> {
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open("/proc/stat").ok()?;
+    for line in BufReader::new(f).lines().map_while(Result::ok) {
+        if let Some(rest) = line.strip_prefix("btime ") {
+            return rest.trim().parse::<libc::time_t>().ok();
+        }
+    }
+    None
+}
+
 #[cfg(unix)]
 fn print_since(uptime_secs: f64) {
-    let now = unsafe { libc::time(std::ptr::null_mut()) };
-    let boot_time = now - uptime_secs.round() as libc::time_t;
+    // On Linux, read boot time directly from /proc/stat btime to avoid
+    // a race condition between reading /proc/uptime and calling time().
+    // Computing boot_time = now - uptime can drift by 1 second if the
+    // two reads straddle a second boundary.
+    #[cfg(target_os = "linux")]
+    let boot_time = read_btime().unwrap_or_else(|| {
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        now - uptime_secs.round() as libc::time_t
+    });
+    #[cfg(not(target_os = "linux"))]
+    let boot_time = {
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        now - uptime_secs.round() as libc::time_t
+    };
     let tm = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&boot_time, &mut tm);

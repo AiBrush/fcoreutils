@@ -387,12 +387,33 @@ fn main() {
             process::exit(status_to_code(status));
         } else {
             if sig != libc::SIGTERM {
+                // Match GNU timeout: re-raise the signal on ourselves so the
+                // parent sees a signal death (not a normal exit with code 128+sig).
+                // This is important because bash treats signal deaths differently
+                // from normal exits (e.g., printing diagnostics, WIFSIGNALED check).
                 unsafe {
-                    libc::signal(sig, libc::SIG_DFL);
-                    libc::raise(sig);
+                    // Unblock the signal in case it's masked (e.g. inherited from parent).
+                    let mut unblock: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut unblock);
+                    libc::sigaddset(&mut unblock, sig);
+                    libc::sigprocmask(libc::SIG_UNBLOCK, &unblock, std::ptr::null_mut());
+                    // Reset to default disposition. SIGKILL/SIGSTOP are always SIG_DFL
+                    // and signal() returns SIG_ERR for them, so skip the call.
+                    if sig != libc::SIGKILL && sig != libc::SIGSTOP {
+                        let prev = libc::signal(sig, libc::SIG_DFL);
+                        if prev == libc::SIG_ERR {
+                            process::exit(128 + sig as i32);
+                        }
+                    }
+                    libc::kill(libc::getpid(), sig);
+                    // Signal should terminate us before we get here.
+                    // Loop on pause() as safety net. Note: SIGSTOP will stop
+                    // the process here until SIGCONT, then loop — this matches
+                    // GNU timeout behavior for the degenerate --signal=STOP case.
+                    loop {
+                        libc::pause();
+                    }
                 }
-                // If raise didn't kill us (shouldn't happen for uncatchable signals)
-                process::exit(128 + sig as i32);
             }
             process::exit(EXIT_TIMEOUT);
         }
@@ -595,8 +616,8 @@ mod tests {
             .args(["-s", "KILL", "0.1", "sleep", "10"])
             .output()
             .unwrap();
-        // ftimeout raises SIGKILL on itself, so the process dies by signal
-        // status.code() returns None for signal deaths on Unix
+        // ftimeout re-raises the signal on itself (matching GNU timeout),
+        // so the process dies by signal rather than exiting normally.
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
