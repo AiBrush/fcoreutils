@@ -320,27 +320,26 @@ fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64, src_mode: u32) -> i
 // that the old code paid when FICLONE failed on non-reflink filesystems.
 
 #[cfg(target_os = "linux")]
-fn copy_data_linux(
-    src: &Path,
-    dst: &Path,
-    src_meta: &std::fs::Metadata,
-    config: &CpConfig,
-) -> io::Result<()> {
+fn copy_data_linux(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
     let src_file = std::fs::File::open(src)?;
     let src_fd = src_file.as_raw_fd();
 
+    // Use fstat on the opened fd (not src_meta) to get the real file size and mode.
+    // src_meta may come from symlink_metadata, giving the symlink path length
+    // instead of the target file size when dereference != Always.
+    let fd_meta = src_file.metadata()?;
+    let len = fd_meta.len();
+
     let dst_file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(src_meta.mode())
+        .mode(fd_meta.mode())
         .open(dst)?;
     let dst_fd = dst_file.as_raw_fd();
-
-    let len = src_meta.len();
 
     // Hint sequential access for kernel readahead (benefits copy_file_range and read/write).
     // posix_fadvise is advisory; failure (e.g. ESPIPE for pipes) is harmless.
@@ -376,8 +375,9 @@ fn copy_data_linux(
                 FICLONE_UNSUPPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             if errno == libc::EXDEV {
-                // Cross-device: copy_file_range will also fail with EXDEV; skip to read/write.
-                return copy_readwrite_fallback(src_file, dst_file, len);
+                // Cross-device: copy_file_range will also fail with EXDEV;
+                // skip directly to read/write (posix_fadvise already issued above).
+                return readwrite_with_buffer(src_file, dst_file, len);
             }
             // Auto mode: fall through to copy_file_range on the same fds.
         }
@@ -417,6 +417,13 @@ fn copy_data_linux(
             return Err(err);
         }
         if ret == 0 {
+            if remaining > 0 {
+                // Source file shrank during copy — report rather than silently truncate.
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "source file shrank during copy",
+                ));
+            }
             break;
         }
         remaining -= ret as i64;
@@ -474,18 +481,6 @@ fn readwrite_with_buffer(
         }
         Ok(())
     })
-}
-
-/// EXDEV short-circuit: skip copy_file_range and go straight to read/write.
-/// posix_fadvise is already issued by copy_data_linux before FICLONE, so no
-/// need to repeat it here.
-#[cfg(target_os = "linux")]
-fn copy_readwrite_fallback(
-    src_file: std::fs::File,
-    dst_file: std::fs::File,
-    len: u64,
-) -> io::Result<()> {
-    readwrite_with_buffer(src_file, dst_file, len)
 }
 
 // ---- single-file copy ----
@@ -549,7 +544,7 @@ fn copy_file_with_meta(
     // Linux: single-open cascade (FICLONE → copy_file_range → read/write).
     #[cfg(target_os = "linux")]
     {
-        copy_data_linux(src, dst, src_meta, config)?;
+        copy_data_linux(src, dst, config)?;
         preserve_attributes_from_meta(src_meta, dst, config)?;
         return Ok(());
     }
