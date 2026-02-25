@@ -349,7 +349,13 @@ fn encode_5_to_8(b0: u8, b1: u8, b2: u8, b3: u8, b4: u8, out: &mut [u8]) {
 
 /// Copy encoded bytes into output buffer, inserting newlines at wrap boundaries.
 #[inline(always)]
-fn copy_with_wrap(encoded: &[u8], buf: &mut [u8], offset: &mut usize, col: &mut usize, wrap: usize) {
+fn copy_with_wrap(
+    encoded: &[u8],
+    buf: &mut [u8],
+    offset: &mut usize,
+    col: &mut usize,
+    wrap: usize,
+) {
     let mut i = 0;
     while i < encoded.len() {
         let space_in_line = wrap - *col;
@@ -387,7 +393,14 @@ fn encode_streaming(data: &[u8], wrap: usize, out: &mut impl Write) -> io::Resul
     if wrap == 0 {
         // No wrapping: encode directly into output buffer, 8 bytes at a time
         for chunk in data[..full_end].chunks_exact(5) {
-            encode_5_to_8(chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], &mut buf[offset..]);
+            encode_5_to_8(
+                chunk[0],
+                chunk[1],
+                chunk[2],
+                chunk[3],
+                chunk[4],
+                &mut buf[offset..],
+            );
             offset += 8;
             if offset >= FLUSH_AT {
                 out.write_all(&buf[..offset])?;

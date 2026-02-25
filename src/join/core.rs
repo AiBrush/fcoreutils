@@ -515,7 +515,12 @@ pub fn join(
                         );
                     } else {
                         write_unpaired_default_zerocopy(
-                            lines1[i1], config.field1, config.separator, out_sep, delim, &mut buf,
+                            lines1[i1],
+                            config.field1,
+                            config.separator,
+                            out_sep,
+                            delim,
+                            &mut buf,
                         );
                     }
                 }
@@ -541,7 +546,12 @@ pub fn join(
                         );
                     } else {
                         write_unpaired_default_zerocopy(
-                            lines2[i2], config.field2, config.separator, out_sep, delim, &mut buf,
+                            lines2[i2],
+                            config.field2,
+                            config.separator,
+                            out_sep,
+                            delim,
+                            &mut buf,
                         );
                     }
                 }
@@ -685,7 +695,12 @@ pub fn join(
                 );
             } else {
                 write_unpaired_default_zerocopy(
-                    lines1[i1], config.field1, config.separator, out_sep, delim, &mut buf,
+                    lines1[i1],
+                    config.field1,
+                    config.separator,
+                    out_sep,
+                    delim,
+                    &mut buf,
                 );
             }
         }
@@ -732,7 +747,12 @@ pub fn join(
                 );
             } else {
                 write_unpaired_default_zerocopy(
-                    lines2[i2], config.field2, config.separator, out_sep, delim, &mut buf,
+                    lines2[i2],
+                    config.field2,
+                    config.separator,
+                    out_sep,
+                    delim,
+                    &mut buf,
                 );
             }
         }
