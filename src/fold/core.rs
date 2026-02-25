@@ -204,8 +204,6 @@ fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
     }
 }
 
-
-
 /// Insert a line break, preferring the last space position when -s is active.
 /// Returns the new column position after the break.
 #[inline]
