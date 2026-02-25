@@ -186,8 +186,114 @@ pub fn sendfile_tail_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool>
     Ok(true)
 }
 
+/// Streaming tail -n N for regular files using sendfile on Linux.
+/// Seeks backward from EOF in 256KB chunks, SIMD-scans for N newlines,
+/// then uses sendfile for zero-copy output. Only reads the tail of the file,
+/// not the entire thing (a 100MB file typically needs only one 256KB read).
+#[cfg(target_os = "linux")]
+fn sendfile_tail_lines(path: &Path, n: u64, delimiter: u8, out_fd: i32) -> io::Result<bool> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    if n == 0 {
+        return Ok(true);
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOATIME)
+        .open(path)
+        .or_else(|_| std::fs::File::open(path))?;
+
+    let metadata = file.metadata()?;
+    let file_size = metadata.len();
+
+    if file_size == 0 {
+        return Ok(true);
+    }
+
+    let in_fd = file.as_raw_fd();
+
+    // Disable forward readahead — we scan backward from EOF
+    unsafe {
+        libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_RANDOM);
+    }
+
+    // Scan backward in chunks to find the start offset of the last N lines
+    const CHUNK: u64 = 262144; // 256KB — typically contains far more than 10 lines
+    let mut pos = file_size;
+    let mut count = 0u64;
+    let mut start_byte: u64 = 0; // offset to start output from (0 = whole file)
+    let mut found = false;
+    let mut reader = file;
+    let mut buf = vec![0u8; CHUNK as usize];
+
+    while pos > 0 {
+        let read_start = if pos > CHUNK { pos - CHUNK } else { 0 };
+        let read_len = (pos - read_start) as usize;
+
+        reader.seek(io::SeekFrom::Start(read_start))?;
+        reader.read_exact(&mut buf[..read_len])?;
+
+        // Skip trailing delimiter (don't count the file's final newline)
+        let search_end = if pos == file_size && read_len > 0 && buf[read_len - 1] == delimiter {
+            read_len - 1
+        } else {
+            read_len
+        };
+
+        for rpos in memrchr_iter(delimiter, &buf[..search_end]) {
+            count += 1;
+            if count == n {
+                start_byte = read_start + rpos as u64 + 1;
+                found = true;
+                break;
+            }
+        }
+
+        if found {
+            break;
+        }
+        pos = read_start;
+    }
+
+    // Enable forward readahead from the output start point
+    let remaining = file_size - start_byte;
+    unsafe {
+        libc::posix_fadvise(
+            in_fd,
+            start_byte as libc::off_t,
+            remaining as libc::off_t,
+            libc::POSIX_FADV_SEQUENTIAL,
+        );
+    }
+
+    // Zero-copy output via sendfile
+    let mut offset = start_byte as libc::off_t;
+    let mut left = remaining as usize;
+    while left > 0 {
+        let chunk = left.min(0x7ffff000);
+        let ret = unsafe { libc::sendfile(out_fd, in_fd, &mut offset, chunk) };
+        if ret > 0 {
+            left -= ret as usize;
+        } else if ret == 0 {
+            break;
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+
+    Ok(true)
+}
+
 /// Streaming tail -n N for regular files: read backward from EOF.
 /// Only reads enough of the file to find N lines, avoids mmapping entire file.
+/// Used on non-Linux platforms (macOS, Windows).
+#[cfg(not(target_os = "linux"))]
 fn tail_lines_streaming_file(
     path: &Path,
     n: u64,
@@ -198,18 +304,7 @@ fn tail_lines_streaming_file(
         return Ok(true);
     }
 
-    #[cfg(target_os = "linux")]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOATIME)
-            .open(path)
-            .or_else(|_| std::fs::File::open(path))?
-    };
-    #[cfg(not(target_os = "linux"))]
     let file = std::fs::File::open(path)?;
-
     let metadata = file.metadata()?;
     let file_size = metadata.len();
 
@@ -217,84 +312,46 @@ fn tail_lines_streaming_file(
         return Ok(true);
     }
 
-    // Try mmap for backward scanning — avoids heap allocations entirely
-    // and lets the kernel page in only the portion we scan.
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                file_size as libc::size_t,
-                libc::PROT_READ,
-                libc::MAP_PRIVATE | libc::MAP_NORESERVE,
-                fd,
-                0,
-            )
-        };
-        if ptr != libc::MAP_FAILED {
-            // Advise sequential read from the end
-            let _ = unsafe { libc::madvise(ptr, file_size as libc::size_t, libc::MADV_SEQUENTIAL) };
-            let data = unsafe { std::slice::from_raw_parts(ptr as *const u8, file_size as usize) };
-            let result = tail_lines(data, n, delimiter, out);
-            unsafe {
-                libc::munmap(ptr, file_size as libc::size_t);
-            }
-            return result.map(|_| true);
-        }
-    }
-
-    // Fallback: read backward in chunks to find N lines from the end
+    // Read backward in chunks to find the start offset, then seek forward to output
     const CHUNK: u64 = 262144;
-    let mut chunks: Vec<Vec<u8>> = Vec::new();
     let mut pos = file_size;
     let mut count = 0u64;
-    let mut found_start = false;
-
+    let mut start_byte: u64 = 0;
+    let mut found = false;
     let mut reader = file;
+    let mut buf = vec![0u8; CHUNK as usize];
 
     while pos > 0 {
         let read_start = if pos > CHUNK { pos - CHUNK } else { 0 };
         let read_len = (pos - read_start) as usize;
 
         reader.seek(io::SeekFrom::Start(read_start))?;
-        let mut buf = vec![0u8; read_len];
-        reader.read_exact(&mut buf)?;
+        reader.read_exact(&mut buf[..read_len])?;
 
-        // Count delimiters backward in this chunk using SIMD
-        let search_end = if pos == file_size && !buf.is_empty() && buf[buf.len() - 1] == delimiter {
-            buf.len() - 1
+        let search_end = if pos == file_size && read_len > 0 && buf[read_len - 1] == delimiter {
+            read_len - 1
         } else {
-            buf.len()
+            read_len
         };
 
         for rpos in memrchr_iter(delimiter, &buf[..search_end]) {
             count += 1;
             if count == n {
-                out.write_all(&buf[rpos + 1..])?;
-                for chunk in chunks.iter().rev() {
-                    out.write_all(chunk)?;
-                }
-                found_start = true;
+                start_byte = read_start + rpos as u64 + 1;
+                found = true;
                 break;
             }
         }
 
-        if found_start {
+        if found {
             break;
         }
-
-        chunks.push(buf);
         pos = read_start;
     }
 
-    if !found_start {
-        // Fewer than N lines — output entire file
-        for chunk in chunks.iter().rev() {
-            out.write_all(chunk)?;
-        }
-    }
+    // Seek to start_byte and copy to output
+    reader.seek(io::SeekFrom::Start(start_byte))?;
+    io::copy(&mut reader, out)?;
 
     Ok(true)
 }
@@ -420,19 +477,42 @@ pub fn tail_file(
 
         match &config.mode {
             TailMode::Lines(n) => {
-                // Streaming backward read: only reads enough to find N lines
-                match tail_lines_streaming_file(path, *n, delimiter, out) {
-                    Ok(true) => return Ok(true),
-                    Err(e) => {
-                        eprintln!(
-                            "{}: cannot open '{}' for reading: {}",
-                            tool_name,
-                            filename,
-                            crate::common::io_error_msg(&e)
-                        );
-                        return Ok(false);
+                // Seek backward from EOF, SIMD-scan for N lines, sendfile output
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::io::AsRawFd;
+                    out.flush()?; // drain BufWriter before bypassing it with sendfile
+                    let stdout = io::stdout();
+                    let out_fd = stdout.as_raw_fd();
+                    match sendfile_tail_lines(path, *n, delimiter, out_fd) {
+                        Ok(true) => return Ok(true),
+                        Err(e) => {
+                            eprintln!(
+                                "{}: cannot open '{}' for reading: {}",
+                                tool_name,
+                                filename,
+                                crate::common::io_error_msg(&e)
+                            );
+                            return Ok(false);
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    match tail_lines_streaming_file(path, *n, delimiter, out) {
+                        Ok(true) => return Ok(true),
+                        Err(e) => {
+                            eprintln!(
+                                "{}: cannot open '{}' for reading: {}",
+                                tool_name,
+                                filename,
+                                crate::common::io_error_msg(&e)
+                            );
+                            return Ok(false);
+                        }
+                        _ => {}
+                    }
                 }
             }
             TailMode::LinesFrom(n) => {
@@ -455,6 +535,7 @@ pub fn tail_file(
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
+                    out.flush()?; // drain BufWriter before bypassing with sendfile
                     let stdout = io::stdout();
                     let out_fd = stdout.as_raw_fd();
                     if let Ok(true) = sendfile_tail_bytes(path, *_n, out_fd) {
@@ -466,6 +547,7 @@ pub fn tail_file(
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
+                    out.flush()?; // drain BufWriter before bypassing with sendfile
                     let stdout = io::stdout();
                     let out_fd = stdout.as_raw_fd();
                     if let Ok(true) = sendfile_tail_bytes_from(path, *_n, out_fd) {
