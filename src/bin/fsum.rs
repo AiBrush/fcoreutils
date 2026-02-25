@@ -132,7 +132,7 @@ fn sysv_checksum(data: &[u8]) -> u32 {
     sysv_fold(sysv_sum_bytes(data))
 }
 
-/// Checksum a slice (used for mmap'd regular files).
+/// Checksum a slice (used for all regular files via read_file).
 fn process_slice(data: &[u8], algorithm: Algorithm) -> (u32, u64) {
     let total_bytes = data.len() as u64;
     match algorithm {
