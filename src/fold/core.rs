@@ -22,19 +22,17 @@ pub fn fold_bytes(
         return fold_width_zero(data, out);
     }
 
-    // Fast path: byte mode without -s, use SIMD-accelerated scanning
-    if count_bytes && !break_at_spaces {
-        return fold_byte_fast(data, width, out);
+    // Fast path: byte mode, use SIMD-accelerated scanning
+    if count_bytes {
+        if break_at_spaces {
+            return fold_byte_fast_spaces(data, width, out);
+        } else {
+            return fold_byte_fast(data, width, out);
+        }
     }
 
     let mut output = Vec::with_capacity(data.len() + data.len() / width);
-
-    if count_bytes {
-        fold_byte_mode(data, width, break_at_spaces, &mut output);
-    } else {
-        fold_column_mode(data, width, break_at_spaces, &mut output);
-    }
-
+    fold_column_mode(data, width, break_at_spaces, &mut output);
     out.write_all(&output)
 }
 
@@ -73,12 +71,80 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
     out.write_all(&output)
 }
 
+/// Fast fold by byte count with -s (break at spaces).
+/// Uses memchr to find newlines and memrchr to find last space in each chunk.
+fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
+    let mut output = Vec::with_capacity(data.len() + data.len() / width + 1);
+    let mut pos: usize = 0;
+
+    while pos < data.len() {
+        let remaining = &data[pos..];
+
+        match memchr::memchr(b'\n', remaining) {
+            Some(nl_offset) => {
+                let segment = &data[pos..pos + nl_offset + 1];
+                fold_segment_bytes_spaces(&mut output, segment, width);
+                pos += nl_offset + 1;
+            }
+            None => {
+                fold_segment_bytes_spaces(&mut output, &data[pos..], width);
+                break;
+            }
+        }
+    }
+
+    out.write_all(&output)
+}
+
+/// Fold a single line segment by bytes with -s (break at spaces).
+///
+/// # Invariant
+/// `segment` must contain at most one `\n`, and only as its final byte.
+#[inline]
+fn fold_segment_bytes_spaces(output: &mut Vec<u8>, segment: &[u8], width: usize) {
+    debug_assert!(
+        !segment[..segment.len().saturating_sub(1)].contains(&b'\n'),
+        "fold_segment_bytes_spaces: invariant violated — internal newline in segment"
+    );
+    let mut start = 0;
+    while start + width < segment.len() {
+        // SAFETY: loop guard ensures start + width < segment.len()
+        if segment[start + width] == b'\n' {
+            output.extend_from_slice(&segment[start..start + width + 1]);
+            return;
+        }
+        let chunk = &segment[start..start + width];
+        // In byte mode, tab is 1 byte; break after it just like a space.
+        // Column mode uses memrchr(b' ') only — tabs are handled via is_ascii_simple fallback.
+        match memchr::memrchr2(b' ', b'\t', chunk) {
+            Some(sp_offset) => {
+                let break_at = start + sp_offset + 1;
+                output.extend_from_slice(&segment[start..break_at]);
+                output.push(b'\n');
+                start = break_at;
+            }
+            None => {
+                output.extend_from_slice(&segment[start..start + width]);
+                output.push(b'\n');
+                start += width;
+            }
+        }
+    }
+    if start < segment.len() {
+        output.extend_from_slice(&segment[start..]);
+    }
+}
+
 /// Fold a single line segment (no internal newlines except possibly trailing) by bytes.
 #[inline]
 fn fold_segment_bytes(output: &mut Vec<u8>, segment: &[u8], width: usize) {
+    debug_assert!(
+        !segment[..segment.len().saturating_sub(1)].contains(&b'\n'),
+        "fold_segment_bytes: invariant violated — internal newline in segment"
+    );
     let mut start = 0;
     while start + width < segment.len() {
-        // Check if the character at start+width is a newline (end of line)
+        // SAFETY: loop guard ensures start + width < segment.len()
         if segment[start + width] == b'\n' {
             output.extend_from_slice(&segment[start..start + width + 1]);
             return;
@@ -93,53 +159,14 @@ fn fold_segment_bytes(output: &mut Vec<u8>, segment: &[u8], width: usize) {
     }
 }
 
-/// Fold by byte count with -s (break at spaces).
-/// When breaking at a space, uses copy_within instead of allocating a temporary Vec.
-fn fold_byte_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
-    let mut col: usize = 0;
-    let mut last_space_out_pos: Option<usize> = None;
-
-    for &byte in data {
-        if byte == b'\n' {
-            output.push(b'\n');
-            col = 0;
-            last_space_out_pos = None;
-            continue;
-        }
-
-        if col >= width {
-            if break_at_spaces {
-                if let Some(sp_pos) = last_space_out_pos {
-                    // Insert newline after the space and shift trailing bytes forward
-                    let tail_start = sp_pos + 1;
-                    let tail_end = output.len();
-                    let after_len = tail_end - tail_start;
-                    output.push(0); // make room for the newline
-                    output.copy_within(tail_start..tail_end, tail_start + 1);
-                    output[tail_start] = b'\n';
-                    col = after_len;
-                    last_space_out_pos = None;
-                } else {
-                    output.push(b'\n');
-                    col = 0;
-                }
-            } else {
-                output.push(b'\n');
-                col = 0;
-            }
-        }
-
-        if break_at_spaces && (byte == b' ' || byte == b'\t') {
-            last_space_out_pos = Some(output.len());
-        }
-
-        output.push(byte);
-        col += 1;
-    }
-}
-
 /// Fold by column count (default mode, handles tabs, backspaces, and UTF-8).
 fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
+    // For -s mode, use the lazy-checked path that avoids scanning entire lines
+    // with is_ascii_simple upfront, instead checking each chunk during fold.
+    if break_at_spaces {
+        return fold_column_mode_spaces(data, width, output);
+    }
+
     let mut pos = 0;
 
     while pos < data.len() {
@@ -156,22 +183,14 @@ fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &m
             if line_data.len() <= width {
                 // Short line: no wrapping needed
                 output.extend_from_slice(line_data);
-            } else if break_at_spaces {
-                fold_ascii_line_spaces(line_data, width, output);
             } else {
                 fold_segment_bytes(output, line_data, width);
             }
-            if let Some(nl) = line_end {
-                output.push(b'\n');
-                pos = nl + 1;
-            } else {
-                break;
-            }
-            continue;
+        } else {
+            // Slow path: process character by character for this line
+            fold_one_line_column(line_data, width, false, output);
         }
 
-        // Slow path: process character by character for this line
-        fold_one_line_column(line_data, width, break_at_spaces, output);
         if let Some(nl) = line_end {
             output.push(b'\n');
             pos = nl + 1;
@@ -181,40 +200,144 @@ fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &m
     }
 }
 
-/// Fast fold an ASCII line with -s (break at spaces).
-/// Since it's pure ASCII, column == byte position.
-fn fold_ascii_line_spaces(line: &[u8], width: usize, output: &mut Vec<u8>) {
+/// Fold column mode with -s (break at spaces).
+/// Avoids scanning entire lines with is_ascii_simple upfront.
+/// Instead, checks each chunk lazily during fold and falls back to slow path
+/// when non-simple bytes (tabs, backspaces, CR) are encountered.
+fn fold_column_mode_spaces(data: &[u8], width: usize, output: &mut Vec<u8>) {
+    let mut pos = 0;
+
+    while pos < data.len() {
+        let remaining = &data[pos..];
+        let line_end = memchr::memchr(b'\n', remaining).map(|p| pos + p);
+        let line_data = match line_end {
+            Some(nl) => &data[pos..nl],
+            None => &data[pos..],
+        };
+
+        if line_data.len() <= width {
+            if is_ascii_simple(line_data) {
+                // Short ASCII-simple line: byte length == display width, no wrapping needed
+                output.extend_from_slice(line_data);
+            } else {
+                // Short but contains tabs/control chars: display width may exceed byte length
+                fold_one_line_column(line_data, width, true, output);
+            }
+        } else {
+            fold_line_spaces_checked(line_data, width, output);
+        }
+
+        if let Some(nl) = line_end {
+            output.push(b'\n');
+            pos = nl + 1;
+        } else {
+            break;
+        }
+    }
+}
+
+/// Fold a line with -s, checking each chunk for non-simple bytes.
+/// For ASCII-simple chunks (the common case), uses memrchr for fast space search.
+/// Falls back to the full column-mode handler when non-simple bytes are found.
+///
+/// Note: worst case O(n·width/8) SWAR word-ops when spaces cluster at chunk offset 0
+/// (start advances 1 byte per iteration, each paying O(width/8) for is_ascii_simple).
+/// Typical ASCII prose converges to O(n/width) iterations.
+fn fold_line_spaces_checked(line: &[u8], width: usize, output: &mut Vec<u8>) {
     let mut start = 0;
     while start + width < line.len() {
-        // Look for the last space within the width
         let chunk = &line[start..start + width];
+        // Lazy ASCII check: only examine this chunk, not the whole line.
+        // Uses SWAR word-at-a-time processing for speed.
+        // NOTE: this scans `chunk` twice (is_ascii_simple + memrchr below).
+        // A fused memrchr2(b' ',b'\t',chunk) approach could reduce this to
+        // one pass, but benchmarks show the SWAR check is cheap enough that
+        // the two-pass cost is negligible for the common ASCII-only case.
+        if !is_ascii_simple(chunk) {
+            // Non-simple byte found: fall back to slow path for the rest.
+            // col=0 invariant: either start=0 (beginning of this input
+            // line, outer loop consumed previous \n) or a prior
+            // space/hard-break emitted b'\n'.
+            fold_one_line_column(&line[start..], width, true, output);
+            return;
+        }
+        // is_ascii_simple guarantees no tabs in this chunk; search for spaces only.
         match memchr::memrchr(b' ', chunk) {
             Some(sp_offset) => {
-                // Break after the space (include the space, then newline)
                 let break_at = start + sp_offset + 1;
                 output.extend_from_slice(&line[start..break_at]);
                 output.push(b'\n');
                 start = break_at;
             }
             None => {
-                // No space found: hard break at width
                 output.extend_from_slice(&line[start..start + width]);
                 output.push(b'\n');
                 start += width;
             }
         }
     }
-    // Remaining bytes
     if start < line.len() {
-        output.extend_from_slice(&line[start..]);
+        let tail = &line[start..];
+        if is_ascii_simple(tail) {
+            output.extend_from_slice(tail);
+        } else {
+            // col=0 invariant: either start=0 (beginning of this input
+            // line, outer loop consumed previous \n) or a prior
+            // space/hard-break emitted b'\n'.
+            fold_one_line_column(tail, width, true, output);
+        }
     }
 }
 
-/// Check if a line is pure ASCII with no tabs or backspaces.
+/// Check if data is pure ASCII with no tabs, backspaces, CR, or control chars.
+/// Uses SWAR (SIMD Within A Register) to process 8 bytes at a time.
 #[inline]
 fn is_ascii_simple(data: &[u8]) -> bool {
-    // All bytes must be ASCII printable (0x20..=0x7E) or space
-    data.iter().all(|&b| b >= 0x20 && b <= 0x7E)
+    let mut i = 0;
+    // Process 8 bytes at a time using u64 word operations
+    while i + 8 <= data.len() {
+        let word = u64::from_ne_bytes(data[i..i + 8].try_into().unwrap());
+        if !word_is_ascii_simple(word) {
+            return false;
+        }
+        i += 8;
+    }
+    // Handle remaining bytes
+    for &b in &data[i..] {
+        if b < 0x20 || b > 0x7E {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if all 8 bytes in a u64 word are in the ASCII printable range [0x20, 0x7E].
+/// Uses SWAR bit tricks to check all bytes in parallel.
+#[inline(always)]
+fn word_is_ascii_simple(word: u64) -> bool {
+    // Check 1: no byte has high bit set (all < 0x80)
+    if word & 0x8080808080808080 != 0 {
+        return false;
+    }
+    // Check 2: all bytes >= 0x20
+    // Since all bytes < 0x80 (check 1), adding 0x60 cannot carry between bytes.
+    // byte + 0x60: [0x00..0x1F] -> [0x60..0x7F] (high bit clear = bad)
+    //              [0x20..=0x7F] -> [0x80..0xDF] (high bit set = good)
+    // Note: 0x7F (DEL) passes here; check 3 rejects it.
+    let added = word.wrapping_add(0x6060606060606060);
+    if added & 0x8080808080808080 != 0x8080808080808080 {
+        return false;
+    }
+    // Check 3: no byte == 0x7F (DEL)
+    // XOR with 0x7F turns 0x7F bytes into 0x00; we then detect zero bytes via
+    // the standard (x - 0x01) & !x & 0x80 trick.
+    // When no 0x7F is present, all xored bytes are in [0x01..0x5F] — none
+    // underflow on -0x01 — so no inter-byte borrow occurs and has_zero == 0.
+    // When a 0x7F IS present, the zero byte flags correctly; adjacent bytes
+    // may show false positives in has_zero but the overall != 0 is still correct.
+    let xored = word ^ 0x7F7F7F7F7F7F7F7F;
+    let has_zero = xored.wrapping_sub(0x0101010101010101) & !xored & 0x8080808080808080;
+    has_zero == 0
 }
 
 /// Get the column width and byte length of a byte at `data[pos]`.
@@ -263,8 +386,8 @@ fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output
         if byte == b'\t' {
             let tab_width = ((col / 8) + 1) * 8 - col;
 
-            if col + tab_width > width && tab_width > 0 {
-                // Need to break before this tab
+            if col > 0 && col + tab_width > width {
+                // Need to break before this tab (skip when col==0: can't break before first char)
                 if break_at_spaces {
                     if let Some(sp_after) = last_space_in {
                         // Flush up to and including the space, then newline
