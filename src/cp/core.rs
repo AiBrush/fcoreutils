@@ -264,6 +264,8 @@ fn preserve_attributes_from_meta(
 /// Copy file data using a thread-local buffer (up to 4MB, capped to file size).
 /// Avoids stdlib's 64KB default buffer and amortizes allocation across files.
 /// Creates the destination with `src_mode` so the kernel applies the process umask.
+/// Used on non-Linux platforms; Linux uses `copy_data_linux` instead.
+#[cfg(not(target_os = "linux"))]
 fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64, src_mode: u32) -> io::Result<()> {
     use std::cell::RefCell;
     use std::io::{Read, Write};
@@ -311,53 +313,174 @@ fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64, src_mode: u32) -> i
     })
 }
 
-// ---- Linux copy_file_range optimisation ----
+// ---- Linux single-open cascade copy ----
+//
+// Opens src and dst once, then tries FICLONE → copy_file_range → read/write
+// on the same file descriptors. Eliminates redundant open/close/stat syscalls
+// that the old code paid when FICLONE failed on non-reflink filesystems.
 
 #[cfg(target_os = "linux")]
-fn copy_file_range_linux(src: &Path, dst: &Path, src_mode: u32) -> io::Result<()> {
+fn copy_data_linux(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
     let src_file = std::fs::File::open(src)?;
-    let src_meta = src_file.metadata()?;
-    let len = src_meta.len();
+    let src_fd = src_file.as_raw_fd();
+
+    // Use fstat on the opened fd (not src_meta) to get the real file size and mode.
+    // src_meta may come from symlink_metadata, giving the symlink path length
+    // instead of the target file size when dereference != Always.
+    let fd_meta = src_file.metadata()?;
+    let len = fd_meta.len();
 
     let dst_file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(src_mode)
+        .mode(fd_meta.mode())
         .open(dst)?;
+    let dst_fd = dst_file.as_raw_fd();
 
-    let mut remaining = len as i64;
+    // Hint sequential access for kernel readahead (benefits copy_file_range and read/write).
+    // posix_fadvise is advisory; failure (e.g. ESPIPE for pipes) is harmless.
+    unsafe {
+        let _ = libc::posix_fadvise(src_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    }
+
+    // Step 1: Try FICLONE (instant CoW clone on btrfs/XFS).
+    if matches!(config.reflink, ReflinkMode::Auto | ReflinkMode::Always) {
+        const FICLONE: libc::c_ulong = 0x40049409;
+        let should_try = config.reflink == ReflinkMode::Always
+            || !FICLONE_UNSUPPORTED.load(std::sync::atomic::Ordering::Relaxed);
+
+        if should_try {
+            // SAFETY: src_fd and dst_fd are valid open file descriptors.
+            let ret = unsafe { libc::ioctl(dst_fd, FICLONE, src_fd) };
+            if ret == 0 {
+                return Ok(());
+            }
+            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if config.reflink == ReflinkMode::Always {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "failed to clone '{}' to '{}': {}",
+                        src.display(),
+                        dst.display(),
+                        io::Error::from_raw_os_error(errno)
+                    ),
+                ));
+            }
+            if matches!(errno, libc::EOPNOTSUPP | libc::ENOTTY | libc::ENOSYS) {
+                FICLONE_UNSUPPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if errno == libc::EXDEV {
+                // Cross-device: copy_file_range will also fail with EXDEV;
+                // skip directly to read/write (posix_fadvise already issued above).
+                return readwrite_with_buffer(src_file, dst_file, len);
+            }
+            // Auto mode: fall through to copy_file_range on the same fds.
+        }
+    }
+
+    // Step 2: Try copy_file_range (zero-copy in kernel, same fds).
+    let mut remaining = match i64::try_from(len) {
+        Ok(v) => v,
+        // File too large for copy_file_range offset arithmetic; skip to read/write.
+        Err(_) => return readwrite_with_buffer(src_file, dst_file, len),
+    };
+    let mut cfr_failed = false;
     while remaining > 0 {
-        // Cap to isize::MAX to avoid overflow on 32-bit when casting to usize.
         let to_copy = (remaining as u64).min(isize::MAX as u64) as usize;
-        // SAFETY: src_file and dst_file are valid open file descriptors;
-        // null offsets mean the kernel uses and updates the file offsets.
-        // Uses raw syscall instead of libc::copy_file_range to support
-        // older glibc versions (e.g. cross-compilation with cross-rs).
+        // SAFETY: src_fd and dst_fd are valid open file descriptors;
+        // null offsets use and update the kernel file position.
         let ret = unsafe {
             libc::syscall(
                 libc::SYS_copy_file_range,
-                src_file.as_raw_fd(),
+                src_fd,
                 std::ptr::null_mut::<libc::off64_t>(),
-                dst_file.as_raw_fd(),
+                dst_fd,
                 std::ptr::null_mut::<libc::off64_t>(),
                 to_copy,
                 0u32,
             )
         };
         if ret < 0 {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            if matches!(
+                err.raw_os_error(),
+                Some(libc::EINVAL | libc::ENOSYS | libc::EXDEV)
+            ) {
+                cfr_failed = true;
+                break;
+            }
+            return Err(err);
         }
         if ret == 0 {
-            // EOF before all bytes copied — break to avoid infinite loop
+            if remaining > 0 {
+                // Source file shrank during copy — report rather than silently truncate.
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "source file shrank during copy",
+                ));
+            }
             break;
         }
         remaining -= ret as i64;
     }
-    Ok(())
+    if !cfr_failed {
+        return Ok(());
+    }
+
+    // Step 3: Fallback — read/write on the same fds with large buffer.
+    // Reset file positions since copy_file_range may have partially transferred.
+    use std::io::Seek;
+    let mut src_file = src_file;
+    let mut dst_file = dst_file;
+    src_file.seek(std::io::SeekFrom::Start(0))?;
+    dst_file.seek(std::io::SeekFrom::Start(0))?;
+    dst_file.set_len(0)?;
+
+    readwrite_with_buffer(src_file, dst_file, len)
+}
+
+/// Read/write copy with thread-local buffer reuse (shared by all Linux fallback paths).
+#[cfg(target_os = "linux")]
+fn readwrite_with_buffer(
+    mut src_file: std::fs::File,
+    mut dst_file: std::fs::File,
+    len: u64,
+) -> io::Result<()> {
+    use std::cell::RefCell;
+    use std::io::{Read, Write};
+
+    const MAX_BUF: usize = 4 * 1024 * 1024;
+    /// Shrink when buffer is >512KB and 4x larger than needed (matches non-Linux path).
+    const SHRINK_THRESHOLD: usize = 512 * 1024;
+
+    // Clamp while still u64 to avoid 32-bit truncation on large files.
+    let buf_size = (len.min(MAX_BUF as u64) as usize).max(8192);
+
+    thread_local! {
+        static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
+    BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        if buf.len() > SHRINK_THRESHOLD && buf_size < buf.len() / 4 {
+            buf.resize(buf_size, 0);
+            buf.shrink_to_fit();
+        } else if buf.len() < buf_size {
+            buf.resize(buf_size, 0);
+        }
+        loop {
+            let n = src_file.read(&mut buf[..buf_size])?;
+            if n == 0 {
+                break;
+            }
+            dst_file.write_all(&buf[..n])?;
+        }
+        Ok(())
+    })
 }
 
 // ---- single-file copy ----
@@ -418,100 +541,25 @@ fn copy_file_with_meta(
         return Ok(());
     }
 
-    // Try reflink (FICLONE ioctl) for instant CoW copy on btrfs/XFS.
-    // Uses a cached flag to skip FICLONE attempts after the first failure on
-    // non-reflink filesystems (ext4, tmpfs, etc.), avoiding 3 wasted syscalls per file.
+    // Linux: single-open cascade (FICLONE → copy_file_range → read/write).
     #[cfg(target_os = "linux")]
     {
-        if matches!(config.reflink, ReflinkMode::Auto | ReflinkMode::Always) {
-            use std::os::unix::fs::OpenOptionsExt;
-            use std::os::unix::io::AsRawFd;
-            // FICLONE = _IOW(0x94, 9, int) from linux/fs.h
-            const FICLONE: libc::c_ulong = 0x40049409;
-
-            // In Auto mode, skip FICLONE if a previous attempt on this filesystem failed.
-            // This avoids redundant open+open+ioctl syscalls per file during recursive copies.
-            let should_try = config.reflink == ReflinkMode::Always
-                || !FICLONE_UNSUPPORTED.load(std::sync::atomic::Ordering::Relaxed);
-
-            if should_try {
-                if let Ok(src_file) = std::fs::File::open(src) {
-                    let dst_file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .mode(src_meta.mode())
-                        .open(dst);
-                    if let Ok(dst_file) = dst_file {
-                        // SAFETY: Both file descriptors are valid (files are open),
-                        // FICLONE takes an fd as argument, and we check the return value.
-                        let ret = unsafe {
-                            libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd())
-                        };
-                        if ret == 0 {
-                            preserve_attributes_from_meta(src_meta, dst, config)?;
-                            return Ok(());
-                        }
-                        let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                        if config.reflink == ReflinkMode::Always {
-                            return Err(io::Error::new(
-                                io::ErrorKind::Unsupported,
-                                format!(
-                                    "failed to clone '{}' to '{}': {}",
-                                    src.display(),
-                                    dst.display(),
-                                    io::Error::from_raw_os_error(errno)
-                                ),
-                            ));
-                        }
-                        // Auto mode: mark FICLONE as unsupported to skip future attempts.
-                        // Only cache for definitive filesystem/kernel-level errors:
-                        // EOPNOTSUPP: fs doesn't support reflinks (ext4, tmpfs).
-                        // ENOTTY: kernel doesn't recognize FICLONE ioctl (older kernels).
-                        // ENOSYS: kernel doesn't implement the ioctl at all.
-                        // NOT EINVAL: can be file-specific (block size mismatch, inode flags)
-                        // and shouldn't suppress FICLONE for other files on the same fs.
-                        if matches!(errno, libc::EOPNOTSUPP | libc::ENOTTY | libc::ENOSYS) {
-                            FICLONE_UNSUPPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        // Fall through — dst was created+truncated, so copy_file_range
-                        // below will overwrite the empty file.
-                    }
-                }
-            }
-        }
+        copy_data_linux(src, dst, config)?;
+        preserve_attributes_from_meta(src_meta, dst, config)?;
+        return Ok(());
     }
 
-    // Try Linux copy_file_range for zero-copy.
-    #[cfg(target_os = "linux")]
-    let src_mode_bits = src_meta.mode();
-    #[cfg(target_os = "linux")]
+    // Non-Linux fallback: large-buffer copy (up to 4MB vs stdlib's 64KB).
+    #[cfg(not(target_os = "linux"))]
     {
-        match copy_file_range_linux(src, dst, src_mode_bits) {
-            Ok(()) => {
-                preserve_attributes_from_meta(src_meta, dst, config)?;
-                return Ok(());
-            }
-            Err(e)
-                if matches!(
-                    e.raw_os_error(),
-                    Some(libc::EINVAL | libc::ENOSYS | libc::EXDEV)
-                ) =>
-            {
-                // Unsupported/cross-device — fall through to large-buffer copy
-            }
-            Err(e) => return Err(e),
-        }
+        #[cfg(unix)]
+        let mode = src_meta.mode();
+        #[cfg(not(unix))]
+        let mode = 0o666u32;
+        copy_data_large_buf(src, dst, src_meta.len(), mode)?;
+        preserve_attributes_from_meta(src_meta, dst, config)?;
+        Ok(())
     }
-
-    // Fallback: large-buffer copy (up to 4MB vs stdlib's 64KB).
-    #[cfg(unix)]
-    let mode = src_meta.mode();
-    #[cfg(not(unix))]
-    let mode = 0o666u32;
-    copy_data_large_buf(src, dst, src_meta.len(), mode)?;
-    preserve_attributes_from_meta(src_meta, dst, config)?;
-    Ok(())
 }
 
 // ---- recursive copy ----
