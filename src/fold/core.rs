@@ -1,5 +1,4 @@
 use std::io::Write;
-use unicode_width::UnicodeWidthChar;
 
 /// Fold (wrap) lines to a given width.
 ///
@@ -182,8 +181,13 @@ fn is_ascii_simple(data: &[u8]) -> bool {
     data.iter().all(|&b| b >= 0x20 && b <= 0x7E)
 }
 
-/// Get the display width and byte length of the UTF-8 character starting at `data[pos]`.
-/// Returns (display_width, byte_length).
+/// Get the column width and byte length of a byte at `data[pos]`.
+/// Returns (column_width, byte_length) — always (1, 1) for non-special bytes.
+///
+/// GNU fold on glibc processes bytes individually through adjust_column():
+/// the multibyte code path is disabled by `#if !defined __GLIBC__`.
+/// Each non-special byte increments column by 1 — same as -b mode but with
+/// tab/backspace/CR handling (those are checked by the caller).
 #[inline]
 fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
     let b = data[pos];
@@ -195,49 +199,12 @@ fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
             (1, 1)
         }
     } else {
-        // UTF-8 multi-byte: decode the character
-        let (ch, len) = decode_utf8_at(data, pos);
-        match ch {
-            Some(c) => (UnicodeWidthChar::width(c).unwrap_or(0), len),
-            None => (1, 1), // Invalid UTF-8 byte: treat as 1 column (GNU compat)
-        }
+        // High byte: count as 1 column, 1 byte (GNU glibc compat)
+        (1, 1)
     }
 }
 
-/// Decode a UTF-8 character starting at data[pos].
-/// Returns (Some(char), byte_length) or (None, 1) for invalid sequences.
-#[inline]
-fn decode_utf8_at(data: &[u8], pos: usize) -> (Option<char>, usize) {
-    let b = data[pos];
-    let (expected_len, mut code_point) = if b < 0xC2 {
-        return (None, 1); // continuation byte, invalid, or overlong (0xC0/0xC1)
-    } else if b < 0xE0 {
-        (2, (b as u32) & 0x1F)
-    } else if b < 0xF0 {
-        (3, (b as u32) & 0x0F)
-    } else if b < 0xF8 {
-        (4, (b as u32) & 0x07)
-    } else {
-        return (None, 1);
-    };
 
-    if pos + expected_len > data.len() {
-        return (None, 1);
-    }
-
-    for i in 1..expected_len {
-        let cb = data[pos + i];
-        if cb & 0xC0 != 0x80 {
-            return (None, 1);
-        }
-        code_point = (code_point << 6) | ((cb as u32) & 0x3F);
-    }
-
-    match char::from_u32(code_point) {
-        Some(c) => (Some(c), expected_len),
-        None => (None, 1),
-    }
-}
 
 /// Insert a line break, preferring the last space position when -s is active.
 /// Returns the new column position after the break.

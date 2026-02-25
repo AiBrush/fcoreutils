@@ -164,43 +164,49 @@ fn test_backspace_column_mode() {
 
 #[test]
 fn test_multibyte_utf8_column() {
-    // In UTF-8 locale column mode, é (U+00E9, 2 bytes) has display width 1.
-    // Input "aéb\n" with width 3:
-    //   a -> col=1, é -> col=2 (1 display column), b -> col=3
-    //   3 <= 3, so no break needed.
-    let result = fold("a\u{e9}b\n", 3);
+    // GNU fold on glibc counts each byte as 1 column (multibyte path disabled).
+    // é (U+00E9) = 0xC3 0xA9 = 2 bytes.
+    // "aéb" = a(1) + 0xC3(1) + 0xA9(1) + b(1) = 4 bytes = 4 columns.
+    let mut out = Vec::new();
+    fold_bytes("a\u{e9}b\n".as_bytes(), 3, false, false, &mut out).unwrap();
+    // Width 3: a + 0xC3 + 0xA9 = 3 bytes, break, then b.
+    assert_eq!(out, b"a\xc3\xa9\nb\n");
+
+    // With width 4: all 4 bytes fit.
+    let result = fold("a\u{e9}b\n", 4);
     assert_eq!(result, "a\u{e9}b\n");
 }
 
 #[test]
 fn test_cjk_column_width() {
-    // CJK characters are fullwidth (2 display columns each).
-    // "中文" = 4 columns. With width 3, '中' fills cols 1-2, '文' needs
-    // cols 3-4 but only 1 left, so break before '文'.
-    let result = fold("中文\n", 3);
-    assert_eq!(result, "中\n文\n");
+    // GNU fold on glibc counts each BYTE as 1 column (multibyte path disabled).
+    // 中 = 3 bytes (0xE4 0xB8 0xAD), 文 = 3 bytes (0xE6 0x96 0x87).
+    // "中文" = 6 bytes = 6 columns.
+    let mut out = Vec::new();
+    fold_bytes("中文\n".as_bytes(), 6, false, false, &mut out).unwrap();
+    assert_eq!(out, "中文\n".as_bytes()); // 6 bytes fit in width 6
 
-    // With width 4, both fit: 中=2 + 文=2 = 4 columns.
-    let result = fold("中文\n", 4);
-    assert_eq!(result, "中文\n");
+    // Width 3: exactly 1 CJK char (3 bytes) per line
+    out.clear();
+    fold_bytes("中文\n".as_bytes(), 3, false, false, &mut out).unwrap();
+    assert_eq!(out, "中\n文\n".as_bytes());
 
-    // CJK mixed with ASCII: "a中b" = 1+2+1 = 4 columns
-    let result = fold("a中b\n", 4);
-    assert_eq!(result, "a中b\n");
-
-    let result = fold("a中b\n", 3);
-    assert_eq!(result, "a中\nb\n");
+    // Width 4: breaks mid-character (GNU compat behavior on glibc)
+    out.clear();
+    fold_bytes("中文\n".as_bytes(), 4, false, false, &mut out).unwrap();
+    assert_eq!(out, b"\xe4\xb8\xad\xe6\n\x96\x87\n");
 }
 
 #[test]
 fn test_emoji_column_width() {
-    // Common emoji are typically 2 display columns wide.
-    // "😀" (U+1F600) is 4 bytes in UTF-8 but 2 columns.
-    let result = fold("😀x\n", 3);
-    assert_eq!(result, "😀x\n"); // 2+1 = 3, fits
+    // GNU fold on glibc counts each byte as 1 column.
+    // 😀 (U+1F600) = 4 bytes (0xF0 0x9F 0x98 0x80).
+    // "😀x" = 5 bytes = 5 columns.
+    let result = fold("😀x\n", 5);
+    assert_eq!(result, "😀x\n"); // 5 bytes fit in width 5
 
-    let result = fold("😀x\n", 2);
-    assert_eq!(result, "😀\nx\n"); // 2 columns for emoji, x doesn't fit
+    let result = fold("😀x\n", 4);
+    assert_eq!(result, "😀\nx\n"); // 4 bytes = emoji, then x on next line
 }
 
 #[test]
