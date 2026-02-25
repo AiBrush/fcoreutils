@@ -239,7 +239,7 @@ fn main() {
     } else {
         // Process command-line arguments as numbers.
         let stdout = io::stdout();
-        let mut writer = BufWriter::with_capacity(256 * 1024, stdout.lock());
+        let mut writer = BufWriter::with_capacity(8 * 1024, stdout.lock());
         let terminator = if config.zero_terminated { '\0' } else { '\n' };
         let mut had_error = false;
 

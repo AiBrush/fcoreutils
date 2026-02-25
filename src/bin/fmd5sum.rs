@@ -450,9 +450,11 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        // Flush buffered output before writing error to stderr
+                        // Flush buffered output before writing error to stderr.
+                        // Bypass BufWriter — output_buf is already a batch buffer.
                         if !output_buf.is_empty() {
-                            let _ = out.write_all(&output_buf);
+                            let _ = out.flush();
+                            let _ = out.get_mut().write_all(&output_buf);
                             output_buf.clear();
                         }
                         let _ = out.flush();
@@ -462,7 +464,9 @@ fn main() {
                 }
             }
             if !output_buf.is_empty() {
-                let _ = out.write_all(&output_buf);
+                // Bypass BufWriter — output_buf is already a batch buffer.
+                let _ = out.flush();
+                let _ = out.get_mut().write_all(&output_buf);
             }
         }
     }
