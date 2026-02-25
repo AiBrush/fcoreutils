@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use memchr::memchr_iter;
+use memchr::{memchr_iter, memrchr_iter};
 
 use crate::common::io::{FileData, read_file, read_stdin};
 
@@ -111,7 +111,8 @@ pub fn head_lines(data: &[u8], n: u64, delimiter: u8, out: &mut impl Write) -> i
     out.write_all(data)
 }
 
-/// Output all but last N lines from data
+/// Output all but last N lines from data.
+/// Uses reverse scanning (memrchr_iter) for single-pass O(n) instead of 2-pass.
 pub fn head_lines_from_end(
     data: &[u8],
     n: u64,
@@ -125,15 +126,18 @@ pub fn head_lines_from_end(
         return Ok(());
     }
 
-    // Count total lines
-    let total_lines: u64 = memchr_iter(delimiter, data).count() as u64;
-
-    if n >= total_lines {
-        return Ok(());
+    // Scan backward: skip N delimiters (= N lines), then the next delimiter
+    // marks the end of the last line to keep.
+    let mut count = 0u64;
+    for pos in memrchr_iter(delimiter, data) {
+        count += 1;
+        if count > n {
+            return out.write_all(&data[..=pos]);
+        }
     }
 
-    let target = total_lines - n;
-    head_lines(data, target, delimiter, out)
+    // Fewer than N+1 delimiters → N >= total lines → output nothing
+    Ok(())
 }
 
 /// Output first N bytes from data
