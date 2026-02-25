@@ -194,7 +194,7 @@ fn test_cr_after_space_column_mode() {
     // Verify it doesn't panic in debug mode (the main bug was usize underflow)
     out.clear();
     fold_bytes(b"ab cd\refghijklmno\n", 8, false, true, &mut out).unwrap();
-    assert!(out.len() > 0);
+    assert!(!out.is_empty());
 }
 
 #[test]
