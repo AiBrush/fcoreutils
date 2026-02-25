@@ -412,14 +412,10 @@ fn run_file_shuffle(
         // Shuffle indices (cheap u64 swaps) instead of strings
         shuffle(&mut offsets, rng);
         let count = head_count.unwrap_or(offsets.len()).min(offsets.len());
-        // Batch output: estimate total size and build one contiguous buffer
-        let total_size: usize = offsets.iter().take(count).map(|(s, e)| e - s + 1).sum();
-        let mut batch = Vec::with_capacity(total_size);
         for &(s, e) in offsets.iter().take(count) {
-            batch.extend_from_slice(&data[s..e]);
-            batch.push(delimiter);
+            let _ = out.write_all(&data[s..e]);
+            let _ = out.write_all(&[delimiter]);
         }
-        let _ = out.write_all(&batch);
     }
 }
 

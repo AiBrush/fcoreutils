@@ -88,7 +88,7 @@ fn parse_args() -> Cli {
 }
 
 /// Checksum a memory-mapped slice (zero-copy for regular files).
-fn process_slice(data: &[u8], algorithm: Algorithm) -> io::Result<(u32, u64)> {
+fn process_slice(data: &[u8], algorithm: Algorithm) -> (u32, u64) {
     let total_bytes = data.len() as u64;
     match algorithm {
         Algorithm::Bsd => {
@@ -110,7 +110,7 @@ fn process_slice(data: &[u8], algorithm: Algorithm) -> io::Result<(u32, u64)> {
                 checksum = (checksum + u32::from(byte)) & 0xFFFF;
             }
             let blocks = total_bytes.div_ceil(1024);
-            Ok((checksum, blocks))
+            (checksum, blocks)
         }
         Algorithm::SysV => {
             let mut sum: u32 = 0;
@@ -133,7 +133,7 @@ fn process_slice(data: &[u8], algorithm: Algorithm) -> io::Result<(u32, u64)> {
             r = (r & 0xFFFF) + (r >> 16);
             r = (r & 0xFFFF) + (r >> 16);
             let blocks = total_bytes.div_ceil(512);
-            Ok((r, blocks))
+            (r, blocks)
         }
     }
 }
@@ -226,7 +226,7 @@ fn main() {
             process_streaming(io::stdin().lock(), cli.algorithm)
         } else {
             match coreutils_rs::common::io::read_file(std::path::Path::new(filename)) {
-                Ok(data) => process_slice(&data, cli.algorithm),
+                Ok(data) => Ok(process_slice(&data, cli.algorithm)),
                 Err(e) => {
                     eprintln!(
                         "{}: {}: {}",

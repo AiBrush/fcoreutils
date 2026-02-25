@@ -337,7 +337,7 @@ fn main() {
             }
         }
     } else {
-        // Multiple files: concatenate (mmap each, then combine)
+        // Multiple files: concatenate (read_file gives O_NOATIME + exact-size prealloc)
         let mut combined = Vec::new();
         for path in &operands {
             if path == "-" {
