@@ -65,11 +65,11 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
 }
 
 /// Parse and factor a single whitespace-delimited token.
-/// Returns true if the token was valid, false on error.
+/// Returns true on error (matching the convention of all other functions in this file).
 #[inline]
 fn factor_token(token: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::StdoutLock>) -> bool {
     if token.is_empty() {
-        return true;
+        return false;
     }
 
     // Try u64 fast path first (handles all numbers up to u64::MAX = 20 digits).
@@ -99,7 +99,7 @@ fn factor_token(token: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::Std
     if valid_u64 && !overflowed {
         factor::write_factors_u64(n64, out_buf);
         flush_if_full(out_buf, out);
-        return true;
+        return false;
     }
 
     // u128 path for numbers > u64::MAX
@@ -129,7 +129,7 @@ fn factor_token(token: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::Std
         if valid_u128 {
             factor::write_factors(n, out_buf);
             flush_if_full(out_buf, out);
-            return true;
+            return false;
         }
     }
 
@@ -144,7 +144,7 @@ fn factor_token(token: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::Std
         "{}: \u{2018}{}\u{2019} is not a valid positive integer",
         TOOL_NAME, token_str
     );
-    false
+    true
 }
 
 /// Flush output buffer if it exceeds 128KB.
@@ -158,47 +158,13 @@ fn flush_if_full(out_buf: &mut Vec<u8>, out: &mut BufWriter<io::StdoutLock>) {
     }
 }
 
-/// Process byte buffer of whitespace-delimited numbers.
+/// Process byte buffer of whitespace-delimited numbers (used by mmap path).
 fn process_bytes(input: &[u8], out: &mut BufWriter<io::StdoutLock>) -> bool {
-    let mut had_error = false;
-    let mut out_buf = Vec::with_capacity(256 * 1024);
-    let mut pos = 0;
-    let len = input.len();
-
-    while pos < len {
-        // Skip whitespace
-        while pos < len
-            && (input[pos] == b' '
-                || input[pos] == b'\n'
-                || input[pos] == b'\r'
-                || input[pos] == b'\t')
-        {
-            pos += 1;
-        }
-        if pos >= len {
-            break;
-        }
-
-        // Scan token
-        let start = pos;
-        while pos < len
-            && input[pos] != b' '
-            && input[pos] != b'\n'
-            && input[pos] != b'\r'
-            && input[pos] != b'\t'
-        {
-            pos += 1;
-        }
-
-        if !factor_token(&input[start..pos], &mut out_buf, out) {
-            had_error = true;
-        }
-    }
-
+    let mut out_buf = Vec::with_capacity(128 * 1024);
+    let had_error = process_tokens(input, &mut out_buf, out);
     if !out_buf.is_empty() && out.write_all(&out_buf).is_err() {
         process::exit(0);
     }
-
     had_error
 }
 
@@ -221,7 +187,7 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
     let mut buf = vec![0u8; 256 * 1024];
     let mut leftover = 0usize; // bytes carried over from previous chunk
     let mut had_error = false;
-    let mut out_buf = Vec::with_capacity(256 * 1024);
+    let mut out_buf = Vec::with_capacity(128 * 1024);
 
     loop {
         let n = match reader.read(&mut buf[leftover..]) {
@@ -324,7 +290,7 @@ fn process_tokens(
             pos += 1;
         }
 
-        if !factor_token(&input[start..pos], out_buf, out) {
+        if factor_token(&input[start..pos], out_buf, out) {
             had_error = true;
         }
     }
