@@ -617,8 +617,15 @@ fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::
                 }
                 hash_bytes(algo, &mmap)?
             } else {
-                hash_file_small(algo, file, size as usize)?
+                // mmap failed: fall back to pipelined I/O
+                hash_file_pipelined(algo, file, size)?
             }
+        } else if size >= STREAMING_THRESHOLD {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+            }
+            hash_reader(algo, file)?
         } else {
             hash_file_small(algo, file, size as usize)?
         }
@@ -743,6 +750,13 @@ const SMALL_FILE_LIMIT: u64 = 16 * 1024 * 1024;
 /// Below this size, we use a stack-allocated buffer + single read() syscall,
 /// completely avoiding any heap allocation for the data path.
 const TINY_FILE_LIMIT: u64 = 8 * 1024;
+
+/// Threshold above which streaming hash_reader replaces hash_file_small.
+/// Below this, hash_file_small (single read into thread-local buffer + single-shot
+/// SIMD hash) is faster because the buffer is small enough that page faults are
+/// negligible (~64 pages = ~256µs). Above this, the file-sized buffer causes
+/// significant page fault overhead on first access (cold thread-local).
+const STREAMING_THRESHOLD: u64 = 256 * 1024;
 
 // Thread-local reusable buffer for single-read hash.
 // Grows lazily up to SMALL_FILE_LIMIT (16MB). Initial 64KB allocation
@@ -904,6 +918,9 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
             return hash_file_tiny(algo, file, file_size as usize);
         }
         // Large files (>=SMALL_FILE_LIMIT): mmap for zero-copy single-shot hash.
+        // SAFETY: mmap is safe for regular local files opened above. If the file
+        // is truncated or backing storage disappears after mapping (e.g. NFS),
+        // the kernel delivers SIGBUS — acceptable, matching other mmap tools.
         if file_size >= SMALL_FILE_LIMIT {
             let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
             if let Ok(mmap) = mmap_result {
@@ -929,16 +946,23 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
                 return hash_reader(algo, file);
             }
         }
-        // Medium files (8KB..SMALL_FILE_LIMIT): streaming hash with fadvise.
-        // Avoids both mmap overhead and large buffer allocation page faults.
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::io::AsRawFd;
-            unsafe {
-                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        // Medium-large files (STREAMING_THRESHOLD..SMALL_FILE_LIMIT): streaming
+        // hash with fadvise. Avoids large buffer page faults while keeping
+        // incremental 128KB reads efficient with kernel readahead.
+        if file_size >= STREAMING_THRESHOLD {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::io::AsRawFd;
+                unsafe {
+                    libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+                }
             }
+            return hash_reader(algo, file);
         }
-        return hash_reader(algo, file);
+        // Small files (8KB..STREAMING_THRESHOLD): single read into thread-local
+        // buffer + single-shot SIMD hash. Buffer is small enough that page faults
+        // are negligible.
+        return hash_file_small(algo, file, file_size as usize);
     }
 
     // Non-regular files or fallback: stream
@@ -1119,10 +1143,19 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
                 }
             }
         }
-        // Small files (8KB..1MB): single read into thread-local buffer, then single-shot hash
-        if file_size < SMALL_FILE_LIMIT {
-            return blake2b_hash_file_small(file, file_size as usize, output_bytes);
+        // Medium-large files (STREAMING_THRESHOLD..SMALL_FILE_LIMIT): streaming with fadvise
+        if file_size >= STREAMING_THRESHOLD {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::io::AsRawFd;
+                unsafe {
+                    libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+                }
+            }
+            return blake2b_hash_reader(file, output_bytes);
         }
+        // Small files (8KB..STREAMING_THRESHOLD): single read + single-shot hash
+        return blake2b_hash_file_small(file, file_size as usize, output_bytes);
     }
 
     // Non-regular files or fallback: stream
@@ -2357,12 +2390,16 @@ fn hash_from_raw_fd(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
             // mmap failed: fall back to pipelined I/O
             return hash_file_pipelined(algo, file, size);
         }
-        // Medium files: streaming hash with fadvise
-        use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        // Medium-large files (STREAMING_THRESHOLD..SMALL_FILE_LIMIT): streaming with fadvise
+        if size >= STREAMING_THRESHOLD {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+            }
+            return hash_reader(algo, file);
         }
-        return hash_reader(algo, file);
+        // Small files (TINY..STREAMING_THRESHOLD): single read into thread-local buffer
+        return hash_file_small(algo, file, size as usize);
     }
 
     // Non-regular files: streaming hash
