@@ -18,8 +18,9 @@ use rayon::prelude::*;
 use crate::common::io_error_msg;
 
 use super::compare::{
-    compare_with_opts, int_to_sortable_u64, parse_general_numeric, parse_human_numeric,
-    parse_numeric_value, select_comparator, skip_leading_blanks, try_parse_integer,
+    compare_with_opts, human_numeric_to_sortable_u64, int_to_sortable_u64,
+    parse_general_numeric, parse_numeric_value, select_comparator, skip_leading_blanks,
+    try_parse_integer,
 };
 use super::key::{KeyDef, KeyOpts, extract_key};
 
@@ -932,13 +933,15 @@ fn pre_extract_key_offsets(
 }
 
 /// Select the right numeric parser for pre-parsing.
-fn parse_value_for_opts(slice: &[u8], opts: &KeyOpts) -> f64 {
-    if opts.general_numeric {
-        parse_general_numeric(slice)
-    } else if opts.human_numeric {
-        parse_human_numeric(slice)
+/// Returns a sortable u64 whose natural ordering matches the desired sort order.
+/// For human-numeric sort, uses tier-encoded u64 directly (avoids f64 precision loss).
+fn parse_to_sortable_u64(slice: &[u8], opts: &KeyOpts) -> u64 {
+    if opts.human_numeric {
+        human_numeric_to_sortable_u64(slice)
+    } else if opts.general_numeric {
+        float_to_sortable_u64(parse_general_numeric(slice))
     } else {
-        parse_numeric_value(slice)
+        float_to_sortable_u64(parse_numeric_value(slice))
     }
 }
 
@@ -2229,14 +2232,14 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     .collect()
             }
         } else {
-            // General numeric (-g) or human numeric (-h): always use f64
+            // General numeric (-g) or human numeric (-h): use sortable u64
             if num_lines > 10_000 {
                 offsets
                     .par_iter()
                     .enumerate()
                     .map(|(i, &(s, e))| {
                         (
-                            float_to_sortable_u64(parse_value_for_opts(&data[s..e], gopts)),
+                            parse_to_sortable_u64(&data[s..e], gopts),
                             i,
                         )
                     })
@@ -2247,7 +2250,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                     .enumerate()
                     .map(|(i, &(s, e))| {
                         (
-                            float_to_sortable_u64(parse_value_for_opts(&data[s..e], gopts)),
+                            parse_to_sortable_u64(&data[s..e], gopts),
                             i,
                         )
                     })
@@ -2375,12 +2378,18 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 }
             } else {
                 let parse_entry = |i: usize, &(s, e): &(usize, usize)| {
-                    let f = if s == e {
-                        if is_gen { f64::NAN } else { 0.0 }
+                    let u = if s == e {
+                        if is_gen {
+                            float_to_sortable_u64(f64::NAN)
+                        } else if opts.human_numeric {
+                            human_numeric_to_sortable_u64(b"")
+                        } else {
+                            float_to_sortable_u64(0.0)
+                        }
                     } else {
-                        parse_value_for_opts(&data[s..e], opts)
+                        parse_to_sortable_u64(&data[s..e], opts)
                     };
-                    (float_to_sortable_u64(f), i)
+                    (u, i)
                 };
                 if num_lines > 10_000 {
                     key_offs

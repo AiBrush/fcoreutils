@@ -4,7 +4,10 @@ mod core;
 #[cfg(test)]
 mod tests;
 
-pub use self::charset::{complement, expand_set2, parse_set};
+pub use self::charset::{
+    complement, expand_set2, expand_set2_with_classes, parse_set, parse_set_with_classes,
+    validate_case_classes, validate_set2_class_at_end, CaseClass, CaseClassInfo,
+};
 pub use self::core::{delete, delete_squeeze, squeeze, translate, translate_squeeze};
 pub use self::core::{
     delete_mmap, delete_squeeze_mmap, squeeze_mmap, translate_mmap, translate_mmap_inplace,

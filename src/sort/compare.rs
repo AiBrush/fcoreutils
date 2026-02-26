@@ -483,23 +483,45 @@ fn parse_human_numeric_tiered(s: &[u8]) -> (f64, u8) {
     }
 }
 
-/// Legacy parse function for pre-parsed numeric sort paths.
-/// Returns a single f64 that preserves tier-then-value ordering.
-/// Uses large multiplier gaps between tiers to ensure tier dominates.
-pub fn parse_human_numeric(s: &[u8]) -> f64 {
+/// Convert a human-numeric string directly to a sortable u64.
+/// Encodes tier in the top 4 bits and the float value in the bottom 60 bits.
+/// This avoids the f64 precision loss that would occur from encoding tier + value
+/// in a single f64 (e.g., 1e18 + 3.0 == 1e18 + 1.0 due to 52-bit mantissa).
+///
+/// Encoding:
+/// - Non-negative values: (8 + tier) << 60 | (float_sortable >> 4)
+/// - Negative values: (7 - tier) << 60 | (float_sortable >> 4)
+///
+/// This ensures: -1G < -1M < -1K < -1 < 0 < 1 < 1K < 1M < 1G
+pub fn human_numeric_to_sortable_u64(s: &[u8]) -> u64 {
     let (val, tier) = parse_human_numeric_tiered(s);
-    if tier == 0 {
-        val
+
+    // Convert the numeric value to a sortable u64 (preserves float ordering)
+    let sf = {
+        if val.is_nan() {
+            0u64 // NaN sorts first
+        } else {
+            let bits = val.to_bits();
+            if (bits >> 63) == 0 {
+                bits ^ 0x8000000000000000 // positive: flip sign bit
+            } else {
+                !bits // negative: flip all bits
+            }
+        }
+    };
+
+    // Encode tier in top 4 bits, float in bottom 60 bits
+    if val >= 0.0 || val == 0.0 {
+        ((8 + tier as u64) << 60) | (sf >> 4)
     } else {
-        // Use tier as primary sort key: tier * huge_constant + value
-        // This preserves the tier-first ordering in a single f64.
-        // The tier constant must be larger than any realistic numeric prefix.
-        // Since we use f64, precision is ~15 digits.
-        // Map: tier 1 (K) base = 1e18, tier 2 (M) base = 2e18, etc.
-        let sign = if val < 0.0 { -1.0 } else { 1.0 };
-        let abs_val = val.abs();
-        sign * (tier as f64 * 1e18 + abs_val)
+        ((7 - tier as u64) << 60) | (sf >> 4)
     }
+}
+
+/// Legacy parse function for backward compatibility (not used in sort hot path).
+pub fn parse_human_numeric(s: &[u8]) -> f64 {
+    let (val, _tier) = parse_human_numeric_tiered(s);
+    val
 }
 
 /// Month sort (-M).

@@ -195,13 +195,22 @@ fn test_int_comparisons() {
     assert_eq!(evaluate(&args(&["10", "-ge", "11"])), Ok(false));
 }
 
-// Additional tests for string comparison operators
+// GNU test does not support < and > operators — they return error
 #[test]
-fn test_string_ordering() {
-    assert_eq!(evaluate(&args(&["abc", "<", "abd"])), Ok(true));
-    assert_eq!(evaluate(&args(&["abd", "<", "abc"])), Ok(false));
-    assert_eq!(evaluate(&args(&["abd", ">", "abc"])), Ok(true));
-    assert_eq!(evaluate(&args(&["abc", ">", "abd"])), Ok(false));
+fn test_string_ordering_unsupported() {
+    assert!(evaluate(&args(&["abc", "<", "abd"])).is_err());
+    assert!(evaluate(&args(&["abd", ">", "abc"])).is_err());
+}
+
+// -a and -o operators in 3-arg form (GNU compat)
+#[test]
+fn test_and_or_three_args() {
+    assert_eq!(evaluate(&args(&["t", "-a", "t"])), Ok(true));
+    assert_eq!(evaluate(&args(&["t", "-o", "t"])), Ok(true));
+    assert_eq!(evaluate(&args(&["", "-o", "t"])), Ok(true));
+    assert_eq!(evaluate(&args(&["t", "-o", ""])), Ok(true));
+    assert_eq!(evaluate(&args(&["", "-a", "t"])), Ok(false));
+    assert_eq!(evaluate(&args(&["", "-a", ""])), Ok(false));
 }
 
 // Parenthesized grouping

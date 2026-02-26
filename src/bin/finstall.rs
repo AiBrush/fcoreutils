@@ -280,6 +280,21 @@ fn main() {
         i += 1;
     }
 
+    // -C (compare) is mutually exclusive with --strip and --preserve-timestamps
+    if config.compare && config.strip {
+        eprintln!("{}: options --compare and --strip are mutually exclusive", TOOL_NAME);
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(1);
+    }
+    if config.compare && config.preserve_timestamps {
+        eprintln!(
+            "{}: options --compare and --preserve-timestamps are mutually exclusive",
+            TOOL_NAME
+        );
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(1);
+    }
+
     // -d mode: create directories
     if config.directory_mode {
         if operands.is_empty() {
@@ -305,6 +320,18 @@ fn main() {
 
     if let Some(ref dir) = config.target_directory {
         // -t DIRECTORY SOURCE...
+        // With -D, create the target directory (and parents) if it doesn't exist
+        if config.create_leading {
+            if let Err(e) = std::fs::create_dir_all(Path::new(dir)) {
+                eprintln!(
+                    "{}: cannot create directory '{}': {}",
+                    TOOL_NAME,
+                    dir,
+                    coreutils_rs::common::io_error_msg(&e)
+                );
+                process::exit(1);
+            }
+        }
         if !Path::new(dir).is_dir() {
             eprintln!("{}: target '{}' is not a directory", TOOL_NAME, dir);
             process::exit(1);

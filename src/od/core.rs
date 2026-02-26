@@ -349,48 +349,13 @@ fn write_value(
     }
 }
 
-/// Compute the effective field width for a format, considering alignment with other formats.
-/// When multiple formats share the same element size, they all use the maximum field width.
-/// When formats have different element sizes, the wider element's field width must accommodate
-/// the narrower element's columns that it spans.
+/// Compute the effective field width for each format, ensuring multi-format alignment.
+/// GNU od computes the total chars_per_block for each format (num_elements * field_width),
+/// takes the maximum across all formats, then distributes that evenly back to each format.
 fn compute_effective_widths(formats: &[OutputFormat], line_width: usize) -> Vec<usize> {
     if formats.len() <= 1 {
         return formats.iter().map(|f| field_width(*f)).collect();
     }
-
-    // Group formats by element size and find the max field width per byte position.
-    // For each format, compute how many bytes each element covers.
-    // The column layout is determined by the narrowest element size (1 byte per column).
-    // Wider elements span multiple narrow columns.
-
-    // Find the minimum element size (determines the number of column slots per line)
-    let min_elem_sz = formats.iter().map(|f| element_size(*f)).min().unwrap_or(1);
-    let _num_slots = line_width / min_elem_sz;
-
-    // For each slot (in terms of min_elem_sz), compute the maximum width contribution
-    // from all formats.
-    // A format with element size `es` contributes `field_width / (es / min_elem_sz)` per slot,
-    // but we need to think in terms of total width per slot.
-    //
-    // Actually, GNU od's approach is simpler: for formats with the same element size,
-    // use the max field width. For formats with different element sizes, the wider
-    // element's field width = (field_width_of_narrower * (es / narrow_es)).
-    //
-    // The key rule: per byte position, the total character width must be consistent across all
-    // format lines. Each byte gets (total_chars_per_line / line_width_bytes) chars.
-
-    // Simpler approach: compute per-slot width.
-    // Each slot is min_elem_sz bytes wide.
-    // For a format with element size `es`, it spans `es / min_elem_sz` slots,
-    // and its field_width is spread across those slots.
-    // The per-slot width for that format is `field_width(fmt) / (es / min_elem_sz)`.
-    // But this needs to be an integer, so we need to be careful.
-
-    // Actually, GNU od computes it differently. It computes per-byte-position width:
-    //   bytes_per_block = line_width
-    //   For each format, chars_per_block = num_elements * field_width
-    //   The effective chars_per_block for the line = max over all formats
-    //   Then each format adjusts its field_width = effective_chars_per_block / num_elements
 
     let mut max_chars_per_block = 0usize;
     for fmt in formats {

@@ -64,6 +64,8 @@ fn parse_size_suffix(s: &str) -> Option<(u64, usize)> {
 }
 
 fn parse_size(s: &str) -> Result<(SizeMode, u64), String> {
+    // GNU compat: strip leading whitespace
+    let s = s.trim_start();
     if s.is_empty() {
         return Err("invalid empty size".to_string());
     }
@@ -82,6 +84,14 @@ fn parse_size(s: &str) -> Result<(SizeMode, u64), String> {
         return Err(format!("invalid number: '{}'", s));
     }
 
+    // GNU compat: reject mixed modifiers like '>+0' or '/<0'
+    if mode != SizeMode::Absolute && !rest.is_empty() {
+        let first = rest.as_bytes()[0];
+        if first == b'+' || first == b'-' || first == b'<' || first == b'>' || first == b'/' || first == b'%' {
+            return Err(format!("invalid number: '{}'", s));
+        }
+    }
+
     let (multiplier, suffix_len) = parse_size_suffix(rest).unwrap_or((1, 0));
     let num_str = &rest[..rest.len() - suffix_len];
 
@@ -96,6 +106,11 @@ fn parse_size(s: &str) -> Result<(SizeMode, u64), String> {
     let total = value
         .checked_mul(multiplier)
         .ok_or_else(|| format!("size overflow: '{}'", s))?;
+
+    // GNU compat: reject division/modulo by zero
+    if (mode == SizeMode::RoundDown || mode == SizeMode::RoundUp) && total == 0 {
+        return Err(format!("invalid number: '{}'", s));
+    }
 
     Ok((mode, total))
 }
@@ -257,6 +272,16 @@ fn main() {
 
     if files.is_empty() {
         eprintln!("{}: missing file operand", TOOL_NAME);
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(1);
+    }
+
+    // GNU compat: --io-blocks without --size is invalid
+    if io_blocks && size_str.is_none() {
+        eprintln!(
+            "{}: --io-blocks was specified but --size was not",
+            TOOL_NAME
+        );
         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(1);
     }

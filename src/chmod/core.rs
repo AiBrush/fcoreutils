@@ -59,18 +59,38 @@ pub fn parse_mode(mode_str: &str, current_mode: u32) -> Result<u32, String> {
     parse_symbolic_mode(mode_str, current_mode)
 }
 
+/// Like `parse_mode` but ignores the process umask.
+///
+/// Used by `install -m` where the mode string is applied without umask
+/// filtering (matching GNU coreutils behaviour).
+pub fn parse_mode_no_umask(mode_str: &str, current_mode: u32) -> Result<u32, String> {
+    // Try octal first
+    if !mode_str.is_empty() && mode_str.chars().all(|c| c.is_ascii_digit() && c < '8') {
+        if let Ok(octal) = u32::from_str_radix(mode_str, 8) {
+            return Ok(octal & 0o7777);
+        }
+    }
+    parse_symbolic_mode_with_umask(mode_str, current_mode, 0)
+}
+
 /// Parse a symbolic mode string and compute the resulting mode.
 ///
 /// Format: `[ugoa]*[+-=][rwxXstugo]+` (comma-separated clauses)
 fn parse_symbolic_mode(mode_str: &str, current_mode: u32) -> Result<u32, String> {
+    parse_symbolic_mode_with_umask(mode_str, current_mode, get_umask())
+}
+
+/// Inner implementation that accepts an explicit umask value.
+fn parse_symbolic_mode_with_umask(
+    mode_str: &str,
+    current_mode: u32,
+    umask: u32,
+) -> Result<u32, String> {
     let mut mode = current_mode & 0o7777;
 
     // Preserve the file type bits from the original mode so that
     // apply_symbolic_clause can detect directories for capital-X handling.
     let file_type_bits = current_mode & 0o170000;
-
-    // Get the current umask
-    let umask = get_umask();
 
     for clause in mode_str.split(',') {
         if clause.is_empty() {

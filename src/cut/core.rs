@@ -3525,38 +3525,10 @@ pub fn cut_field1_inplace(data: &mut [u8], delim: u8, line_delim: u8, suppress: 
 }
 
 /// Process a full data buffer (from mmap or read) with cut operation.
-/// GNU cut preserves the absence of a trailing newline: if the input does not
-/// end with the line delimiter, the output must not either.
 pub fn process_cut_data(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io::Result<()> {
-    if data.is_empty() {
-        return Ok(());
-    }
-
-    // Check if input ends with line delimiter
-    let input_has_trailing = data[data.len() - 1] == cfg.line_delim;
-
-    if input_has_trailing {
-        // Input ends with newline — process normally
-        match cfg.mode {
-            CutMode::Fields => process_fields_fast(data, cfg, out),
-            CutMode::Bytes | CutMode::Characters => process_bytes_fast(data, cfg, out),
-        }
-    } else {
-        // Input does NOT end with newline. Process into a buffer,
-        // then strip the trailing line_delim that internal functions add.
-        let mut buf = Vec::with_capacity(data.len());
-        match cfg.mode {
-            CutMode::Fields => process_fields_fast(data, cfg, &mut buf)?,
-            CutMode::Bytes | CutMode::Characters => process_bytes_fast(data, cfg, &mut buf)?,
-        }
-        // Strip the trailing line_delim if the internal functions added one
-        if !buf.is_empty() && buf[buf.len() - 1] == cfg.line_delim {
-            buf.pop();
-        }
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
-        Ok(())
+    match cfg.mode {
+        CutMode::Fields => process_fields_fast(data, cfg, out),
+        CutMode::Bytes | CutMode::Characters => process_bytes_fast(data, cfg, out),
     }
 }
 
@@ -3644,18 +3616,22 @@ fn read_fully<R: BufRead>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
 /// In-place avoids allocating intermediate output buffers — the result is written
 /// directly into the input buffer (output is always <= input for non-complement modes
 /// with default output delimiter).
-/// GNU compat: preserves absence of trailing line delimiter.
+///
+/// Note: if the input does not end with line_delim, we fall back to the regular
+/// path because GNU cut always adds a trailing line delimiter, and the in-place
+/// buffer cannot grow beyond the input size.
 pub fn process_cut_data_mut(data: &mut [u8], cfg: &CutConfig) -> Option<usize> {
-    if data.is_empty() {
-        return Some(0);
-    }
     if cfg.complement {
         return None;
     }
+    // If input doesn't end with line_delim, the output may need an extra byte
+    // (GNU cut always terminates the last line). In-place can't grow the buffer,
+    // so fall back to the regular allocating path.
+    if data.is_empty() || data[data.len() - 1] != cfg.line_delim {
+        return None;
+    }
 
-    let input_has_trailing = data[data.len() - 1] == cfg.line_delim;
-
-    let new_len = match cfg.mode {
+    match cfg.mode {
         CutMode::Fields => {
             // Only handle when output delimiter matches input (single-byte)
             if cfg.output_delim.len() != 1 || cfg.output_delim[0] != cfg.delim {
@@ -3664,27 +3640,20 @@ pub fn process_cut_data_mut(data: &mut [u8], cfg: &CutConfig) -> Option<usize> {
             if cfg.delim == cfg.line_delim {
                 return None;
             }
-            cut_fields_inplace_general(
+            Some(cut_fields_inplace_general(
                 data,
                 cfg.delim,
                 cfg.line_delim,
                 cfg.ranges,
                 cfg.suppress_no_delim,
-            )
+            ))
         }
         CutMode::Bytes | CutMode::Characters => {
             if !cfg.output_delim.is_empty() {
                 return None;
             }
-            cut_bytes_inplace_general(data, cfg.line_delim, cfg.ranges)
+            Some(cut_bytes_inplace_general(data, cfg.line_delim, cfg.ranges))
         }
-    };
-
-    // GNU compat: if input didn't end with line_delim, strip the one we added
-    if !input_has_trailing && new_len > 0 && data[new_len - 1] == cfg.line_delim {
-        Some(new_len - 1)
-    } else {
-        Some(new_len)
     }
 }
 
