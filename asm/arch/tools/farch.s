@@ -85,7 +85,6 @@ str_newline:
 # =========================================================
 .section .bss
     .lcomm utsname_buf, UTSNAME_SIZE
-    .lcomm err_buf, ARG_BUF
 
 # =========================================================
 # Text section
@@ -208,13 +207,9 @@ _start:
     mov     rdx, str_invalid_opt_len
     call    asm_write_err
 
-    # Write the single char after '-'
-    mov     rdi, r12
-    call    asm_strlen
-    mov     rdx, rax
-    # Write from argv[1]+1 (skip the '-')
+    # Write only the single char after '-' (GNU prints just the first invalid char)
     lea     rsi, [r12 + 1]
-    dec     rdx
+    mov     rdx, 1
     call    asm_write_err
 
     lea     rsi, [rip + str_err_suffix]

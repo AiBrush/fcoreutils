@@ -235,11 +235,9 @@ _start:
     lea     rsi, [rip + str_invalid_opt]
     mov     rdx, str_invalid_opt_len
     call    asm_write_err
-    mov     rdi, r12
-    call    asm_strlen
-    mov     rdx, rax
+    # Write only the single char after '-' (GNU prints just the first invalid char)
     lea     rsi, [r12 + 1]
-    dec     rdx
+    mov     rdx, 1
     call    asm_write_err
     lea     rsi, [rip + str_err_suffix]
     mov     rdx, str_err_suffix_len
