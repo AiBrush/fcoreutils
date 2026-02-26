@@ -605,23 +605,7 @@ fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::
     use std::os::unix::io::FromRawFd;
     let file = unsafe { File::from_raw_fd(fd) };
     let hash_str = if is_regular && size > 0 {
-        if size >= SMALL_FILE_LIMIT {
-            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
-            if let Ok(mmap) = mmap_result {
-                if size >= 2 * 1024 * 1024 {
-                    let _ = mmap.advise(memmap2::Advice::HugePage);
-                }
-                let _ = mmap.advise(memmap2::Advice::Sequential);
-                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
-                    let _ = mmap.advise(memmap2::Advice::WillNeed);
-                }
-                hash_bytes(algo, &mmap)?
-            } else {
-                hash_file_small(algo, file, size as usize)?
-            }
-        } else {
-            hash_file_small(algo, file, size as usize)?
-        }
+        hash_regular_file(algo, file, size)?
     } else {
         hash_reader(algo, file)?
     };
@@ -743,6 +727,13 @@ const SMALL_FILE_LIMIT: u64 = 16 * 1024 * 1024;
 /// Below this size, we use a stack-allocated buffer + single read() syscall,
 /// completely avoiding any heap allocation for the data path.
 const TINY_FILE_LIMIT: u64 = 8 * 1024;
+
+/// Threshold above which streaming hash_reader replaces hash_file_small.
+/// Below this, hash_file_small (single read into thread-local buffer + single-shot
+/// SIMD hash) is faster because the buffer is small enough that page faults are
+/// negligible (~64 pages = ~256µs). Above this, the file-sized buffer causes
+/// significant page fault overhead on first access (cold thread-local).
+const STREAMING_THRESHOLD: u64 = 256 * 1024;
 
 // Thread-local reusable buffer for single-read hash.
 // Grows lazily up to SMALL_FILE_LIMIT (16MB). Initial 64KB allocation
@@ -888,9 +879,69 @@ fn hash_file_pipelined_read(
     hash_result
 }
 
-/// Hash a file by path. Uses I/O pipelining for large files on Linux,
-/// mmap with HUGEPAGE hints as fallback, single-read for small files,
-/// and streaming read for non-regular files.
+/// Hash a known-regular file using tiered I/O strategy based on size.
+/// - Large (>=16MB): mmap with HugePage/PopulateRead hints, pipelined fallback
+/// - Medium (256KB-16MB): streaming hash_reader with fadvise(SEQUENTIAL)
+/// - Small (8KB-256KB): single read into thread-local buffer + single-shot hash
+///
+/// SAFETY: mmap is safe for regular local files opened just above. The fallback
+/// to streaming I/O (hash_reader/hash_file_pipelined) handles mmap failures at
+/// map time, but cannot protect against post-map truncation. If the file is
+/// truncated or backing storage disappears after mapping (e.g. NFS), the kernel
+/// delivers SIGBUS — acceptable, matching other mmap tools.
+fn hash_regular_file(algo: HashAlgorithm, file: File, file_size: u64) -> io::Result<String> {
+    // Large files (>=SMALL_FILE_LIMIT): mmap for zero-copy single-shot hash.
+    if file_size >= SMALL_FILE_LIMIT {
+        let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
+        if let Ok(mmap) = mmap_result {
+            #[cfg(target_os = "linux")]
+            {
+                if file_size >= 2 * 1024 * 1024 {
+                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                }
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                // PopulateRead (Linux 5.14+) synchronously faults all pages before
+                // returning, giving warm TLB entries for hash_bytes. WillNeed is
+                // async and best-effort — pages may still fault during hashing.
+                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                    let _ = mmap.advise(memmap2::Advice::WillNeed);
+                }
+            }
+            return hash_bytes(algo, &mmap);
+        }
+        // mmap failed — fall back to streaming I/O
+        #[cfg(target_os = "linux")]
+        {
+            return hash_file_pipelined(algo, file, file_size);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return hash_reader(algo, file);
+        }
+    }
+    // Medium-large files (STREAMING_THRESHOLD..SMALL_FILE_LIMIT): streaming
+    // hash with fadvise. Avoids large buffer page faults.
+    if file_size >= STREAMING_THRESHOLD {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let _ = unsafe {
+                libc::posix_fadvise(
+                    file.as_raw_fd(),
+                    0,
+                    file_size as i64,
+                    libc::POSIX_FADV_SEQUENTIAL,
+                )
+            };
+        }
+        return hash_reader(algo, file);
+    }
+    // Small files (8KB..STREAMING_THRESHOLD): single read + single-shot hash.
+    hash_file_small(algo, file, file_size as usize)
+}
+
+/// Hash a file by path. Uses tiered I/O strategy for regular files,
+/// streaming read for non-regular files.
 pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     let (file, file_size, is_regular) = open_and_stat(path)?;
 
@@ -899,63 +950,24 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     }
 
     if file_size > 0 && is_regular {
-        // Tiny files (<8KB): stack buffer + single read() — zero heap allocation
         if file_size < TINY_FILE_LIMIT {
             return hash_file_tiny(algo, file, file_size as usize);
         }
-        // Large files (>=16MB): mmap with huge pages for zero-copy single-shot hash.
-        // This is faster than streaming I/O for files that fit in RAM because it
-        // avoids thread synchronization, buffer management, and data copying.
-        // Falls back to streaming I/O if mmap fails (FUSE, NFS, etc.).
-        //
-        // SAFETY: mmap is safe for regular local files. If the file is truncated
-        // or the backing storage disappears after mapping (e.g. NFS disconnect),
-        // the kernel delivers SIGBUS which will crash the process. This matches
-        // the behavior of other mmap-using tools (wc, cat). The fallback to
-        // streaming I/O (read()) handles mmap failures at map time, but cannot
-        // protect against post-map truncation.
-        if file_size >= SMALL_FILE_LIMIT {
-            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
-            if let Ok(mmap) = mmap_result {
-                #[cfg(target_os = "linux")]
-                {
-                    if file_size >= 2 * 1024 * 1024 {
-                        let _ = mmap.advise(memmap2::Advice::HugePage);
-                    }
-                    let _ = mmap.advise(memmap2::Advice::Sequential);
-                    // PopulateRead (Linux 5.14+) synchronously faults all pages before
-                    // returning, giving warm TLB entries for hash_bytes. WillNeed is
-                    // async and best-effort — pages may still fault during hashing.
-                    if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
-                        let _ = mmap.advise(memmap2::Advice::WillNeed);
-                    }
-                }
-                return hash_bytes(algo, &mmap);
-            }
-            // mmap failed — fall back to streaming I/O
-            #[cfg(target_os = "linux")]
-            {
-                return hash_file_pipelined(algo, file, file_size);
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                // On non-Linux, fall through to hash_reader (streaming fallback)
-            }
-        }
-        // Small files (8KB..16MB): single read into thread-local buffer, then single-shot hash.
-        // This avoids Hasher context allocation + streaming overhead for each file.
-        if file_size < SMALL_FILE_LIMIT {
-            return hash_file_small(algo, file, file_size as usize);
-        }
+        return hash_regular_file(algo, file, file_size);
     }
 
     // Non-regular files or fallback: stream
     #[cfg(target_os = "linux")]
     if file_size >= FADVISE_MIN_SIZE {
         use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-        }
+        let _ = unsafe {
+            libc::posix_fadvise(
+                file.as_raw_fd(),
+                0,
+                file_size as i64,
+                libc::POSIX_FADV_SEQUENTIAL,
+            )
+        };
     }
     hash_reader(algo, file)
 }
@@ -1127,7 +1139,7 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
                 }
             }
         }
-        // Small files (8KB..1MB): single read into thread-local buffer, then single-shot hash
+        // Small files (8KB..16MB): single read into thread-local buffer, then single-shot hash
         if file_size < SMALL_FILE_LIMIT {
             return blake2b_hash_file_small(file, file_size as usize, output_bytes);
         }
@@ -1137,9 +1149,14 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
     #[cfg(target_os = "linux")]
     if file_size >= FADVISE_MIN_SIZE {
         use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-        }
+        let _ = unsafe {
+            libc::posix_fadvise(
+                file.as_raw_fd(),
+                0,
+                file_size as i64,
+                libc::POSIX_FADV_SEQUENTIAL,
+            )
+        };
     }
     blake2b_hash_reader(file, output_bytes)
 }
@@ -2349,23 +2366,7 @@ fn hash_from_raw_fd(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
     let file = unsafe { File::from_raw_fd(fd) };
 
     if is_regular && size > 0 {
-        // Large files (>=16MB): mmap with HugePage + PopulateRead
-        if size >= SMALL_FILE_LIMIT {
-            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
-            if let Ok(mmap) = mmap_result {
-                if size >= 2 * 1024 * 1024 {
-                    let _ = mmap.advise(memmap2::Advice::HugePage);
-                }
-                let _ = mmap.advise(memmap2::Advice::Sequential);
-                // Prefault pages using huge pages (kernel 5.14+)
-                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
-                    let _ = mmap.advise(memmap2::Advice::WillNeed);
-                }
-                return hash_bytes(algo, &mmap);
-            }
-        }
-        // Small files (8KB-16MB): single-read into thread-local buffer
-        return hash_file_small(algo, file, size as usize);
+        return hash_regular_file(algo, file, size);
     }
 
     // Non-regular files: streaming hash

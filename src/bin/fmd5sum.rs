@@ -385,12 +385,12 @@ fn main() {
 
         if has_stdin || files.len() <= 1 {
             // Sequential for stdin or single file.
-            // Uses hash_file_nostat to skip fstat (~5µs/file).
+            // Uses hash_file (with fstat) for optimal mmap/bulk-read path.
             for filename in &files {
                 let hash_result = if filename == "-" {
                     hash::hash_stdin(algo)
                 } else {
-                    hash::hash_file_nostat(algo, Path::new(filename))
+                    hash::hash_file(algo, Path::new(filename))
                 };
                 match hash_result {
                     Ok(h) => {
