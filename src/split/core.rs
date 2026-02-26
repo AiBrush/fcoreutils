@@ -621,10 +621,8 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
                                 match f.read(&mut buf[total..]) {
                                     Ok(0) => break,
                                     Ok(n) => total += n,
-                                    Err(ref e)
-                                        if e.kind() == io::ErrorKind::Interrupted =>
-                                    {
-                                        continue
+                                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+                                        continue;
                                     }
                                     Err(e) => return Err(e),
                                 }
