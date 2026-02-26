@@ -110,6 +110,19 @@ fn take_short_value(
     }
 }
 
+/// Parse a number that may have 0x (hex) or 0 (octal) prefix, like GNU coreutils.
+#[cfg(unix)]
+fn parse_num(s: &str) -> Option<usize> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        usize::from_str_radix(hex, 16).ok()
+    } else if s.starts_with('0') && s.len() > 1 && s.bytes().all(|b| b.is_ascii_digit()) {
+        usize::from_str_radix(&s[1..], 8).ok()
+    } else {
+        s.parse::<usize>().ok()
+    }
+}
+
 #[cfg(unix)]
 fn parse_args() -> (LsConfig, Vec<String>) {
     let is_tty = atty_stdout();
@@ -187,7 +200,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         }
                         _ => {
                             eprintln!("ls: invalid argument '{}' for '--classify'", mode);
-                            process::exit(2);
+                            process::exit(1);
                         }
                     }
                 }
@@ -235,7 +248,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "never" | "no" | "none" => ColorMode::Never,
                         _ => {
                             eprintln!("ls: invalid argument '{}' for '--color'", val);
-                            process::exit(2);
+                            process::exit(1);
                         }
                     };
                 }
@@ -258,7 +271,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "width" => SortBy::Width,
                         _ => {
                             eprintln!("ls: invalid argument '{}' for '--sort'", val);
-                            process::exit(2);
+                            process::exit(1);
                         }
                     };
                 }
@@ -279,7 +292,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "mtime" | "modification" => TimeField::Mtime,
                         _ => {
                             eprintln!("ls: invalid argument '{}' for '--time'", val);
-                            process::exit(2);
+                            process::exit(1);
                         }
                     };
                 }
@@ -321,7 +334,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                             .to_string_lossy()
                             .into_owned()
                     });
-                    config.tab_size = val.parse().unwrap_or(8);
+                    config.tab_size = parse_num(&val).unwrap_or(8);
                 }
                 "width" => {
                     let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
@@ -333,7 +346,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                             .to_string_lossy()
                             .into_owned()
                     });
-                    config.width = val.parse().unwrap_or(80);
+                    config.width = parse_num(&val).unwrap_or(80);
                 }
                 "hyperlink" => {
                     let val = eq_val.unwrap_or("always");
@@ -343,7 +356,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "never" | "no" | "none" => HyperlinkMode::Never,
                         _ => {
                             eprintln!("ls: invalid argument '{}' for '--hyperlink'", val);
-                            process::exit(2);
+                            process::exit(1);
                         }
                     };
                 }
@@ -364,7 +377,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "classify" => IndicatorStyle::Classify,
                         _ => {
                             eprintln!("ls: invalid argument '{}' for '--indicator-style'", val);
-                            process::exit(2);
+                            process::exit(1);
                         }
                     };
                 }
@@ -389,9 +402,18 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                         "escape" => QuotingStyle::Escape,
                         _ => {
                             eprintln!("ls: invalid argument '{}' for '--quoting-style'", val);
-                            process::exit(2);
+                            process::exit(1);
                         }
                     };
+                }
+                "zero" => {
+                    config.zero = true;
+                    config.hide_control_chars = false;
+                    if config.format != OutputFormat::Long {
+                        config.format = OutputFormat::SingleColumn;
+                        explicit_format = true;
+                    }
+                    config.color = ColorMode::Never;
                 }
                 _ => {
                     eprintln!("ls: unrecognized option '--{}'", name);
@@ -488,7 +510,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                     }
                     b'w' => {
                         let val = take_short_value(bytes, i + 1, &mut args, "w");
-                        config.width = val.parse().unwrap_or_else(|_| {
+                        config.width = parse_num(&val).unwrap_or_else(|| {
                             eprintln!("ls: invalid line width: '{}'", val);
                             process::exit(2);
                         });
@@ -496,7 +518,7 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                     }
                     b'T' => {
                         let val = take_short_value(bytes, i + 1, &mut args, "T");
-                        config.tab_size = val.parse().unwrap_or_else(|_| {
+                        config.tab_size = parse_num(&val).unwrap_or_else(|| {
                             eprintln!("ls: invalid tab size: '{}'", val);
                             process::exit(2);
                         });

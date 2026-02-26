@@ -66,8 +66,9 @@ fn test_stdbuf_version() {
 #[test]
 fn test_stdbuf_matches_gnu_args() {
     // Verify that the same flags are accepted
+    // Note: -i L (line buffering stdin) is meaningless and rejected by GNU stdbuf too
     let output = cmd()
-        .args(["-i", "L", "-o", "0", "-e", "4096", "echo", "test"])
+        .args(["-i", "0", "-o", "0", "-e", "4096", "echo", "test"])
         .output()
         .unwrap();
     assert!(
@@ -89,8 +90,12 @@ fn test_parse_buffer_mode_line() {
 
 #[test]
 fn test_parse_buffer_mode_line_lowercase() {
-    let mode = parse_buffer_mode("l").unwrap();
-    assert!(matches!(mode, BufferMode::Line));
+    // GNU stdbuf only accepts uppercase 'L' for line buffering
+    let result = parse_buffer_mode("l");
+    assert!(
+        result.is_err(),
+        "lowercase 'l' should be rejected per GNU stdbuf"
+    );
 }
 
 #[test]

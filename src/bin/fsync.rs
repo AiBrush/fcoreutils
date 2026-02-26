@@ -98,11 +98,14 @@ fn main() {
 }
 
 fn sync_file(path: &str, data_only: bool, file_system: bool) -> std::io::Result<()> {
-    use std::fs::File;
+    use std::fs::{File, OpenOptions};
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
 
-    let file = File::open(path)?;
+    // Try read-only first, then write-only (for chmod 0200 files), then read-write
+    let file = File::open(path)
+        .or_else(|_| OpenOptions::new().write(true).open(path))
+        .or_else(|_| OpenOptions::new().read(true).write(true).open(path))?;
 
     #[cfg(unix)]
     {

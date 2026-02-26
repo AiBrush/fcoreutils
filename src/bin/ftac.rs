@@ -226,7 +226,12 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             tac::tac_regex_separator(bytes, sep, cli.before, out)
         } else if let Some(ref sep) = cli.separator {
             let bytes: &[u8] = &data;
-            tac::tac_string_separator(bytes, sep.as_bytes(), cli.before, out)
+            if sep.is_empty() {
+                // GNU tac: -s '' means NUL byte separator
+                tac::tac_bytes(bytes, b'\0', cli.before, out)
+            } else {
+                tac::tac_string_separator(bytes, sep.as_bytes(), cli.before, out)
+            }
         } else if let FileData::Owned(ref mut owned) = data {
             tac::tac_bytes_owned(owned, b'\n', cli.before, out)
         } else {

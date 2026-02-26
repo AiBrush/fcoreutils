@@ -345,12 +345,119 @@ pub fn parse_date_string(s: &str, utc: bool) -> Result<SystemTime, String> {
         return Ok(result);
     }
 
+    // Try time-only format: "HH:MM[ +OFFSET]"
+    if let Some(result) = try_parse_time_only(s, utc) {
+        return Ok(result);
+    }
+
     // Try ISO-like format: "YYYY-MM-DD[ HH:MM[:SS]]"
     if let Some(result) = try_parse_iso(s, utc) {
         return Ok(result);
     }
 
     Err(format!("invalid date '{}'", s))
+}
+
+/// Try to parse a time-only string like "HH:MM", "HH:MM:SS", "HH:MM +OFFSET".
+/// Interprets as today's date with the given time. Seconds default to 00.
+fn try_parse_time_only(s: &str, utc: bool) -> Option<SystemTime> {
+    let s = s.trim();
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 2 {
+        return None;
+    }
+
+    let time_str = parts[0];
+    let tz_str = if parts.len() == 2 {
+        Some(parts[1])
+    } else {
+        None
+    };
+
+    // Validate time format: HH:MM or HH:MM:SS
+    let time_fields: Vec<&str> = time_str.split(':').collect();
+    if time_fields.len() < 2 || time_fields.len() > 3 {
+        return None;
+    }
+
+    let hour: u32 = time_fields[0].parse().ok()?;
+    let minute: u32 = time_fields[1].parse().ok()?;
+    let second: u32 = if time_fields.len() == 3 {
+        time_fields[2].parse().ok()?
+    } else {
+        0
+    };
+
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    // Determine timezone offset in seconds east of UTC
+    let mut use_utc = utc;
+    let mut tz_offset_secs: i64 = 0;
+    if let Some(tz) = tz_str {
+        if tz.eq_ignore_ascii_case("UTC") || tz == "Z" {
+            use_utc = true;
+        } else if (tz.starts_with('+') || tz.starts_with('-')) && (tz.len() == 5 || tz.len() == 3) {
+            let sign: i64 = if tz.starts_with('-') { -1 } else { 1 };
+            let digits = &tz[1..];
+            if !digits.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let (oh, om) = if digits.len() == 4 {
+                let h: i64 = digits[..2].parse().ok()?;
+                let m: i64 = digits[2..].parse().ok()?;
+                (h, m)
+            } else {
+                let h: i64 = digits.parse().ok()?;
+                (h, 0)
+            };
+            tz_offset_secs = sign * (oh * 3600 + om * 60);
+            use_utc = true;
+        } else {
+            return None;
+        }
+    }
+
+    // Get today's date
+    let now = SystemTime::now();
+    let now_secs = now.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if use_utc {
+        let now_t = now_secs as libc::time_t;
+        unsafe {
+            libc::gmtime_r(&now_t, &mut tm);
+        }
+    } else {
+        let now_t = now_secs as libc::time_t;
+        unsafe {
+            libc::localtime_r(&now_t, &mut tm);
+        }
+    }
+
+    tm.tm_hour = hour as i32;
+    tm.tm_min = minute as i32;
+    tm.tm_sec = second as i32;
+    tm.tm_isdst = -1;
+
+    let epoch_secs = if use_utc {
+        unsafe { libc::timegm(&mut tm) }
+    } else {
+        unsafe { libc::mktime(&mut tm) }
+    };
+    if epoch_secs == -1 {
+        return None;
+    }
+
+    // Subtract timezone offset: input time is in the given tz, convert to UTC
+    let final_secs = epoch_secs as i64 - tz_offset_secs;
+
+    if final_secs >= 0 {
+        Some(UNIX_EPOCH + Duration::from_secs(final_secs as u64))
+    } else {
+        Some(UNIX_EPOCH - Duration::from_secs((-final_secs) as u64))
+    }
 }
 
 /// Try to parse a relative time expression.

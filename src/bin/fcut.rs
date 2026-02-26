@@ -394,7 +394,28 @@ fn main() {
         (CutMode::Fields, cli.fields.as_ref().unwrap().as_str())
     };
 
-    let ranges = match cut::parse_ranges(spec) {
+    // GNU cut: -s (--only-delimited) is only valid with -f
+    if cli.only_delimited && mode != CutMode::Fields {
+        eprintln!(
+            "cut: suppressing non-delimited lines makes sense\n\tonly when operating on fields"
+        );
+        eprintln!("Try 'cut --help' for more information.");
+        process::exit(1);
+    }
+
+    // GNU cut: -d (--delimiter) is only valid with -f
+    if cli.delimiter.is_some() && mode != CutMode::Fields {
+        eprintln!("cut: an input delimiter may be specified only\n\twhen operating on fields");
+        eprintln!("Try 'cut --help' for more information.");
+        process::exit(1);
+    }
+
+    // When --output-delimiter is specified for bytes/chars mode, don't merge adjacent ranges
+    // so the output delimiter is inserted between adjacent (but originally separate) ranges.
+    let has_output_delim = cli.output_delimiter.is_some();
+    let no_merge_adjacent = has_output_delim && mode != CutMode::Fields;
+
+    let ranges = match cut::parse_ranges(spec, no_merge_adjacent) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("cut: {}", e);

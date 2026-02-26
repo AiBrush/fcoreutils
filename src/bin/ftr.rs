@@ -403,9 +403,25 @@ fn main() {
 
     if is_pure_translate {
         let set2_str = &cli.sets[1];
-        let mut set1 = tr::parse_set(set1_str);
+        let (mut set1, set1_classes) = tr::parse_set_with_classes(set1_str);
         if cli.complement {
             set1 = tr::complement(&set1);
+            // Complement mode replaces the set entirely — class positions are meaningless.
+            // Skip case class validation (GNU tr also skips it for -c).
+        } else {
+            // Validate case class alignment before expanding SET2
+            let (set2_raw, set2_classes) = tr::parse_set_with_classes(set2_str);
+            if let Err(msg) = tr::validate_case_classes(&set1_classes, &set2_classes) {
+                eprintln!("tr: {}", msg);
+                process::exit(1);
+            }
+            // Validate SET2 doesn't end with a case class when SET1 is longer
+            if let Err(msg) =
+                tr::validate_set2_class_at_end(set1.len(), set2_raw.len(), &set2_classes)
+            {
+                eprintln!("tr: {}", msg);
+                process::exit(1);
+            }
         }
         let set2 = if cli.truncate {
             let raw_set = tr::parse_set(set2_str);
@@ -594,9 +610,21 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
         with_stdin_reader!(reader => tr::squeeze(&squeeze_set, &mut reader, writer))
     } else if cli.squeeze {
         let set2_str = &cli.sets[1];
-        let mut set1 = tr::parse_set(set1_str);
+        let (mut set1, set1_classes) = tr::parse_set_with_classes(set1_str);
         if cli.complement {
             set1 = tr::complement(&set1);
+        } else {
+            let (set2_raw, set2_classes) = tr::parse_set_with_classes(set2_str);
+            if let Err(msg) = tr::validate_case_classes(&set1_classes, &set2_classes) {
+                eprintln!("tr: {}", msg);
+                process::exit(1);
+            }
+            if let Err(msg) =
+                tr::validate_set2_class_at_end(set1.len(), set2_raw.len(), &set2_classes)
+            {
+                eprintln!("tr: {}", msg);
+                process::exit(1);
+            }
         }
         let set2 = if cli.truncate {
             let raw_set = tr::parse_set(set2_str);
@@ -661,9 +689,21 @@ fn run_mmap_mode(
         tr::squeeze_mmap(&squeeze_set, data, writer)
     } else if cli.squeeze {
         let set2_str = &cli.sets[1];
-        let mut set1 = tr::parse_set(set1_str);
+        let (mut set1, set1_classes) = tr::parse_set_with_classes(set1_str);
         if cli.complement {
             set1 = tr::complement(&set1);
+        } else {
+            let (set2_raw, set2_classes) = tr::parse_set_with_classes(set2_str);
+            if let Err(msg) = tr::validate_case_classes(&set1_classes, &set2_classes) {
+                eprintln!("tr: {}", msg);
+                process::exit(1);
+            }
+            if let Err(msg) =
+                tr::validate_set2_class_at_end(set1.len(), set2_raw.len(), &set2_classes)
+            {
+                eprintln!("tr: {}", msg);
+                process::exit(1);
+            }
         }
         let set2 = if cli.truncate {
             let raw_set = tr::parse_set(set2_str);

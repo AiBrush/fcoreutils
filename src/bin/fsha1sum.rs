@@ -240,7 +240,7 @@ fn run_hash_mode(
             let hash_result = if filename == "-" {
                 hash::hash_stdin(algo)
             } else {
-                hash::hash_file_nostat(algo, Path::new(filename))
+                hash::hash_file(algo, Path::new(filename))
             };
 
             match hash_result {

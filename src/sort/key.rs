@@ -59,6 +59,70 @@ impl KeyOpts {
             }
         }
     }
+
+    /// Validate that the set of options is compatible (GNU sort rules).
+    /// Returns Err with a descriptive message if incompatible options are detected.
+    ///
+    /// GNU incompatibility rules:
+    /// - At most one of {n, g, h, M} can be set (numeric sort types)
+    /// - R is incompatible with {n, g, h, M}
+    /// - V is incompatible with {n, g, h, M}
+    /// - d is incompatible with {n, g, h, M}
+    /// - i is incompatible with {n, g, h, M}
+    ///
+    /// GNU canonical order for error messages: d, g, h, i, M, n, R, V
+    pub fn validate(&self) -> Result<(), String> {
+        // Collect all active options in GNU canonical order: d, g, h, i, M, n, R, V
+        // We only need to check options that participate in incompatibility.
+        let mut active: Vec<char> = Vec::new();
+        if self.dictionary_order {
+            active.push('d');
+        }
+        if self.general_numeric {
+            active.push('g');
+        }
+        if self.human_numeric {
+            active.push('h');
+        }
+        if self.ignore_nonprinting {
+            active.push('i');
+        }
+        if self.month {
+            active.push('M');
+        }
+        if self.numeric {
+            active.push('n');
+        }
+        if self.random {
+            active.push('R');
+        }
+        if self.version {
+            active.push('V');
+        }
+
+        // Define the incompatible pairs (canonical order: lower index in active list first)
+        // Numeric-like types: g, h, M, n — at most one allowed
+        // R, V each incompatible with g, h, M, n
+        // d, i each incompatible with g, h, M, n
+        let is_numeric_type = |c: char| matches!(c, 'g' | 'h' | 'M' | 'n');
+        let incompatible_with_numeric = |c: char| matches!(c, 'd' | 'i' | 'R' | 'V');
+
+        // Check all pairs in canonical order
+        for i in 0..active.len() {
+            for j in (i + 1)..active.len() {
+                let a = active[i];
+                let b = active[j];
+                let conflict = (is_numeric_type(a) && is_numeric_type(b))
+                    || (is_numeric_type(a) && incompatible_with_numeric(b))
+                    || (incompatible_with_numeric(a) && is_numeric_type(b));
+                if conflict {
+                    return Err(format!("options '-{}{}' are incompatible", a, b));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// A parsed key specification from `-k START[,END]`.
@@ -91,6 +155,18 @@ impl KeyDef {
         if start_field == 0 {
             return Err("field number is zero: invalid field specification".to_string());
         }
+
+        // GNU sort rejects character offset 0 in the START position only.
+        // A 0 in the end position is valid (treated as end of field).
+        if start_char == 0 && parts[0].contains('.') {
+            return Err(format!(
+                "character offset is zero: invalid field specification '{}'",
+                spec
+            ));
+        }
+
+        // Validate per-key option compatibility
+        opts.validate()?;
 
         Ok(KeyDef {
             start_field,
@@ -231,9 +307,30 @@ fn is_blank(b: u8) -> bool {
     b == b' ' || b == b'\t'
 }
 
+/// Skip leading blanks (space and tab) starting from position `from` within `line`.
+/// Returns the byte offset of the first non-blank character at or after `from`.
+#[inline]
+fn skip_blanks_from(line: &[u8], from: usize, end: usize) -> usize {
+    let mut i = from;
+    while i < end && is_blank(line[i]) {
+        i += 1;
+    }
+    i
+}
+
 /// Extract the key portion of a line based on a KeyDef.
 /// Allocation-free: uses find_nth_field instead of collecting all fields.
-pub fn extract_key<'a>(line: &'a [u8], key: &KeyDef, separator: Option<u8>) -> &'a [u8] {
+///
+/// When `ignore_leading_blanks` is true (from the key's -b flag or global -b),
+/// leading blanks in each field are skipped before applying character position
+/// offsets. This matches GNU sort's behavior where `-b` affects where character
+/// counting starts within a field.
+pub fn extract_key<'a>(
+    line: &'a [u8],
+    key: &KeyDef,
+    separator: Option<u8>,
+    ignore_leading_blanks: bool,
+) -> &'a [u8] {
     let sf = key.start_field.saturating_sub(1);
     let (sf_start, sf_end) = find_nth_field(line, sf, separator);
 
@@ -242,9 +339,15 @@ pub fn extract_key<'a>(line: &'a [u8], key: &KeyDef, separator: Option<u8>) -> &
     }
 
     let start_byte = if key.start_char > 0 {
-        let field_len = sf_end - sf_start;
+        // When -b is active, skip leading blanks in the field before counting chars
+        let effective_start = if ignore_leading_blanks {
+            skip_blanks_from(line, sf_start, sf_end)
+        } else {
+            sf_start
+        };
+        let field_len = sf_end - effective_start;
         let char_offset = (key.start_char - 1).min(field_len);
-        sf_start + char_offset
+        effective_start + char_offset
     } else {
         sf_start
     };
@@ -253,9 +356,15 @@ pub fn extract_key<'a>(line: &'a [u8], key: &KeyDef, separator: Option<u8>) -> &
         let ef = key.end_field.saturating_sub(1);
         let (ef_start, ef_end) = find_nth_field(line, ef, separator);
         if key.end_char > 0 {
-            let field_len = ef_end - ef_start;
+            // When -b is active, skip leading blanks in the end field too
+            let effective_start = if ignore_leading_blanks {
+                skip_blanks_from(line, ef_start, ef_end)
+            } else {
+                ef_start
+            };
+            let field_len = ef_end - effective_start;
             let char_offset = key.end_char.min(field_len);
-            ef_start + char_offset
+            effective_start + char_offset
         } else {
             ef_end
         }

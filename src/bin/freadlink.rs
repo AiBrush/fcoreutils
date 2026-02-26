@@ -122,16 +122,123 @@ fn resolve(path: &str, mode: CanonMode) -> Result<PathBuf, std::io::Error> {
             // Just read the symlink target
             std::fs::read_link(path)
         }
-        CanonMode::Canonicalize | CanonMode::CanonicalizeExisting => {
+        CanonMode::CanonicalizeExisting => {
             // All components must exist
             std::fs::canonicalize(path)
         }
+        CanonMode::Canonicalize => canonicalize_f(Path::new(path)),
         CanonMode::CanonicalizeMissing => canonicalize_missing(Path::new(path)),
     }
 }
 
-/// Canonicalize a path where not all components need to exist.
-/// Resolve what we can, then normalize the rest.
+/// Canonicalize a path where all but the last component must exist (-f).
+/// Walks each component, following symlinks. All intermediate components must
+/// resolve to existing directories. The very last component may be missing,
+/// but if it is a symlink, it is followed (and its target's parent must exist).
+fn canonicalize_f(path: &Path) -> Result<PathBuf, std::io::Error> {
+    // If the whole path resolves, great
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return Ok(canon);
+    }
+
+    // Make the path absolute
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+
+    let components: Vec<std::path::Component<'_>> = abs.components().collect();
+    if components.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty path",
+        ));
+    }
+
+    let mut resolved = PathBuf::new();
+    let last_idx = components.len() - 1;
+    // Track how many symlinks we follow to prevent infinite loops
+    let mut symlink_count = 0;
+    const MAX_SYMLINKS: usize = 40;
+
+    // Process all components except the last using a queue approach
+    // to handle symlink expansion
+    let mut queue: Vec<(std::ffi::OsString, bool)> = components
+        .iter()
+        .enumerate()
+        .map(|(idx, c)| (c.as_os_str().to_os_string(), idx == last_idx))
+        .collect();
+
+    let mut qi = 0;
+    while qi < queue.len() {
+        let (ref comp_os, is_last) = queue[qi];
+        let comp_str = comp_os.to_string_lossy();
+
+        if comp_str == "/" {
+            resolved = PathBuf::from("/");
+        } else if comp_str == "." {
+            // skip
+        } else if comp_str == ".." {
+            resolved.pop();
+        } else {
+            resolved.push(comp_os);
+
+            match std::fs::symlink_metadata(&resolved) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    symlink_count += 1;
+                    if symlink_count > MAX_SYMLINKS {
+                        return Err(std::io::Error::other("Too many levels of symbolic links"));
+                    }
+                    let target = std::fs::read_link(&resolved)?;
+                    resolved.pop();
+                    // Expand the symlink: replace current component with target's components
+                    let target_path = if target.is_absolute() {
+                        resolved = PathBuf::new();
+                        target
+                    } else {
+                        resolved.join(&target)
+                    };
+                    // Insert the expanded components into the queue
+                    let expanded: Vec<(std::ffi::OsString, bool)> = target_path
+                        .components()
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|c| (c.as_os_str().to_os_string(), false))
+                        .collect();
+                    // The last expanded component inherits the is_last property
+                    let mut exp = expanded;
+                    if let Some(last) = exp.last_mut() {
+                        last.1 = is_last;
+                    }
+                    // Replace the rest of the queue
+                    let remaining: Vec<(std::ffi::OsString, bool)> = queue[qi + 1..].to_vec();
+                    queue.truncate(qi);
+                    queue.extend(exp);
+                    queue.extend(remaining);
+                    continue; // re-process from same index
+                }
+                Ok(_) => {
+                    // Exists and is not a symlink — good
+                }
+                Err(e) => {
+                    if is_last {
+                        // Last component doesn't exist — that's OK for -f
+                        // (resolved already has it appended)
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        qi += 1;
+    }
+
+    Ok(resolved)
+}
+
+/// Canonicalize a path where not all components need to exist (-m).
+/// Walk each component: follow symlinks where possible, normalize the rest.
 fn canonicalize_missing(path: &Path) -> Result<PathBuf, std::io::Error> {
     // Make the path absolute first
     let abs = if path.is_absolute() {
@@ -145,59 +252,64 @@ fn canonicalize_missing(path: &Path) -> Result<PathBuf, std::io::Error> {
         return Ok(canon);
     }
 
-    // Split into components, resolve as much as possible
+    // Walk component by component
+    let components: Vec<std::path::Component<'_>> = abs.components().collect();
     let mut resolved = PathBuf::new();
-    let mut components: Vec<std::path::Component<'_>> = abs.components().collect();
-    let mut remaining_start = 0;
+    let mut i = 0;
 
-    // Try to resolve from the full path down to find the longest resolvable prefix
-    for i in (0..components.len()).rev() {
-        let mut prefix = PathBuf::new();
-        for c in &components[..=i] {
-            prefix.push(c.as_os_str());
-        }
-        if let Ok(canon) = std::fs::canonicalize(&prefix) {
-            resolved = canon;
-            remaining_start = i + 1;
-            break;
-        }
-    }
-
-    // If nothing resolved, start from root
-    if resolved.as_os_str().is_empty() {
-        // At minimum, the root component should be there
-        if let Some(std::path::Component::RootDir) = components.first() {
-            resolved.push("/");
-            remaining_start = 1;
-        } else {
-            // Relative path that can't be resolved at all - use cwd
-            resolved = std::env::current_dir()?;
-        }
-    }
-
-    // Append remaining components, normalizing . and ..
-    for c in components.drain(remaining_start..) {
+    while i < components.len() {
+        let c = components[i];
         match c {
+            std::path::Component::RootDir => {
+                resolved.push("/");
+            }
+            std::path::Component::Prefix(p) => {
+                resolved.push(p.as_os_str());
+            }
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
                 resolved.pop();
             }
             std::path::Component::Normal(s) => {
                 resolved.push(s);
-                // If this component now exists, try to fully resolve it
-                if resolved.symlink_metadata().is_ok()
-                    && let Ok(canon) = std::fs::canonicalize(&resolved)
-                {
+                // Try to canonicalize what we have so far
+                if let Ok(canon) = std::fs::canonicalize(&resolved) {
                     resolved = canon;
+                } else if let Ok(target) = std::fs::read_link(&resolved) {
+                    // It's a symlink but target doesn't exist — follow it anyway for -m
+                    resolved.pop();
+                    if target.is_absolute() {
+                        resolved = target;
+                    } else {
+                        resolved.push(target);
+                    }
+                    // Normalize the result by re-walking through its components
+                    resolved = normalize_path(&resolved);
                 }
-            }
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                resolved.push(c.as_os_str());
+                // else: not a symlink, doesn't exist — just keep it appended
             }
         }
+        i += 1;
     }
 
     Ok(resolved)
+}
+
+/// Normalize a path by resolving . and .. without touching the filesystem.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            _ => {
+                result.push(c.as_os_str());
+            }
+        }
+    }
+    result
 }
 
 fn print_help() {
@@ -342,5 +454,125 @@ mod tests {
                 "Exit code mismatch for regular file"
             );
         }
+    }
+
+    // Tests for the 6 GNU compatibility fixes
+
+    #[test]
+    fn test_f_on_missing_path() {
+        // readlink -f on a non-existent path should resolve parent + final component
+        let dir = tempfile::tempdir().unwrap();
+        let canon_dir = fs::canonicalize(dir.path()).unwrap();
+        let missing = dir.path().join("nonexist");
+
+        let output = cmd()
+            .args(["-f", missing.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "should succeed for -f with missing last component"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), canon_dir.join("nonexist").to_str().unwrap());
+    }
+
+    #[test]
+    fn test_f_symlink_to_missing() {
+        // readlink -f on a symlink pointing to a non-existent file
+        let dir = tempfile::tempdir().unwrap();
+        let canon_dir = fs::canonicalize(dir.path()).unwrap();
+        let target = canon_dir.join("doesnotexist");
+        let link = dir.path().join("link-to-missing");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let output = cmd().args(["-f", link.to_str().unwrap()]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "should succeed for -f on symlink to missing"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should resolve through the symlink to the (missing) target
+        assert_eq!(stdout.trim(), target.to_str().unwrap());
+    }
+
+    #[test]
+    fn test_f_subdir_nonexist() {
+        // readlink -f subdir/nonexist — subdir exists, nonexist does not
+        let dir = tempfile::tempdir().unwrap();
+        let canon_dir = fs::canonicalize(dir.path()).unwrap();
+        let subdir = dir.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+
+        let path = subdir.join("nonexist");
+        let output = cmd().args(["-f", path.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.trim(),
+            canon_dir.join("subdir").join("nonexist").to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_f_link_to_dir_nonexist() {
+        // readlink -f link-to-dir/nonexist — link-to-dir is symlink to existing dir
+        let dir = tempfile::tempdir().unwrap();
+        let canon_dir = fs::canonicalize(dir.path()).unwrap();
+        let subdir = dir.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        let link = dir.path().join("link-to-dir");
+        std::os::unix::fs::symlink(&subdir, &link).unwrap();
+
+        let path = link.join("nonexist");
+        let output = cmd().args(["-f", path.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should resolve link-to-dir -> subdir, then append nonexist
+        assert_eq!(
+            stdout.trim(),
+            canon_dir.join("subdir").join("nonexist").to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_f_link_to_subdir_missing() {
+        // readlink -f link-to-dir/missing — similar to above with different name
+        let dir = tempfile::tempdir().unwrap();
+        let canon_dir = fs::canonicalize(dir.path()).unwrap();
+        let subdir = dir.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        let link = dir.path().join("link-to-dir");
+        std::os::unix::fs::symlink(&subdir, &link).unwrap();
+
+        let path = link.join("missing");
+        let output = cmd().args(["-f", path.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.trim(),
+            canon_dir.join("subdir").join("missing").to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_m_link_to_missing_more() {
+        // readlink -m link-to-missing/more — symlink target doesn't exist,
+        // and we add more components after it
+        let dir = tempfile::tempdir().unwrap();
+        let canon_dir = fs::canonicalize(dir.path()).unwrap();
+        let target = canon_dir.join("doesnotexist");
+        let link = dir.path().join("link-to-missing");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let path = link.join("more");
+        let output = cmd().args(["-m", path.to_str().unwrap()]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "should succeed for -m with missing intermediates"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should follow symlink to doesnotexist, then append "more"
+        assert_eq!(stdout.trim(), target.join("more").to_str().unwrap());
     }
 }

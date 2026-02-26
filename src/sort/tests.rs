@@ -102,7 +102,7 @@ fn test_key_parsing() {
 fn test_key_extraction_with_separator() {
     let line = b"alice\tbob\tcharlie";
     let key = KeyDef::parse("2,2").unwrap();
-    let extracted = extract_key(line, &key, Some(b'\t'));
+    let extracted = extract_key(line, &key, Some(b'\t'), false);
     assert_eq!(extracted, b"bob");
 }
 
@@ -110,7 +110,7 @@ fn test_key_extraction_with_separator() {
 fn test_key_extraction_blank_separator() {
     let line = b"alice bob charlie";
     let key = KeyDef::parse("2,2").unwrap();
-    let extracted = extract_key(line, &key, None);
+    let extracted = extract_key(line, &key, None, false);
     // Field 2 with blank separator: "bob"
     // With default blank separator, leading blanks are part of the field
     let extracted_str = std::str::from_utf8(extracted).unwrap();

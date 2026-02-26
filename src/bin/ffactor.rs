@@ -12,10 +12,11 @@ const TOOL_NAME: &str = "factor";
 
 fn print_help() {
     print!(
-        "Usage: {0} [NUMBER]...\n\
+        "Usage: {0} [OPTION] [NUMBER]...\n\
          Print the prime factors of each specified integer.\n\n\
-         \x20     --help     display this help and exit\n\
-         \x20     --version  output version information and exit\n\n\
+         \x20 -h, --exponents   print repeated factors in p^e notation\n\
+         \x20     --help         display this help and exit\n\
+         \x20     --version      output version information and exit\n\n\
          Print the prime factors of each specified integer NUMBER. If none\n\
          are specified on the command line, read them from standard input.\n",
         TOOL_NAME
@@ -28,16 +29,29 @@ fn print_version() {
 
 /// Process a single CLI argument: parse as u128, print factors.
 /// Returns true on error (matching all other functions in this file).
-fn process_number(token: &str, out: &mut impl Write) -> bool {
-    match token.parse::<u128>() {
+fn process_number(token: &str, exponents: bool, out: &mut impl Write) -> bool {
+    // Strip leading '+' (GNU compat)
+    let clean = token.strip_prefix('+').unwrap_or(token);
+    match clean.parse::<u128>() {
         Ok(n) => {
-            let line = factor::format_factors(n);
-            if writeln!(out, "{}", line).is_err() {
-                process::exit(0);
+            if exponents {
+                let line = format_factors_exp(n);
+                if writeln!(out, "{}", line).is_err() {
+                    process::exit(0);
+                }
+            } else {
+                let line = factor::format_factors(n);
+                if writeln!(out, "{}", line).is_err() {
+                    process::exit(0);
+                }
             }
             false
         }
         Err(_) => {
+            // Try big number path for numbers > u128::MAX
+            if clean.bytes().all(|b| b.is_ascii_digit()) && !clean.is_empty() {
+                return process_big_number(clean, exponents, out);
+            }
             eprintln!(
                 "{}: \u{2018}{}\u{2019} is not a valid positive integer",
                 TOOL_NAME, token
@@ -45,6 +59,157 @@ fn process_number(token: &str, out: &mut impl Write) -> bool {
             true
         }
     }
+}
+
+/// Format factors with exponent notation: "3000: 2^3 3 5^3"
+fn format_factors_exp(n: u128) -> String {
+    let factors = factor::factorize(n);
+    let mut result = format!("{}:", n);
+    let mut i = 0;
+    while i < factors.len() {
+        let p = factors[i];
+        let mut count = 1;
+        while i + count < factors.len() && factors[i + count] == p {
+            count += 1;
+        }
+        result.push(' ');
+        result.push_str(&p.to_string());
+        if count > 1 {
+            result.push('^');
+            result.push_str(&count.to_string());
+        }
+        i += count;
+    }
+    result
+}
+
+/// Factorize a number larger than u128::MAX using decimal string division.
+fn process_big_number(s: &str, exponents: bool, out: &mut impl Write) -> bool {
+    let mut digits: Vec<u8> = s.bytes().map(|b| b - b'0').collect();
+    // Remove leading zeros
+    while digits.len() > 1 && digits[0] == 0 {
+        digits.remove(0);
+    }
+    let mut factors: Vec<String> = Vec::new();
+
+    // Trial division by small primes
+    let small_primes: &[u64] = &[
+        2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89,
+        97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181,
+        191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281,
+        283, 293, 307, 311, 313, 317, 331, 337, 347, 349, 353, 359, 367, 373, 379, 383, 389, 397,
+        401, 409, 419, 421, 431, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503,
+        509, 521, 523, 541, 547, 557, 563, 569, 571, 577, 587, 593, 599, 601, 607, 613, 617, 619,
+        631, 641, 643, 647, 653, 659, 661, 673, 677, 683, 691, 701, 709, 719, 727, 733, 739, 743,
+        751, 757, 761, 769, 773, 787, 797, 809, 811, 821, 823, 827, 829, 839, 853, 857, 859, 863,
+        877, 881, 883, 887, 907, 911, 919, 929, 937, 941, 947, 953, 967, 971, 977, 983, 991, 997,
+    ];
+
+    for &p in small_primes {
+        loop {
+            let rem = big_mod(&digits, p);
+            if rem != 0 {
+                break;
+            }
+            digits = big_div(&digits, p);
+            factors.push(p.to_string());
+        }
+        // If quotient fits in u128, switch to fast path
+        if let Some(n) = big_to_u128(&digits) {
+            if n <= 1 {
+                break;
+            }
+            let remaining = factor::factorize(n);
+            for f in remaining {
+                factors.push(f.to_string());
+            }
+            digits = vec![0]; // signal done
+            break;
+        }
+    }
+
+    // If still have a remainder > 1 and > u128, it's a large prime factor
+    if let Some(n) = big_to_u128(&digits) {
+        if n > 1 {
+            let remaining = factor::factorize(n);
+            for f in remaining {
+                factors.push(f.to_string());
+            }
+        }
+    } else {
+        // Number is still > u128::MAX after trial division — emit as single factor.
+        // Limitation: this may be composite if all prime factors > 997. A full
+        // implementation would use Pollard's rho + Miller-Rabin (as GNU factor does).
+        let s = digits
+            .iter()
+            .map(|d| (d + b'0') as char)
+            .collect::<String>();
+        factors.push(s);
+    }
+
+    // Format output
+    let mut line = format!("{}:", s);
+    if exponents {
+        let mut i = 0;
+        while i < factors.len() {
+            let p = &factors[i];
+            let mut count = 1;
+            while i + count < factors.len() && factors[i + count] == *p {
+                count += 1;
+            }
+            line.push(' ');
+            line.push_str(p);
+            if count > 1 {
+                line.push('^');
+                line.push_str(&count.to_string());
+            }
+            i += count;
+        }
+    } else {
+        for f in &factors {
+            line.push(' ');
+            line.push_str(f);
+        }
+    }
+
+    if writeln!(out, "{}", line).is_err() {
+        process::exit(0);
+    }
+    false
+}
+
+/// Compute big_number % small_divisor using long division on decimal digits.
+fn big_mod(digits: &[u8], d: u64) -> u64 {
+    let mut rem: u64 = 0;
+    for &dig in digits {
+        rem = (rem * 10 + dig as u64) % d;
+    }
+    rem
+}
+
+/// Compute big_number / small_divisor using long division on decimal digits.
+fn big_div(digits: &[u8], d: u64) -> Vec<u8> {
+    let mut result = Vec::with_capacity(digits.len());
+    let mut rem: u64 = 0;
+    for &dig in digits {
+        rem = rem * 10 + dig as u64;
+        result.push((rem / d) as u8);
+        rem %= d;
+    }
+    // Remove leading zeros
+    while result.len() > 1 && result[0] == 0 {
+        result.remove(0);
+    }
+    result
+}
+
+/// Try to convert big decimal digits to u128.
+fn big_to_u128(digits: &[u8]) -> Option<u128> {
+    let mut n: u128 = 0;
+    for &d in digits {
+        n = n.checked_mul(10)?.checked_add(d as u128)?;
+    }
+    Some(n)
 }
 
 /// Try to mmap stdin if it's a regular file (zero-copy, zero-allocation).
@@ -67,9 +232,24 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
 /// Parse and factor a single whitespace-delimited token.
 /// Returns true on error (matching the convention of all other functions in this file).
 #[inline]
-fn factor_token(token: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::StdoutLock>) -> bool {
+fn factor_token(
+    token: &[u8],
+    exponents: bool,
+    out_buf: &mut Vec<u8>,
+    out: &mut BufWriter<io::StdoutLock>,
+) -> bool {
     if token.is_empty() {
         return false;
+    }
+
+    // Strip leading '+' (GNU compat)
+    let token = if !token.is_empty() && token[0] == b'+' {
+        &token[1..]
+    } else {
+        token
+    };
+    if token.is_empty() {
+        return report_invalid(b"+", out_buf, out);
     }
 
     // Try u64 fast path first (handles all numbers up to u64::MAX = 20 digits).
@@ -97,7 +277,11 @@ fn factor_token(token: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::Std
         };
     }
     if valid_u64 && !overflowed {
-        factor::write_factors_u64(n64, out_buf);
+        if exponents {
+            write_factors_u64_exp(n64, out_buf);
+        } else {
+            factor::write_factors_u64(n64, out_buf);
+        }
         flush_if_full(out_buf, out);
         return false;
     }
@@ -127,13 +311,35 @@ fn factor_token(token: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::Std
             };
         }
         if valid_u128 {
-            factor::write_factors(n, out_buf);
+            if exponents {
+                write_factors_exp(n, out_buf);
+            } else {
+                factor::write_factors(n, out_buf);
+            }
             flush_if_full(out_buf, out);
             return false;
         }
+
+        // Number overflows u128 — try big number path if all digits
+        if token.iter().all(|&b| b.is_ascii_digit()) {
+            if !out_buf.is_empty() {
+                let _ = out.write_all(out_buf);
+                out_buf.clear();
+            }
+            let _ = out.flush();
+            let token_str = std::str::from_utf8(token).unwrap_or("");
+            return process_big_number(token_str, exponents, out);
+        }
     }
 
-    // Invalid token — flush buffered output, then print error
+    report_invalid(token, out_buf, out)
+}
+
+fn report_invalid(
+    token: &[u8],
+    out_buf: &mut Vec<u8>,
+    out: &mut BufWriter<io::StdoutLock>,
+) -> bool {
     if !out_buf.is_empty() {
         let _ = out.write_all(out_buf);
         out_buf.clear();
@@ -145,6 +351,65 @@ fn factor_token(token: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::Std
         TOOL_NAME, token_str
     );
     true
+}
+
+/// Write u64 factors in exponent notation.
+fn write_factors_u64_exp(n: u64, out: &mut Vec<u8>) {
+    let mut buf = itoa::Buffer::new();
+    out.extend_from_slice(buf.format(n).as_bytes());
+    out.push(b':');
+    if n <= 1 {
+        out.push(b'\n');
+        return;
+    }
+    let factors = factor::factorize(n as u128);
+    write_exp_factors(&factors, out);
+    out.push(b'\n');
+}
+
+/// Write u128 factors in exponent notation.
+fn write_factors_exp(n: u128, out: &mut Vec<u8>) {
+    use std::fmt::Write;
+    if n <= u64::MAX as u128 {
+        write_factors_u64_exp(n as u64, out);
+        return;
+    }
+    let mut s = String::new();
+    let _ = write!(s, "{}", n);
+    out.extend_from_slice(s.as_bytes());
+    out.push(b':');
+    let factors = factor::factorize(n);
+    write_exp_factors(&factors, out);
+    out.push(b'\n');
+}
+
+/// Write factors in p^e notation to buffer.
+fn write_exp_factors(factors: &[u128], out: &mut Vec<u8>) {
+    let mut buf = itoa::Buffer::new();
+    let mut i = 0;
+    while i < factors.len() {
+        let p = factors[i];
+        let mut count = 1u32;
+        while i + count as usize <= factors.len().saturating_sub(1)
+            && factors[i + count as usize] == p
+        {
+            count += 1;
+        }
+        out.push(b' ');
+        if p <= u64::MAX as u128 {
+            out.extend_from_slice(buf.format(p as u64).as_bytes());
+        } else {
+            use std::fmt::Write;
+            let mut s = String::new();
+            let _ = write!(s, "{}", p);
+            out.extend_from_slice(s.as_bytes());
+        }
+        if count > 1 {
+            out.push(b'^');
+            out.extend_from_slice(buf.format(count).as_bytes());
+        }
+        i += count as usize;
+    }
 }
 
 /// Flush output buffer if it exceeds 128KB.
@@ -159,9 +424,9 @@ fn flush_if_full(out_buf: &mut Vec<u8>, out: &mut BufWriter<io::StdoutLock>) {
 }
 
 /// Process byte buffer of whitespace-delimited numbers (used by mmap path).
-fn process_bytes(input: &[u8], out: &mut BufWriter<io::StdoutLock>) -> bool {
+fn process_bytes(input: &[u8], exponents: bool, out: &mut BufWriter<io::StdoutLock>) -> bool {
     let mut out_buf = Vec::with_capacity(128 * 1024);
-    let had_error = process_tokens(input, &mut out_buf, out);
+    let had_error = process_tokens(input, exponents, &mut out_buf, out);
     if !out_buf.is_empty() && out.write_all(&out_buf).is_err() {
         process::exit(0);
     }
@@ -170,12 +435,12 @@ fn process_bytes(input: &[u8], out: &mut BufWriter<io::StdoutLock>) -> bool {
 
 /// Process numbers from stdin using raw byte scanning for maximum throughput.
 /// Uses mmap for file redirections (zero-copy), streaming chunks for pipes.
-fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
+fn process_stdin(exponents: bool, out: &mut BufWriter<io::StdoutLock>) -> bool {
     // Try mmap for file redirections (zero-copy, zero-allocation input)
     #[cfg(unix)]
     {
         if let Some(mmap) = try_mmap_stdin() {
-            return process_bytes(&mmap, out);
+            return process_bytes(&mmap, exponents, out);
         }
     }
 
@@ -193,7 +458,7 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
         let n = match reader.read(&mut buf[leftover..]) {
             Ok(0) => {
                 // EOF: process any remaining leftover bytes
-                if leftover > 0 && process_tokens(&buf[..leftover], &mut out_buf, out) {
+                if leftover > 0 && process_tokens(&buf[..leftover], exponents, &mut out_buf, out) {
                     had_error = true;
                 }
                 break;
@@ -226,7 +491,7 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
                         .rposition(|&b| b == b' ' || b == b'\t' || b == b'\r')
                         .map(|p| p + 1)
                         .unwrap_or(leftover); // no whitespace: process entire buffer (single huge token)
-                    if process_tokens(&buf[..split], &mut out_buf, out) {
+                    if process_tokens(&buf[..split], exponents, &mut out_buf, out) {
                         had_error = true;
                     }
                     let remaining = leftover - split;
@@ -240,7 +505,7 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
         };
 
         // Process complete lines
-        if process_tokens(&buf[..boundary], &mut out_buf, out) {
+        if process_tokens(&buf[..boundary], exponents, &mut out_buf, out) {
             had_error = true;
         }
 
@@ -263,6 +528,7 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
 /// Returns true if any error occurred.
 fn process_tokens(
     input: &[u8],
+    exponents: bool,
     out_buf: &mut Vec<u8>,
     out: &mut BufWriter<io::StdoutLock>,
 ) -> bool {
@@ -295,7 +561,7 @@ fn process_tokens(
             pos += 1;
         }
 
-        if factor_token(&input[start..pos], out_buf, out) {
+        if factor_token(&input[start..pos], exponents, out_buf, out) {
             had_error = true;
         }
     }
@@ -308,9 +574,9 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Parse options (only --help and --version)
     let mut numbers: Vec<String> = Vec::new();
     let mut saw_dashdash = false;
+    let mut exponents = false;
 
     for arg in &args {
         if saw_dashdash {
@@ -329,6 +595,9 @@ fn main() {
                 print_version();
                 process::exit(0);
             }
+            "-h" | "--exponents" => {
+                exponents = true;
+            }
             _ => {
                 if arg.starts_with("--") {
                     eprintln!("{}: unrecognized option \u{2018}{}\u{2019}", TOOL_NAME, arg);
@@ -344,10 +613,10 @@ fn main() {
     let mut had_error = false;
 
     if numbers.is_empty() {
-        had_error = process_stdin(&mut out);
+        had_error = process_stdin(exponents, &mut out);
     } else {
         for num_str in &numbers {
-            if process_number(num_str, &mut out) {
+            if process_number(num_str, exponents, &mut out) {
                 had_error = true;
             }
         }

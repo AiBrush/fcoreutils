@@ -36,7 +36,12 @@ pub fn evaluate(args: &[String]) -> Result<bool, String> {
             if args[0] == "(" && args[2] == ")" {
                 return evaluate(&args[1..2]);
             }
-            return Err(format!("test: {}: binary operator expected", args[1]));
+            // GNU compat: if $2 is -a or -o, fall through to general parser
+            if args[1] == "-a" || args[1] == "-o" {
+                // Fall through to general parser below
+            } else {
+                return Err(format!("test: {}: binary operator expected", args[1]));
+            }
         }
         4 => {
             // ! expr expr expr (3-arg expression negated)
@@ -98,8 +103,7 @@ fn eval_binary(left: &str, op: &str, right: &str) -> Result<bool, String> {
     match op {
         "=" | "==" => Ok(left == right),
         "!=" => Ok(left != right),
-        "<" => Ok(left < right),
-        ">" => Ok(left > right),
+        // Note: < and > are NOT supported by GNU test (they're bash [[ ]] only)
         "-eq" => int_cmp(left, right, |a, b| a == b),
         "-ne" => int_cmp(left, right, |a, b| a != b),
         "-lt" => int_cmp(left, right, |a, b| a < b),
@@ -373,18 +377,6 @@ fn is_unary_op(s: &str) -> bool {
 fn is_binary_op(s: &str) -> bool {
     matches!(
         s,
-        "=" | "=="
-            | "!="
-            | "<"
-            | ">"
-            | "-eq"
-            | "-ne"
-            | "-lt"
-            | "-le"
-            | "-gt"
-            | "-ge"
-            | "-nt"
-            | "-ot"
-            | "-ef"
+        "=" | "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef"
     )
 }

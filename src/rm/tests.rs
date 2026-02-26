@@ -116,11 +116,11 @@ fn test_rm_verbose() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("removed"),
+        stdout_str.contains("removed"),
         "verbose output should contain 'removed', got: {}",
-        stderr
+        stdout_str
     );
     assert!(!file.exists());
 }

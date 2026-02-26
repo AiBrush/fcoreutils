@@ -60,15 +60,28 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
     let num_str = &s[..num_end];
     let suffix = &s[num_end..];
 
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| format!("invalid number: '{}'", num_str))?;
+    let num: u64 = match num_str.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            // If the string is valid digits but overflows u64, clamp to u64::MAX
+            // like GNU coreutils does for huge counts
+            let digits = num_str
+                .strip_prefix('+')
+                .or_else(|| num_str.strip_prefix('-'))
+                .unwrap_or(num_str);
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                u64::MAX
+            } else {
+                return Err(format!("invalid number: '{}'", num_str));
+            }
+        }
+    };
 
     let multiplier: u64 = match suffix {
         "" => 1,
         "b" => 512,
         "kB" => 1000,
-        "K" | "KiB" => 1024,
+        "k" | "K" | "KiB" => 1024,
         "MB" => 1_000_000,
         "M" | "MiB" => 1_048_576,
         "GB" => 1_000_000_000,
