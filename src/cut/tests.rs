@@ -1,7 +1,7 @@
 use super::*;
 
 fn cut_field_str(input: &str, delim: u8, spec: &str, complement: bool, suppress: bool) -> String {
-    let ranges = parse_ranges(spec).unwrap();
+    let ranges = parse_ranges(spec, false).unwrap();
     let output_delim = &[delim];
     let mut out = Vec::new();
     cut_fields(
@@ -18,7 +18,7 @@ fn cut_field_str(input: &str, delim: u8, spec: &str, complement: bool, suppress:
 }
 
 fn cut_byte_str(input: &str, spec: &str, complement: bool) -> String {
-    let ranges = parse_ranges(spec).unwrap();
+    let ranges = parse_ranges(spec, false).unwrap();
     let mut out = Vec::new();
     cut_bytes(input.as_bytes(), &ranges, complement, b"", &mut out).unwrap();
     String::from_utf8(out).unwrap()
@@ -34,7 +34,7 @@ fn process_data_str(
     output_delim: Option<&[u8]>,
     line_delim: u8,
 ) -> String {
-    let ranges = parse_ranges(spec).unwrap();
+    let ranges = parse_ranges(spec, false).unwrap();
     let default_od = if mode == CutMode::Fields {
         vec![delim]
     } else {
@@ -59,7 +59,7 @@ fn process_data_str(
 
 #[test]
 fn test_parse_single() {
-    let r = parse_ranges("3").unwrap();
+    let r = parse_ranges("3", false).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].start, 3);
     assert_eq!(r[0].end, 3);
@@ -67,7 +67,7 @@ fn test_parse_single() {
 
 #[test]
 fn test_parse_range() {
-    let r = parse_ranges("2-4").unwrap();
+    let r = parse_ranges("2-4", false).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].start, 2);
     assert_eq!(r[0].end, 4);
@@ -75,27 +75,27 @@ fn test_parse_range() {
 
 #[test]
 fn test_parse_open_start() {
-    let r = parse_ranges("-3").unwrap();
+    let r = parse_ranges("-3", false).unwrap();
     assert_eq!(r[0].start, 1);
     assert_eq!(r[0].end, 3);
 }
 
 #[test]
 fn test_parse_open_end() {
-    let r = parse_ranges("3-").unwrap();
+    let r = parse_ranges("3-", false).unwrap();
     assert_eq!(r[0].start, 3);
     assert_eq!(r[0].end, usize::MAX);
 }
 
 #[test]
 fn test_parse_multiple() {
-    let r = parse_ranges("1,3,5").unwrap();
+    let r = parse_ranges("1,3,5", false).unwrap();
     assert_eq!(r.len(), 3);
 }
 
 #[test]
 fn test_parse_merge_overlapping() {
-    let r = parse_ranges("1-3,2-5").unwrap();
+    let r = parse_ranges("1-3,2-5", false).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].start, 1);
     assert_eq!(r[0].end, 5);
@@ -103,7 +103,7 @@ fn test_parse_merge_overlapping() {
 
 #[test]
 fn test_parse_merge_adjacent() {
-    let r = parse_ranges("1-2,3-4").unwrap();
+    let r = parse_ranges("1-2,3-4", false).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].start, 1);
     assert_eq!(r[0].end, 4);
@@ -111,7 +111,7 @@ fn test_parse_merge_adjacent() {
 
 #[test]
 fn test_parse_zero_rejected() {
-    assert!(parse_ranges("0").is_err());
+    assert!(parse_ranges("0", false).is_err());
 }
 
 // --- Field cutting ---
@@ -446,7 +446,7 @@ fn test_zero_terminated_complement() {
 
 #[test]
 fn test_cut_fields_returns_false_when_suppressed() {
-    let ranges = parse_ranges("1").unwrap();
+    let ranges = parse_ranges("1", false).unwrap();
     let mut out = Vec::new();
     let result = cut_fields(b"no_delim", b':', &ranges, false, b":", true, &mut out).unwrap();
     assert!(!result);
@@ -455,7 +455,7 @@ fn test_cut_fields_returns_false_when_suppressed() {
 
 #[test]
 fn test_cut_fields_returns_true_when_not_suppressed() {
-    let ranges = parse_ranges("1").unwrap();
+    let ranges = parse_ranges("1", false).unwrap();
     let mut out = Vec::new();
     let result = cut_fields(b"a:b", b':', &ranges, false, b":", false, &mut out).unwrap();
     assert!(result);

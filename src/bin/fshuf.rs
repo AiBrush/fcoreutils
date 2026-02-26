@@ -179,8 +179,10 @@ fn main() {
 
     let mut echo_mode = false;
     let mut input_range: Option<(u64, u64)> = None;
+    let mut input_range_count = 0u32;
     let mut head_count: Option<usize> = None;
     let mut output_file: Option<String> = None;
+    let mut output_file_count = 0u32;
     let mut repeat = false;
     let mut zero_terminated = false;
     let mut random_source: Option<String> = None;
@@ -218,6 +220,7 @@ fn main() {
                     process::exit(1);
                 }
                 input_range = Some(parse_range(&args[i]));
+                input_range_count += 1;
             }
             "-n" | "--head-count" => {
                 i += 1;
@@ -225,7 +228,11 @@ fn main() {
                     eprintln!("{}: option requires an argument -- 'n'", TOOL_NAME);
                     process::exit(1);
                 }
-                head_count = Some(parse_count(&args[i]));
+                let val = parse_count(&args[i]);
+                head_count = Some(match head_count {
+                    Some(prev) => prev.min(val),
+                    None => val,
+                });
             }
             "-o" | "--output" => {
                 i += 1;
@@ -234,6 +241,7 @@ fn main() {
                     process::exit(1);
                 }
                 output_file = Some(args[i].clone());
+                output_file_count += 1;
             }
             "--random-source" => {
                 i += 1;
@@ -249,18 +257,30 @@ fn main() {
             _ => {
                 if let Some(rest) = arg.strip_prefix("--input-range=") {
                     input_range = Some(parse_range(rest));
+                    input_range_count += 1;
                 } else if let Some(rest) = arg.strip_prefix("--head-count=") {
-                    head_count = Some(parse_count(rest));
+                    let val = parse_count(rest);
+                    head_count = Some(match head_count {
+                        Some(prev) => prev.min(val),
+                        None => val,
+                    });
                 } else if let Some(rest) = arg.strip_prefix("--output=") {
                     output_file = Some(rest.to_string());
+                    output_file_count += 1;
                 } else if let Some(rest) = arg.strip_prefix("--random-source=") {
                     random_source = Some(rest.to_string());
                 } else if let Some(rest) = arg.strip_prefix("-i") {
                     input_range = Some(parse_range(rest));
+                    input_range_count += 1;
                 } else if let Some(rest) = arg.strip_prefix("-n") {
-                    head_count = Some(parse_count(rest));
+                    let val = parse_count(rest);
+                    head_count = Some(match head_count {
+                        Some(prev) => prev.min(val),
+                        None => val,
+                    });
                 } else if let Some(rest) = arg.strip_prefix("-o") {
                     output_file = Some(rest.to_string());
+                    output_file_count += 1;
                 } else if has_echo {
                     echo_args.push(arg.clone());
                 } else {
@@ -269,6 +289,38 @@ fn main() {
             }
         }
         i += 1;
+    }
+
+    // Validate option conflicts (GNU compat)
+    if input_range_count > 1 {
+        eprintln!(
+            "{}: multiple -i options specified",
+            TOOL_NAME
+        );
+        process::exit(1);
+    }
+    if output_file_count > 1 {
+        eprintln!(
+            "{}: multiple -o options specified",
+            TOOL_NAME
+        );
+        process::exit(1);
+    }
+    if echo_mode && input_range.is_some() {
+        eprintln!(
+            "{}: cannot combine -e and -i options",
+            TOOL_NAME
+        );
+        process::exit(1);
+    }
+    if input_range.is_some() && !positional.is_empty() {
+        eprintln!(
+            "{}: extra operand \u{2018}{}\u{2019}",
+            TOOL_NAME,
+            positional[0]
+        );
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(1);
     }
 
     let mut rng = if let Some(ref source) = random_source {
@@ -345,11 +397,14 @@ fn run_string_shuffle(
     repeat: bool,
 ) {
     if repeat {
+        let count = head_count.unwrap_or(usize::MAX);
+        if count == 0 {
+            return;
+        }
         if lines.is_empty() {
             eprintln!("{}: no lines to repeat", TOOL_NAME);
             process::exit(1);
         }
-        let count = head_count.unwrap_or(usize::MAX);
         for _ in 0..count {
             let idx = rng.gen_range(lines.len());
             let _ = out.write_all(lines[idx].as_bytes());
@@ -397,11 +452,14 @@ fn run_file_shuffle(
     }
 
     if repeat {
+        let count = head_count.unwrap_or(usize::MAX);
+        if count == 0 {
+            return;
+        }
         if offsets.is_empty() {
             eprintln!("{}: no lines to repeat", TOOL_NAME);
             process::exit(1);
         }
-        let count = head_count.unwrap_or(usize::MAX);
         for _ in 0..count {
             let idx = rng.gen_range(offsets.len());
             let (s, e) = offsets[idx];
@@ -668,6 +726,173 @@ mod tests {
             let mut our_sorted = our_lines;
             our_sorted.sort();
             assert_eq!(gnu_sorted, our_sorted, "Same set of numbers");
+        }
+    }
+
+    // --- GNU compatibility: option conflict validation ---
+
+    #[test]
+    fn test_i_and_e_conflict() {
+        let output = cmd().args(["-e", "-i", "0-9", "a"]).output().unwrap();
+        assert!(!output.status.success(), "-i and -e together should error");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("cannot combine -e and -i"),
+            "stderr: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_multiple_i_is_error() {
+        let output = cmd().args(["-i", "0-1", "-i", "0-2"]).output().unwrap();
+        assert!(
+            !output.status.success(),
+            "multiple -i should error"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("multiple -i"),
+            "stderr: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_i_with_extra_operand() {
+        let output = cmd().args(["-i", "0-0", "foo"]).output().unwrap();
+        assert!(
+            !output.status.success(),
+            "-i with extra operand should error"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("extra operand"),
+            "stderr: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_multiple_o_is_error() {
+        let dir = std::env::temp_dir();
+        let p1 = dir.join("fshuf_multi_o_1.txt");
+        let p2 = dir.join("fshuf_multi_o_2.txt");
+        let output = cmd()
+            .args([
+                "-i", "0-0",
+                "-o", p1.to_str().unwrap(),
+                "-o", p2.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "multiple -o should error"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("multiple -o"),
+            "stderr: {}",
+            stderr
+        );
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+
+    #[test]
+    fn test_multiple_n_uses_smallest() {
+        let output = cmd()
+            .args(["-i", "1-100", "-n", "10", "-n", "3"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 3, "multiple -n should use smallest value");
+    }
+
+    // --- GNU compatibility: --repeat feature ---
+
+    #[test]
+    fn test_repeat_input_range_count() {
+        let output = cmd()
+            .args(["--repeat", "-i", "0-9", "-n", "1000"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 1000, "should output exactly 1000 lines");
+        for line in &lines {
+            let num: u64 = line.parse().expect("each line should be a number");
+            assert!(num <= 9, "number {} out of range 0-9", num);
+        }
+    }
+
+    #[test]
+    fn test_repeat_stdin_n0_empty() {
+        let mut child = cmd()
+            .args(["--repeat", "-n", "0"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            stdin.write_all(b"a\nb\n").unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stdout.is_empty(),
+            "--repeat -n0 should produce no output"
+        );
+    }
+
+    #[test]
+    fn test_repeat_input_range_222_233() {
+        let output = cmd()
+            .args(["--repeat", "-i", "222-233", "-n", "2000"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 2000);
+        for line in &lines {
+            let num: u64 = line.parse().expect("each line should be a number");
+            assert!(
+                (222..=233).contains(&num),
+                "number {} out of range 222-233",
+                num
+            );
+        }
+    }
+
+    #[test]
+    fn test_repeat_stdin_count() {
+        let mut child = cmd()
+            .args(["--repeat", "-n", "2000"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            stdin.write_all(b"a\nb\nc\n").unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 2000);
+        for line in &lines {
+            assert!(
+                *line == "a" || *line == "b" || *line == "c",
+                "unexpected line: {}",
+                line
+            );
         }
     }
 

@@ -9,6 +9,14 @@ pub enum AddressRadix {
     None,
 }
 
+/// Byte order for multi-byte values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Endian {
+    Little,
+    Big,
+    Native,
+}
+
 /// Output format specifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -39,6 +47,7 @@ pub struct OdConfig {
     pub read_bytes: Option<u64>,
     pub width: usize,
     pub show_duplicates: bool,
+    pub endian: Endian,
 }
 
 impl Default for OdConfig {
@@ -51,6 +60,7 @@ impl Default for OdConfig {
             read_bytes: None,
             width: 16,
             show_duplicates: false,
+            endian: Endian::Native,
         }
     }
 }
@@ -172,9 +182,48 @@ fn format_float_f32(v: f32) -> String {
     snprintf_g(v as f64, 9)
 }
 
-/// Format f64 like GNU od: uses %.17g formatting.
+/// Format f64 like GNU od: shortest representation that round-trips.
+/// Try increasing precisions from DBL_DIG (15) to DBL_DECIMAL_DIG (17).
 fn format_float_f64(v: f64) -> String {
+    for prec in 15usize..=17 {
+        let s = snprintf_g(v, prec);
+        if let Ok(reparsed) = s.trim().parse::<f64>() {
+            if reparsed.to_bits() == v.to_bits() {
+                return s;
+            }
+        }
+    }
     snprintf_g(v, 17)
+}
+
+/// Read a u16 from bytes with the specified endianness.
+#[inline]
+fn read_u16(bytes: &[u8], endian: Endian) -> u16 {
+    let arr: [u8; 2] = bytes[..2].try_into().unwrap();
+    match endian {
+        Endian::Big => u16::from_be_bytes(arr),
+        Endian::Little | Endian::Native => u16::from_le_bytes(arr),
+    }
+}
+
+/// Read a u32 from bytes with the specified endianness.
+#[inline]
+fn read_u32(bytes: &[u8], endian: Endian) -> u32 {
+    let arr: [u8; 4] = bytes[..4].try_into().unwrap();
+    match endian {
+        Endian::Big => u32::from_be_bytes(arr),
+        Endian::Little | Endian::Native => u32::from_le_bytes(arr),
+    }
+}
+
+/// Read a u64 from bytes with the specified endianness.
+#[inline]
+fn read_u64(bytes: &[u8], endian: Endian) -> u64 {
+    let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+    match endian {
+        Endian::Big => u64::from_be_bytes(arr),
+        Endian::Little | Endian::Native => u64::from_le_bytes(arr),
+    }
 }
 
 /// Write a formatted value directly to the output, avoiding String allocation.
@@ -184,6 +233,7 @@ fn write_value(
     bytes: &[u8],
     fmt: OutputFormat,
     width: usize,
+    endian: Endian,
 ) -> io::Result<()> {
     match fmt {
         OutputFormat::NamedChar => {
@@ -222,49 +272,49 @@ fn write_value(
             }
         }
         OutputFormat::Octal(size) => match size {
-            1 => write!(out, " {:03o}", bytes[0]),
+            1 => write!(out, "{:>w$}", format!("{:03o}", bytes[0]), w = width),
             2 => {
-                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-                write!(out, " {:06o}", v)
+                let v = read_u16(bytes, endian);
+                write!(out, "{:>w$}", format!("{:06o}", v), w = width)
             }
             4 => {
-                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-                write!(out, " {:011o}", v)
+                let v = read_u32(bytes, endian);
+                write!(out, "{:>w$}", format!("{:011o}", v), w = width)
             }
             8 => {
-                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                write!(out, " {:022o}", v)
+                let v = read_u64(bytes, endian);
+                write!(out, "{:>w$}", format!("{:022o}", v), w = width)
             }
             _ => Ok(()),
         },
         OutputFormat::Hex(size) => match size {
-            1 => write!(out, " {:02x}", bytes[0]),
+            1 => write!(out, "{:>w$}", format!("{:02x}", bytes[0]), w = width),
             2 => {
-                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-                write!(out, " {:04x}", v)
+                let v = read_u16(bytes, endian);
+                write!(out, "{:>w$}", format!("{:04x}", v), w = width)
             }
             4 => {
-                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-                write!(out, " {:08x}", v)
+                let v = read_u32(bytes, endian);
+                write!(out, "{:>w$}", format!("{:08x}", v), w = width)
             }
             8 => {
-                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                write!(out, " {:016x}", v)
+                let v = read_u64(bytes, endian);
+                write!(out, "{:>w$}", format!("{:016x}", v), w = width)
             }
             _ => Ok(()),
         },
         OutputFormat::UnsignedDec(size) => match size {
             1 => write!(out, "{:>w$}", bytes[0], w = width),
             2 => {
-                let v = u16::from_le_bytes(bytes[..2].try_into().unwrap());
+                let v = read_u16(bytes, endian);
                 write!(out, "{:>w$}", v, w = width)
             }
             4 => {
-                let v = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+                let v = read_u32(bytes, endian);
                 write!(out, "{:>w$}", v, w = width)
             }
             8 => {
-                let v = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                let v = read_u64(bytes, endian);
                 write!(out, "{:>w$}", v, w = width)
             }
             _ => Ok(()),
@@ -272,31 +322,100 @@ fn write_value(
         OutputFormat::SignedDec(size) => match size {
             1 => write!(out, "{:>w$}", bytes[0] as i8, w = width),
             2 => {
-                let v = i16::from_le_bytes(bytes[..2].try_into().unwrap());
+                let v = read_u16(bytes, endian) as i16;
                 write!(out, "{:>w$}", v, w = width)
             }
             4 => {
-                let v = i32::from_le_bytes(bytes[..4].try_into().unwrap());
+                let v = read_u32(bytes, endian) as i32;
                 write!(out, "{:>w$}", v, w = width)
             }
             8 => {
-                let v = i64::from_le_bytes(bytes[..8].try_into().unwrap());
+                let v = read_u64(bytes, endian) as i64;
                 write!(out, "{:>w$}", v, w = width)
             }
             _ => Ok(()),
         },
         OutputFormat::Float(size) => match size {
             4 => {
-                let v = f32::from_le_bytes(bytes[..4].try_into().unwrap());
+                let v = f32::from_bits(read_u32(bytes, endian));
                 write!(out, "{:>w$}", format_float_f32(v), w = width)
             }
             8 => {
-                let v = f64::from_le_bytes(bytes[..8].try_into().unwrap());
+                let v = f64::from_bits(read_u64(bytes, endian));
                 write!(out, "{:>w$}", format_float_f64(v), w = width)
             }
             _ => Ok(()),
         },
     }
+}
+
+/// Compute the effective field width for a format, considering alignment with other formats.
+/// When multiple formats share the same element size, they all use the maximum field width.
+/// When formats have different element sizes, the wider element's field width must accommodate
+/// the narrower element's columns that it spans.
+fn compute_effective_widths(formats: &[OutputFormat], line_width: usize) -> Vec<usize> {
+    if formats.len() <= 1 {
+        return formats.iter().map(|f| field_width(*f)).collect();
+    }
+
+    // Group formats by element size and find the max field width per byte position.
+    // For each format, compute how many bytes each element covers.
+    // The column layout is determined by the narrowest element size (1 byte per column).
+    // Wider elements span multiple narrow columns.
+
+    // Find the minimum element size (determines the number of column slots per line)
+    let min_elem_sz = formats.iter().map(|f| element_size(*f)).min().unwrap_or(1);
+    let _num_slots = line_width / min_elem_sz;
+
+    // For each slot (in terms of min_elem_sz), compute the maximum width contribution
+    // from all formats.
+    // A format with element size `es` contributes `field_width / (es / min_elem_sz)` per slot,
+    // but we need to think in terms of total width per slot.
+    //
+    // Actually, GNU od's approach is simpler: for formats with the same element size,
+    // use the max field width. For formats with different element sizes, the wider
+    // element's field width = (field_width_of_narrower * (es / narrow_es)).
+    //
+    // The key rule: per byte position, the total character width must be consistent across all
+    // format lines. Each byte gets (total_chars_per_line / line_width_bytes) chars.
+
+    // Simpler approach: compute per-slot width.
+    // Each slot is min_elem_sz bytes wide.
+    // For a format with element size `es`, it spans `es / min_elem_sz` slots,
+    // and its field_width is spread across those slots.
+    // The per-slot width for that format is `field_width(fmt) / (es / min_elem_sz)`.
+    // But this needs to be an integer, so we need to be careful.
+
+    // Actually, GNU od computes it differently. It computes per-byte-position width:
+    //   bytes_per_block = line_width
+    //   For each format, chars_per_block = num_elements * field_width
+    //   The effective chars_per_block for the line = max over all formats
+    //   Then each format adjusts its field_width = effective_chars_per_block / num_elements
+
+    let mut max_chars_per_block = 0usize;
+    for fmt in formats {
+        let es = element_size(*fmt);
+        let fw = field_width(*fmt);
+        let num_elems = line_width / es;
+        let chars = num_elems * fw;
+        if chars > max_chars_per_block {
+            max_chars_per_block = chars;
+        }
+    }
+
+    // Now compute effective field width for each format
+    formats
+        .iter()
+        .map(|fmt| {
+            let es = element_size(*fmt);
+            let num_elems = line_width / es;
+            if num_elems > 0 {
+                max_chars_per_block / num_elems
+            } else {
+                field_width(*fmt)
+            }
+        })
+        .collect()
 }
 
 /// Write one line of output for a given format type directly to the writer.
@@ -309,6 +428,8 @@ fn write_format_line(
     radix: AddressRadix,
     offset: u64,
     z_annotate: bool,
+    effective_fw: usize,
+    endian: Endian,
 ) -> io::Result<()> {
     // Address prefix
     if is_first_format {
@@ -330,7 +451,7 @@ fn write_format_line(
     }
 
     let elem_sz = element_size(fmt);
-    let fw = field_width(fmt);
+    let fw = effective_fw;
     let num_elems = line_width / elem_sz;
     let actual_full = chunk.len() / elem_sz;
     let remainder = chunk.len() % elem_sz;
@@ -339,12 +460,12 @@ fn write_format_line(
         if i < actual_full {
             let start = i * elem_sz;
             let end = start + elem_sz;
-            write_value(out, &chunk[start..end], fmt, fw)?;
+            write_value(out, &chunk[start..end], fmt, fw, endian)?;
         } else if i == actual_full && remainder > 0 {
             let start = i * elem_sz;
             let mut padded = [0u8; 8]; // max element size is 8
             padded[..remainder].copy_from_slice(&chunk[start..]);
-            write_value(out, &padded[..elem_sz], fmt, fw)?;
+            write_value(out, &padded[..elem_sz], fmt, fw, endian)?;
         }
     }
 
@@ -517,6 +638,9 @@ pub fn od_process<R: Read, W: Write>(
     let mut prev_chunk: Option<Vec<u8>> = None;
     let mut star_printed = false;
 
+    // Compute effective field widths for multi-format alignment
+    let effective_widths = compute_effective_widths(&config.formats, width);
+
     let mut pos = 0;
     while pos < data.len() {
         let end = std::cmp::min(pos + width, data.len());
@@ -541,6 +665,7 @@ pub fn od_process<R: Read, W: Write>(
 
         for (i, fmt) in config.formats.iter().enumerate() {
             let z = config.z_flags.get(i).copied().unwrap_or(false);
+            let ew = effective_widths[i];
             write_format_line(
                 output,
                 chunk,
@@ -550,6 +675,8 @@ pub fn od_process<R: Read, W: Write>(
                 config.address_radix,
                 offset,
                 z,
+                ew,
+                config.endian,
             )?;
         }
 

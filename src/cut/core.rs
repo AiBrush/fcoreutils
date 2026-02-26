@@ -29,7 +29,11 @@ pub struct Range {
 
 /// Parse a LIST specification like "1,3-5,7-" into ranges.
 /// Each range is 1-based. Returns sorted, merged ranges.
-pub fn parse_ranges(spec: &str) -> Result<Vec<Range>, String> {
+/// When `no_merge_adjacent` is true, overlapping ranges are still merged but
+/// adjacent ranges (e.g., 1-2,3-4) are kept separate. This is needed when
+/// `--output-delimiter` is specified for byte/char mode so the delimiter is
+/// inserted between originally separate but adjacent ranges.
+pub fn parse_ranges(spec: &str, no_merge_adjacent: bool) -> Result<Vec<Range>, String> {
     let mut ranges = Vec::new();
 
     for part in spec.split(',') {
@@ -41,6 +45,13 @@ pub fn parse_ranges(spec: &str) -> Result<Vec<Range>, String> {
         if let Some(idx) = part.find('-') {
             let left = &part[..idx];
             let right = &part[idx + 1..];
+
+            // Reject bare "-" (both sides empty)
+            if left.is_empty() && right.is_empty() {
+                return Err(format!(
+                    "invalid range with no endpoint: -"
+                ));
+            }
 
             let start = if left.is_empty() {
                 1
@@ -80,15 +91,25 @@ pub fn parse_ranges(spec: &str) -> Result<Vec<Range>, String> {
         return Err("you must specify a list of bytes, characters, or fields".to_string());
     }
 
-    // Sort and merge overlapping ranges
+    // Sort and merge overlapping/adjacent ranges
     ranges.sort_by_key(|r| (r.start, r.end));
     let mut merged = vec![ranges[0].clone()];
     for r in &ranges[1..] {
         let last = merged.last_mut().unwrap();
-        if r.start <= last.end.saturating_add(1) {
-            last.end = last.end.max(r.end);
+        if no_merge_adjacent {
+            // Only merge truly overlapping ranges, not adjacent ones
+            if r.start <= last.end {
+                last.end = last.end.max(r.end);
+            } else {
+                merged.push(r.clone());
+            }
         } else {
-            merged.push(r.clone());
+            // Merge both overlapping and adjacent ranges
+            if r.start <= last.end.saturating_add(1) {
+                last.end = last.end.max(r.end);
+            } else {
+                merged.push(r.clone());
+            }
         }
     }
 
@@ -3504,10 +3525,38 @@ pub fn cut_field1_inplace(data: &mut [u8], delim: u8, line_delim: u8, suppress: 
 }
 
 /// Process a full data buffer (from mmap or read) with cut operation.
+/// GNU cut preserves the absence of a trailing newline: if the input does not
+/// end with the line delimiter, the output must not either.
 pub fn process_cut_data(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io::Result<()> {
-    match cfg.mode {
-        CutMode::Fields => process_fields_fast(data, cfg, out),
-        CutMode::Bytes | CutMode::Characters => process_bytes_fast(data, cfg, out),
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    // Check if input ends with line delimiter
+    let input_has_trailing = data[data.len() - 1] == cfg.line_delim;
+
+    if input_has_trailing {
+        // Input ends with newline — process normally
+        match cfg.mode {
+            CutMode::Fields => process_fields_fast(data, cfg, out),
+            CutMode::Bytes | CutMode::Characters => process_bytes_fast(data, cfg, out),
+        }
+    } else {
+        // Input does NOT end with newline. Process into a buffer,
+        // then strip the trailing line_delim that internal functions add.
+        let mut buf = Vec::with_capacity(data.len());
+        match cfg.mode {
+            CutMode::Fields => process_fields_fast(data, cfg, &mut buf)?,
+            CutMode::Bytes | CutMode::Characters => process_bytes_fast(data, cfg, &mut buf)?,
+        }
+        // Strip the trailing line_delim if the internal functions added one
+        if !buf.is_empty() && buf[buf.len() - 1] == cfg.line_delim {
+            buf.pop();
+        }
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+        Ok(())
     }
 }
 
@@ -3595,12 +3644,18 @@ fn read_fully<R: BufRead>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
 /// In-place avoids allocating intermediate output buffers — the result is written
 /// directly into the input buffer (output is always <= input for non-complement modes
 /// with default output delimiter).
+/// GNU compat: preserves absence of trailing line delimiter.
 pub fn process_cut_data_mut(data: &mut [u8], cfg: &CutConfig) -> Option<usize> {
+    if data.is_empty() {
+        return Some(0);
+    }
     if cfg.complement {
         return None;
     }
 
-    match cfg.mode {
+    let input_has_trailing = data[data.len() - 1] == cfg.line_delim;
+
+    let new_len = match cfg.mode {
         CutMode::Fields => {
             // Only handle when output delimiter matches input (single-byte)
             if cfg.output_delim.len() != 1 || cfg.output_delim[0] != cfg.delim {
@@ -3609,20 +3664,27 @@ pub fn process_cut_data_mut(data: &mut [u8], cfg: &CutConfig) -> Option<usize> {
             if cfg.delim == cfg.line_delim {
                 return None;
             }
-            Some(cut_fields_inplace_general(
+            cut_fields_inplace_general(
                 data,
                 cfg.delim,
                 cfg.line_delim,
                 cfg.ranges,
                 cfg.suppress_no_delim,
-            ))
+            )
         }
         CutMode::Bytes | CutMode::Characters => {
             if !cfg.output_delim.is_empty() {
                 return None;
             }
-            Some(cut_bytes_inplace_general(data, cfg.line_delim, cfg.ranges))
+            cut_bytes_inplace_general(data, cfg.line_delim, cfg.ranges)
         }
+    };
+
+    // GNU compat: if input didn't end with line_delim, strip the one we added
+    if !input_has_trailing && new_len > 0 && data[new_len - 1] == cfg.line_delim {
+        Some(new_len - 1)
+    } else {
+        Some(new_len)
     }
 }
 

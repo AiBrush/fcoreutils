@@ -22,7 +22,21 @@ impl Default for EchoConfig {
 /// flags if it starts with `-` and every subsequent character is one of `n`,
 /// `e`, or `E`.  Combined flags like `-neE` are valid.  Anything else (e.g.
 /// `-z`, `--foo`, or even `-`) is treated as a normal text argument.
+///
+/// When `POSIXLY_CORRECT` is set, no flags are recognized and escape
+/// interpretation is always enabled (POSIX XSI behavior).
 pub fn parse_echo_args(args: &[String]) -> (EchoConfig, &[String]) {
+    // POSIXLY_CORRECT: no options recognized, escapes always interpreted
+    if std::env::var_os("POSIXLY_CORRECT").is_some() {
+        return (
+            EchoConfig {
+                trailing_newline: true,
+                interpret_escapes: true,
+            },
+            args,
+        );
+    }
+
     let mut config = EchoConfig::default();
     let mut idx = 0;
 
@@ -118,19 +132,32 @@ fn expand_escapes(src: &[u8], out: &mut Vec<u8>) -> bool {
             b't' => out.push(b'\t'),
             b'v' => out.push(0x0B),
             b'0' => {
-                // \0NNN — octal (up to 3 octal digits after the '0')
-                let start = i + 1;
-                let mut end = start;
-                while end < len && end < start + 3 && src[end] >= b'0' && src[end] <= b'7' {
-                    end += 1;
+                // \0NNN — octal with \0 prefix (up to 3 more octal digits)
+                // GNU echo treats \0 as a prefix: read up to 3 MORE digits
+                let mut val: u16 = 0;
+                let mut consumed = 0;
+                let mut j = i + 1;
+                while j < len && consumed < 3 && src[j] >= b'0' && src[j] <= b'7' {
+                    val = val * 8 + (src[j] - b'0') as u16;
+                    j += 1;
+                    consumed += 1;
                 }
-                let val = if start == end {
-                    0u8 // \0 with no digits = NUL
-                } else {
-                    parse_octal(&src[start..end])
-                };
-                out.push(val);
-                i = end - 1; // will be incremented at end of loop
+                out.push(val as u8);
+                i = j - 1; // will be incremented at end of loop
+            }
+            b'1'..=b'7' => {
+                // \NNN — octal (up to 3 total digits including the first)
+                let first = src[i] - b'0';
+                let mut val = first as u16;
+                let mut consumed = 0;
+                let mut j = i + 1;
+                while j < len && consumed < 2 && src[j] >= b'0' && src[j] <= b'7' {
+                    val = val * 8 + (src[j] - b'0') as u16;
+                    j += 1;
+                    consumed += 1;
+                }
+                out.push(val as u8);
+                i = j - 1; // will be incremented at end of loop
             }
             b'x' => {
                 // \xHH — hexadecimal (up to 2 hex digits)
@@ -163,14 +190,6 @@ fn expand_escapes(src: &[u8], out: &mut Vec<u8>) -> bool {
 #[inline]
 fn is_hex_digit(b: u8) -> bool {
     b.is_ascii_hexdigit()
-}
-
-fn parse_octal(digits: &[u8]) -> u8 {
-    let mut val: u16 = 0;
-    for &d in digits {
-        val = val * 8 + (d - b'0') as u16;
-    }
-    val as u8
 }
 
 fn parse_hex(digits: &[u8]) -> u8 {

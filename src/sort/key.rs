@@ -59,6 +59,76 @@ impl KeyOpts {
             }
         }
     }
+
+    /// Validate that the set of options is compatible (GNU sort rules).
+    /// Returns Err with a descriptive message if incompatible options are detected.
+    ///
+    /// GNU incompatibility rules:
+    /// - At most one of {n, g, h, M} can be set (numeric sort types)
+    /// - R is incompatible with {n, g, h, M}
+    /// - V is incompatible with {n, g, h, M}
+    /// - d is incompatible with {n, g, h, M}
+    /// - i is incompatible with {n, g, h, M}
+    ///
+    /// GNU canonical order for error messages: d, g, h, i, M, n, R, V
+    pub fn validate(&self) -> Result<(), String> {
+        // Collect all active options in GNU canonical order: d, g, h, i, M, n, R, V
+        // We only need to check options that participate in incompatibility.
+        let mut active: Vec<char> = Vec::new();
+        if self.dictionary_order {
+            active.push('d');
+        }
+        if self.general_numeric {
+            active.push('g');
+        }
+        if self.human_numeric {
+            active.push('h');
+        }
+        if self.ignore_nonprinting {
+            active.push('i');
+        }
+        if self.month {
+            active.push('M');
+        }
+        if self.numeric {
+            active.push('n');
+        }
+        if self.random {
+            active.push('R');
+        }
+        if self.version {
+            active.push('V');
+        }
+
+        // Define the incompatible pairs (canonical order: lower index in active list first)
+        // Numeric-like types: g, h, M, n — at most one allowed
+        // R, V each incompatible with g, h, M, n
+        // d, i each incompatible with g, h, M, n
+        let is_numeric_type = |c: char| matches!(c, 'g' | 'h' | 'M' | 'n');
+        let incompatible_with_numeric = |c: char| matches!(c, 'd' | 'i' | 'R' | 'V');
+
+        // Check all pairs in canonical order
+        for i in 0..active.len() {
+            for j in (i + 1)..active.len() {
+                let a = active[i];
+                let b = active[j];
+                let conflict = if is_numeric_type(a) && is_numeric_type(b) {
+                    true
+                } else if is_numeric_type(a) && incompatible_with_numeric(b) {
+                    true
+                } else if incompatible_with_numeric(a) && is_numeric_type(b) {
+                    true
+                } else {
+                    false
+                };
+                if conflict {
+                    return Err(format!("options '-{}{}' are incompatible", a, b));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// A parsed key specification from `-k START[,END]`.
@@ -91,6 +161,23 @@ impl KeyDef {
         if start_field == 0 {
             return Err("field number is zero: invalid field specification".to_string());
         }
+
+        // GNU sort rejects character offset 0 (positions are 1-indexed)
+        if start_char == 0 && parts[0].contains('.') {
+            return Err(format!(
+                "character offset is zero: invalid field specification '{}'",
+                parts[0]
+            ));
+        }
+        if parts.len() > 1 && end_char == 0 && parts[1].contains('.') {
+            return Err(format!(
+                "character offset is zero: invalid field specification '{}'",
+                parts[1]
+            ));
+        }
+
+        // Validate per-key option compatibility
+        opts.validate().map_err(|e| e)?;
 
         Ok(KeyDef {
             start_field,
