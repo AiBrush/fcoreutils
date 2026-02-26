@@ -903,39 +903,42 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         if file_size < TINY_FILE_LIMIT {
             return hash_file_tiny(algo, file, file_size as usize);
         }
-        // Files >= 8KB: mmap for zero-copy single-shot hash.
-        // Avoids buffer allocation, read() syscalls, and data copying.
-        // Falls back to streaming I/O if mmap fails (FUSE, NFS, etc.).
-        //
-        // SAFETY: mmap is safe for regular local files. If the file is truncated
-        // or the backing storage disappears after mapping (e.g. NFS disconnect),
-        // the kernel delivers SIGBUS which will crash the process. This matches
-        // the behavior of other mmap-using tools (wc, cat). The fallback to
-        // streaming I/O (read()) handles mmap failures at map time, but cannot
-        // protect against post-map truncation.
-        let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
-        if let Ok(mmap) = mmap_result {
+        // Large files (>=SMALL_FILE_LIMIT): mmap for zero-copy single-shot hash.
+        if file_size >= SMALL_FILE_LIMIT {
+            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
+            if let Ok(mmap) = mmap_result {
+                #[cfg(target_os = "linux")]
+                {
+                    if file_size >= 2 * 1024 * 1024 {
+                        let _ = mmap.advise(memmap2::Advice::HugePage);
+                    }
+                    let _ = mmap.advise(memmap2::Advice::Sequential);
+                    if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                        let _ = mmap.advise(memmap2::Advice::WillNeed);
+                    }
+                }
+                return hash_bytes(algo, &mmap);
+            }
+            // mmap failed — fall back to streaming I/O
             #[cfg(target_os = "linux")]
             {
-                if file_size >= 2 * 1024 * 1024 {
-                    let _ = mmap.advise(memmap2::Advice::HugePage);
-                }
-                let _ = mmap.advise(memmap2::Advice::Sequential);
-                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
-                    let _ = mmap.advise(memmap2::Advice::WillNeed);
-                }
+                return hash_file_pipelined(algo, file, file_size);
             }
-            return hash_bytes(algo, &mmap);
+            #[cfg(not(target_os = "linux"))]
+            {
+                return hash_reader(algo, file);
+            }
         }
-        // mmap failed — fall back to streaming I/O
+        // Medium files (8KB..SMALL_FILE_LIMIT): streaming hash with fadvise.
+        // Avoids both mmap overhead and large buffer allocation page faults.
         #[cfg(target_os = "linux")]
         {
-            return hash_file_pipelined(algo, file, file_size);
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+            }
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            return hash_reader(algo, file);
-        }
+        return hash_reader(algo, file);
     }
 
     // Non-regular files or fallback: stream
@@ -2338,23 +2341,28 @@ fn hash_from_raw_fd(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
     let file = unsafe { File::from_raw_fd(fd) };
 
     if is_regular && size > 0 {
-        // Files >=8KB: mmap with HugePage + PopulateRead for zero-copy hash
-        let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
-        if let Ok(mmap) = mmap_result {
-            if size >= 2 * 1024 * 1024 {
-                let _ = mmap.advise(memmap2::Advice::HugePage);
-            }
-            let _ = mmap.advise(memmap2::Advice::Sequential);
-            if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
-                let _ = mmap.advise(memmap2::Advice::WillNeed);
-            }
-            return hash_bytes(algo, &mmap);
-        }
-        // mmap failed: use pipelined I/O for large files, small-buffer read for tiny ones
+        // Large files (>=SMALL_FILE_LIMIT): mmap for zero-copy hash
         if size >= SMALL_FILE_LIMIT {
+            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
+            if let Ok(mmap) = mmap_result {
+                if size >= 2 * 1024 * 1024 {
+                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                }
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                    let _ = mmap.advise(memmap2::Advice::WillNeed);
+                }
+                return hash_bytes(algo, &mmap);
+            }
+            // mmap failed: fall back to pipelined I/O
             return hash_file_pipelined(algo, file, size);
         }
-        return hash_file_small(algo, file, size as usize);
+        // Medium files: streaming hash with fadvise
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        }
+        return hash_reader(algo, file);
     }
 
     // Non-regular files: streaming hash
