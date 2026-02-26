@@ -934,7 +934,7 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            return hash_file_small(algo, file, file_size as usize);
+            return hash_reader(algo, file);
         }
     }
 
@@ -2350,7 +2350,10 @@ fn hash_from_raw_fd(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
             }
             return hash_bytes(algo, &mmap);
         }
-        // mmap failed: fallback to single-read into thread-local buffer
+        // mmap failed: use pipelined I/O for large files, small-buffer read for tiny ones
+        if size >= SMALL_FILE_LIMIT {
+            return hash_file_pipelined(algo, file, size);
+        }
         return hash_file_small(algo, file, size as usize);
     }
 
