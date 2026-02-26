@@ -80,37 +80,89 @@ _start:
     cmp     r14, 1
     jle     .missing_operand
 
-    ; If argc == 2, check for --help / --version
-    cmp     r14, 2
-    jne     .parse_args
+    ; ============================================================
+    ; PASS 1: Scan ALL argv for --help / --version
+    ; GNU sleep uses parse_gnu_standard_options_only() which checks
+    ; every argv entry for --help/--version, respecting --.
+    ; ============================================================
+    mov     rcx, 1              ; start at argv[1]
+    xor     r8d, r8d            ; r8 = 0: not past "--" yet
 
-    ; Check argv[1]
-    mov     rdi, [r15 + 8]      ; argv[1]
+.scan_loop:
+    cmp     rcx, r14
+    jge     .scan_done
+
+    mov     rdi, [r15 + rcx*8]  ; argv[i]
+
+    ; If past "--", skip option checking
+    test    r8d, r8d
+    jnz     .scan_next
+
+    ; Check if starts with '-'
+    cmp     byte [rdi], '-'
+    jne     .scan_next
+
+    ; Check for "--"
+    cmp     byte [rdi + 1], '-'
+    jne     .scan_next
+
+    ; Check for exactly "--"
+    cmp     byte [rdi + 2], 0
+    je      .scan_set_past
+
+    ; Check for "--help"
+    push    rcx
+    push    r8
     mov     rsi, str_opt_help
     call    _strcmp
+    pop     r8
+    pop     rcx
     test    eax, eax
     jz      .show_help
 
-    mov     rdi, [r15 + 8]
+    ; Check for "--version"
+    mov     rdi, [r15 + rcx*8]
+    push    rcx
+    push    r8
     mov     rsi, str_opt_version
     call    _strcmp
+    pop     r8
+    pop     rcx
     test    eax, eax
     jz      .show_version
 
-.parse_args:
-    ; Parse all arguments, accumulate total seconds + nanoseconds
+    jmp     .scan_next
+
+.scan_set_past:
+    mov     r8d, 1              ; past "--"
+.scan_next:
+    inc     rcx
+    jmp     .scan_loop
+
+.scan_done:
+    ; ============================================================
+    ; PASS 2: Parse arguments, accumulate time
     ; r12 = total seconds (integer part)
     ; r13 = total nanoseconds (fractional part, 0-999999999)
+    ; rbx = arg index
+    ; rbp = argc
+    ; r8  = "past options" flag (0 = checking options, 1 = past --)
+    ; ============================================================
     xor     r12, r12            ; total_sec = 0
     xor     r13, r13            ; total_nsec = 0
     mov     rbx, 1              ; arg index (start at 1, skip argv[0])
     mov     rbp, r14            ; argc
+    xor     r8d, r8d            ; not past "--" yet
 
 .arg_loop:
     cmp     rbx, rbp
     jge     .do_sleep           ; processed all args
 
     mov     rdi, [r15 + rbx*8]  ; argv[i]
+
+    ; If past "--", skip option checking — go straight to parsing
+    test    r8d, r8d
+    jnz     .not_flag
 
     ; Check for flag-like arguments starting with '-'
     cmp     byte [rdi], '-'
@@ -127,6 +179,8 @@ _start:
     jmp     .unrecognized_option
 
 .end_of_options:
+    ; Set "past options" flag; this -- itself is skipped (not parsed as time)
+    mov     r8d, 1
     inc     rbx
     jmp     .arg_loop
 
@@ -338,6 +392,35 @@ _strcmp:
     ret
 
 ; ============================================================
+; _strcasecmp(rdi=s1, rsi=s2) -> eax: 0=equal (case-insensitive)
+; Compares s1 against s2 case-insensitively (s2 must be lowercase)
+; ============================================================
+_strcasecmp:
+.loop:
+    movzx   eax, byte [rdi]
+    movzx   ecx, byte [rsi]
+    ; Convert al to lowercase if A-Z
+    cmp     al, 'A'
+    jb      .no_lower
+    cmp     al, 'Z'
+    ja      .no_lower
+    add     al, 32              ; 'A' -> 'a'
+.no_lower:
+    cmp     al, cl
+    jne     .diff
+    test    al, al
+    jz      .equal
+    inc     rdi
+    inc     rsi
+    jmp     .loop
+.equal:
+    xor     eax, eax
+    ret
+.diff:
+    sub     eax, ecx
+    ret
+
+; ============================================================
 ; _parse_time(rdi=str) -> rax=sec, rdx=nsec, rcx=status
 ; status: 0=ok, 1=error, 2=infinity
 ; ============================================================
@@ -351,15 +434,15 @@ _parse_time:
 
     mov     r15, rdi
 
-    ; Check for "infinity"
+    ; Check for "infinity" (case-insensitive)
     mov     rsi, str_infinity
-    call    _strcmp
+    call    _strcasecmp
     test    eax, eax
     jz      .pt_infinity
 
     mov     rdi, r15
     mov     rsi, str_inf
-    call    _strcmp
+    call    _strcasecmp
     test    eax, eax
     jz      .pt_infinity
 
