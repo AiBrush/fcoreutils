@@ -3,6 +3,39 @@
 use std::io::{self, Read, Write};
 use std::process;
 
+/// Write buffer directly to fd 1, bypassing BufWriter overhead.
+#[cfg(unix)]
+fn write_all_fd1(buf: &[u8]) -> bool {
+    let mut pos = 0;
+    while pos < buf.len() {
+        let ret = unsafe {
+            libc::write(
+                1,
+                buf[pos..].as_ptr() as *const libc::c_void,
+                (buf.len() - pos) as _,
+            )
+        };
+        if ret > 0 {
+            pos += ret as usize;
+        } else if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return false;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn write_all_fd1(buf: &[u8]) -> bool {
+    use std::io::Write;
+    std::io::stdout().lock().write_all(buf).is_ok()
+}
+
 const TOOL_NAME: &str = "base32";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -347,77 +380,68 @@ fn encode_5_to_8(b0: u8, b1: u8, b2: u8, b3: u8, b4: u8, out: &mut [u8]) {
     out[7] = BASE32_ALPHABET[(b4 & 0x1F) as usize];
 }
 
-/// Copy encoded bytes into output buffer, inserting newlines at wrap boundaries.
-#[inline(always)]
-fn copy_with_wrap(
-    encoded: &[u8],
-    buf: &mut [u8],
-    offset: &mut usize,
-    col: &mut usize,
-    wrap: usize,
-) {
-    let mut i = 0;
-    while i < encoded.len() {
-        let space_in_line = wrap - *col;
-        let to_copy = space_in_line.min(encoded.len() - i);
-        buf[*offset..*offset + to_copy].copy_from_slice(&encoded[i..i + to_copy]);
-        *offset += to_copy;
-        *col += to_copy;
-        i += to_copy;
-        if *col == wrap {
-            buf[*offset] = b'\n';
-            *offset += 1;
-            *col = 0;
-        }
-    }
-}
-
-/// Encode and write with line wrapping using a fixed output buffer.
-/// Encodes into a temp 8-byte buffer per group, then copies to output
-/// with wrapping interleaved. No per-chunk Vec allocation.
-fn encode_streaming(data: &[u8], wrap: usize, out: &mut impl Write) -> io::Result<()> {
+/// Encode and write with line wrapping using raw fd1 writes.
+/// Two-phase approach: batch-encode raw base32 chars, then insert newlines.
+/// Eliminates per-5-byte copy_with_wrap overhead (was 2M calls for 10MB).
+fn encode_streaming(data: &[u8], wrap: usize) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
-
-    // Output buffer: 256KB + margin for partial group + newlines
-    const FLUSH_AT: usize = 256 * 1024;
-    let mut buf = vec![0u8; FLUSH_AT + 256];
-    let mut offset = 0usize;
-    let mut col = 0usize;
 
     let full_chunks = data.len() / 5;
     let remainder = data.len() % 5;
     let full_end = full_chunks * 5;
 
-    if wrap == 0 {
-        // No wrapping: encode directly into output buffer, 8 bytes at a time
-        for chunk in data[..full_end].chunks_exact(5) {
+    // Process in 256KB input batches to bound memory
+    const BATCH_INPUT: usize = 256 * 1024;
+    // Align batch to 5 bytes
+    let batch_input = BATCH_INPUT / 5 * 5;
+    // Output per batch: batch_input/5*8 raw + batch_input/5*8/wrap newlines + margin
+    let batch_output_raw = batch_input / 5 * 8;
+    let batch_output_wrapped = if wrap > 0 {
+        batch_output_raw + batch_output_raw / wrap + 16
+    } else {
+        batch_output_raw + 16
+    };
+    let mut raw_buf = vec![0u8; batch_output_raw + 16];
+    let mut wrap_buf = if wrap > 0 {
+        vec![0u8; batch_output_wrapped]
+    } else {
+        Vec::new()
+    };
+    let mut col = 0usize;
+
+    let mut input_pos = 0usize;
+    while input_pos < full_end {
+        let batch_end = (input_pos + batch_input).min(full_end);
+        let batch = &data[input_pos..batch_end];
+
+        // Encode batch into raw_buf
+        let mut raw_offset = 0usize;
+        for chunk in batch.chunks_exact(5) {
             encode_5_to_8(
                 chunk[0],
                 chunk[1],
                 chunk[2],
                 chunk[3],
                 chunk[4],
-                &mut buf[offset..],
+                &mut raw_buf[raw_offset..],
             );
-            offset += 8;
-            if offset >= FLUSH_AT {
-                out.write_all(&buf[..offset])?;
-                offset = 0;
+            raw_offset += 8;
+        }
+
+        if wrap == 0 {
+            if !write_all_fd1(&raw_buf[..raw_offset]) {
+                return Ok(());
+            }
+        } else {
+            // Insert newlines in a single pass
+            let written = insert_newlines(&raw_buf[..raw_offset], &mut wrap_buf, wrap, &mut col);
+            if !write_all_fd1(&wrap_buf[..written]) {
+                return Ok(());
             }
         }
-    } else {
-        // With wrapping: encode to temp, then copy with newline insertion
-        let mut temp = [0u8; 8];
-        for chunk in data[..full_end].chunks_exact(5) {
-            encode_5_to_8(chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], &mut temp);
-            copy_with_wrap(&temp, &mut buf, &mut offset, &mut col, wrap);
-            if offset >= FLUSH_AT {
-                out.write_all(&buf[..offset])?;
-                offset = 0;
-            }
-        }
+        input_pos = batch_end;
     }
 
     // Handle the last partial chunk with padding
@@ -443,24 +467,45 @@ fn encode_streaming(data: &[u8], wrap: usize, out: &mut impl Write) -> io::Resul
         }
 
         if wrap == 0 {
-            buf[offset..offset + 8].copy_from_slice(&partial);
-            offset += 8;
+            write_all_fd1(&partial);
         } else {
-            copy_with_wrap(&partial, &mut buf, &mut offset, &mut col, wrap);
+            let mut tail_buf = [0u8; 24]; // 8 chars + possible newline + margin
+            let written = insert_newlines(&partial, &mut tail_buf, wrap, &mut col);
+            write_all_fd1(&tail_buf[..written]);
         }
     }
 
     // Final newline if there's a partial line
     if wrap > 0 && col > 0 {
-        buf[offset] = b'\n';
-        offset += 1;
-    }
-
-    if offset > 0 {
-        out.write_all(&buf[..offset])?;
+        write_all_fd1(b"\n");
     }
 
     Ok(())
+}
+
+/// Insert newlines into raw encoded data at `wrap` column boundaries.
+/// Single pass: copies chunks of (wrap - col) bytes, inserting \n between.
+/// Returns number of bytes written to `out`.
+#[inline]
+fn insert_newlines(raw: &[u8], out: &mut [u8], wrap: usize, col: &mut usize) -> usize {
+    let mut ri = 0usize;
+    let mut wi = 0usize;
+
+    while ri < raw.len() {
+        let space = wrap - *col;
+        let available = raw.len() - ri;
+        let to_copy = space.min(available);
+        out[wi..wi + to_copy].copy_from_slice(&raw[ri..ri + to_copy]);
+        wi += to_copy;
+        ri += to_copy;
+        *col += to_copy;
+        if *col == wrap {
+            out[wi] = b'\n';
+            wi += 1;
+            *col = 0;
+        }
+    }
+    wi
 }
 
 fn main() {
@@ -510,12 +555,15 @@ fn main() {
                 process::exit(1);
             }
         }
-    } else if let Err(e) = encode_streaming(&data, cli.wrap, &mut out) {
-        if e.kind() == io::ErrorKind::BrokenPipe {
-            process::exit(0);
+    } else {
+        if let Err(e) = encode_streaming(&data, cli.wrap) {
+            if e.kind() == io::ErrorKind::BrokenPipe {
+                process::exit(0);
+            }
+            eprintln!("{}: write error: {}", TOOL_NAME, e);
+            process::exit(1);
         }
-        eprintln!("{}: write error: {}", TOOL_NAME, e);
-        process::exit(1);
+        return;
     }
 
     if let Err(e) = out.flush()

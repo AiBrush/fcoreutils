@@ -8,11 +8,11 @@
 
 High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelerated, drop-in compatible, cross-platform.
 
-## Independent Test Results (v0.12.5)
+## Independent Test Results (v0.13.6)
 
-*Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, 100MB file, hyperfine*
+*Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, hyperfine*
 
-**Summary:** 107 tools tracked · **2203/2213 tests passed (99.5%)** · 95 tools at 100% · fastest: wc at 33.5x vs GNU
+**Summary:** 107 tools tracked · **10 benchmarks at 10x+** · compute-bound median: **10.2x** · fastest: wc at 33.5x vs GNU
 
 > Sizes are stripped release binaries. Compat is GNU test pass rate (skipped tests excluded). Speedup is peak across all benchmark scenarios. `-` = no data or not applicable. `SKIP` = requires root or SELinux, or GNU baseline not available.
 
@@ -20,10 +20,10 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 |------|--------:|---------:|------------:|-------:|-----------:|--------------:|
 | arch | 424.9 KB | 34.5 KB | - | ✅ 100% (5/5) | 0.8x | - |
 | b2sum | 633.9 KB | 54.5 KB | 2.3 MB | ✅ 100% (25/25) | 1.3x | 1.2x |
-| base32 | 445.3 KB | 38.5 KB | - | ✅ 100% (29/29) | 1.4x | - |
-| base64 | 558.6 KB | 38.5 KB | 1.3 MB | ✅ 100% (33/33) | **5.6x** | **5.7x** |
+| base32 | 445.3 KB | 38.5 KB | - | ✅ 100% (29/29) | 1.6x | - |
+| base64 | 558.6 KB | 38.5 KB | 1.3 MB | ✅ 100% (33/33) | **6.6x** | **5.7x** |
 | basename | 429.7 KB | 34.5 KB | - | ✅ 100% (26/26) | 0.8x | - |
-| basenc | 458.9 KB | 46.5 KB | - | ✅ 100% (40/40) | 1.1x | - |
+| basenc | 458.9 KB | 46.5 KB | - | ✅ 100% (40/40) | **2.4x** | - |
 | cat | 459.0 KB | 38.5 KB | 1.3 MB | ✅ 100% (46/46) | **2.6x** | **1.8x** |
 | chcon | 458.9 KB | 58.5 KB | - | SKIP | - | - |
 | chgrp | 523.9 KB | 58.5 KB | - | ✅ 100% (11/11) | 1.0x | - |
@@ -32,11 +32,11 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | chroot | 464.7 KB | 38.5 KB | - | SKIP | - | - |
 | cksum | 450.5 KB | 102.5 KB | - | ✅ 100% (21/21) | 1.2x | - |
 | comm | 453.7 KB | 38.5 KB | 1.3 MB | ✅ 100% (30/30) | **3.5x** | **3.4x** |
-| cp | 562.4 KB | 138.5 KB | - | ✅ 100% (18/18) | 1.0x | - |
+| cp | 562.4 KB | 138.5 KB | - | ✅ 100% (18/18) | 1.1x | - |
 | csplit | 1.8 MB | 50.5 KB | - | SKIP | **17.6x** | - |
-| cut | 635.1 KB | 38.5 KB | 1.3 MB | ✅ 100% (49/49) | **5.4x** | **1.6x** |
+| cut | 635.1 KB | 38.5 KB | 1.3 MB | ✅ 100% (49/49) | **5.9x** | **1.6x** |
 | date | 505.2 KB | 106.5 KB | - | ✅ 100% (32/32) | - | - |
-| dd | 496.0 KB | 70.5 KB | - | ✅ 100% (17/17) | 0.9x | - |
+| dd | 496.0 KB | 70.5 KB | - | ✅ 100% (17/17) | 1.1x | - |
 | df | 540.2 KB | 87.1 KB | - | ❌ 53% (9/17) | - | - |
 | dir | 585.5 KB | 139.0 KB | - | SKIP | - | - |
 | dircolors | 450.1 KB | 46.5 KB | - | ✅ 100% (14/14) | - | - |
@@ -46,7 +46,7 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | env | 467.4 KB | 46.9 KB | - | ✅ 100% (17/17) | 0.9x | - |
 | expand | 453.5 KB | 34.5 KB | 1.3 MB | ✅ 100% (33/33) | **10.4x** | **12.9x** |
 | expr | 1.8 MB | 42.4 KB | - | ✅ 100% (43/43) | 0.9x | - |
-| factor | 453.0 KB | 62.5 KB | - | ✅ 100% (26/26) | 0.9x | - |
+| factor | 453.0 KB | 62.5 KB | - | ✅ 100% (26/26) | 1.7x | - |
 | false | 297.0 KB | 26.3 KB | - | ✅ 100% (7/7) | - | - |
 | fmt | 457.9 KB | 38.5 KB | - | ✅ 100% (18/18) | - | - |
 | fold | 445.2 KB | 34.5 KB | 1.3 MB | ✅ 100% (35/35) | **4.8x** | **1.5x** |
@@ -83,20 +83,20 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | pwd | 429.2 KB | 34.5 KB | - | ✅ 100% (8/8) | - | - |
 | readlink | 439.2 KB | 42.4 KB | - | ✅ 100% (19/19) | 0.8x | - |
 | realpath | 443.5 KB | 42.4 KB | - | ✅ 100% (24/24) | 0.8x | - |
-| rev | 439.3 KB | 14.4 KB | - | ✅ 100% (32/32) | **21.2x** | - |
+| rev | 439.3 KB | 14.4 KB | - | ✅ 100% (32/32) | **23.1x** | - |
 | rm | 522.7 KB | 58.5 KB | - | ✅ 100% (12/12) | 0.9x | - |
 | rmdir | 431.0 KB | 46.4 KB | - | ✅ 100% (12/12) | 0.7x | - |
 | runcon | 463.9 KB | 34.5 KB | - | SKIP | - | - |
-| seq | 485.9 KB | 50.5 KB | - | ✅ 100% (53/53) | **15.9x** | - |
+| seq | 485.9 KB | 50.5 KB | - | ✅ 100% (53/53) | **15.6x** | - |
 | sha1sum | 616.9 KB | 38.4 KB | - | ✅ 100% (15/15) | 0.8x | - |
 | sha224sum | 617.0 KB | 38.4 KB | - | ✅ 100% (10/10) | 0.9x | - |
 | sha256sum | 617.8 KB | 38.4 KB | 2.3 MB | ✅ 100% (34/34) | 1.0x | 1.0x |
 | sha384sum | 616.9 KB | 38.4 KB | - | ✅ 100% (10/10) | 0.9x | - |
 | sha512sum | 617.0 KB | 38.4 KB | - | ✅ 100% (10/10) | 0.9x | - |
-| shred | 456.5 KB | 54.5 KB | - | ✅ 100% (10/10) | **2.0x** | - |
+| shred | 456.5 KB | 54.5 KB | - | ✅ 100% (10/10) | **2.4x** | - |
 | shuf | 470.0 KB | 46.5 KB | - | ✅ 100% (27/27) | - | - |
 | sleep | 444.4 KB | 34.5 KB | - | ✅ 100% (10/10) | 0.9x | - |
-| sort | 1.0 MB | 102.8 KB | 3.2 MB | ✅ 100% (51/51) | **12.1x** | **12.1x** |
+| sort | 1.0 MB | 102.8 KB | 3.2 MB | ✅ 100% (51/51) | **12.2x** | **12.1x** |
 | split | 523.7 KB | 54.9 KB | - | ✅ 100% (22/22) | 1.0x | - |
 | stat | 465.5 KB | 86.5 KB | - | ⚠️ 97% (28/29) | - | - |
 | stdbuf | 484.4 KB | 50.5 KB | - | ✅ 100% (6/6) | - | - |
@@ -109,14 +109,14 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | test | 440.5 KB | 46.4 KB | - | ✅ 100% (51/51) | - | - |
 | timeout | 486.9 KB | 38.9 KB | - | ✅ 100% (21/21) | - | - |
 | touch | 457.8 KB | 94.5 KB | - | ✅ 100% (21/21) | 1.0x | - |
-| tr | 696.2 KB | 46.5 KB | 1.3 MB | ✅ 100% (46/46) | **5.5x** | **6.0x** |
+| tr | 696.2 KB | 46.5 KB | 1.3 MB | ✅ 100% (46/46) | **7.0x** | **6.0x** |
 | true | 296.6 KB | 26.3 KB | - | ✅ 100% (8/8) | - | - |
 | truncate | 441.2 KB | 38.5 KB | - | ✅ 100% (25/25) | 1.0x | - |
-| tsort | 464.7 KB | 46.5 KB | - | ✅ 100% (19/19) | - | - |
+| tsort | 464.7 KB | 46.5 KB | - | ✅ 100% (19/19) | **10.2x** | - |
 | tty | 425.8 KB | 34.5 KB | - | ✅ 100% (6/6) | 0.8x | - |
 | uname | 428.6 KB | 34.5 KB | - | ✅ 100% (14/14) | 0.8x | - |
 | unexpand | 453.3 KB | 38.5 KB | 1.3 MB | ✅ 100% (26/26) | **4.0x** | **2.9x** |
-| uniq | 907.0 KB | 38.5 KB | 1.3 MB | ✅ 100% (46/46) | **10.3x** | **6.0x** |
+| uniq | 907.0 KB | 38.5 KB | 1.3 MB | ✅ 100% (46/46) | **11.2x** | **6.0x** |
 | unlink | 429.4 KB | 34.5 KB | - | ✅ 100% (7/7) | 0.9x | - |
 | uptime | 501.2 KB | 14.4 KB | - | ✅ 100% (5/5) | - | - |
 | users | 461.2 KB | 34.5 KB | - | ✅ 100% (8/8) | - | - |
