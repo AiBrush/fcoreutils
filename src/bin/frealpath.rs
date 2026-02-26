@@ -120,17 +120,17 @@ fn main() {
     }
 
     // Validate --relative-to and --relative-base are not empty strings
-    if let Some(ref val) = relative_to {
-        if val.is_empty() {
-            eprintln!("{}: '': No such file or directory", TOOL_NAME);
-            process::exit(1);
-        }
+    if let Some(ref val) = relative_to
+        && val.is_empty()
+    {
+        eprintln!("{}: '': No such file or directory", TOOL_NAME);
+        process::exit(1);
     }
-    if let Some(ref val) = relative_base {
-        if val.is_empty() {
-            eprintln!("{}: '': No such file or directory", TOOL_NAME);
-            process::exit(1);
-        }
+    if let Some(ref val) = relative_base
+        && val.is_empty()
+    {
+        eprintln!("{}: '': No such file or directory", TOOL_NAME);
+        process::exit(1);
     }
 
     // Resolve relative-to and relative-base directories
@@ -145,29 +145,31 @@ fn main() {
 
     // With -e mode, validate that --relative-to and --relative-base are directories
     if mode == Mode::CanonicalizeExisting {
-        if let Some(ref resolved) = resolved_relative_to {
-            if resolved.exists() && !resolved.is_dir() {
-                if !quiet {
-                    eprintln!(
-                        "{}: {}: Not a directory",
-                        TOOL_NAME,
-                        relative_to.as_ref().unwrap()
-                    );
-                }
-                process::exit(1);
+        if let Some(ref resolved) = resolved_relative_to
+            && resolved.exists()
+            && !resolved.is_dir()
+        {
+            if !quiet {
+                eprintln!(
+                    "{}: {}: Not a directory",
+                    TOOL_NAME,
+                    relative_to.as_ref().unwrap()
+                );
             }
+            process::exit(1);
         }
-        if let Some(ref resolved) = resolved_relative_base {
-            if resolved.exists() && !resolved.is_dir() {
-                if !quiet {
-                    eprintln!(
-                        "{}: {}: Not a directory",
-                        TOOL_NAME,
-                        relative_base.as_ref().unwrap()
-                    );
-                }
-                process::exit(1);
+        if let Some(ref resolved) = resolved_relative_base
+            && resolved.exists()
+            && !resolved.is_dir()
+        {
+            if !quiet {
+                eprintln!(
+                    "{}: {}: Not a directory",
+                    TOOL_NAME,
+                    relative_base.as_ref().unwrap()
+                );
             }
+            process::exit(1);
         }
     }
 

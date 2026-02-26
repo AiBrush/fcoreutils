@@ -99,20 +99,19 @@ fn get_nprocs_available() -> usize {
             .split(',')
             .next()
             .and_then(|first| first.trim().parse::<usize>().ok())
+            && omp_n > 0
         {
-            if omp_n > 0 {
-                n = omp_n;
-            }
+            n = omp_n;
         }
     }
 
     // Check OMP_THREAD_LIMIT — caps the result (GNU nproc compat)
-    if let Ok(val) = std::env::var("OMP_THREAD_LIMIT") {
-        if let Ok(limit) = val.trim().parse::<usize>() {
-            if limit > 0 && limit < n {
-                n = limit;
-            }
-        }
+    if let Ok(val) = std::env::var("OMP_THREAD_LIMIT")
+        && let Ok(limit) = val.trim().parse::<usize>()
+        && limit > 0
+        && limit < n
+    {
+        n = limit;
     }
 
     n

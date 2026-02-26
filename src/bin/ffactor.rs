@@ -330,7 +330,7 @@ fn factor_token(
         }
     }
 
-    return report_invalid(token, out_buf, out);
+    report_invalid(token, out_buf, out)
 }
 
 fn report_invalid(

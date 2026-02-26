@@ -324,16 +324,16 @@ fn main() {
     if let Some(ref dir) = config.target_directory {
         // -t DIRECTORY SOURCE...
         // With -D, create the target directory (and parents) if it doesn't exist
-        if config.create_leading {
-            if let Err(e) = std::fs::create_dir_all(Path::new(dir)) {
-                eprintln!(
-                    "{}: cannot create directory '{}': {}",
-                    TOOL_NAME,
-                    dir,
-                    coreutils_rs::common::io_error_msg(&e)
-                );
-                process::exit(1);
-            }
+        if config.create_leading
+            && let Err(e) = std::fs::create_dir_all(Path::new(dir))
+        {
+            eprintln!(
+                "{}: cannot create directory '{}': {}",
+                TOOL_NAME,
+                dir,
+                coreutils_rs::common::io_error_msg(&e)
+            );
+            process::exit(1);
         }
         if !Path::new(dir).is_dir() {
             eprintln!("{}: target '{}' is not a directory", TOOL_NAME, dir);

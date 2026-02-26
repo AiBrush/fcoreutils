@@ -116,7 +116,7 @@ fn main() {
     } else {
         // Number of copies that fills at least BUF_SIZE bytes,
         // rounded up to a full line.
-        let copies = (BUF_SIZE + line_len - 1) / line_len;
+        let copies = BUF_SIZE.div_ceil(line_len);
         let mut v = Vec::with_capacity(copies * line_len);
         for _ in 0..copies {
             v.extend_from_slice(line_bytes);

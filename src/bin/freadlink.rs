@@ -188,8 +188,7 @@ fn canonicalize_f(path: &Path) -> Result<PathBuf, std::io::Error> {
                 Ok(meta) if meta.file_type().is_symlink() => {
                     symlink_count += 1;
                     if symlink_count > MAX_SYMLINKS {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        return Err(std::io::Error::other(
                             "Too many levels of symbolic links",
                         ));
                     }

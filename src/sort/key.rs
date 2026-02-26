@@ -112,15 +112,9 @@ impl KeyOpts {
             for j in (i + 1)..active.len() {
                 let a = active[i];
                 let b = active[j];
-                let conflict = if is_numeric_type(a) && is_numeric_type(b) {
-                    true
-                } else if is_numeric_type(a) && incompatible_with_numeric(b) {
-                    true
-                } else if incompatible_with_numeric(a) && is_numeric_type(b) {
-                    true
-                } else {
-                    false
-                };
+                let conflict = (is_numeric_type(a) && is_numeric_type(b))
+                    || (is_numeric_type(a) && incompatible_with_numeric(b))
+                    || (incompatible_with_numeric(a) && is_numeric_type(b));
                 if conflict {
                     return Err(format!("options '-{}{}' are incompatible", a, b));
                 }
@@ -172,7 +166,7 @@ impl KeyDef {
         }
 
         // Validate per-key option compatibility
-        opts.validate().map_err(|e| e)?;
+        opts.validate()?;
 
         Ok(KeyDef {
             start_field,

@@ -431,15 +431,16 @@ fn make_link(
     let link_exists = link_path.symlink_metadata().is_ok();
 
     // For -sf: detect same source and destination before removing
-    if link_exists && (force || backup != BackupMode::None) {
-        if same_file(target, link_name) {
-            // GNU ln: "X and Y are the same file"
-            eprintln!(
-                "{}: '{}' and '{}' are the same file",
-                TOOL_NAME, target, link_name
-            );
-            return Err(1);
-        }
+    if link_exists
+        && (force || backup != BackupMode::None)
+        && same_file(target, link_name)
+    {
+        // GNU ln: "X and Y are the same file"
+        eprintln!(
+            "{}: '{}' and '{}' are the same file",
+            TOOL_NAME, target, link_name
+        );
+        return Err(1);
     }
 
     if link_exists {
@@ -458,16 +459,17 @@ fn make_link(
             // If link_name still exists after rename (e.g. source and backup dest
             // were hard links to the same inode, so rename() was a no-op), and
             // force is also set, remove the destination.
-            if force && link_path.symlink_metadata().is_ok() {
-                if let Err(e) = remove_dest(link_name) {
-                    eprintln!(
-                        "{}: cannot remove '{}': {}",
-                        TOOL_NAME,
-                        link_name,
-                        coreutils_rs::common::io_error_msg(&e)
-                    );
-                    return Err(1);
-                }
+            if force
+                && link_path.symlink_metadata().is_ok()
+                && let Err(e) = remove_dest(link_name)
+            {
+                eprintln!(
+                    "{}: cannot remove '{}': {}",
+                    TOOL_NAME,
+                    link_name,
+                    coreutils_rs::common::io_error_msg(&e)
+                );
+                return Err(1);
             }
         } else if force {
             if let Err(e) = remove_dest(link_name) {

@@ -607,17 +607,16 @@ fn main() {
         // Trailing slash on a non-directory should fail with ENOTDIR (GNU compat)
         if file.ends_with('/') {
             let base = file.trim_end_matches('/');
-            if !base.is_empty() {
-                if let Ok(meta) = fs::symlink_metadata(base) {
-                    if !meta.is_dir() {
-                        eprintln!(
-                            "{}: setting times of '{}': Not a directory",
-                            TOOL_NAME, file
-                        );
-                        exit_code = 1;
-                        continue;
-                    }
-                }
+            if !base.is_empty()
+                && let Ok(meta) = fs::symlink_metadata(base)
+                && !meta.is_dir()
+            {
+                eprintln!(
+                    "{}: setting times of '{}': Not a directory",
+                    TOOL_NAME, file
+                );
+                exit_code = 1;
+                continue;
             }
         }
 
@@ -701,11 +700,11 @@ fn path_exists(path: &str) -> bool {
 /// Check if path is a symlink whose target does not exist (dangling symlink).
 #[cfg(unix)]
 fn is_dangling_symlink(path: &str) -> bool {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            // fs::metadata follows symlinks; if it fails, the target doesn't exist
-            return fs::metadata(path).is_err();
-        }
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        // fs::metadata follows symlinks; if it fails, the target doesn't exist
+        return fs::metadata(path).is_err();
     }
     false
 }

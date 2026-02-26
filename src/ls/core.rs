@@ -1684,7 +1684,7 @@ fn print_columns(
         1
     } else {
         let base = term_width / min_col_w;
-        let extra = if term_width % min_col_w != 0 { 1 } else { 0 };
+        let extra = if !term_width.is_multiple_of(min_col_w) { 1 } else { 0 };
         std::cmp::min(base + extra, n)
     };
 

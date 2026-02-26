@@ -48,7 +48,7 @@ pub fn parse_ranges(spec: &str, no_merge_adjacent: bool) -> Result<Vec<Range>, S
 
             // Reject bare "-" (both sides empty)
             if left.is_empty() && right.is_empty() {
-                return Err(format!("invalid range with no endpoint: -"));
+                return Err("invalid range with no endpoint: -".to_string());
             }
 
             let start = if left.is_empty() {

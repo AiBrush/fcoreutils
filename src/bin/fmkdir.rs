@@ -171,15 +171,12 @@ fn create_single(dir: &str, verbose: bool, mode: Option<libc::mode_t>) -> Result
 }
 
 #[cfg(unix)]
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+fn strip_curdir(path: &std::path::Path) -> std::path::PathBuf {
     use std::path::{Component, PathBuf};
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
             Component::CurDir => { /* skip "." */ }
-            Component::ParentDir => {
-                result.pop();
-            }
             other => {
                 result.push(other);
             }
@@ -191,7 +188,7 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
 #[cfg(unix)]
 fn create_with_parents(dir: &str, verbose: bool, mode: Option<libc::mode_t>) -> Result<(), i32> {
     let raw_path = std::path::Path::new(dir);
-    let normalized = normalize_path(raw_path);
+    let normalized = strip_curdir(raw_path);
     let path = normalized.as_path();
 
     // Collect all ancestors that need to be created
