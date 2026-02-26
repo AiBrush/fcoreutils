@@ -1124,19 +1124,10 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
                 }
             }
         }
-        // Medium-large files (STREAMING_THRESHOLD..SMALL_FILE_LIMIT): streaming with fadvise
-        if file_size >= STREAMING_THRESHOLD {
-            #[cfg(target_os = "linux")]
-            {
-                use std::os::unix::io::AsRawFd;
-                unsafe {
-                    libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-                }
-            }
-            return blake2b_hash_reader(file, output_bytes);
+        // Small files (8KB..16MB): single read into thread-local buffer, then single-shot hash
+        if file_size < SMALL_FILE_LIMIT {
+            return blake2b_hash_file_small(file, file_size as usize, output_bytes);
         }
-        // Small files (8KB..STREAMING_THRESHOLD): single read + single-shot hash
-        return blake2b_hash_file_small(file, file_size as usize, output_bytes);
     }
 
     // Non-regular files or fallback: stream
