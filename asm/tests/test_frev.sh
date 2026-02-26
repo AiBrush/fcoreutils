@@ -272,9 +272,37 @@ else
     ((FAIL++))
 fi
 
-# Unknown option
-check_exit "unknown option exits 1" 1 --foobar
-check_stderr "unknown option stderr" "unrecognized option" --foobar
+# Unknown long option
+check_exit "unknown long option exits 1" 1 --foobar
+check_stderr "unknown long option stderr" "unrecognized option" --foobar
+check_stderr "unknown long option try help" "Try 'rev --help'" --foobar
+
+# Unknown short option
+check_exit "unknown short option exits 1" 1 -z
+check_stderr "unknown short option stderr" "invalid option" -z
+check_stderr "unknown short option try help" "Try 'rev --help'" -z
+
+# -h (help)
+h_out=$($TOOL -h 2>/dev/null)
+h_exit=$?
+if [ "$h_exit" -eq 0 ] && echo "$h_out" | grep -q "Usage:"; then
+    echo -e "  ${GREEN}PASS${NC}: -h prints usage and exits 0"
+    ((PASS++))
+else
+    echo -e "  ${RED}FAIL${NC}: -h (exit=$h_exit)"
+    ((FAIL++))
+fi
+
+# -V (version)
+V_out=$($TOOL -V 2>/dev/null)
+V_exit=$?
+if [ "$V_exit" -eq 0 ] && echo "$V_out" | grep -q "fcoreutils"; then
+    echo -e "  ${GREEN}PASS${NC}: -V prints version and exits 0"
+    ((PASS++))
+else
+    echo -e "  ${RED}FAIL${NC}: -V (exit=$V_exit)"
+    ((FAIL++))
+fi
 
 # -- end of options
 echo "after dash" > "$TMPDIR/dashdash.txt"
@@ -287,11 +315,22 @@ else
     ((FAIL++))
 fi
 
+# -- alone reads stdin (no file operands after --)
+dd_stdin_out=$(echo "hello" | $TOOL -- 2>/dev/null)
+if [ "$dd_stdin_out" = "olleh" ]; then
+    echo -e "  ${GREEN}PASS${NC}: -- alone reads stdin"
+    ((PASS++))
+else
+    echo -e "  ${RED}FAIL${NC}: -- alone reads stdin (got: $dd_stdin_out)"
+    ((FAIL++))
+fi
+
 # ── Error handling ──
 echo ""
 echo "── Error handling ──"
 check_exit "nonexistent file exits 1" 1 /nonexistent/file
 check_stderr "nonexistent file stderr" "No such file or directory" /nonexistent/file
+check_stderr "nonexistent file 'cannot open'" "cannot open" /nonexistent/file
 
 # /dev/null (empty input via file)
 devnull_out=$($TOOL /dev/null 2>/dev/null)
