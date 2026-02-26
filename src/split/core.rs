@@ -596,21 +596,25 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
         return split_by_number(input_path, config, n);
     }
 
-    // Fast path: mmap-based line splitting for regular files (no filter)
+    // Fast path: read+memchr line splitting for regular files (no filter).
+    // Intentionally bypasses create_writer for single write_all() per chunk.
     #[cfg(unix)]
     if let SplitMode::Lines(n) = config.mode {
         if input_path != "-" && config.filter.is_none() {
             let path = Path::new(input_path);
-            if !path.exists() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "cannot open '{}' for reading: No such file or directory",
-                        input_path
-                    ),
-                ));
-            }
-            let data = crate::common::io::read_file(path)?;
+            let data = crate::common::io::read_file_direct(path).map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "cannot open '{}' for reading: No such file or directory",
+                            input_path
+                        ),
+                    )
+                } else {
+                    e
+                }
+            })?;
             return split_lines_mmap(&data, config, n);
         }
     }
