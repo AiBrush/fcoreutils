@@ -6,6 +6,30 @@
 
 use std::process;
 
+/// Powers of 10 lookup table for i64 (10^0 through 10^18).
+/// Used instead of runtime `10i64.pow()` for cleanliness and constant-time access.
+const POWERS_OF_10: [i64; 19] = [
+    1,                         // 10^0
+    10,                        // 10^1
+    100,                       // 10^2
+    1_000,                     // 10^3
+    10_000,                    // 10^4
+    100_000,                   // 10^5
+    1_000_000,                 // 10^6
+    10_000_000,                // 10^7
+    100_000_000,               // 10^8
+    1_000_000_000,             // 10^9
+    10_000_000_000,            // 10^10
+    100_000_000_000,           // 10^11
+    1_000_000_000_000,         // 10^12
+    10_000_000_000_000,        // 10^13
+    100_000_000_000_000,       // 10^14
+    1_000_000_000_000_000,     // 10^15
+    10_000_000_000_000_000,    // 10^16
+    100_000_000_000_000_000,   // 10^17
+    1_000_000_000_000_000_000, // 10^18
+];
+
 /// Write buffer directly to fd 1, bypassing BufWriter overhead.
 /// Returns false on unrecoverable error (caller should stop generating output).
 fn write_all_fd1(buf: &[u8]) -> bool {
@@ -546,7 +570,7 @@ fn main() {
             while current <= last_i {
                 // End of current digit-width batch (e.g., 999 for 3-digit)
                 let batch_end = if len < 19 {
-                    std::cmp::min(10i64.pow(len as u32) - 1, last_i)
+                    std::cmp::min(POWERS_OF_10[len] - 1, last_i)
                 } else {
                     last_i
                 };
@@ -567,7 +591,7 @@ fn main() {
                             }
                             let remaining = FLUSH_AT - offset;
                             let can_fit = remaining / ENTRY;
-                            let run_end = std::cmp::min(current + can_fit as i64 - 1, batch_end);
+                            let run_end = std::cmp::min(current.saturating_add(can_fit as i64 - 1), batch_end);
                             // Handle prefix: numbers before next decade boundary
                             while current <= run_end && (current % 10) != 0 {
                                 unsafe {
@@ -586,6 +610,7 @@ fn main() {
                                         break;
                                     }
                                     digits[p] = b'0';
+                                    debug_assert!(p > 0, "carry propagated beyond digit buffer");
                                     p -= 1;
                                 }
                             }
@@ -614,6 +639,10 @@ fn main() {
                                 // Carry for tens digit (once per 10 numbers).
                                 // INVARIANT: digits[19] == b'0' here (set at start of
                                 // decade block), so carry begins at tens position (p=18).
+                                // NOTE: For batch!(1), p=18 is START-1 (outside the output
+                                // window), but this write is harmless — it sets up the
+                                // digit-width transition digit that is consumed when len
+                                // advances to 2.
                                 let mut p = 18usize;
                                 loop {
                                     if digits[p] < b'9' {
@@ -621,6 +650,7 @@ fn main() {
                                         break;
                                     }
                                     digits[p] = b'0';
+                                    debug_assert!(p > 0, "carry propagated beyond digit buffer");
                                     p -= 1;
                                 }
                             }
@@ -642,6 +672,7 @@ fn main() {
                                         break;
                                     }
                                     digits[p] = b'0';
+                                    debug_assert!(p > 0, "carry propagated beyond digit buffer");
                                     p -= 1;
                                 }
                             }
