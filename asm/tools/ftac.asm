@@ -604,6 +604,10 @@ process_one_file:
     mov     r13, [rel g_sep_ptr]    ; r13 = separator ptr
     mov     r15, [rel g_sep_len]    ; r15 = separator len
 
+    ; Handle empty separator — output data unchanged (GNU behavior)
+    test    r15, r15
+    jz      .pof_passthrough
+
     ; Choose algorithm based on separator length
     cmp     r15, 1
     jne     .pof_multi_byte
@@ -624,6 +628,13 @@ process_one_file:
     mov     rdi, r14
     mov     rsi, rbp
     call    tac_before
+    jmp     .pof_cleanup
+
+.pof_passthrough:
+    ; Empty separator — just write data as-is
+    mov     rdi, r14
+    mov     rsi, rbp
+    call    buffered_write
     jmp     .pof_cleanup
 
 .pof_multi_byte:
@@ -1152,21 +1163,21 @@ tac_multi_byte:
 
     mov     r12, rax                ; r12 = positions array
     xor     r13d, r13d              ; r13 = position count
-    xor     r15d, r15d              ; r15 = search offset
 
-    ; Forward scan for all separator positions
+    ; Backward scan for separator positions (matches GNU tac behavior)
+    ; GNU tac scans backward; after finding a separator at position P,
+    ; the next search is limited to [0, P), so separators cannot overlap.
+    mov     r15, rbp
+    sub     r15, [rsp+8]            ; r15 = last possible start position
+
 .tmb_scan:
-    mov     rax, rbp
-    mov     rcx, [rsp+8]           ; sep_len
-    sub     rax, r15                ; remaining = data_len - offset
-    cmp     rax, rcx                ; enough for separator?
-    jl      .tmb_scan_done
+    test    r15, r15
+    js      .tmb_scan_done          ; if r15 < 0, done
 
     ; Try to match separator at offset r15
     lea     rdi, [r14 + r15]        ; current position in data
     mov     rsi, [rsp]              ; separator string
     mov     rcx, [rsp+8]           ; separator length
-    ; Compare rcx bytes
     xor     edx, edx                ; byte index
 .tmb_cmp:
     cmp     edx, ecx
@@ -1179,17 +1190,34 @@ tac_multi_byte:
     jmp     .tmb_cmp
 
 .tmb_match:
-    ; Record position
+    ; Record position (stored in decreasing order)
     mov     [r12 + r13*8], r15
     inc     r13
-    add     r15, [rsp+8]           ; skip past separator
+    sub     r15, [rsp+8]           ; next match must end before this one
     jmp     .tmb_scan
 
 .tmb_no_match:
-    inc     r15                     ; advance by 1
+    dec     r15                     ; move backward by 1
     jmp     .tmb_scan
 
 .tmb_scan_done:
+    ; Positions are in decreasing order; reverse to get increasing order
+    ; (reconstruction code expects increasing order)
+    cmp     r13, 2
+    jl      .tmb_reversed           ; 0 or 1 elements: no swap needed
+    xor     ecx, ecx                ; i = 0
+    lea     rdx, [r13 - 1]          ; j = count - 1
+.tmb_reverse:
+    cmp     rcx, rdx
+    jge     .tmb_reversed
+    mov     rax, [r12 + rcx*8]
+    mov     r8, [r12 + rdx*8]
+    mov     [r12 + rcx*8], r8
+    mov     [r12 + rdx*8], rax
+    inc     rcx
+    dec     rdx
+    jmp     .tmb_reverse
+.tmb_reversed:
     ; r12 = positions array (callee-saved)
     ; r13 = position count (callee-saved)
     ; r14 = data pointer (callee-saved)
