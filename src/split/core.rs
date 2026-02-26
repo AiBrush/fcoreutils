@@ -542,11 +542,15 @@ fn split_by_number(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io:
     Ok(())
 }
 
-/// Fast mmap-based line splitting: reads the entire file into memory and splits
-/// by scanning for separator positions in one pass. Each output chunk is written
-/// with a single write_all() call (no BufWriter needed).
+/// Fast pre-loaded line splitting: reads the entire file into a heap buffer and
+/// splits by scanning for separator positions in one pass. Each output chunk is
+/// written with a single write_all() call (no BufWriter needed).
 #[cfg(unix)]
-fn split_lines_mmap(data: &[u8], config: &SplitConfig, lines_per_chunk: u64) -> io::Result<()> {
+fn split_lines_preloaded(
+    data: &[u8],
+    config: &SplitConfig,
+    lines_per_chunk: u64,
+) -> io::Result<()> {
     let limit = max_chunks(&config.suffix_type, config.suffix_length);
     let sep = config.separator;
     let mut chunk_index: u64 = 0;
@@ -598,24 +602,32 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
 
     // Fast path: read+memchr line splitting for regular files (no filter).
     // Intentionally bypasses create_writer for single write_all() per chunk.
+    // Only used for files ≤512 MB to avoid OOM on very large files.
     #[cfg(unix)]
     if let SplitMode::Lines(n) = config.mode {
         if input_path != "-" && config.filter.is_none() {
             let path = Path::new(input_path);
-            let data = crate::common::io::read_file_direct(path).map_err(|e| {
-                if e.kind() == io::ErrorKind::NotFound {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "cannot open '{}' for reading: No such file or directory",
-                            input_path
-                        ),
-                    )
-                } else {
-                    e
-                }
-            })?;
-            return split_lines_mmap(&data, config, n);
+            const FAST_PATH_LIMIT: u64 = 512 * 1024 * 1024;
+            let fits_in_memory = path
+                .metadata()
+                .map(|m| m.len() <= FAST_PATH_LIMIT)
+                .unwrap_or(false);
+            if fits_in_memory {
+                let data = crate::common::io::read_file_direct(path).map_err(|e| {
+                    if e.kind() == io::ErrorKind::NotFound {
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!(
+                                "cannot open '{}' for reading: No such file or directory",
+                                input_path
+                            ),
+                        )
+                    } else {
+                        e
+                    }
+                })?;
+                return split_lines_preloaded(&data, config, n);
+            }
         }
     }
 
