@@ -1,94 +1,148 @@
 ; ============================================================================
-;  fhead_unified.asm — Unified build of fhead
-;  Auto-merged from modular source — DO NOT EDIT
-;  Edit the modular files in tools/ and lib/ instead
-;  Source files: tools/fhead.asm, lib/io.asm
+;  fhead_unified.asm — Unified single-file "head" binary (auto-merged)
+;
+;  This file was created by merging:
+;    - asm/tools/fhead.asm       (main head implementation)
+;    - asm/lib/io.asm            (shared I/O routines)
+;    - asm/include/linux.inc     (syscall constants, inlined)
+;    - asm/include/macros.inc    (macros, expanded inline)
+;
+;  It produces a single static ELF binary via:
+;    nasm -f bin fhead_unified.asm -o fhead && chmod +x fhead
+;
+;  Hand-crafted ELF64 header, no linker, no libc, no dynamic dependencies.
+;  Three program headers: code+data (RX), BSS (RW), GNU_STACK (NX).
 ; ============================================================================
 
 BITS 64
 org 0x400000
 
-; ── Constants ──
-%define SYS_READ         0
-%define SYS_WRITE        1
-%define SYS_OPEN         2
-%define SYS_CLOSE        3
-%define SYS_RT_SIGPROCMASK 14
-%define SYS_EXIT        60
+; ── Inlined constants from linux.inc ─────────────────────────────────────────
+%define SYS_READ            0
+%define SYS_WRITE           1
+%define SYS_OPEN            2
+%define SYS_CLOSE           3
+%define SYS_RT_SIGPROCMASK  14
+%define SYS_EXIT            60
 
-%define STDIN            0
-%define STDOUT           1
-%define STDERR           2
-%define O_RDONLY         0
-%define EINTR            4
-%define EPIPE           32
+%define STDIN               0
+%define STDOUT              1
+%define STDERR              2
 
-%define IOBUF_SIZE      65536
-%define FROMBUF_SIZE    (4 * 1024 * 1024)
+%define O_RDONLY            0
 
-%define MODE_LINES       0
-%define MODE_BYTES       1
-%define MODE_LINES_END   2
-%define MODE_BYTES_END   3
+%define EINTR               4
+%define EPIPE               32
 
-; ── Macros ──
-%macro EXIT 1
-    mov     rax, SYS_EXIT
-    mov     rdi, %1
-    syscall
-%endmacro
+; ── fhead-specific constants ─────────────────────────────────────────────────
+%define IOBUF_SIZE          65536               ; 64KB I/O buffer
+%define FROMBUF_SIZE        (4 * 1024 * 1024)   ; 4MB buffer for "from end" modes
 
-; ── ELF Header ──
+; Mode constants
+%define MODE_LINES          0                   ; -n N (default)
+%define MODE_BYTES          1                   ; -c N
+%define MODE_LINES_END      2                   ; -n -N
+%define MODE_BYTES_END      3                   ; -c -N
+
+; ── BSS Layout (absolute addresses at 0x500000) ─────────────────────────────
+;
+; All BSS variables are at fixed absolute addresses in the RW segment.
+; The kernel zero-fills this memory on exec (PT_LOAD with filesz=0).
+;
+;  Offset  Size   Name
+;  ------  ----   ----
+;  0x0000     8   argc
+;  0x0008     8   argv
+;  0x0010     8   mode
+;  0x0018     8   count
+;  0x0020     1   quiet
+;  0x0021     1   verbose
+;  0x0022     1   zero_term
+;  0x0023     1   show_headers
+;  0x0024     1   had_error
+;  0x0025     1   first_file
+;  0x0026     2   (padding to align nfiles)
+;  0x0028     8   nfiles
+;  0x0030     8   cur_fd
+;  0x0038  2048   files (256 * 8)
+;  0x0838 65536   iobuf (64KB)
+; 0x10838  4MB    frombuf (4194304 bytes)
+; 0x410838        end of BSS
+;
+; Total BSS size = 0x410838 = 4261944 bytes
+
+%define BSS_BASE        0x500000
+
+%define argc            (BSS_BASE + 0x0000)
+%define argv            (BSS_BASE + 0x0008)
+%define mode            (BSS_BASE + 0x0010)
+%define count           (BSS_BASE + 0x0018)
+%define quiet           (BSS_BASE + 0x0020)
+%define verbose         (BSS_BASE + 0x0021)
+%define zero_term       (BSS_BASE + 0x0022)
+%define show_headers    (BSS_BASE + 0x0023)
+%define had_error       (BSS_BASE + 0x0024)
+%define first_file      (BSS_BASE + 0x0025)
+%define nfiles          (BSS_BASE + 0x0028)
+%define cur_fd          (BSS_BASE + 0x0030)
+%define files           (BSS_BASE + 0x0038)
+%define iobuf           (BSS_BASE + 0x0838)
+%define frombuf         (BSS_BASE + 0x10838)
+
+%define bss_size        (0x0038 + 256*8 + IOBUF_SIZE + FROMBUF_SIZE)
+; bss_size = 0x38 + 2048 + 65536 + 4194304 = 4261944
+
+; ======================== ELF Header ========================================
 ehdr:
-    db      0x7f, "ELF"
-    db      2, 1, 1, 0
-    dq      0
-    dw      2
-    dw      0x3E
-    dd      1
-    dq      _start
-    dq      phdr - ehdr
-    dq      0
-    dd      0
-    dw      ehdr_end - ehdr
-    dw      phdr_size
-    dw      3
-    dw      0, 0, 0
+    db      0x7f, "ELF"            ; e_ident[0..3]: ELF magic number
+    db      2, 1, 1, 0             ; 2=64-bit, 1=little-endian, 1=ELF v1, 0=SysV ABI
+    dq      0                      ; e_ident padding (8 bytes)
+    dw      2                      ; e_type:    ET_EXEC (executable)
+    dw      0x3E                   ; e_machine: EM_X86_64
+    dd      1                      ; e_version: EV_CURRENT
+    dq      _start                 ; e_entry:   virtual address of entry point
+    dq      phdr - ehdr            ; e_phoff:   program header table offset
+    dq      0                      ; e_shoff:   no section headers
+    dd      0                      ; e_flags:   no processor-specific flags
+    dw      ehdr_end - ehdr        ; e_ehsize:  ELF header size (64 bytes)
+    dw      phdr_size              ; e_phentsize: program header entry size (56 bytes)
+    dw      3                      ; e_phnum:   3 program headers
+    dw      0, 0, 0                ; e_shentsize, e_shnum, e_shstrndx: unused
 ehdr_end:
 
-; ── Program Headers ──
+; ======================== Program Headers ===================================
 phdr:
-    ; Code + Data (R+X)
-    dd      1
-    dd      5
-    dq      0
-    dq      0x400000
-    dq      0x400000
-    dq      file_end - ehdr
-    dq      file_end - ehdr
-    dq      0x1000
-phdr_size equ $ - phdr
+    ; --- Segment 1: Code + Data (loaded from file, RX) ---
+    dd      1                       ; p_type:  PT_LOAD
+    dd      5                       ; p_flags: PF_R(4) | PF_X(1) = read+execute
+    dq      0                       ; p_offset: start of file
+    dq      0x400000                ; p_vaddr:  virtual address
+    dq      0x400000                ; p_paddr:  physical address (same)
+    dq      file_size               ; p_filesz: entire file
+    dq      file_size               ; p_memsz:  same as filesz
+    dq      0x1000                  ; p_align:  page-aligned (4KB)
+phdr_size equ $ - phdr              ; Size of one program header entry (56 bytes)
 
-    ; BSS (R+W)
-    dd      1
-    dd      6
-    dq      0
-    dq      bss_start
-    dq      bss_start
-    dq      0
-    dq      bss_size
-    dq      0x1000
+    ; --- Segment 2: BSS (runtime buffers, zero-initialized, RW) ---
+    dd      1                       ; p_type:  PT_LOAD
+    dd      6                       ; p_flags: PF_R(4) | PF_W(2) = read+write
+    dq      0                       ; p_offset: 0 (no file content)
+    dq      BSS_BASE                ; p_vaddr:  buffer base address
+    dq      BSS_BASE                ; p_paddr:  same
+    dq      0                       ; p_filesz: 0 (nothing loaded from file)
+    dq      bss_size                ; p_memsz:  total BSS space
+    dq      0x1000                  ; p_align:  page-aligned
 
-    ; GNU_STACK (NX)
-    dd      0x6474E551
-    dd      6
-    dq      0, 0, 0, 0, 0
-    dq      0x10
+    ; --- Segment 3: GNU Stack (marks stack as non-executable) ---
+    dd      0x6474E551              ; p_type:  PT_GNU_STACK
+    dd      6                       ; p_flags: PF_R(4) | PF_W(2) = NX stack
+    dq      0, 0, 0, 0, 0          ; p_offset, p_vaddr, p_paddr, p_filesz, p_memsz: unused
+    dq      0x10                    ; p_align:  16-byte alignment
 
-; ============================================================================
+
+; ############################################################################
 ;                           CODE SECTION
-; ============================================================================
-
+; ############################################################################
 
 ; ============================================================================
 ;                           ENTRY POINT
@@ -106,16 +160,14 @@ _start:
     add     rsp, 16
 
     ; ── Save argc/argv ──
-    mov     rax, [rsp]                  ; argc (was pushed by kernel before sigprocmask)
-    ; At this point rsp points to argc
-    ; rsp+0 = argc, rsp+8 = argv[0], rsp+16 = argv[1], ...
+    mov     rax, [rsp]                  ; argc
     mov     [argc], rax
     lea     rax, [rsp + 8]
     mov     [argv], rax
 
     ; ── Initialize defaults ──
     mov     qword [mode], MODE_LINES
-    mov     qword [count], 10       ; default: 10 lines
+    mov     qword [count], 10           ; default: 10 lines
     mov     byte [quiet], 0
     mov     byte [verbose], 0
     mov     byte [zero_term], 0
@@ -128,7 +180,7 @@ _start:
     cmp     qword [nfiles], 0
     jne     .have_files
     ; Set files[0] = dash_str ("-")
-    lea     rax, [dash_str]
+    mov     rax, dash_str
     mov     [files], rax
     mov     qword [nfiles], 1
 
@@ -157,12 +209,11 @@ _start:
     jge     .done
 
     ; Get filename pointer
-    lea     rax, [files]
-    mov     rbx, [rax + r12*8]          ; rbx = files[file_index]
+    mov     rbx, [files + r12*8]        ; rbx = files[file_index]
 
     ; ── For non-stdin files, try to open first before printing header ──
     mov     rdi, rbx
-    lea     rsi, [dash_str]
+    mov     rsi, dash_str
     call    str_equal
     test    eax, eax
     jnz     .is_stdin_file
@@ -174,7 +225,7 @@ _start:
     call    asm_open
     test    rax, rax
     js      .file_open_error
-    mov     [cur_fd], rax           ; save fd
+    mov     [cur_fd], rax               ; save fd
 
     ; File opened successfully — print header then process
     call    print_file_header
@@ -214,7 +265,7 @@ _start:
     ; Print error to stderr: "head: cannot open 'FILE' for reading: ERROR\n"
     push    rax                         ; save errno
     mov     rdi, STDERR
-    lea     rsi, [err_cannot_open_pre]
+    mov     rsi, err_cannot_open_pre
     mov     rdx, err_cannot_open_pre_len
     call    asm_write_all
     mov     rdi, rbx
@@ -224,14 +275,14 @@ _start:
     mov     rsi, rbx
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [err_for_reading]
+    mov     rsi, err_for_reading
     mov     rdx, err_for_reading_len
     call    asm_write_all
     pop     rax
     neg     rax
     call    print_errno
     mov     rdi, STDERR
-    lea     rsi, [newline_str]
+    mov     rsi, newline_str
     mov     rdx, 1
     call    asm_write_all
     mov     byte [had_error], 1
@@ -244,7 +295,8 @@ _start:
 .done:
     ; Exit with appropriate code
     movzx   edi, byte [had_error]
-    EXIT    rdi
+    mov     rax, SYS_EXIT
+    syscall
 
 .write_error:
     ; Check for EPIPE — exit 0 silently
@@ -255,7 +307,9 @@ _start:
     jmp     .done
 
 .epipe_exit:
-    EXIT    0
+    xor     edi, edi
+    mov     rax, SYS_EXIT
+    syscall
 
 ; ============================================================================
 ;  print_file_header — Print "==> filename <==" header if needed
@@ -270,7 +324,7 @@ print_file_header:
     cmp     byte [first_file], 1
     je      .pfh_header
     mov     rdi, STDOUT
-    lea     rsi, [newline_str]
+    mov     rsi, newline_str
     mov     rdx, 1
     call    asm_write_all
     test    rax, rax
@@ -279,7 +333,7 @@ print_file_header:
 .pfh_header:
     ; Print "==> "
     mov     rdi, STDOUT
-    lea     rsi, [header_prefix]
+    mov     rsi, header_prefix
     mov     rdx, 4
     call    asm_write_all
     test    rax, rax
@@ -287,12 +341,12 @@ print_file_header:
 
     ; Print filename (or "standard input" for "-")
     mov     rdi, rbx
-    lea     rsi, [dash_str]
+    mov     rsi, dash_str
     call    str_equal
     test    eax, eax
     jz      .pfh_filename
     mov     rdi, STDOUT
-    lea     rsi, [stdin_name]
+    mov     rsi, stdin_name
     mov     rdx, 14
     call    asm_write_all
     test    rax, rax
@@ -311,7 +365,7 @@ print_file_header:
 
 .pfh_suffix:
     mov     rdi, STDOUT
-    lea     rsi, [header_suffix]
+    mov     rsi, header_suffix
     mov     rdx, 5
     call    asm_write_all
     ret
@@ -403,7 +457,7 @@ head_lines:
 .hl_read_loop:
     ; Read a chunk
     mov     rdi, r12
-    lea     rsi, [iobuf]
+    mov     rsi, iobuf
     mov     rdx, IOBUF_SIZE
     call    asm_read
     test    rax, rax
@@ -412,7 +466,7 @@ head_lines:
     mov     r14, rax                    ; bytes_read
 
     ; Scan for delimiters in the chunk
-    lea     rsi, [iobuf]            ; current position
+    mov     rsi, iobuf                  ; current position
     mov     rcx, r14                    ; remaining bytes in chunk
 
 .hl_scan:
@@ -427,7 +481,7 @@ head_lines:
     je      .hl_found_delim
 
     ; Not found in remaining bytes — write entire chunk
-    pop     rcx                         ; restore original count (not needed but clean)
+    pop     rcx
     jmp     .hl_write_chunk
 
 .hl_found_delim:
@@ -450,7 +504,7 @@ head_lines:
 .hl_write_last:
     ; Write from iobuf start up to (rdi - iobuf)
     mov     rdx, rdi
-    lea     rsi, [iobuf]
+    mov     rsi, iobuf
     sub     rdx, rsi                    ; bytes to write
     mov     rdi, STDOUT
     call    asm_write_all
@@ -461,7 +515,7 @@ head_lines:
 .hl_write_chunk:
     ; Write the entire chunk
     mov     rdi, STDOUT
-    lea     rsi, [iobuf]
+    mov     rsi, iobuf
     mov     rdx, r14
     call    asm_write_all
     test    rax, rax
@@ -518,7 +572,7 @@ head_bytes:
     cmp     r13, rdx
     cmovb   rdx, r13                    ; rdx = min(remaining, IOBUF_SIZE)
     mov     rdi, r12
-    lea     rsi, [iobuf]
+    mov     rsi, iobuf
     call    asm_read
     test    rax, rax
     jz      .hb_done_ok                 ; EOF
@@ -531,7 +585,7 @@ head_bytes:
 
     ; Write
     mov     rdi, STDOUT
-    lea     rsi, [iobuf]
+    mov     rsi, iobuf
     mov     rdx, r14
     call    asm_write_all
     test    rax, rax
@@ -590,7 +644,7 @@ head_lines_from_end:
     sub     rdx, r14
     jz      .hlfe_read_done             ; buffer full
     mov     rdi, r12
-    lea     rsi, [frombuf]
+    mov     rsi, frombuf
     add     rsi, r14
     call    asm_read
     test    rax, rax
@@ -615,8 +669,7 @@ head_lines_from_end:
 
 .hlfe_scan_back:
     ; Scan backward from end, skip N delimiters
-    ; If last byte is not delimiter, the trailing content counts as 1 extra line
-    lea     rsi, [frombuf]
+    mov     rsi, frombuf
     mov     rcx, r14                    ; total length
     xor     edx, edx                    ; delimiter count
 
@@ -638,14 +691,14 @@ head_lines_from_end:
     inc     rcx                         ; include the delimiter
     mov     rdx, rcx
     mov     rdi, STDOUT
-    lea     rsi, [frombuf]
+    mov     rsi, frombuf
     call    asm_write_all
     test    rax, rax
     js      .hlfe_write_err
     jmp     .hlfe_done_ok
 
 .hlfe_nothing:
-    ; Fewer than N+1 delimiters → N >= total lines → output nothing
+    ; Fewer than N+1 delimiters — N >= total lines — output nothing
     jmp     .hlfe_done_ok
 
 .hlfe_output_all:
@@ -710,7 +763,7 @@ head_bytes_from_end:
     sub     rdx, r14
     jz      .hbfe_read_done
     mov     rdi, r12
-    lea     rsi, [frombuf]
+    mov     rsi, frombuf
     add     rsi, r14
     call    asm_read
     test    rax, rax
@@ -726,7 +779,7 @@ head_bytes_from_end:
     jle     .hbfe_done_ok               ; N >= len, output nothing
     mov     rdx, rax                    ; bytes to write
     mov     rdi, STDOUT
-    lea     rsi, [frombuf]
+    mov     rsi, frombuf
     call    asm_write_all
     test    rax, rax
     js      .hbfe_write_err
@@ -778,8 +831,8 @@ parse_args:
     push    rbx
     push    rbp
 
-    mov     r12, [argv]             ; argv base
-    mov     r13, [argc]             ; argc
+    mov     r12, [argv]                 ; argv base
+    mov     r13, [argc]                 ; argc
     mov     r14, 1                      ; current arg index (skip argv[0])
 
 .pa_loop:
@@ -799,7 +852,7 @@ parse_args:
     cmp     r14, r13
     jge     .pa_done
     mov     rax, [r12 + r14*8]
-    lea     rcx, [files]
+    mov     rcx, files
     mov     rdx, [nfiles]
     mov     [rcx + rdx*8], rax
     inc     qword [nfiles]
@@ -927,52 +980,54 @@ parse_args:
     jmp     .pa_short_loop
 
 .pa_long_opt:
-    ; Long options: --lines=, --bytes=, --lines, --bytes, --quiet, --silent, --verbose, --zero-terminated, --help, --version
+    ; Long options: --lines=, --bytes=, --lines, --bytes, --quiet, --silent,
+    ; --verbose, --zero-terminated, --help, --version
     lea     rdi, [rbx + 2]             ; skip "--"
 
     ; --help
-    lea     rsi, [str_help]
+    mov     rsi, str_help
     call    str_equal
     test    eax, eax
     jnz     .pa_help
 
     ; --version
-    lea     rsi, [str_version]
+    lea     rdi, [rbx + 2]
+    mov     rsi, str_version
     call    str_equal
     test    eax, eax
     jnz     .pa_version
 
     ; --quiet
     lea     rdi, [rbx + 2]
-    lea     rsi, [str_quiet]
+    mov     rsi, str_quiet
     call    str_equal
     test    eax, eax
     jnz     .pa_long_quiet
 
     ; --silent
     lea     rdi, [rbx + 2]
-    lea     rsi, [str_silent]
+    mov     rsi, str_silent
     call    str_equal
     test    eax, eax
     jnz     .pa_long_quiet
 
     ; --verbose
     lea     rdi, [rbx + 2]
-    lea     rsi, [str_verbose]
+    mov     rsi, str_verbose
     call    str_equal
     test    eax, eax
     jnz     .pa_long_verbose
 
     ; --zero-terminated
     lea     rdi, [rbx + 2]
-    lea     rsi, [str_zerot]
+    mov     rsi, str_zerot
     call    str_equal
     test    eax, eax
     jnz     .pa_long_zerot
 
     ; --lines=VALUE
     lea     rdi, [rbx + 2]
-    lea     rsi, [str_lines_eq]
+    mov     rsi, str_lines_eq
     mov     rdx, 6                      ; len("lines=")
     call    str_prefix
     test    eax, eax
@@ -980,7 +1035,7 @@ parse_args:
 
     ; --bytes=VALUE
     lea     rdi, [rbx + 2]
-    lea     rsi, [str_bytes_eq]
+    mov     rsi, str_bytes_eq
     mov     rdx, 6                      ; len("bytes=")
     call    str_prefix
     test    eax, eax
@@ -988,14 +1043,14 @@ parse_args:
 
     ; --lines (next arg is value)
     lea     rdi, [rbx + 2]
-    lea     rsi, [str_lines]
+    mov     rsi, str_lines
     call    str_equal
     test    eax, eax
     jnz     .pa_long_lines
 
     ; --bytes (next arg is value)
     lea     rdi, [rbx + 2]
-    lea     rsi, [str_bytes]
+    mov     rsi, str_bytes
     call    str_equal
     test    eax, eax
     jnz     .pa_long_bytes
@@ -1039,15 +1094,19 @@ parse_args:
 
 .pa_help:
     call    print_help
-    EXIT    0
+    xor     edi, edi
+    mov     rax, SYS_EXIT
+    syscall
 
 .pa_version:
     call    print_version
-    EXIT    0
+    xor     edi, edi
+    mov     rax, SYS_EXIT
+    syscall
 
 .pa_file:
     ; Add to files list
-    lea     rcx, [files]
+    mov     rcx, files
     mov     rdx, [nfiles]
     mov     [rcx + rdx*8], rbx
     inc     qword [nfiles]
@@ -1071,7 +1130,7 @@ parse_args:
     ; "head: invalid option -- 'X'\nTry 'head --help' for more information.\n"
     mov     r15b, al                    ; save char
     mov     rdi, STDERR
-    lea     rsi, [err_invalid_opt_pre]
+    mov     rsi, err_invalid_opt_pre
     mov     rdx, err_invalid_opt_pre_len
     call    asm_write_all
     ; Write the char
@@ -1083,15 +1142,17 @@ parse_args:
     pop     r15
     ; Write suffix
     mov     rdi, STDERR
-    lea     rsi, [err_opt_suffix]
+    mov     rsi, err_opt_suffix
     mov     rdx, err_opt_suffix_len
     call    asm_write_all
-    EXIT    1
+    mov     edi, 1
+    mov     rax, SYS_EXIT
+    syscall
 
 .pa_unrec_long:
     ; "head: unrecognized option 'XXXX'\nTry ..."
     mov     rdi, STDERR
-    lea     rsi, [err_unrec_pre]
+    mov     rsi, err_unrec_pre
     mov     rdx, err_unrec_pre_len
     call    asm_write_all
     ; Write the option string
@@ -1103,90 +1164,93 @@ parse_args:
     call    asm_write_all
     ; Write suffix
     mov     rdi, STDERR
-    lea     rsi, [err_opt_suffix]
+    mov     rsi, err_opt_suffix
     mov     rdx, err_opt_suffix_len
     call    asm_write_all
-    EXIT    1
+    mov     edi, 1
+    mov     rax, SYS_EXIT
+    syscall
 
 .pa_missing_arg_n:
     mov     rdi, STDERR
-    lea     rsi, [err_missing_n]
+    mov     rsi, err_missing_n
     mov     rdx, err_missing_n_len
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [err_try_help]
+    mov     rsi, err_try_help
     mov     rdx, err_try_help_len
     call    asm_write_all
-    EXIT    1
+    mov     edi, 1
+    mov     rax, SYS_EXIT
+    syscall
 
 .pa_missing_arg_c:
     mov     rdi, STDERR
-    lea     rsi, [err_missing_c]
+    mov     rsi, err_missing_c
     mov     rdx, err_missing_c_len
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [err_try_help]
+    mov     rsi, err_try_help
     mov     rdx, err_try_help_len
     call    asm_write_all
-    EXIT    1
+    mov     edi, 1
+    mov     rax, SYS_EXIT
+    syscall
 
 .pa_missing_arg_long_lines:
     mov     rdi, STDERR
-    lea     rsi, [err_missing_long_lines]
+    mov     rsi, err_missing_long_lines
     mov     rdx, err_missing_long_lines_len
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [err_try_help]
+    mov     rsi, err_try_help
     mov     rdx, err_try_help_len
     call    asm_write_all
-    EXIT    1
+    mov     edi, 1
+    mov     rax, SYS_EXIT
+    syscall
 
 .pa_missing_arg_long_bytes:
     mov     rdi, STDERR
-    lea     rsi, [err_missing_long_bytes]
+    mov     rsi, err_missing_long_bytes
     mov     rdx, err_missing_long_bytes_len
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [err_try_help]
+    mov     rsi, err_try_help
     mov     rdx, err_try_help_len
     call    asm_write_all
-    EXIT    1
+    mov     edi, 1
+    mov     rax, SYS_EXIT
+    syscall
 
 .pa_invalid_lines:
-    ; Save the original argument for error message
-    ; "head: invalid number of lines: 'VALUE'\n"
-    ; We need the original value including the potential leading '-'
-    ; The rdi we passed to parse was already past the '-', but the error
-    ; needs the full value. We'll use rbx or reconstruct.
     mov     rdi, STDERR
-    lea     rsi, [err_invalid_lines_pre]
+    mov     rsi, err_invalid_lines_pre
     mov     rdx, err_invalid_lines_pre_len
     call    asm_write_all
     jmp     .pa_invalid_num_finish
 
 .pa_invalid_lines_num:
-    ; Same as above but for legacy -NUM format
     mov     rdi, STDERR
-    lea     rsi, [err_invalid_lines_pre]
+    mov     rsi, err_invalid_lines_pre
     mov     rdx, err_invalid_lines_pre_len
     call    asm_write_all
     jmp     .pa_invalid_num_finish
 
 .pa_invalid_bytes:
     mov     rdi, STDERR
-    lea     rsi, [err_invalid_bytes_pre]
+    mov     rsi, err_invalid_bytes_pre
     mov     rdx, err_invalid_bytes_pre_len
     call    asm_write_all
 
 .pa_invalid_num_finish:
-    ; Print the problematic value — we use the current arg
-    ; For -nVAL or --lines=VAL, print just the value part
-    ; For simplicity, we'll print the raw value
     mov     rdi, STDERR
-    lea     rsi, [err_quote_nl]
+    mov     rsi, err_quote_nl
     mov     rdx, 2                      ; "'\n"
     call    asm_write_all
-    EXIT    1
+    mov     edi, 1
+    mov     rax, SYS_EXIT
+    syscall
 
 
 ; ============================================================================
@@ -1507,62 +1571,57 @@ print_errno:
     je      .pe_notdir
     ; Default: "Input/output error"
     mov     rdi, STDERR
-    lea     rsi, [err_io]
+    mov     rsi, err_io
     mov     rdx, err_io_len
     jmp     asm_write_all
 .pe_noent:
     mov     rdi, STDERR
-    lea     rsi, [err_noent]
+    mov     rsi, err_noent
     mov     rdx, err_noent_len
     jmp     asm_write_all
 .pe_perm:
     mov     rdi, STDERR
-    lea     rsi, [err_perm]
+    mov     rsi, err_perm
     mov     rdx, err_perm_len
     jmp     asm_write_all
 .pe_isdir:
     mov     rdi, STDERR
-    lea     rsi, [err_isdir]
+    mov     rsi, err_isdir
     mov     rdx, err_isdir_len
     jmp     asm_write_all
 .pe_notdir:
     mov     rdi, STDERR
-    lea     rsi, [err_notdir]
+    mov     rsi, err_notdir
     mov     rdx, err_notdir_len
     jmp     asm_write_all
 
 ; print_help — print help text to stdout
 print_help:
     mov     rdi, STDOUT
-    lea     rsi, [help_text]
+    mov     rsi, help_text
     mov     rdx, help_text_len
     jmp     asm_write_all
 
 ; print_version — print version text to stdout
 print_version:
     mov     rdi, STDOUT
-    lea     rsi, [version_text]
+    mov     rsi, version_text
     mov     rdx, version_text_len
     jmp     asm_write_all
 
 
-; ============================================================================
-;                        DATA SECTION
-; ============================================================================
-
-; ============================================================================
-;                        SHARED LIBRARY FUNCTIONS
-; ============================================================================
-
+; ############################################################################
+;  Inlined I/O routines (from lib/io.asm)
+; ############################################################################
 
 ; asm_write(rdi=fd, rsi=buf, rdx=len) -> rax=bytes_written
 ; Handles EINTR automatically
 asm_write:
-.retry:
+.aw_retry:
     mov     rax, SYS_WRITE
     syscall
     cmp     rax, -EINTR
-    je      .retry
+    je      .aw_retry
     ret
 
 ; asm_write_all(rdi=fd, rsi=buf, rdx=len) -> rax=0 on success, -1 on error
@@ -1574,28 +1633,28 @@ asm_write_all:
     mov     rbx, rdi            ; fd
     mov     r12, rsi            ; buf
     mov     r13, rdx            ; remaining
-.loop:
+.wa_loop:
     test    r13, r13
-    jle     .success
+    jle     .wa_success
     mov     rdi, rbx
     mov     rsi, r12
     mov     rdx, r13
     mov     rax, SYS_WRITE
     syscall
     cmp     rax, -EINTR
-    je      .loop               ; EINTR — retry
+    je      .wa_loop            ; EINTR — retry
     test    rax, rax
-    js      .error              ; negative = error
+    js      .wa_error           ; negative = error
     add     r12, rax
     sub     r13, rax
-    jmp     .loop
-.success:
+    jmp     .wa_loop
+.wa_success:
     xor     eax, eax
     pop     r13
     pop     r12
     pop     rbx
     ret
-.error:
+.wa_error:
     mov     rax, -1
     pop     r13
     pop     r12
@@ -1605,11 +1664,11 @@ asm_write_all:
 ; asm_read(rdi=fd, rsi=buf, rdx=len) -> rax=bytes_read
 ; Handles EINTR automatically
 asm_read:
-.retry:
+.ar_retry:
     mov     rax, SYS_READ
     syscall
     cmp     rax, -EINTR
-    je      .retry
+    je      .ar_retry
     ret
 
 ; asm_open(rdi=path, rsi=flags, rdx=mode) -> rax=fd
@@ -1630,11 +1689,10 @@ asm_exit:
     syscall
 
 
-
-; ============================================================================
+; ############################################################################
 ;                           DATA SECTION
-; ============================================================================
-
+;  Inline data placed directly after code. Part of the RX PT_LOAD segment.
+; ############################################################################
 
 dash_str:       db "-", 0
 newline_str:    db 10
@@ -1687,7 +1745,7 @@ version_text_len equ $ - version_text
 
 ; Error message fragments
 err_cannot_open_pre:
-    db "head: cannot open '",
+    db "head: cannot open '"
 err_cannot_open_pre_len equ $ - err_cannot_open_pre
 
 err_for_reading:
@@ -1754,31 +1812,8 @@ err_notdir_len equ $ - err_notdir
 err_io:         db "Input/output error"
 err_io_len equ $ - err_io
 
-; ============================================================================
-;                        BSS SECTION
-; ============================================================================
-
-file_end:
 
 ; ============================================================================
-;                           BSS SECTION
+;  End of file. file_size marks the total binary size.
 ; ============================================================================
-bss_start equ (file_end - ehdr + 0x400000 + 0xFFF) & ~0xFFF
-
-argc equ bss_start + 0
-argv equ bss_start + 8
-mode equ bss_start + 16
-count equ bss_start + 24
-quiet equ bss_start + 32
-verbose equ bss_start + 33
-zero_term equ bss_start + 34
-show_headers equ bss_start + 35
-had_error equ bss_start + 36
-first_file equ bss_start + 37
-nfiles equ bss_start + 38
-cur_fd equ bss_start + 46
-files equ bss_start + 54
-iobuf equ bss_start + 2102
-frombuf equ bss_start + 67638
-
-bss_size equ 4261942
+file_size equ $ - ehdr
