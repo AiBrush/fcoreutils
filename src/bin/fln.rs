@@ -397,12 +397,13 @@ fn link_name_in_dir(target: &str, dir: &str) -> String {
 /// For symbolic links with force, GNU ln detects this and errors.
 #[cfg(unix)]
 fn same_file(target: &str, link_name: &str) -> bool {
-    // Resolve both paths to their real metadata
     let target_meta = match std::fs::metadata(target) {
         Ok(m) => m,
         Err(_) => return false,
     };
-    let link_meta = match std::fs::metadata(link_name) {
+    // Use symlink_metadata for link_name so we compare the link entry's own inode,
+    // not its resolved target (which would false-positive for symlink re-creation)
+    let link_meta = match std::fs::symlink_metadata(link_name) {
         Ok(m) => m,
         Err(_) => return false,
     };

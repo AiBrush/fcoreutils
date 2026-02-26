@@ -244,7 +244,18 @@ fn rm_recursive(
     };
 
     for entry in entries {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!(
+                    "rm: cannot read directory entry in '{}': {}",
+                    display_path,
+                    format_io_error(&e)
+                );
+                success = false;
+                continue;
+            }
+        };
         let child_path = entry.path();
         let child_name = child_path
             .file_name()
@@ -362,6 +373,9 @@ fn rm_recursive_parallel(
         let child_meta = match std::fs::symlink_metadata(&child_path) {
             Ok(m) => m,
             Err(e) => {
+                if config.force && is_ignorable_force_error(&e) {
+                    return;
+                }
                 if !config.force {
                     eprintln!(
                         "rm: cannot remove '{}': {}",
@@ -382,6 +396,9 @@ fn rm_recursive_parallel(
         if child_meta.is_dir() {
             rm_recursive_parallel(&child_path, config, root_dev, success);
             if let Err(e) = std::fs::remove_dir(&child_path) {
+                if config.force && is_ignorable_force_error(&e) {
+                    return;
+                }
                 if !config.force {
                     eprintln!(
                         "rm: cannot remove '{}': {}",
@@ -392,6 +409,9 @@ fn rm_recursive_parallel(
                 success.store(false, std::sync::atomic::Ordering::Relaxed);
             }
         } else if let Err(e) = std::fs::remove_file(&child_path) {
+            if config.force && is_ignorable_force_error(&e) {
+                return;
+            }
             if !config.force {
                 eprintln!(
                     "rm: cannot remove '{}': {}",

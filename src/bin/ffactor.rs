@@ -138,7 +138,9 @@ fn process_big_number(s: &str, exponents: bool, out: &mut impl Write) -> bool {
             }
         }
     } else {
-        // Number is still > u128::MAX after trial division - it's a large factor
+        // Number is still > u128::MAX after trial division — emit as single factor.
+        // Limitation: this may be composite if all prime factors > 997. A full
+        // implementation would use Pollard's rho + Miller-Rabin (as GNU factor does).
         let s = digits.iter().map(|d| (d + b'0') as char).collect::<String>();
         factors.push(s);
     }
@@ -323,10 +325,8 @@ fn factor_token(
                 out_buf.clear();
             }
             let _ = out.flush();
-            let stdout = io::stdout();
-            let mut w = BufWriter::new(stdout.lock());
             let token_str = std::str::from_utf8(token).unwrap_or("");
-            return process_big_number(token_str, exponents, &mut w);
+            return process_big_number(token_str, exponents, out);
         }
     }
 
