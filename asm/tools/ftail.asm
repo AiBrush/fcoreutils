@@ -228,10 +228,14 @@ parse_args:
 .pa_n_missing:
     lea     rdi, [rel err_n_requires]
     call    write_str_stderr
+    lea     rdi, [rel err_try_help]
+    call    write_str_stderr
     SYSCALL_EXIT 1
 
 .pa_parse_lines_val:
-    ; rsi = value string. Check for '+' prefix
+    ; rsi = value string. Save original for error messages
+    mov     r13, rsi
+    ; Check for '+' prefix
     cmp     byte [rsi], '+'
     je      .pa_lines_from
     cmp     byte [rsi], '-'
@@ -255,11 +259,10 @@ parse_args:
     mov     [rel count], rax
     jmp     .pa_next_arg
 .pa_bad_lines:
-    ; Save the original value for error message
     lea     rdi, [rel err_bad_lines_prefix]
     call    write_str_stderr
-    ; We need the original value string - reconstruct from rsi
-    ; For simplicity, just print a generic error
+    mov     rdi, r13                ; original value string
+    call    write_str_stderr
     lea     rdi, [rel err_bad_lines_suffix]
     call    write_str_stderr
     SYSCALL_EXIT 1
@@ -277,9 +280,12 @@ parse_args:
 .pa_c_missing:
     lea     rdi, [rel err_c_requires]
     call    write_str_stderr
+    lea     rdi, [rel err_try_help]
+    call    write_str_stderr
     SYSCALL_EXIT 1
 
 .pa_parse_bytes_val:
+    mov     r13, rsi                ; save original value for error messages
     cmp     byte [rsi], '+'
     je      .pa_bytes_from
     cmp     byte [rsi], '-'
@@ -304,6 +310,8 @@ parse_args:
     jmp     .pa_next_arg
 .pa_bad_bytes:
     lea     rdi, [rel err_bad_bytes_prefix]
+    call    write_str_stderr
+    mov     rdi, r13                ; original value string
     call    write_str_stderr
     lea     rdi, [rel err_bad_bytes_suffix]
     call    write_str_stderr
@@ -478,6 +486,8 @@ parse_args:
 .pa_lines_opt_missing:
     lea     rdi, [rel err_lines_requires]
     call    write_str_stderr
+    lea     rdi, [rel err_try_help]
+    call    write_str_stderr
     SYSCALL_EXIT 1
 
 .pa_long_bytes:
@@ -491,6 +501,8 @@ parse_args:
     jmp     .pa_parse_bytes_val
 .pa_bytes_opt_missing:
     lea     rdi, [rel err_bytes_requires]
+    call    write_str_stderr
+    lea     rdi, [rel err_try_help]
     call    write_str_stderr
     SYSCALL_EXIT 1
 
@@ -530,9 +542,10 @@ parse_args:
 
 .pa_unrec_long:
     ; "tail: unrecognized option 'OPTION'"
+    mov     r12, rsi                ; save option string (rsi clobbered by write_str_stderr)
     lea     rdi, [rel err_unrec_prefix]
     call    write_str_stderr
-    mov     rdi, rsi
+    mov     rdi, r12
     call    write_str_stderr
     lea     rdi, [rel err_unrec_suffix]
     call    write_str_stderr
@@ -1832,6 +1845,7 @@ err_bad_lines_prefix: db "tail: invalid number of lines: '", 0
 err_bad_lines_suffix: db "'", 10, 0
 err_bad_bytes_prefix: db "tail: invalid number of bytes: '", 0
 err_bad_bytes_suffix: db "'", 10, 0
+err_try_help:       db "Try 'tail --help' for more information.", 10, 0
 err_open_prefix:    db "tail: cannot open '", 0
 err_open_suffix:    db "' for reading: No such file or directory", 10, 0
 
