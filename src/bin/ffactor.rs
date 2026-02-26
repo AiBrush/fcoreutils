@@ -64,6 +64,100 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     mmap
 }
 
+/// Parse and factor a single whitespace-delimited token.
+/// Returns true if the token was valid, false on error.
+#[inline]
+fn factor_token(token: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::StdoutLock>) -> bool {
+    if token.is_empty() {
+        return true;
+    }
+
+    // Try u64 fast path first (handles all numbers up to u64::MAX = 20 digits).
+    let mut n64: u64 = 0;
+    let mut valid_u64 = true;
+    let mut overflowed = false;
+    for &b in token {
+        let d = b.wrapping_sub(b'0');
+        if d > 9 {
+            valid_u64 = false;
+            break;
+        }
+        n64 = match n64.checked_mul(10) {
+            Some(v) => match v.checked_add(d as u64) {
+                Some(v) => v,
+                None => {
+                    overflowed = true;
+                    break;
+                }
+            },
+            None => {
+                overflowed = true;
+                break;
+            }
+        };
+    }
+    if valid_u64 && !overflowed {
+        factor::write_factors_u64(n64, out_buf);
+        flush_if_full(out_buf, out);
+        return true;
+    }
+
+    // u128 path for numbers > u64::MAX
+    if overflowed {
+        let mut n: u128 = 0;
+        let mut valid_u128 = true;
+        for &b in token {
+            let d = b.wrapping_sub(b'0');
+            if d > 9 {
+                valid_u128 = false;
+                break;
+            }
+            n = match n.checked_mul(10) {
+                Some(v) => match v.checked_add(d as u128) {
+                    Some(v) => v,
+                    None => {
+                        valid_u128 = false;
+                        break;
+                    }
+                },
+                None => {
+                    valid_u128 = false;
+                    break;
+                }
+            };
+        }
+        if valid_u128 {
+            factor::write_factors(n, out_buf);
+            flush_if_full(out_buf, out);
+            return true;
+        }
+    }
+
+    // Invalid token — flush buffered output, then print error
+    if !out_buf.is_empty() {
+        let _ = out.write_all(out_buf);
+        out_buf.clear();
+    }
+    let _ = out.flush();
+    let token_str = String::from_utf8_lossy(token);
+    eprintln!(
+        "{}: \u{2018}{}\u{2019} is not a valid positive integer",
+        TOOL_NAME, token_str
+    );
+    false
+}
+
+/// Flush output buffer if it exceeds 128KB.
+#[inline]
+fn flush_if_full(out_buf: &mut Vec<u8>, out: &mut BufWriter<io::StdoutLock>) {
+    if out_buf.len() >= 128 * 1024 {
+        if out.write_all(out_buf).is_err() {
+            process::exit(0);
+        }
+        out_buf.clear();
+    }
+}
+
 /// Process byte buffer of whitespace-delimited numbers.
 fn process_bytes(input: &[u8], out: &mut BufWriter<io::StdoutLock>) -> bool {
     let mut had_error = false;
@@ -96,96 +190,9 @@ fn process_bytes(input: &[u8], out: &mut BufWriter<io::StdoutLock>) -> bool {
             pos += 1;
         }
 
-        let token = &input[start..pos];
-
-        // Try u64 fast path first (handles all numbers up to u64::MAX = 20 digits).
-        // On overflow, fall through to u128 path.
-        if !token.is_empty() {
-            let mut n64: u64 = 0;
-            let mut valid_u64 = true;
-            let mut overflowed = false;
-            for &b in token {
-                let d = b.wrapping_sub(b'0');
-                if d > 9 {
-                    valid_u64 = false;
-                    break;
-                }
-                n64 = match n64.checked_mul(10) {
-                    Some(v) => match v.checked_add(d as u64) {
-                        Some(v) => v,
-                        None => {
-                            overflowed = true;
-                            break;
-                        }
-                    },
-                    None => {
-                        overflowed = true;
-                        break;
-                    }
-                };
-            }
-            if valid_u64 && !overflowed {
-                factor::write_factors_u64(n64, &mut out_buf);
-                if out_buf.len() >= 128 * 1024 {
-                    if out.write_all(&out_buf).is_err() {
-                        process::exit(0);
-                    }
-                    out_buf.clear();
-                }
-                continue;
-            }
-            // Not valid digits → error (handled below)
-            if !valid_u64 && !overflowed {
-                // fall through to error
-            } else if overflowed {
-                // u128 path for numbers > u64::MAX
-                let mut n: u128 = 0;
-                let mut valid_u128 = true;
-                for &b in token {
-                    let d = b.wrapping_sub(b'0');
-                    if d > 9 {
-                        valid_u128 = false;
-                        break;
-                    }
-                    n = match n.checked_mul(10) {
-                        Some(v) => match v.checked_add(d as u128) {
-                            Some(v) => v,
-                            None => {
-                                valid_u128 = false;
-                                break;
-                            }
-                        },
-                        None => {
-                            valid_u128 = false;
-                            break;
-                        }
-                    };
-                }
-                if valid_u128 {
-                    factor::write_factors(n, &mut out_buf);
-                    if out_buf.len() >= 128 * 1024 {
-                        if out.write_all(&out_buf).is_err() {
-                            process::exit(0);
-                        }
-                        out_buf.clear();
-                    }
-                    continue;
-                }
-            }
+        if !factor_token(&input[start..pos], &mut out_buf, out) {
+            had_error = true;
         }
-
-        // Invalid token
-        if !out_buf.is_empty() {
-            let _ = out.write_all(&out_buf);
-            out_buf.clear();
-        }
-        let _ = out.flush();
-        let token_str = String::from_utf8_lossy(token);
-        eprintln!(
-            "{}: \u{2018}{}\u{2019} is not a valid positive integer",
-            TOOL_NAME, token_str
-        );
-        had_error = true;
     }
 
     if !out_buf.is_empty() && out.write_all(&out_buf).is_err() {
@@ -220,7 +227,7 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
         let n = match reader.read(&mut buf[leftover..]) {
             Ok(0) => {
                 // EOF: process any remaining leftover bytes
-                if leftover > 0 && process_chunk(&buf[..leftover], &mut out_buf, out) {
+                if leftover > 0 && process_tokens(&buf[..leftover], &mut out_buf, out) {
                     had_error = true;
                 }
                 break;
@@ -234,25 +241,35 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
         };
 
         let total = leftover + n;
-        // Find last newline/whitespace boundary to avoid splitting a number
+        // Find last newline boundary to avoid splitting a number
         let boundary = match memchr::memrchr(b'\n', &buf[..total]) {
             Some(pos) => pos + 1,
             None => {
                 // No newline in buffer — carry everything forward
                 leftover = total;
                 if leftover >= buf.len() {
-                    // Buffer full with no newline: process as-is (very long line)
-                    if process_chunk(&buf[..leftover], &mut out_buf, out) {
+                    // Buffer full with no newline (very long line).
+                    // Find last whitespace to avoid splitting a token.
+                    let split = buf[..leftover]
+                        .iter()
+                        .rposition(|&b| b == b' ' || b == b'\t' || b == b'\r')
+                        .map(|p| p + 1)
+                        .unwrap_or(leftover); // no whitespace at all: process entire buffer
+                    if process_tokens(&buf[..split], &mut out_buf, out) {
                         had_error = true;
                     }
-                    leftover = 0;
+                    let remaining = leftover - split;
+                    if remaining > 0 {
+                        buf.copy_within(split..leftover, 0);
+                    }
+                    leftover = remaining;
                 }
                 continue;
             }
         };
 
         // Process complete lines
-        if process_chunk(&buf[..boundary], &mut out_buf, out) {
+        if process_tokens(&buf[..boundary], &mut out_buf, out) {
             had_error = true;
         }
 
@@ -273,7 +290,11 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
 
 /// Process a chunk of bytes containing whitespace-delimited numbers.
 /// Returns true if any error occurred.
-fn process_chunk(input: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::StdoutLock>) -> bool {
+fn process_tokens(
+    input: &[u8],
+    out_buf: &mut Vec<u8>,
+    out: &mut BufWriter<io::StdoutLock>,
+) -> bool {
     let mut had_error = false;
     let mut pos = 0;
     let len = input.len();
@@ -303,93 +324,9 @@ fn process_chunk(input: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::St
             pos += 1;
         }
 
-        let token = &input[start..pos];
-        if token.is_empty() {
-            continue;
+        if !factor_token(&input[start..pos], out_buf, out) {
+            had_error = true;
         }
-
-        // Try u64 fast path first
-        let mut n64: u64 = 0;
-        let mut valid_u64 = true;
-        let mut overflowed = false;
-        for &b in token {
-            let d = b.wrapping_sub(b'0');
-            if d > 9 {
-                valid_u64 = false;
-                break;
-            }
-            n64 = match n64.checked_mul(10) {
-                Some(v) => match v.checked_add(d as u64) {
-                    Some(v) => v,
-                    None => {
-                        overflowed = true;
-                        break;
-                    }
-                },
-                None => {
-                    overflowed = true;
-                    break;
-                }
-            };
-        }
-        if valid_u64 && !overflowed {
-            factor::write_factors_u64(n64, out_buf);
-            if out_buf.len() >= 128 * 1024 {
-                if out.write_all(out_buf).is_err() {
-                    process::exit(0);
-                }
-                out_buf.clear();
-            }
-            continue;
-        }
-        // u128 path for overflow
-        if overflowed {
-            let mut n: u128 = 0;
-            let mut valid_u128 = true;
-            for &b in token {
-                let d = b.wrapping_sub(b'0');
-                if d > 9 {
-                    valid_u128 = false;
-                    break;
-                }
-                n = match n.checked_mul(10) {
-                    Some(v) => match v.checked_add(d as u128) {
-                        Some(v) => v,
-                        None => {
-                            valid_u128 = false;
-                            break;
-                        }
-                    },
-                    None => {
-                        valid_u128 = false;
-                        break;
-                    }
-                };
-            }
-            if valid_u128 {
-                factor::write_factors(n, out_buf);
-                if out_buf.len() >= 128 * 1024 {
-                    if out.write_all(out_buf).is_err() {
-                        process::exit(0);
-                    }
-                    out_buf.clear();
-                }
-                continue;
-            }
-        }
-
-        // Invalid token
-        if !out_buf.is_empty() {
-            let _ = out.write_all(out_buf);
-            out_buf.clear();
-        }
-        let _ = out.flush();
-        let token_str = String::from_utf8_lossy(token);
-        eprintln!(
-            "{}: \u{2018}{}\u{2019} is not a valid positive integer",
-            TOOL_NAME, token_str
-        );
-        had_error = true;
     }
 
     had_error
