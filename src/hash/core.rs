@@ -903,9 +903,8 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         if file_size < TINY_FILE_LIMIT {
             return hash_file_tiny(algo, file, file_size as usize);
         }
-        // Large files (>=16MB): mmap with huge pages for zero-copy single-shot hash.
-        // This is faster than streaming I/O for files that fit in RAM because it
-        // avoids thread synchronization, buffer management, and data copying.
+        // Files >= 8KB: mmap for zero-copy single-shot hash.
+        // Avoids buffer allocation, read() syscalls, and data copying.
         // Falls back to streaming I/O if mmap fails (FUSE, NFS, etc.).
         //
         // SAFETY: mmap is safe for regular local files. If the file is truncated
@@ -914,37 +913,27 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
         // the behavior of other mmap-using tools (wc, cat). The fallback to
         // streaming I/O (read()) handles mmap failures at map time, but cannot
         // protect against post-map truncation.
-        if file_size >= SMALL_FILE_LIMIT {
-            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
-            if let Ok(mmap) = mmap_result {
-                #[cfg(target_os = "linux")]
-                {
-                    if file_size >= 2 * 1024 * 1024 {
-                        let _ = mmap.advise(memmap2::Advice::HugePage);
-                    }
-                    let _ = mmap.advise(memmap2::Advice::Sequential);
-                    // PopulateRead (Linux 5.14+) synchronously faults all pages before
-                    // returning, giving warm TLB entries for hash_bytes. WillNeed is
-                    // async and best-effort — pages may still fault during hashing.
-                    if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
-                        let _ = mmap.advise(memmap2::Advice::WillNeed);
-                    }
-                }
-                return hash_bytes(algo, &mmap);
-            }
-            // mmap failed — fall back to streaming I/O
+        let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
+        if let Ok(mmap) = mmap_result {
             #[cfg(target_os = "linux")]
             {
-                return hash_file_pipelined(algo, file, file_size);
+                if file_size >= 2 * 1024 * 1024 {
+                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                }
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                    let _ = mmap.advise(memmap2::Advice::WillNeed);
+                }
             }
-            #[cfg(not(target_os = "linux"))]
-            {
-                // On non-Linux, fall through to hash_reader (streaming fallback)
-            }
+            return hash_bytes(algo, &mmap);
         }
-        // Small files (8KB..16MB): single read into thread-local buffer, then single-shot hash.
-        // This avoids Hasher context allocation + streaming overhead for each file.
-        if file_size < SMALL_FILE_LIMIT {
+        // mmap failed — fall back to streaming I/O
+        #[cfg(target_os = "linux")]
+        {
+            return hash_file_pipelined(algo, file, file_size);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
             return hash_file_small(algo, file, file_size as usize);
         }
     }
@@ -2349,22 +2338,19 @@ fn hash_from_raw_fd(algo: HashAlgorithm, fd: i32) -> io::Result<String> {
     let file = unsafe { File::from_raw_fd(fd) };
 
     if is_regular && size > 0 {
-        // Large files (>=16MB): mmap with HugePage + PopulateRead
-        if size >= SMALL_FILE_LIMIT {
-            let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
-            if let Ok(mmap) = mmap_result {
-                if size >= 2 * 1024 * 1024 {
-                    let _ = mmap.advise(memmap2::Advice::HugePage);
-                }
-                let _ = mmap.advise(memmap2::Advice::Sequential);
-                // Prefault pages using huge pages (kernel 5.14+)
-                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
-                    let _ = mmap.advise(memmap2::Advice::WillNeed);
-                }
-                return hash_bytes(algo, &mmap);
+        // Files >=8KB: mmap with HugePage + PopulateRead for zero-copy hash
+        let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
+        if let Ok(mmap) = mmap_result {
+            if size >= 2 * 1024 * 1024 {
+                let _ = mmap.advise(memmap2::Advice::HugePage);
             }
+            let _ = mmap.advise(memmap2::Advice::Sequential);
+            if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                let _ = mmap.advise(memmap2::Advice::WillNeed);
+            }
+            return hash_bytes(algo, &mmap);
         }
-        // Small files (8KB-16MB): single-read into thread-local buffer
+        // mmap failed: fallback to single-read into thread-local buffer
         return hash_file_small(algo, file, size as usize);
     }
 
