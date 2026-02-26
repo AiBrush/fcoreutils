@@ -41,7 +41,7 @@ ehdr:
     dd 0                        ; flags
     dw 64                       ; ELF header size
     dw phdr_size                ; program header entry size
-    dw 1                        ; 1 program header
+    dw 2                        ; 2 program headers
     dw 64                       ; section header entry size
     dw 0                        ; section header count
     dw 0                        ; section name index
@@ -59,6 +59,17 @@ phdr:
     dq file_size + BSS_SIZE     ; memory size (includes BSS)
     dq 0x200000                 ; alignment
 phdr_size equ $ - phdr
+
+; PT_GNU_STACK — mark stack as non-executable
+phdr_stack:
+    dd 0x6474e551               ; PT_GNU_STACK
+    dd 6                        ; PF_R | PF_W (no PF_X)
+    dq 0                        ; offset
+    dq 0                        ; virtual address
+    dq 0                        ; physical address
+    dq 0                        ; file size
+    dq 0                        ; memory size
+    dq 0x10                     ; alignment
 
 ; ============================================================
 ; Code section
@@ -99,6 +110,10 @@ _start:
     jmp     .parse_short_opts
 
 .check_long_opt:
+    ; Check if it's exactly "--" (end of options marker)
+    cmp     byte [rsi + 2], 0
+    je      .end_of_opts
+
     ; Check --help
     mov     rdi, rsi
     lea     rsi, [rel str_opt_help]
@@ -163,6 +178,15 @@ _start:
 .next_arg:
     inc     r13
     jmp     .arg_loop
+
+; Handle "--" end-of-options: remaining args are operands
+.end_of_opts:
+    inc     r13
+    cmp     r13, r14
+    jge     .run_main           ; no more args after --, proceed normally
+    ; First arg after -- is an extra operand
+    mov     rsi, [r15 + r13*8]
+    jmp     .err_extra_operand
 
 ; ── Help ─────────────────────────────────────────────────────
 .do_help:

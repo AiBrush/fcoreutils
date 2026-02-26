@@ -137,44 +137,43 @@ _start:
 
 .check_long_opt:
     ; rsi points to the arg starting with '--'
+    ; Check if it's exactly "--" (end of options marker)
+    cmp     byte [rsi + 2], 0
+    je      .end_of_opts
+
+    ; Save arg pointer in callee-saved rbp for use across calls
+    mov     rbp, rsi
+
     ; Check --help
-    mov     rdi, str_opt_help
-    push    rsi
     mov     rdi, rsi
     mov     rsi, str_opt_help
     call    asm_strcmp
-    pop     rsi
     test    rax, rax
     jz      .do_help
 
     ; Check --version
-    push    rsi
-    mov     rdi, rsi
+    mov     rdi, rbp
     mov     rsi, str_opt_version
     call    asm_strcmp
-    pop     rsi
     test    rax, rax
     jz      .do_version
 
     ; Check --silent
-    push    rsi
-    mov     rdi, rsi
+    mov     rdi, rbp
     mov     rsi, str_opt_silent
     call    asm_strcmp
-    pop     rsi
     test    rax, rax
     jz      .set_silent
 
     ; Check --quiet
-    push    rsi
-    mov     rdi, rsi
+    mov     rdi, rbp
     mov     rsi, str_opt_quiet
     call    asm_strcmp
-    pop     rsi
     test    rax, rax
     jz      .set_silent
 
     ; Unrecognized long option
+    mov     rsi, rbp
     jmp     .err_unrecognized_opt
 
 .parse_short_opts:
@@ -207,6 +206,15 @@ _start:
 .next_arg:
     inc     r13
     jmp     .arg_loop
+
+; Handle "--" end-of-options: remaining args are operands
+.end_of_opts:
+    inc     r13
+    cmp     r13, r14
+    jge     .run_main           ; no more args after --, proceed normally
+    ; First arg after -- is an extra operand
+    mov     rsi, [r15 + r13*8]
+    jmp     .err_extra_operand
 
 ; ── Help output ──────────────────────────────────────────────
 .do_help:
@@ -380,3 +388,6 @@ _start:
 
     mov     rdi, 2
     call    asm_exit
+
+; Mark stack as non-executable
+section .note.GNU-stack noalloc noexec nowrite progbits

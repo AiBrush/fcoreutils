@@ -36,3 +36,6 @@ asm_strcmp:
     movzx   rcx, cl
     sub     rax, rcx
     ret
+
+; Mark stack as non-executable
+section .note.GNU-stack noalloc noexec nowrite progbits
