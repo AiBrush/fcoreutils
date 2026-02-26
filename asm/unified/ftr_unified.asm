@@ -265,6 +265,10 @@ _start:
     inc     ebx
     jmp     .next_arg
 .store_extra:
+    cmp     ebx, 2
+    jne     .store_extra_skip
+    mov     rbp, rdi
+.store_extra_skip:
     inc     ebx
     jmp     .next_arg
 
@@ -287,6 +291,10 @@ _start:
     inc     ebx
     jmp     .eo_next
 .eo_extra:
+    cmp     ebx, 2
+    jne     .eo_extra_skip
+    mov     rbp, rdi
+.eo_extra_skip:
     inc     ebx
 .eo_next:
     add     rsi, 8
@@ -309,6 +317,7 @@ _start:
     jnz     .mode_sq
     cmp     ebx, 2
     jl      .err_missing_set2_tr
+    jg      .err_extra_general
     jmp     do_translate
 
 .mode_del:
@@ -321,10 +330,12 @@ _start:
 .mode_ds:
     cmp     ebx, 2
     jl      .err_missing_set2_ds
+    jg      .err_extra_general
     jmp     do_delete_squeeze
 
 .mode_sq:
     cmp     ebx, 2
+    jg      .err_extra_general
     jge     do_translate_squeeze
     jmp     do_squeeze
 
@@ -364,6 +375,17 @@ _start:
     WRITE_SC STDERR, r14, r15
     WRITE_SC STDERR, err_quote_nl, err_quote_nl_len
     WRITE_SC STDERR, err_one_del, err_one_del_len
+    WRITE_SC STDERR, err_try_help, err_try_help_len
+    EXIT_SC 1
+
+.err_extra_general:
+    ; rbp = pointer to the extra (3rd) operand
+    WRITE_SC STDERR, err_extra, err_extra_len
+    mov     rdi, rbp
+    call    strlen
+    mov     r15, rax
+    WRITE_SC STDERR, rbp, r15
+    WRITE_SC STDERR, err_quote_nl, err_quote_nl_len
     WRITE_SC STDERR, err_try_help, err_try_help_len
     EXIT_SC 1
 
@@ -455,6 +477,20 @@ asm_read:
     je      .rd_retry
     ret
 
+; ── Range error handler (called from parse_set) ──
+; ecx = start char, edx = end char of the reversed range
+err_range_reversed:
+    sub     rsp, 8
+    mov     byte [rsp], cl
+    mov     byte [rsp+1], '-'
+    mov     byte [rsp+2], dl
+    WRITE_SC STDERR, err_range_reversed_prefix, err_range_reversed_prefix_len
+    lea     rsi, [rsp]
+    WRITE_SC STDERR, rsi, 3
+    WRITE_SC STDERR, err_range_reversed_suffix, err_range_reversed_suffix_len
+    add     rsp, 8
+    EXIT_SC 1
+
 ; ============================================================================
 ;                       SET PARSING
 ; ============================================================================
@@ -472,6 +508,12 @@ parse_set:
     mov     rbx, rsi
 
 .ps_loop:
+    ; Bounds check: stop if output buffer is full
+    lea     rax, [r9]
+    sub     rax, rbx
+    cmp     rax, 8192
+    jge     .ps_done
+
     movzx   eax, byte [r8]
     test    al, al
     jz      .ps_done
@@ -493,8 +535,12 @@ parse_set:
     movzx   ecx, r10b
     movzx   edx, r11b
     cmp     ecx, edx
-    jg      .ps_loop
+    jg      err_range_reversed
 .ps_range:
+    lea     rax, [r9]
+    sub     rax, rbx
+    cmp     rax, 8192
+    jge     .ps_done
     mov     [r9], cl
     inc     r9
     inc     ecx
@@ -521,7 +567,7 @@ parse_set:
     movzx   ecx, r10b
     movzx   edx, r11b
     cmp     ecx, edx
-    jg      .ps_loop
+    jg      err_range_reversed
     jmp     .ps_range
 
 .ps_bracket:
@@ -553,6 +599,8 @@ parse_set:
     mov     r11b, al
     movzx   ecx, r10b
     movzx   edx, r11b
+    cmp     ecx, edx
+    jg      err_range_reversed
     jmp     .ps_range
 
 .ps_class:
@@ -760,16 +808,26 @@ parse_set:
 %macro EMIT_RANGE 2
     mov     ecx, %1
 %%loop:
+    lea     rax, [r9]
+    sub     rax, rbx
+    cmp     rax, 8192
+    jge     %%done
     mov     [r9], cl
     inc     r9
     inc     ecx
     cmp     ecx, %2 + 1
     jl      %%loop
+%%done:
 %endmacro
 
 %macro EMIT_BYTE 1
+    lea     rax, [r9]
+    sub     rax, rbx
+    cmp     rax, 8192
+    jge     %%skip
     mov     byte [r9], %1
     inc     r9
+%%skip:
 %endmacro
 
 ; expand_char_class(rdi=name_ptr, rcx=name_len, r9=output_ptr)
@@ -809,6 +867,8 @@ expand_char_class:
     jmp     .ecc_loop
 
 .ecc_expand:
+    ; Restore rbx to output buffer start for EMIT bounds checks
+    mov     rbx, [rsp + 24]
     cmp     r8d, 0
     je      .c_alnum
     cmp     r8d, 1
@@ -907,6 +967,16 @@ build_translate_table:
     mov     r13, [set1_len_var]
     mov     r14, [set2_len_var]
 
+    ; Cap set lengths to 256 (max meaningful for byte-to-byte translation)
+    cmp     r13, 256
+    jle     .btt_s1_ok
+    mov     r13, 256
+.btt_s1_ok:
+    cmp     r14, 256
+    jle     .btt_s2_ok
+    mov     r14, 256
+.btt_s2_ok:
+
     test    r12d, FLAG_COMPLEMENT
     jz      .btt_no_comp
 
@@ -971,6 +1041,8 @@ build_translate_table:
     movzx   eax, byte [rsi + r14 - 1]
 .btt_ext:
     cmp     r14, r13
+    jge     .btt_ready
+    cmp     r14, 256
     jge     .btt_ready
     mov     [rsi + r14], al
     inc     r14
@@ -1562,5 +1634,13 @@ err_one_del_len equ $ - err_one_del
 err_quote_nl:
     db "'", 10
 err_quote_nl_len equ $ - err_quote_nl
+
+err_range_reversed_prefix:
+    db "tr: range-endpoints of '"
+err_range_reversed_prefix_len equ $ - err_range_reversed_prefix
+
+err_range_reversed_suffix:
+    db "' are in reverse collating sequence order", 10
+err_range_reversed_suffix_len equ $ - err_range_reversed_suffix
 
 file_end:
