@@ -8,3 +8,6 @@ section .text
 ; For tty, arg parsing is done inline in the tool
 asm_args_init:
     ret
+
+; Mark stack as non-executable
+section .note.GNU-stack noalloc noexec nowrite progbits

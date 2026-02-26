@@ -122,6 +122,13 @@ run_test_pipe "silent mode --silent"         "--silent"
 run_test_pipe "silent mode --quiet"          "--quiet"
 run_test_pipe "multiple silent flags"        "-s --silent --quiet"
 
+# ── End-of-options marker -- ─────────────────────────────────
+run_test_pipe "-- (end of options, no args)"  "--"
+run_test_pipe "-s -- (silent with end marker)" "-s --"
+run_test_stderr "-- foo (extra operand after --)" "-- foo"
+run_test_stderr "-- -s (operand after --)"      "-- -s"
+run_test_stderr "-- --help (operand after --)"  "-- --help"
+
 # ── Results ──────────────────────────────────────────────────
 echo ""
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
