@@ -561,7 +561,7 @@ fn main() {
                         while current <= batch_end {
                             let remaining = FLUSH_AT - offset;
                             let can_fit = remaining / ENTRY;
-                            let run_end = std::cmp::min(current + can_fit as i64, batch_end);
+                            let run_end = std::cmp::min(current + can_fit as i64 - 1, batch_end);
                             // Handle prefix: numbers before next decade boundary
                             while current <= run_end && (current % 10) != 0 {
                                 unsafe {
@@ -615,7 +615,6 @@ fn main() {
                                     digits[p] = b'0';
                                     p -= 1;
                                 }
-                                digits[19] = b'0';
                             }
                             // Handle suffix: remaining numbers after last full decade
                             while current <= run_end {
@@ -659,39 +658,21 @@ fn main() {
                     8 => batch!(8),
                     9 => batch!(9),
                     10 => batch!(10),
-                    _ => {
-                        // Fallback for >10 digits (rare: numbers > 10 billion)
-                        while current <= batch_end {
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(
-                                    digits.as_ptr().add(20 - len),
-                                    buf.as_mut_ptr().add(offset),
-                                    len,
-                                );
-                                *buf.as_mut_ptr().add(offset + len) = b'\n';
-                            }
-                            offset += len + 1;
-                            if offset >= FLUSH_AT {
-                                if !write_all_fd1(&buf[..offset]) {
-                                    return;
-                                }
-                                offset = 0;
-                            }
-                            current += 1;
-                            let mut p = 19usize;
-                            loop {
-                                if digits[p] < b'9' {
-                                    digits[p] += 1;
-                                    break;
-                                }
-                                digits[p] = b'0';
-                                p -= 1;
-                            }
-                        }
-                    }
+                    11 => batch!(11),
+                    12 => batch!(12),
+                    13 => batch!(13),
+                    14 => batch!(14),
+                    15 => batch!(15),
+                    16 => batch!(16),
+                    17 => batch!(17),
+                    18 => batch!(18),
+                    19 => batch!(19),
+                    _ => unreachable!("i64 has at most 19 digits"),
                 }
 
-                // Next digit width (carry already propagated by ASCII increment)
+                // Next digit width: set leading '1' for the new power of 10.
+                // The lower digits are already '0' from carry propagation or
+                // from the initial fill; this write is the definitive init.
                 if current <= last_i {
                     len += 1;
                     digits[20 - len] = b'1';
