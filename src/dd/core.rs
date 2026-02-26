@@ -119,25 +119,27 @@ pub struct DdStats {
     pub bytes_copied: u64,
 }
 
-/// Parse a SIZE string with optional suffix.
+/// Parse a GNU dd SIZE string with optional suffix and `x` multiplier.
 ///
-/// Supported suffixes: c (1), w (2), b (512),
-/// K/kB (1000), KiB/k (1024),
-/// M/MB (1000^2), MiB (1024^2),
-/// G/GB (1000^3), GiB (1024^3),
-/// T/TB (1000^4), TiB (1024^4),
-/// P/PB (1000^5), PiB (1024^5),
-/// E/EB (1000^6), EiB (1024^6).
+/// Suffix conventions (matching GNU dd):
+///   - Single letter = binary (powers of 1024): k/K, M, G, T, P, E
+///   - `xB` suffix = decimal (powers of 1000): kB, KB, MB, GB, TB, PB, EB
+///   - `xIB` suffix = explicit binary: KiB, MiB, GiB, TiB, PiB, EiB
+///   - Special: c (1), w (2), b (512)
+///
+/// The `x` operator multiplies terms and chains recursively,
+/// so `1x2x4` = 1 * (2 * 4) = 8.
 pub fn parse_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("empty size string".to_string());
     }
 
-    // GNU dd supports 'x' as multiplication: e.g. "2x512", "1Mx2"
+    // GNU dd supports 'x' as multiplication: e.g. "2x512", "1Mx2", "1x2x4"
+    // Split on first 'x' and recurse on the right side for chaining.
     if let Some(pos) = s.find('x') {
         let left = parse_size_single(&s[..pos])?;
-        let right = parse_size_single(&s[pos + 1..])?;
+        let right = parse_size(&s[pos + 1..])?;
         return left
             .checked_mul(right)
             .ok_or_else(|| format!("size overflow: {} * {}", left, right));

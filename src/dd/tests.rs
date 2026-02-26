@@ -397,6 +397,7 @@ fn test_parse_size_x_multiplier() {
     assert_eq!(parse_size("1Mx2").unwrap(), 2_097_152);
     assert_eq!(parse_size("512x4").unwrap(), 2048);
     assert_eq!(parse_size("1bx4").unwrap(), 2048); // 512 * 4
+    assert_eq!(parse_size("1x2x4").unwrap(), 8); // chained: 1 * 2 * 4
 }
 
 #[test]
