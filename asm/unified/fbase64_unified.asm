@@ -1,232 +1,96 @@
-; fbase64_unified.asm — Unified build of fbase64
-; Auto-merged from modular source — DO NOT EDIT
-; Edit the modular files in tools/ and lib/ instead
-; Build: nasm -f bin fbase64_unified.asm -o fbase64_tiny && chmod +x fbase64_tiny
+; fbase64_unified.asm — GNU-compatible base64 encode/decode in x86-64 Linux assembly
+;
+; Unified single-file build with hand-crafted ELF64 header.
+; No linker needed — produces a standalone static binary.
+;
+; Build:
+;   nasm -f bin fbase64_unified.asm -o fbase64_tiny && chmod +x fbase64_tiny
+;
+; Flags: -d (decode), -i (ignore-garbage), -w COLS (wrap, default 76)
+;        --help, --version, -- (end of options)
 
 BITS 64
 org 0x400000
 
-; ── Syscall constants ──
-%define SYS_READ        0
-%define SYS_WRITE       1
-%define SYS_OPEN        2
-%define SYS_CLOSE       3
-%define SYS_STAT        4
-%define SYS_FSTAT       5
-%define SYS_LSEEK       8
-%define SYS_MMAP        9
-%define SYS_MUNMAP     11
-%define SYS_BRK        12
-%define SYS_RT_SIGACTION 13
+; ── Syscall constants (inlined from linux.inc) ──
+%define SYS_READ          0
+%define SYS_WRITE         1
+%define SYS_OPEN          2
+%define SYS_CLOSE         3
 %define SYS_RT_SIGPROCMASK 14
-%define SYS_IOCTL      16
-%define SYS_ACCESS     21
-%define SYS_PIPE       22
-%define SYS_DUP2       33
-%define SYS_NANOSLEEP  35
-%define SYS_GETPID     39
-%define SYS_FORK       57
-%define SYS_EXECVE     59
-%define SYS_EXIT       60
-%define SYS_UNAME      63
-%define SYS_GETCWD     79
-%define SYS_GETUID    102
-%define SYS_GETGID    104
-%define SYS_GETEUID   107
-%define SYS_GETEGID   108
-%define SYS_SYNC      162
-%define STDIN           0
-%define STDOUT          1
-%define STDERR          2
-%define O_RDONLY        0
-%define SIGPIPE        13
-%define BUF_SIZE    65536
+%define SYS_EXIT         60
+
+%define STDIN              0
+%define STDOUT             1
+%define STDERR             2
+
+%define O_RDONLY           0
 
 ; ── Buffer sizes ──
-%define INBUF_SIZE   65536
-%define OUTBUF_SIZE  (65536+16384)
+%define INBUF_SIZE   65536              ; 64KB read buffer
+%define OUTBUF_SIZE  (65536+16384)      ; ~80KB output buffer (encode expands 4/3 + newlines)
 %define WRAP_DEFAULT 76
 
 ; ── BSS addresses (at 0x600000, zero-initialized by kernel) ──
-%define inbuf         0x600000
-%define outbuf        0x610000
-%define decbuf        0x624000
-%define filename_ptr  0x634000
-%define BSS_SIZE      0x34008
+; Layout: inbuf(64KB) + outbuf(80KB) + decbuf(64KB) + filename_ptr(8)
+%define BSS_BASE      0x600000
+%define inbuf         BSS_BASE                             ; 0x600000, 65536 bytes
+%define outbuf        (BSS_BASE + INBUF_SIZE)              ; 0x610000, 81920 bytes
+%define decbuf        (BSS_BASE + INBUF_SIZE + OUTBUF_SIZE) ; 0x624000, 65536 bytes
+%define filename_ptr  (BSS_BASE + INBUF_SIZE + OUTBUF_SIZE + INBUF_SIZE) ; 0x634000, 8 bytes
+%define BSS_SIZE      (INBUF_SIZE + OUTBUF_SIZE + INBUF_SIZE + 8)        ; 213000 bytes
 
-; ── ELF Header ──
+; ======================== ELF Header ========================================
 ehdr:
-    db      0x7F, "ELF"            ; magic
-    db      2, 1, 1, 0             ; 64-bit, LE, ELF v1, SysV ABI
-    dq      0                      ; padding
-    dw      2                      ; ET_EXEC
-    dw      0x3E                   ; x86-64
-    dd      1                      ; ELF version
-    dq      _start                 ; entry point
-    dq      phdr - ehdr            ; program header offset
-    dq      0                      ; no section headers
-    dd      0                      ; flags
-    dw      ehdr_end - ehdr        ; ELF header size
-    dw      phdr_size              ; program header entry size
-    dw      3                      ; 3 program headers
-    dw      0, 0, 0                ; unused section header fields
+    db      0x7f, "ELF"            ; e_ident[0..3]: ELF magic number
+    db      2, 1, 1, 0             ; 2=64-bit, 1=little-endian, 1=ELF v1, 0=SysV ABI
+    dq      0                      ; e_ident padding (8 bytes)
+    dw      2                      ; e_type:    ET_EXEC (executable)
+    dw      0x3E                   ; e_machine: EM_X86_64
+    dd      1                      ; e_version: EV_CURRENT
+    dq      _start                 ; e_entry:   virtual address of entry point
+    dq      phdr - ehdr            ; e_phoff:   program header table offset
+    dq      0                      ; e_shoff:   no section headers
+    dd      0                      ; e_flags:   no processor-specific flags
+    dw      ehdr_end - ehdr        ; e_ehsize:  ELF header size (64 bytes)
+    dw      phdr_size              ; e_phentsize: program header entry size (56 bytes)
+    dw      3                      ; e_phnum:   3 program headers
+    dw      0, 0, 0                ; e_shentsize, e_shnum, e_shstrndx: unused
 ehdr_end:
 
-; ── Program Headers ──
+; ======================== Program Headers ===================================
 phdr:
-    ; Segment 1: Code + Data (R+X)
-    dd      1                      ; PT_LOAD
-    dd      5                      ; PF_R | PF_X
-    dq      0                      ; offset
-    dq      0x400000               ; vaddr
-    dq      0x400000               ; paddr
-    dq      file_size              ; filesz
-    dq      file_size              ; memsz
-    dq      0x1000                 ; align
-phdr_size equ $ - phdr
+    ; --- Segment 1: Code + Data (loaded from file) ---
+    dd      1                       ; p_type:  PT_LOAD
+    dd      5                       ; p_flags: PF_R(4) | PF_X(1) = read+execute
+    dq      0                       ; p_offset: start of file
+    dq      0x400000                ; p_vaddr:  virtual address
+    dq      0x400000                ; p_paddr:  physical address (same)
+    dq      file_end - ehdr         ; p_filesz: entire file
+    dq      file_end - ehdr         ; p_memsz:  same as filesz
+    dq      0x1000                  ; p_align:  page-aligned (4KB)
+phdr_size equ $ - phdr              ; Size of one program header entry (56 bytes)
 
-    ; Segment 2: BSS (R+W, zero-initialized)
-    dd      1                      ; PT_LOAD
-    dd      6                      ; PF_R | PF_W
-    dq      0                      ; offset (no file content)
-    dq      0x600000               ; vaddr
-    dq      0x600000               ; paddr
-    dq      0                      ; filesz = 0
-    dq      BSS_SIZE               ; memsz
-    dq      0x1000                 ; align
+    ; --- Segment 2: BSS (runtime buffers, zero-initialized) ---
+    dd      1                       ; p_type:  PT_LOAD
+    dd      6                       ; p_flags: PF_R(4) | PF_W(2) = read+write
+    dq      0                       ; p_offset: 0 (no file content)
+    dq      BSS_BASE                ; p_vaddr:  buffer base address
+    dq      BSS_BASE                ; p_paddr:  same
+    dq      0                       ; p_filesz: 0 (nothing loaded from file)
+    dq      BSS_SIZE                ; p_memsz:  ~213KB total buffer space
+    dq      0x1000                  ; p_align:  page-aligned
 
-    ; Segment 3: GNU Stack (NX)
-    dd      0x6474E551             ; PT_GNU_STACK
-    dd      6                      ; PF_R | PF_W (no X)
-    dq      0, 0, 0, 0, 0         ; unused
-    dq      0x10                   ; align
+    ; --- Segment 3: GNU Stack (marks stack as non-executable) ---
+    dd      0x6474E551              ; p_type:  PT_GNU_STACK
+    dd      6                       ; p_flags: PF_R(4) | PF_W(2) = NX stack
+    dq      0, 0, 0, 0, 0          ; p_offset, p_vaddr, p_paddr, p_filesz, p_memsz: unused
+    dq      0x10                    ; p_align:  16-byte alignment
 
-; ══════════════════════════════════════════════════════════════════════
-;  CODE
-; ══════════════════════════════════════════════════════════════════════
-; fbase64.asm — GNU-compatible base64 encode/decode in x86-64 Linux assembly
-;
-; Flags: -d (decode), -i (ignore-garbage), -w COLS (wrap, default 76)
-;        --help, --version, -- (end of options)
-;
-; Build (modular):
-;   nasm -f elf64 -I include/ tools/fbase64.asm -o build/tools/fbase64.o
-;   nasm -f elf64 -I include/ lib/io.asm -o build/lib/io.o
-;   ld --gc-sections -n build/tools/fbase64.o build/lib/io.o -o fbase64
+; ============================================================================
+;                           CODE SECTION
+; ============================================================================
 
-
-
-
-; ── Buffer sizes ──
-%define INBUF_SIZE   65536          ; 64KB read buffer
-%define OUTBUF_SIZE  (65536+16384)  ; ~80KB output buffer (encode expands 4/3 + newlines)
-%define WRAP_DEFAULT 76
-
-    ; Decode buffer: 4 base64 chars -> 3 bytes; we process INBUF_SIZE at a time
-
-
-; Base64 encoding table
-b64_encode_table:
-    db "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-
-; Base64 decode table: maps ASCII byte -> 6-bit value (0-63), 0xFF = invalid, 0xFE = whitespace
-; 256 entries
-b64_decode_table:
-    ;       0     1     2     3     4     5     6     7     8     9     A     B     C     D     E     F
-    db   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFF, 0xFF  ; 0x00-0x0F (TAB,LF,VT,FF,CR=whitespace)
-    db   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  ; 0x10-0x1F
-    db   0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,   62, 0xFF, 0xFF, 0xFF,   63  ; 0x20-0x2F (space=ws, +=62, /=63)
-    db     52,   53,   54,   55,   56,   57,   58,   59,   60,   61, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  ; 0x30-0x3F (0-9=52-61, '='=0xFF but handled separately)
-    db   0xFF,    0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14  ; 0x40-0x4F (A-O=0-14)
-    db     15,   16,   17,   18,   19,   20,   21,   22,   23,   24,   25, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  ; 0x50-0x5F (P-Z=15-25)
-    db   0xFF,   26,   27,   28,   29,   30,   31,   32,   33,   34,   35,   36,   37,   38,   39,   40  ; 0x60-0x6F (a-o=26-40)
-    db     41,   42,   43,   44,   45,   46,   47,   48,   49,   50,   51, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  ; 0x70-0x7F (p-z=41-51)
-    ; 0x80-0xFF: all invalid
-    times 128 db 0xFF
-
-; ── String constants ──
-help_text:
-    db "Usage: base64 [OPTION]... [FILE]", 10
-    db "Base64 encode or decode FILE, or standard input, to standard output.", 10, 10
-    db "With no FILE, or when FILE is -, read standard input.", 10, 10
-    db "Mandatory arguments to long options are mandatory for short options too.", 10
-    db "  -d, --decode          decode data", 10
-    db "  -i, --ignore-garbage  when decoding, ignore non-alphabet characters", 10
-    db "  -w, --wrap=COLS       wrap encoded lines after COLS character (default 76).", 10
-    db "                          Use 0 to disable line wrapping", 10
-    db "      --help        display this help and exit", 10
-    db "      --version     output version information and exit", 10, 10
-    db "The data are encoded as described for the base64 alphabet in RFC 4648.", 10
-    db "When decoding, the input may contain newlines in addition to the bytes of", 10
-    db "the formal base64 alphabet.  Use --ignore-garbage to attempt to recover", 10
-    db "from any other non-alphabet bytes in the encoded stream.", 10
-help_text_len equ $ - help_text
-
-version_text:
-    db "base64 (fcoreutils) 0.1.0", 10
-version_text_len equ $ - version_text
-
-err_prefix:
-    db "base64: "
-err_prefix_len equ $ - err_prefix
-
-err_invalid_option:
-    db "base64: invalid option -- '"
-err_invalid_option_len equ $ - err_invalid_option
-
-err_unrecognized:
-    db "base64: unrecognized option '"
-err_unrecognized_len equ $ - err_unrecognized
-
-err_suffix:
-    db "'", 10, "Try 'base64 --help' for more information.", 10
-err_suffix_len equ $ - err_suffix
-
-err_invalid_wrap:
-    db "base64: invalid wrap size: '"
-err_invalid_wrap_len equ $ - err_invalid_wrap
-
-err_wrap_suffix:
-    db "'", 10
-err_wrap_suffix_len equ $ - err_wrap_suffix
-
-err_option_requires_arg_w:
-    db "base64: option requires an argument -- 'w'", 10
-    db "Try 'base64 --help' for more information.", 10
-err_option_requires_arg_w_len equ $ - err_option_requires_arg_w
-
-err_wrap_long_requires:
-    db "base64: option '--wrap' requires an argument", 10
-    db "Try 'base64 --help' for more information.", 10
-err_wrap_long_requires_len equ $ - err_wrap_long_requires
-
-err_invalid_input:
-    db "base64: invalid input", 10
-err_invalid_input_len equ $ - err_invalid_input
-
-err_nosuchfile:
-    db ": No such file or directory", 10
-err_nosuchfile_len equ $ - err_nosuchfile
-
-err_perm_denied:
-    db ": Permission denied", 10
-err_perm_denied_len equ $ - err_perm_denied
-
-err_isdir:
-    db ": Is a directory", 10
-err_isdir_len equ $ - err_isdir
-
-err_read_error:
-    db ": read error", 10
-err_read_error_len equ $ - err_read_error
-
-newline_char:
-    db 10
-
-
-; ═════════════════════════════════════════════════════════════════════════════
-;  Entry point
-; ═════════════════════════════════════════════════════════════════════════════
 _start:
     ; Stack: [argc] [argv0] [argv1] ... [NULL] [envp...]
     mov     r15, rsp                ; save stack pointer
@@ -283,7 +147,7 @@ _start:
     ; Check exactly "--"
     cmp     byte [rsi+2], 0
     jne     .chk_long_help
-    ; It's "--" → set past-options flag
+    ; It's "--" -> set past-options flag
     mov     ebp, 1
     jmp     .arg_next
 
@@ -351,10 +215,10 @@ _start:
 
 .chk_long_wrap:
     ; Check "--wrap=" (7 bytes: "--wrap=")
-    ; "--wr" = 2D 2D 77 72 → LE dword = 0x72772D2D
+    ; "--wr" = 2D 2D 77 72 -> LE dword = 0x72772D2D
     cmp     dword [rsi], 0x72772D2D
     jne     .chk_long_wrap_space
-    ; "ap=" = 61 70 3D → check word "ap" then byte '='
+    ; "ap=" = 61 70 3D -> check word "ap" then byte '='
     cmp     word [rsi+4], 0x7061    ; "ap"
     jne     .chk_long_wrap_space
     cmp     byte [rsi+6], '='       ; '='
@@ -503,11 +367,6 @@ _start:
 
     ; ═════════════════════════════════════════════════════════════════════════
     ;  ENCODE PATH — optimized with batch processing
-    ;
-    ;  Key optimization: instead of checking wrap after every character,
-    ;  we batch-encode full lines at a time. For wrap=76 (default):
-    ;    76 chars = 19 triplets = 57 input bytes per line
-    ;  For wrap=0: no wrapping at all, straight encode.
     ; ═════════════════════════════════════════════════════════════════════════
 .do_encode:
     ; r13d = wrap column, ebp = input fd
@@ -520,7 +379,7 @@ _start:
 
 .encode_read_loop:
     mov     edi, ebp               ; fd
-    lea     rsi, [inbuf]
+    mov     rsi, inbuf
     mov     edx, INBUF_SIZE
     call    asm_read
     test    rax, rax
@@ -528,8 +387,8 @@ _start:
     jz      .encode_flush_final
 
     mov     rcx, rax               ; rcx = bytes read
-    lea     rsi, [inbuf]           ; rsi = input pointer
-    lea     rdi, [outbuf]          ; rdi = output pointer
+    mov     rsi, inbuf             ; rsi = input pointer
+    mov     rdi, outbuf            ; rdi = output pointer
 
     ; Handle leftover from previous read
     test    r9d, r9d
@@ -582,8 +441,7 @@ _start:
     cmp     rcx, 3
     jl      .encode_save_leftover
 
-    ; Fast path only for wrap=0 or wrap divisible by 4 (76, 64, 80, etc.)
-    ; For other wrap values, the slow per-char wrap check is needed
+    ; Fast path only for wrap=0 or wrap divisible by 4
     test    r13d, r13d
     jz      .encode_fast_triplet   ; wrap=0: always fast
     mov     eax, r13d
@@ -591,7 +449,7 @@ _start:
     jnz     .encode_slow_triplet   ; not divisible by 4: slow path
 
 .encode_fast_triplet:
-    ; Fast encode: 3 input bytes → 4 output chars, inline
+    ; Fast encode: 3 input bytes -> 4 output chars, inline
     movzx   eax, byte [rsi]
     shl     eax, 16
     movzx   edx, byte [rsi+1]
@@ -603,7 +461,7 @@ _start:
     sub     rcx, 3
 
     ; Encode to 4 base64 chars (fully inlined, no function calls)
-    lea     r10, [b64_encode_table]
+    mov     r10, b64_encode_table
     mov     edx, eax
     shr     edx, 18
     movzx   edx, byte [r10 + rdx]
@@ -630,18 +488,15 @@ _start:
     add     r8d, 4                 ; column += 4
     cmp     r8d, r13d
     jl      .encode_no_wrap_check
-    ; Insert newline(s) — handle wrap values not divisible by 4
-    ; If column >= wrap, insert newline and adjust
+    ; Insert newline
     mov     byte [rdi], 10
     inc     rdi
-    sub     r8d, r13d              ; column -= wrap (handle > case)
-    ; If still >= wrap (wrap < 4), keep inserting
-    ; After newline, check if we still have overflow (shouldn't happen for wrap >= 4)
+    sub     r8d, r13d              ; column -= wrap
     jmp     .encode_no_wrap_check
 
 .encode_no_wrap_check:
     ; Check if output buffer is getting full
-    lea     rax, [outbuf]
+    mov     rax, outbuf
     mov     r11, rdi
     sub     r11, rax               ; r11 = bytes in outbuf
     cmp     r11, OUTBUF_SIZE - 256
@@ -651,14 +506,14 @@ _start:
     push    rcx
     push    rsi
     mov     rdx, r11
-    lea     rsi, [outbuf]
+    mov     rsi, outbuf
     mov     rdi, STDOUT
     call    asm_write_all
     test    eax, eax
     js      .encode_write_error_pop
     pop     rsi
     pop     rcx
-    lea     rdi, [outbuf]
+    mov     rdi, outbuf
     jmp     .encode_main_loop
 
 ; Slow path for wrapping with wrap < 4 (char by char)
@@ -676,7 +531,7 @@ _start:
     sub     rcx, 3
     call    .encode_triplet_inline
     ; Check if output buffer is getting full
-    lea     rax, [outbuf]
+    mov     rax, outbuf
     mov     r11, rdi
     sub     r11, rax
     cmp     r11, OUTBUF_SIZE - 256
@@ -684,14 +539,14 @@ _start:
     push    rcx
     push    rsi
     mov     rdx, r11
-    lea     rsi, [outbuf]
+    mov     rsi, outbuf
     mov     rdi, STDOUT
     call    asm_write_all
     test    eax, eax
     js      .encode_write_error_pop
     pop     rsi
     pop     rcx
-    lea     rdi, [outbuf]
+    mov     rdi, outbuf
     jmp     .encode_slow_triplet
 
 .encode_save_leftover:
@@ -706,13 +561,13 @@ _start:
     mov     [rsp+1], al
 
 .encode_flush_and_continue:
-    lea     rax, [outbuf]
+    mov     rax, outbuf
     mov     rdx, rdi
     sub     rdx, rax
     test    rdx, rdx
     jz      .encode_read_loop
     push    r9
-    lea     rsi, [outbuf]
+    mov     rsi, outbuf
     mov     rdi, STDOUT
     call    asm_write_all
     test    eax, eax
@@ -721,7 +576,7 @@ _start:
     jmp     .encode_read_loop
 
 .encode_flush_final:
-    lea     rdi, [outbuf]
+    mov     rdi, outbuf
 
     cmp     r9d, 1
     je      .encode_pad_1
@@ -730,10 +585,10 @@ _start:
     jmp     .encode_final_newline
 
 .encode_pad_1:
-    ; 1 leftover byte → 2 base64 chars + "=="
+    ; 1 leftover byte -> 2 base64 chars + "=="
     movzx   eax, byte [rsp]
     shl     eax, 16
-    lea     r10, [b64_encode_table]
+    mov     r10, b64_encode_table
     mov     edx, eax
     shr     edx, 18
     and     edx, 0x3F
@@ -778,13 +633,13 @@ _start:
     jmp     .encode_final_newline
 
 .encode_pad_2:
-    ; 2 leftover bytes → 3 base64 chars + "="
+    ; 2 leftover bytes -> 3 base64 chars + "="
     movzx   eax, byte [rsp]
     shl     eax, 16
     movzx   edx, byte [rsp+1]
     shl     edx, 8
     or      eax, edx
-    lea     r10, [b64_encode_table]
+    mov     r10, b64_encode_table
     mov     edx, eax
     shr     edx, 18
     and     edx, 0x3F
@@ -846,7 +701,7 @@ _start:
     inc     rdi
 
 .encode_final_flush:
-    lea     rsi, [outbuf]
+    mov     rsi, outbuf
     mov     rdx, rdi
     sub     rdx, rsi
     test    rdx, rdx
@@ -870,7 +725,7 @@ _start:
 ; Input: eax = 24-bit value
 ; Uses: rdi (output), r8d (column), r13d (wrap), r10 (table)
 .encode_triplet_inline:
-    lea     r10, [b64_encode_table]
+    mov     r10, b64_encode_table
     push    rax
     mov     edx, eax
     shr     edx, 18
@@ -923,18 +778,14 @@ _start:
     ; ═════════════════════════════════════════════════════════════════════════
 .do_decode:
     ; r12d bit 1 = ignore_garbage, ebp = input fd
-    ; Strategy: read input, strip whitespace (and garbage if -i),
-    ;           decode base64 groups of 4 chars → 3 bytes,
-    ;           handle padding at end.
-
     xor     r8d, r8d               ; accumulated base64 chars in current group
     xor     r9d, r9d               ; accumulated 24-bit value
     sub     rsp, 16                ; local: [rsp] = group accumulator count, etc
-    lea     r14, [outbuf]          ; output write pointer
+    mov     r14, outbuf            ; output write pointer
 
 .decode_read_loop:
     mov     edi, ebp               ; fd
-    lea     rsi, [inbuf]
+    mov     rsi, inbuf
     mov     edx, INBUF_SIZE
     call    asm_read
     test    rax, rax
@@ -942,7 +793,7 @@ _start:
     jz      .decode_eof
 
     mov     rcx, rax               ; rcx = bytes read
-    lea     rsi, [inbuf]           ; input pointer
+    mov     rsi, inbuf             ; input pointer
 
 .decode_byte_loop:
     test    rcx, rcx
@@ -957,11 +808,11 @@ _start:
     je      .decode_padding
 
     ; Look up in decode table
-    lea     r10, [b64_decode_table]
+    mov     r10, b64_decode_table
     movzx   edx, byte [r10 + rax]
 
     cmp     dl, 0xFE
-    je      .decode_byte_loop      ; whitespace → skip
+    je      .decode_byte_loop      ; whitespace -> skip
     cmp     dl, 0xFF
     je      .decode_invalid_or_garbage
 
@@ -972,7 +823,7 @@ _start:
     cmp     r8d, 4
     jl      .decode_byte_loop
 
-    ; Have 4 chars → output 3 bytes
+    ; Have 4 chars -> output 3 bytes
     mov     eax, r9d
     shr     eax, 16
     mov     [r14], al
@@ -985,7 +836,7 @@ _start:
     xor     r9d, r9d
 
     ; Check if output buffer is getting full
-    lea     rax, [outbuf]
+    mov     rax, outbuf
     mov     rdx, r14
     sub     rdx, rax
     cmp     rdx, OUTBUF_SIZE - 256
@@ -994,14 +845,14 @@ _start:
     ; Flush output buffer
     push    rcx
     push    rsi
-    lea     rsi, [outbuf]
+    mov     rsi, outbuf
     mov     rdi, STDOUT
     call    asm_write_all
     test    eax, eax
     js      .decode_write_error_pop
     pop     rsi
     pop     rcx
-    lea     r14, [outbuf]
+    mov     r14, outbuf
     jmp     .decode_byte_loop
 
 .decode_invalid_or_garbage:
@@ -1013,7 +864,6 @@ _start:
 
 .decode_padding:
     ; '=' encountered. Collect remaining '=' and whitespace, then decode.
-    ; After '=', we expect either another '=' or end of valid data.
     inc     r8d
     cmp     r8d, 3
     je      .decode_pad_need_one_more
@@ -1025,9 +875,6 @@ _start:
 
 .decode_pad_need_one_more:
     ; We have 3 chars so far (2 data + 1 '='). Look for one more '='
-    ; to distinguish XX== from XXX=
-    ; Actually, r8d counts: after seeing 2 data chars then '=', r8d was at 2 then incremented to 3
-    ; So we need one more character which should be '='
 .decode_scan_for_eq:
     ; Skip whitespace, look for '=' or end
     test    rcx, rcx
@@ -1038,7 +885,7 @@ _start:
     cmp     al, '='
     je      .decode_pad_complete_2eq
     ; Check whitespace
-    lea     r10, [b64_decode_table]
+    mov     r10, b64_decode_table
     movzx   edx, byte [r10 + rax]
     cmp     dl, 0xFE
     je      .decode_scan_for_eq    ; whitespace, skip
@@ -1052,102 +899,29 @@ _start:
     push    r8
     push    r9
     mov     edi, ebp
-    lea     rsi, [inbuf]
+    mov     rsi, inbuf
     mov     edx, INBUF_SIZE
     call    asm_read
     pop     r9
     pop     r8
     test    rax, rax
-    jz      .decode_pad_single_eq  ; EOF: only one '=', that's ok (XXX=)
+    jz      .decode_pad_single_eq  ; EOF: only one '='
     js      .decode_read_error
     mov     rcx, rax
-    lea     rsi, [inbuf]
+    mov     rsi, inbuf
     jmp     .decode_scan_for_eq
 
 .decode_pad_single_eq:
-    ; Pattern: XXX= (3 data chars + 1 pad) → 2 output bytes
-    ; r8d = 3 (we had 2 data + 1 '='), r9d has the accumulated value
-    ; Actually wait - r8d was incremented when we saw '=', so the data chars = r8d - 1 = 2
-    ; But we also shifted r9d. Let's handle this properly.
-    ; r9d has 2 data values shifted in (12 bits). Output = 1 byte from top 8 bits.
-    shl     r9d, 6                 ; shift for the padding position
-    shl     r9d, 6                 ; another shift (total 4 chars worth of shifts)
-    ; Wait, let me reconsider. r8d=3 means we had exactly 2 real b64 chars + 1 '='.
-    ; r9d had 2 chars shifted in = 12 bits. We need to do: r9d <<= 12 to get 24 bits.
-    ; Then output top 1 byte.
-    ; Actually, let me re-think: each char shifts left 6 and ORs.
-    ; After 2 chars: r9d = (c0 << 6) | c1 = 12 bits
-    ; For XX==: pad 2 more shifts: val = r9d << 12, output 1 byte (bits 23-16)
-    ; For XXX=: 3 chars: r9d = (c0<<12)|(c1<<6)|c2 = 18 bits, pad 1: val=r9d<<6, output 2 bytes
-    ; But when we get here for single_eq, we came through pad_need_one_more with r8d=3
-    ; That means we had 2 data chars (r8d went 0->1->2 from data, then 2->3 from '=')
-    ; So: r9d = 12 bits of data. This is XX= pattern, so output 1 byte.
-    ; Actually no: 2 data + 1 '=' = 3 is the XXX= pattern (if 3rd was '=' and 4th implied).
-    ; Hmm, let me re-check the flow:
-    ; data char -> r8d increments -> when r8d reaches 4, emit 3 bytes
-    ; When we see '=' with r8d=2 (2 data chars collected), we increment to r8d=3
-    ; Then look for another '='. If found -> XX== (2 data, 2 pad) -> 1 output byte
-    ; If EOF (here) -> means XX= only, which is actually 3-char group -> error or special
-    ; In base64, the group is always 4 chars. XX= is invalid. XXX= is valid (3 chars + 1 pad = 4)
-    ; So if r8d=3 and we see '=', r8d becomes 4 -> pad_complete_2eq handles XX== (2 data + 2 pad)
-    ; If r8d=3 and EOF without second '=' -> this is XXX pattern without = which is actually
-    ; 3 data chars (we had 2 data then '=' then no more '=')
-    ; Wait, I'm confusing myself. Let me restart:
-    ;
-    ; When '=' is seen, r8d is the count BEFORE incrementing:
-    ; r8d=0,1: too early for padding
-    ; r8d=2: we have 2 data chars, then '=' -> increment to r8d=3 -> need one more '='
-    ;   Found '=' -> XX== -> decode_pad_complete_2eq (output 1 byte)
-    ;   Not found -> invalid
-    ; r8d=3: we have 3 data chars, then '=' -> increment to r8d=4 -> decode_pad_complete_2eq
-    ;   which for 1 pad -> output 2 bytes
-    ;
-    ; So reaching decode_pad_single_eq means we had 2 data + '=' and couldn't find second '='.
-    ; This is actually invalid per standard. But let's match GNU behavior - GNU would fail.
     jmp     .err_invalid_input
 
 .decode_pad_complete_2eq:
-    ; r8d = 4 now. But how many '=' did we see?
-    ; Case 1: r8d went 0->1->2->3(=)->4(=) → XX== → 2 data chars → 1 output byte
-    ; Case 2: r8d went 0->1->2->3->4(=) → XXX= → 3 data chars → 2 output bytes
-    ; We need to distinguish. Let's check how many data chars we had before padding.
-    ; When we enter decode_padding:
-    ;   r8d was N data chars, then incremented for '='
-    ; If first '=' seen at r8d=2 (becomes 3), then searched for second '=' (found, becomes 4):
-    ;   → 2 data chars, 2 '=' → output 1 byte
-    ; If first '=' seen at r8d=3 (becomes 4, goes to decode_pad_complete_2eq directly):
-    ;   → 3 data chars, 1 '=' → output 2 bytes
-
-    ; We can check the actual data by looking at how many 6-bit groups are in r9d
-    ; For 2 data chars: r9d = (c0<<6)|c1 (12 bits)
-    ; For 3 data chars: r9d = (c0<<12)|(c1<<6)|c2 (18 bits)
-
-    ; Simpler approach: track the count before first '='. Use a register.
-    ; Let me restructure - use the stack.
-    ; Actually, let me use a different approach: when r8d = 4 at decode_padding entry,
-    ; that means 3 data chars (0->1->2->3 from data, then 3->4 from '='), output 2 bytes.
-    ; When we come here from decode_scan_for_eq, we had r8d=3 (2 data + first '='),
-    ; now found second '=', so r8d was 3 → 2 data chars, output 1 byte.
-
-    ; Let me fix by using distinct labels:
-    ; At decode_padding:
-    ;   r8d was 0,1 before '=' → error (less than 2 data chars)
-    ;   r8d was 2 before '=' → after inc, r8d=3 → XX.. need 1 more '='
-    ;     → found '=' → XX== → output 1 byte
-    ;   r8d was 3 before '=' → after inc, r8d=4 → XXX= → output 2 bytes
-
-    ; So decode_pad_complete_2eq is called from two paths:
-    ; Path A: from decode_padding with r8d=4 (was 3 before) → 3 data → 2 bytes
-    ; Path B: from decode_scan_for_eq (found 2nd '=') with r8d=3 → 2 data → 1 byte
-
-    ; We need to know which path we took. Let me check r8d value:
+    ; Distinguish XX== (2 data + 2 pad) vs XXX= (3 data + 1 pad)
     cmp     r8d, 3
     je      .decode_output_1byte
-    ; r8d == 4, from decode_padding with 3 data chars → output 2 bytes
+    ; r8d == 4, from decode_padding with 3 data chars -> output 2 bytes
 
 .decode_output_2bytes:
     ; r9d has 18 bits of data (3 chars * 6 bits)
-    ; Shift left 6 to get 24 bits, then take top 2 bytes
     shl     r9d, 6
     mov     eax, r9d
     shr     eax, 16
@@ -1158,12 +932,10 @@ _start:
     add     r14, 2
     xor     r8d, r8d
     xor     r9d, r9d
-    ; Consume remaining whitespace/garbage until next data or EOF
     jmp     .decode_byte_loop
 
 .decode_output_1byte:
     ; r9d has 12 bits of data (2 chars * 6 bits)
-    ; Shift left 12 to get 24 bits, then take top 1 byte
     shl     r9d, 12
     mov     eax, r9d
     shr     eax, 16
@@ -1175,21 +947,21 @@ _start:
 
 .decode_flush_and_read:
     ; Flush output and read more input
-    lea     rax, [outbuf]
+    mov     rax, outbuf
     mov     rdx, r14
     sub     rdx, rax
     test    rdx, rdx
     jz      .decode_read_loop
     push    r8
     push    r9
-    lea     rsi, [outbuf]
+    mov     rsi, outbuf
     mov     rdi, STDOUT
     call    asm_write_all
     test    eax, eax
     pop     r9
     pop     r8
     js      .handle_write_error
-    lea     r14, [outbuf]
+    mov     r14, outbuf
     jmp     .decode_read_loop
 
 .decode_eof:
@@ -1198,7 +970,7 @@ _start:
     jnz     .decode_eof_incomplete
 
     ; Flush remaining output
-    lea     rsi, [outbuf]
+    mov     rsi, outbuf
     mov     rdx, r14
     sub     rdx, rsi
     test    rdx, rdx
@@ -1211,9 +983,6 @@ _start:
 
 .decode_eof_incomplete:
     ; GNU behavior: decode partial data from incomplete group, then error.
-    ; r8d=1: 6 bits → not enough for a byte, output nothing
-    ; r8d=2: 12 bits → output 1 byte (top 8 bits)
-    ; r8d=3: 18 bits → output 2 bytes (top 16 bits)
     cmp     r8d, 2
     jl      .decode_eof_flush_and_error
     je      .decode_eof_partial_1byte
@@ -1239,7 +1008,7 @@ _start:
 
 .decode_eof_flush_and_error:
     ; Flush output then report error
-    lea     rsi, [outbuf]
+    mov     rsi, outbuf
     mov     rdx, r14
     sub     rdx, rsi
     test    rdx, rdx
@@ -1285,10 +1054,6 @@ _start:
     call    asm_exit
 
 .err_invalid_wrap_val:
-    ; rdi points to the invalid value string (from parse_uint caller)
-    ; We saved it before calling parse_uint, but actually let's reconstruct
-    ; For --wrap=XYZ, the original string is still accessible
-    ; For simplicity, print the generic error
     push    rdi
     mov     rdi, STDERR
     mov     rsi, err_invalid_wrap
@@ -1384,7 +1149,7 @@ _start:
 
 .err_invalid_input:
     ; Flush any pending decode output first
-    lea     rsi, [outbuf]
+    mov     rsi, outbuf
     mov     rdx, r14
     sub     rdx, rsi
     test    rdx, rdx
@@ -1433,8 +1198,7 @@ _start:
     jmp     .err_read
 
 .handle_write_error:
-    ; Check for EPIPE → exit 0 (like GNU base64 for encode)
-    ; Actually, GNU base64 exits 0 on broken pipe for encode
+    ; Check for EPIPE -> exit 0 (like GNU base64 for encode)
     xor     edi, edi
     call    asm_exit
 
@@ -1464,8 +1228,6 @@ strlen:
     ret
 
 ; parse_uint(rdi) -> eax = parsed unsigned int, or -1 on error
-; Parses a decimal number from null-terminated string at rdi
-; Preserves rdi (saves the original pointer for error messages)
 parse_uint:
     push    rdi                    ; save original pointer
     xor     eax, eax               ; result = 0
@@ -1495,20 +1257,19 @@ parse_uint:
     mov     eax, -1
     ret
 
-
-
-; ══════════════════════════════════════════════════════════════════════
-;  Inlined IO functions (from lib/io.asm)
-; ══════════════════════════════════════════════════════════════════════
+; ═════════════════════════════════════════════════════════════════════════════
+;  INLINED IO FUNCTIONS (from lib/io.asm)
+; ═════════════════════════════════════════════════════════════════════════════
 
 ; asm_write_all(rdi=fd, rsi=buf, rdx=len) -> rax=0 on success, -1 on error
+; Handles partial writes + EINTR
 asm_write_all:
     push    rbx
     push    r12
     push    r13
-    mov     rbx, rdi
-    mov     r12, rsi
-    mov     r13, rdx
+    mov     rbx, rdi            ; fd
+    mov     r12, rsi            ; buf
+    mov     r13, rdx            ; remaining
 .wa_loop:
     test    r13, r13
     jle     .wa_success
@@ -1518,9 +1279,9 @@ asm_write_all:
     mov     rax, SYS_WRITE
     syscall
     cmp     rax, -4
-    je      .wa_loop
+    je      .wa_loop            ; EINTR -- retry
     test    rax, rax
-    js      .wa_error
+    js      .wa_error           ; negative = error
     add     r12, rax
     sub     r13, rax
     jmp     .wa_loop
@@ -1552,7 +1313,7 @@ asm_open:
     syscall
     ret
 
-; asm_close(rdi=fd) -> rax
+; asm_close(rdi=fd) -> rax=0 or error
 asm_close:
     mov     rax, SYS_CLOSE
     syscall
@@ -1563,5 +1324,109 @@ asm_exit:
     mov     rax, SYS_EXIT
     syscall
 
-; ── End of binary ──
-file_size equ $ - ehdr
+; ############################################################################
+;                           DATA SECTION
+; ############################################################################
+
+; Base64 encoding table
+b64_encode_table:
+    db "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+; Base64 decode table: maps ASCII byte -> 6-bit value (0-63), 0xFF = invalid, 0xFE = whitespace
+; 256 entries
+b64_decode_table:
+    ;       0     1     2     3     4     5     6     7     8     9     A     B     C     D     E     F
+    db   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFF, 0xFF  ; 0x00-0x0F (TAB,LF,VT,FF,CR=whitespace)
+    db   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  ; 0x10-0x1F
+    db   0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,   62, 0xFF, 0xFF, 0xFF,   63  ; 0x20-0x2F (space=ws, +=62, /=63)
+    db     52,   53,   54,   55,   56,   57,   58,   59,   60,   61, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  ; 0x30-0x3F (0-9=52-61)
+    db   0xFF,    0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14  ; 0x40-0x4F (A-O=0-14)
+    db     15,   16,   17,   18,   19,   20,   21,   22,   23,   24,   25, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  ; 0x50-0x5F (P-Z=15-25)
+    db   0xFF,   26,   27,   28,   29,   30,   31,   32,   33,   34,   35,   36,   37,   38,   39,   40  ; 0x60-0x6F (a-o=26-40)
+    db     41,   42,   43,   44,   45,   46,   47,   48,   49,   50,   51, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  ; 0x70-0x7F (p-z=41-51)
+    ; 0x80-0xFF: all invalid
+    times 128 db 0xFF
+
+; ── String constants ──
+help_text:
+    db "Usage: base64 [OPTION]... [FILE]", 10
+    db "Base64 encode or decode FILE, or standard input, to standard output.", 10, 10
+    db "With no FILE, or when FILE is -, read standard input.", 10, 10
+    db "Mandatory arguments to long options are mandatory for short options too.", 10
+    db "  -d, --decode          decode data", 10
+    db "  -i, --ignore-garbage  when decoding, ignore non-alphabet characters", 10
+    db "  -w, --wrap=COLS       wrap encoded lines after COLS character (default 76).", 10
+    db "                          Use 0 to disable line wrapping", 10
+    db "      --help        display this help and exit", 10
+    db "      --version     output version information and exit", 10, 10
+    db "The data are encoded as described for the base64 alphabet in RFC 4648.", 10
+    db "When decoding, the input may contain newlines in addition to the bytes of", 10
+    db "the formal base64 alphabet.  Use --ignore-garbage to attempt to recover", 10
+    db "from any other non-alphabet bytes in the encoded stream.", 10
+help_text_len equ $ - help_text
+
+version_text:
+    db "base64 (fcoreutils) 0.1.0", 10
+version_text_len equ $ - version_text
+
+err_prefix:
+    db "base64: "
+err_prefix_len equ $ - err_prefix
+
+err_invalid_option:
+    db "base64: invalid option -- '"
+err_invalid_option_len equ $ - err_invalid_option
+
+err_unrecognized:
+    db "base64: unrecognized option '"
+err_unrecognized_len equ $ - err_unrecognized
+
+err_suffix:
+    db "'", 10, "Try 'base64 --help' for more information.", 10
+err_suffix_len equ $ - err_suffix
+
+err_invalid_wrap:
+    db "base64: invalid wrap size: '"
+err_invalid_wrap_len equ $ - err_invalid_wrap
+
+err_wrap_suffix:
+    db "'", 10
+err_wrap_suffix_len equ $ - err_wrap_suffix
+
+err_option_requires_arg_w:
+    db "base64: option requires an argument -- 'w'", 10
+    db "Try 'base64 --help' for more information.", 10
+err_option_requires_arg_w_len equ $ - err_option_requires_arg_w
+
+err_wrap_long_requires:
+    db "base64: option '--wrap' requires an argument", 10
+    db "Try 'base64 --help' for more information.", 10
+err_wrap_long_requires_len equ $ - err_wrap_long_requires
+
+err_invalid_input:
+    db "base64: invalid input", 10
+err_invalid_input_len equ $ - err_invalid_input
+
+err_nosuchfile:
+    db ": No such file or directory", 10
+err_nosuchfile_len equ $ - err_nosuchfile
+
+err_perm_denied:
+    db ": Permission denied", 10
+err_perm_denied_len equ $ - err_perm_denied
+
+err_isdir:
+    db ": Is a directory", 10
+err_isdir_len equ $ - err_isdir
+
+err_read_error:
+    db ": read error", 10
+err_read_error_len equ $ - err_read_error
+
+newline_char:
+    db 10
+
+; ============================================================================
+;  End of file content
+; ============================================================================
+file_end:
