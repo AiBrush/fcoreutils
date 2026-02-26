@@ -375,14 +375,29 @@ fn test_parse_size_suffixes() {
     assert_eq!(parse_size("1c").unwrap(), 1);
     assert_eq!(parse_size("1w").unwrap(), 2);
     assert_eq!(parse_size("1b").unwrap(), 512);
-    assert_eq!(parse_size("1K").unwrap(), 1000);
+    // Single letter = binary (powers of 1024), matching GNU dd
+    assert_eq!(parse_size("1K").unwrap(), 1024);
     assert_eq!(parse_size("1k").unwrap(), 1024);
+    assert_eq!(parse_size("1M").unwrap(), 1_048_576);
+    assert_eq!(parse_size("1G").unwrap(), 1_073_741_824);
+    // xB suffix = decimal (powers of 1000)
     assert_eq!(parse_size("1kB").unwrap(), 1000);
+    assert_eq!(parse_size("1KB").unwrap(), 1000);
+    assert_eq!(parse_size("1MB").unwrap(), 1_000_000);
+    assert_eq!(parse_size("1GB").unwrap(), 1_000_000_000);
+    // xIB suffix = binary (explicit)
     assert_eq!(parse_size("1KiB").unwrap(), 1024);
-    assert_eq!(parse_size("1M").unwrap(), 1_000_000);
     assert_eq!(parse_size("1MiB").unwrap(), 1_048_576);
-    assert_eq!(parse_size("1G").unwrap(), 1_000_000_000);
     assert_eq!(parse_size("1GiB").unwrap(), 1_073_741_824);
+}
+
+#[test]
+fn test_parse_size_x_multiplier() {
+    assert_eq!(parse_size("2x512").unwrap(), 1024);
+    assert_eq!(parse_size("1Mx2").unwrap(), 2_097_152);
+    assert_eq!(parse_size("512x4").unwrap(), 2048);
+    assert_eq!(parse_size("1bx4").unwrap(), 2048); // 512 * 4
+    assert_eq!(parse_size("1x2x4").unwrap(), 8); // chained: 1 * 2 * 4
 }
 
 #[test]
