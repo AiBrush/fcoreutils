@@ -131,12 +131,17 @@ fn main() {
                 print!("{}", output);
             }
             Err(e) => {
-                eprintln!(
-                    "{}: cannot stat '{}': {}",
-                    TOOL_NAME,
-                    path,
-                    coreutils_rs::common::io_error_msg(&e)
-                );
+                if path == "-" && filesystem {
+                    // Special error message for '-' in filesystem mode
+                    eprintln!("{}: {}", TOOL_NAME, coreutils_rs::common::io_error_msg(&e));
+                } else {
+                    eprintln!(
+                        "{}: cannot stat '{}': {}",
+                        TOOL_NAME,
+                        path,
+                        coreutils_rs::common::io_error_msg(&e)
+                    );
+                }
                 exit_code = 1;
             }
         }

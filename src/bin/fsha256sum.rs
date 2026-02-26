@@ -237,13 +237,13 @@ fn run_hash_mode(
 
     if has_stdin || files.len() <= 1 {
         // Sequential for stdin or single file.
-        // Uses hash_file_nostat to skip fstat (~5µs/file) since the nostat path
-        // handles all file sizes via two-tier buffer + streaming fallback.
+        // Uses hash_file (with fstat) for optimal mmap/bulk-read path.
+        // The fstat cost (~5µs) is negligible for single-file workloads.
         for filename in files {
             let hash_result = if filename == "-" {
                 hash::hash_stdin(algo)
             } else {
-                hash::hash_file_nostat(algo, Path::new(filename))
+                hash::hash_file(algo, Path::new(filename))
             };
 
             match hash_result {

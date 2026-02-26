@@ -31,7 +31,11 @@ fn main() {
     if args.is_empty() {
         eprintln!("{}: missing operand", TOOL_NAME);
         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
-        process::exit(125);
+        if std::env::var_os("POSIXLY_CORRECT").is_some() {
+            process::exit(127);
+        } else {
+            process::exit(125);
+        }
     }
 
     match args[0].as_str() {

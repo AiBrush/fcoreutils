@@ -124,6 +124,37 @@ fn main() {
             process::exit(1);
         }
         let group_spec = &positional[0];
+        if group_spec.is_empty() {
+            // GNU chgrp treats '' as a no-op: no group change, just validate files exist
+            let files = &positional[1..];
+            if files.is_empty() {
+                eprintln!("{}: missing operand after '{}'", TOOL_NAME, group_spec);
+                eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                process::exit(1);
+            }
+            let mut errors = 0;
+            for file in files {
+                let path = std::path::Path::new(file);
+                let exists = if config.no_dereference {
+                    std::fs::symlink_metadata(path).is_ok()
+                } else {
+                    std::fs::metadata(path).is_ok()
+                };
+                if !exists {
+                    if !config.silent {
+                        eprintln!(
+                            "{}: cannot access '{}': No such file or directory",
+                            TOOL_NAME, file
+                        );
+                    }
+                    errors += 1;
+                }
+            }
+            if errors > 0 {
+                process::exit(1);
+            }
+            return;
+        }
         match coreutils_rs::chown::resolve_group(group_spec) {
             Some(g) => (g, 1),
             None => {

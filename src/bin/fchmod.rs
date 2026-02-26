@@ -29,13 +29,23 @@ fn main() {
     let mut mode_str: Option<String> = None;
     let mut files: Vec<String> = Vec::new();
     let mut saw_dashdash = false;
+    // Track if the mode was supplied as a dash-prefixed arg before '--'.
+    // GNU chmod only emits the umask-blocked warning in this case.
+    let mut mode_looks_like_option = false;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
         if saw_dashdash {
-            files.push(arg.clone());
+            // After --, first non-option arg is still the mode if we haven't
+            // seen one yet (GNU behaviour: -- only stops option parsing, the
+            // mode is always the first non-option operand).
+            if mode_str.is_none() && reference.is_none() {
+                mode_str = Some(arg.clone());
+            } else {
+                files.push(arg.clone());
+            }
             i += 1;
             continue;
         }
@@ -86,6 +96,8 @@ fn main() {
                     // Treat as mode string (e.g. "-rwx" means remove rwx)
                     if mode_str.is_none() {
                         mode_str = Some(arg.clone());
+                        // This mode was passed as a dash-prefixed arg, not after --
+                        mode_looks_like_option = true;
                     } else {
                         files.push(arg.clone());
                     }
@@ -195,9 +207,11 @@ fn main() {
             }
 
             let current_mode = metadata.mode();
-            let new_mode = match coreutils_rs::chmod::parse_mode(&effective_mode_str, current_mode)
-            {
-                Ok(m) => m,
+            let (new_mode, umask_blocked) = match coreutils_rs::chmod::parse_mode_check_umask(
+                &effective_mode_str,
+                current_mode,
+            ) {
+                Ok(r) => r,
                 Err(e) => {
                     eprintln!("{}: {}", TOOL_NAME, e);
                     process::exit(1);
@@ -213,6 +227,25 @@ fn main() {
                         coreutils_rs::common::io_error_msg(&e)
                     );
                 }
+                exit_code = 1;
+            } else if umask_blocked && mode_looks_like_option {
+                // GNU chmod warns when umask prevents the requested mode from
+                // being fully applied, but ONLY when the mode string was supplied
+                // as a dash-prefixed argument (not after '--').
+                let actual_sym = coreutils_rs::chmod::format_symbolic_for_warning(new_mode);
+                // Compute the mode that would have been set without umask
+                let unmasked_mode = match coreutils_rs::chmod::parse_mode_no_umask(
+                    &effective_mode_str,
+                    current_mode,
+                ) {
+                    Ok(m) => m,
+                    Err(_) => new_mode,
+                };
+                let requested_sym = coreutils_rs::chmod::format_symbolic_for_warning(unmasked_mode);
+                eprintln!(
+                    "{}: {}: new permissions are {}, not {}",
+                    TOOL_NAME, file, actual_sym, requested_sym
+                );
                 exit_code = 1;
             }
         }
@@ -378,11 +411,12 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // GNU chmod sends verbose output to stdout
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stderr.contains("mode of"),
-            "verbose should report mode change: {}",
-            stderr
+            stdout.contains("mode of"),
+            "verbose should report mode change on stdout: {}",
+            stdout
         );
     }
 
@@ -454,6 +488,85 @@ mod tests {
             stderr.contains("dangerous"),
             "should warn about root: {}",
             stderr
+        );
+    }
+
+    #[test]
+    fn test_double_dash_mode() {
+        // After --, the first arg should be treated as mode, not file
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("dd.txt");
+        std::fs::write(&file, "test").unwrap();
+
+        let output = cmd()
+            .args(["--", "755", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "chmod -- 755 file should succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&file).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "mode should be 0755, got {:o}", mode);
+        }
+    }
+
+    #[test]
+    fn test_double_dash_minus_mode() {
+        // After --, -rwx should be treated as a mode string
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ddm.txt");
+        std::fs::write(&file, "test").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
+
+        let output = cmd()
+            .args(["--", "-rwx", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        // After --, no umask warning should be emitted
+        assert!(
+            output.status.success(),
+            "chmod -- -rwx file should succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn test_verbose_includes_symbolic() {
+        // GNU chmod includes symbolic mode in parentheses
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("vs.txt");
+        std::fs::write(&file, "test").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let output = cmd()
+            .args(["-v", "755", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("(rw-r--r--)"),
+            "verbose should include symbolic old mode: {}",
+            stdout
+        );
+        assert!(
+            stdout.contains("(rwxr-xr-x)"),
+            "verbose should include symbolic new mode: {}",
+            stdout
         );
     }
 }

@@ -7,7 +7,9 @@ use std::io::{self, Read};
 use std::process;
 
 use coreutils_rs::common::reset_sigpipe;
-use coreutils_rs::od::{AddressRadix, OdConfig, OutputFormat, od_process, parse_format_type};
+use coreutils_rs::od::{
+    AddressRadix, Endian, OdConfig, OutputFormat, od_process, parse_format_type,
+};
 
 const TOOL_NAME: &str = "od";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -24,6 +26,7 @@ fn main() {
     let mut read_bytes: Option<u64> = None;
     let mut width: Option<usize> = None;
     let mut show_duplicates = false;
+    let mut endian = Endian::Native;
     let mut operands: Vec<String> = Vec::new();
     let mut saw_dashdash = false;
 
@@ -48,6 +51,21 @@ fn main() {
             "-v" | "--output-duplicates" => show_duplicates = true,
 
             "--traditional" => { /* accepted, ignored */ }
+
+            _ if arg.starts_with("--endian=") => {
+                let val = &arg["--endian=".len()..];
+                match val {
+                    "little" => endian = Endian::Little,
+                    "big" => endian = Endian::Big,
+                    _ => {
+                        eprintln!(
+                            "{}: invalid argument '{}' for '--endian'\nValid arguments are:\n  - 'big'\n  - 'little'",
+                            TOOL_NAME, val
+                        );
+                        process::exit(1);
+                    }
+                }
+            }
 
             // Traditional format shortcuts
             "-a" => {
@@ -310,6 +328,7 @@ fn main() {
         read_bytes,
         width: width.unwrap_or(16),
         show_duplicates,
+        endian,
     };
 
     let stdout = io::stdout();

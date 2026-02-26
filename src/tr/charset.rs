@@ -8,6 +8,20 @@
 /// - Equivalence classes: [=c=]
 /// - Repeat: [c*n] or [c*] (SET2 only, handled by caller)
 
+/// Identifies a case-conversion character class and its position in the expanded set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseClass {
+    Upper,
+    Lower,
+}
+
+/// Records the position and type of a [:upper:] or [:lower:] class in a set.
+#[derive(Debug, Clone, Copy)]
+pub struct CaseClassInfo {
+    pub class: CaseClass,
+    pub position: usize,
+}
+
 /// Build the complement of a character set: all bytes NOT in the given set.
 /// Result is sorted ascending (0, 1, 2, ... 255 minus the set members).
 pub fn complement(set: &[u8]) -> Vec<u8> {
@@ -93,6 +107,208 @@ pub fn parse_set(s: &str) -> Vec<u8> {
     }
 
     result
+}
+
+/// Parse a SET string into expanded bytes AND track positions of [:upper:]/[:lower:] classes.
+/// This is needed for GNU-compatible validation of case class alignment.
+pub fn parse_set_with_classes(s: &str) -> (Vec<u8>, Vec<CaseClassInfo>) {
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut classes = Vec::new();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'[' && i + 1 < bytes.len() {
+            // Try character class [:name:]
+            if bytes.get(i + 1) == Some(&b':') {
+                if let Some((class_bytes, end)) = parse_char_class(bytes, i) {
+                    // Check if this is [:upper:] or [:lower:]
+                    let name_start = i + 2;
+                    let mut name_end = name_start;
+                    while name_end < bytes.len() && bytes[name_end] != b':' {
+                        name_end += 1;
+                    }
+                    let name = &bytes[name_start..name_end];
+                    if name == b"upper" {
+                        classes.push(CaseClassInfo {
+                            class: CaseClass::Upper,
+                            position: result.len(),
+                        });
+                    } else if name == b"lower" {
+                        classes.push(CaseClassInfo {
+                            class: CaseClass::Lower,
+                            position: result.len(),
+                        });
+                    }
+                    result.extend_from_slice(&class_bytes);
+                    i = end;
+                    continue;
+                }
+            }
+            // Try equivalence class [=c=]
+            if bytes.get(i + 1) == Some(&b'=') {
+                if let Some((ch, end)) = parse_equiv_class(bytes, i) {
+                    result.push(ch);
+                    i = end;
+                    continue;
+                }
+            }
+            // Try repeat [c*n] or [c*]
+            if let Some((ch, count, end)) = parse_repeat(bytes, i) {
+                for _ in 0..count {
+                    result.push(ch);
+                }
+                i = end;
+                continue;
+            }
+        }
+
+        // Escape sequence
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            let (ch, advance) = parse_escape(bytes, i);
+            result.push(ch);
+            i += advance;
+            continue;
+        }
+
+        // Range: prev-next (only if we have a previous char and a next char)
+        if bytes[i] == b'-' && !result.is_empty() && i + 1 < bytes.len() {
+            let start = *result.last().unwrap();
+            let (end_ch, advance) = if bytes[i + 1] == b'\\' && i + 2 < bytes.len() {
+                let (ch, adv) = parse_escape(bytes, i + 1);
+                (ch, adv)
+            } else {
+                (bytes[i + 1], 1)
+            };
+            if end_ch >= start {
+                for c in (start + 1)..=end_ch {
+                    result.push(c);
+                }
+                i += 1 + advance;
+            } else {
+                result.push(b'-');
+                i += 1;
+            }
+            continue;
+        }
+
+        result.push(bytes[i]);
+        i += 1;
+    }
+
+    (result, classes)
+}
+
+/// Parse SET2 string with class tracking, expanding to match SET1 length.
+/// Returns (expanded_bytes, case_class_positions).
+pub fn expand_set2_with_classes(set2_str: &str, set1_len: usize) -> (Vec<u8>, Vec<CaseClassInfo>) {
+    let bytes = set2_str.as_bytes();
+
+    // Check if there's a [c*] (fill repeat) in SET2
+    // If so, we handle it specially. Otherwise, use parse_set_with_classes + extend.
+    let mut has_fill = false;
+    {
+        let mut j = 0;
+        while j < bytes.len() {
+            if bytes[j] == b'[' {
+                if let Some((_ch, count, _end)) = parse_repeat(bytes, j) {
+                    if count == 0 {
+                        has_fill = true;
+                        break;
+                    }
+                    j = _end;
+                    continue;
+                }
+            }
+            if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                let (_ch, adv) = parse_escape(bytes, j);
+                j += adv;
+                continue;
+            }
+            j += 1;
+        }
+    }
+
+    if has_fill {
+        // When there's a fill repeat, expand_set2 handles it but we still need classes.
+        // Parse the full set for class positions, then use expand_set2 for the bytes.
+        let expanded = expand_set2(set2_str, set1_len);
+        // Re-parse to find class positions (they won't be affected by fill repeats
+        // since fills don't generate case classes)
+        let (_raw, classes) = parse_set_with_classes(set2_str);
+        (expanded, classes)
+    } else {
+        let (mut set2, classes) = parse_set_with_classes(set2_str);
+        if set2.len() < set1_len && !set2.is_empty() {
+            let last = *set2.last().unwrap();
+            set2.resize(set1_len, last);
+        }
+        (set2, classes)
+    }
+}
+
+/// Validate that [:upper:] and [:lower:] classes are properly paired between SET1 and SET2.
+/// GNU tr requires that when [:upper:] appears in one set, [:lower:] must appear at the
+/// same position in the other set (and vice versa). Returns an error message if misaligned.
+pub fn validate_case_classes(
+    set1_classes: &[CaseClassInfo],
+    set2_classes: &[CaseClassInfo],
+) -> Result<(), String> {
+    // Check each class in SET1 has a matching partner in SET2 at the same position
+    for c1 in set1_classes {
+        let expected_partner = match c1.class {
+            CaseClass::Upper => CaseClass::Lower,
+            CaseClass::Lower => CaseClass::Upper,
+        };
+        let found = set2_classes
+            .iter()
+            .any(|c2| c2.class == expected_partner && c2.position == c1.position);
+        if !found {
+            return Err("misaligned [:upper:] and/or [:lower:] construct".to_string());
+        }
+    }
+
+    // Check each class in SET2 has a matching partner in SET1 at the same position
+    for c2 in set2_classes {
+        let expected_partner = match c2.class {
+            CaseClass::Upper => CaseClass::Lower,
+            CaseClass::Lower => CaseClass::Upper,
+        };
+        let found = set1_classes
+            .iter()
+            .any(|c1| c1.class == expected_partner && c1.position == c2.position);
+        if !found {
+            return Err("misaligned [:upper:] and/or [:lower:] construct".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if SET2 ends with a case class and SET1 is longer than SET2 (before expansion).
+/// GNU tr: "when translating with string1 longer than string2, the latter string
+/// must not end with a character class".
+/// `set1_len` is the expanded length of SET1.
+/// `set2_raw_len` is the expanded length of SET2 before extension to match SET1.
+/// `set2_classes` are the case class positions in SET2.
+pub fn validate_set2_class_at_end(
+    set1_len: usize,
+    set2_raw_len: usize,
+    set2_classes: &[CaseClassInfo],
+) -> Result<(), String> {
+    if set1_len <= set2_raw_len || set2_classes.is_empty() {
+        return Ok(());
+    }
+    // Check if the last class in SET2 ends exactly at the end of the raw (unexpanded) SET2
+    let last_class = &set2_classes[set2_classes.len() - 1];
+    // A case class always has 26 characters
+    let class_end = last_class.position + 26;
+    if class_end == set2_raw_len {
+        return Err("when translating with string1 longer than string2,\n\
+             the latter string must not end with a character class"
+            .to_string());
+    }
+    Ok(())
 }
 
 /// Parse escape sequence starting at position `i` (which points to '\').

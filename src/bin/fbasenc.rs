@@ -181,6 +181,14 @@ fn parse_args() -> Cli {
                 }
                 i += 1;
             }
+        } else if cli.file.is_some() {
+            eprintln!(
+                "{}: extra operand \u{2018}{}\u{2019}",
+                TOOL_NAME,
+                arg.to_string_lossy()
+            );
+            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+            process::exit(1);
         } else {
             cli.file = Some(arg.to_string_lossy().into_owned());
         }
@@ -215,11 +223,14 @@ fn base64_encode(data: &[u8], alphabet: &[u8; 64]) -> String {
     unsafe { String::from_utf8_unchecked(base64_encode_bytes(data, alphabet)) }
 }
 
-fn base64_decode(
-    input: &[u8],
-    decode_table: &[u8; 256],
-    ignore_garbage: bool,
-) -> Result<Vec<u8>, String> {
+/// Decode result: decoded data + optional error message.
+/// When error is Some, the caller should write data (if any) then report the error.
+struct DecodeOutput {
+    data: Vec<u8>,
+    error: Option<String>,
+}
+
+fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -> DecodeOutput {
     let mut result = Vec::with_capacity(input.len() * 3 / 4 + 3);
     let mut vals = [0u8; 4];
     let mut n = 0usize;
@@ -246,7 +257,10 @@ fn base64_decode(
         let v = decode_table[b as usize];
         if v == 0xFF {
             if !ignore_garbage {
-                return Err(format!("{}: invalid input", TOOL_NAME));
+                return DecodeOutput {
+                    data: result,
+                    error: Some(format!("{}: invalid input", TOOL_NAME)),
+                };
             }
             continue;
         }
@@ -264,17 +278,25 @@ fn base64_decode(
         }
     }
 
-    if n >= 2 {
-        result.push((vals[0] << 2) | (vals[1] >> 4));
-    }
-    if n >= 3 {
-        result.push((vals[1] << 4) | (vals[2] >> 2));
-    }
-    if n >= 4 {
-        result.push((vals[2] << 6) | vals[3]);
+    // Incomplete final group: decode partial bytes (matching GNU behavior)
+    // then report error
+    if n > 0 {
+        if n >= 2 {
+            result.push((vals[0] << 2) | (vals[1] >> 4));
+        }
+        if n >= 3 {
+            result.push((vals[1] << 4) | (vals[2] >> 2));
+        }
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
-    Ok(result)
+    DecodeOutput {
+        data: result,
+        error: None,
+    }
 }
 
 // ======================== Base32 ========================
@@ -299,11 +321,7 @@ const fn build_base32_decode_table(alphabet: &[u8; 32]) -> [u8; 256] {
 const BASE32_DECODE: [u8; 256] = build_base32_decode_table(BASE32_ALPHABET);
 const BASE32HEX_DECODE: [u8; 256] = build_base32_decode_table(BASE32HEX_ALPHABET);
 
-fn base32_decode(
-    input: &[u8],
-    decode_table: &[u8; 256],
-    ignore_garbage: bool,
-) -> Result<Vec<u8>, String> {
+fn base32_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -> DecodeOutput {
     let mut result = Vec::with_capacity(input.len() * 5 / 8 + 5);
     let mut vals = [0u8; 8];
     let mut n = 0usize;
@@ -365,7 +383,10 @@ fn base32_decode(
         let v = decode_table[b as usize];
         if v == 0xFF {
             if !ignore_garbage {
-                return Err(format!("{}: invalid input", TOOL_NAME));
+                return DecodeOutput {
+                    data: result,
+                    error: Some(format!("{}: invalid input", TOOL_NAME)),
+                };
             }
             continue;
         }
@@ -385,23 +406,18 @@ fn base32_decode(
         }
     }
 
-    if n >= 2 {
-        result.push((vals[0] << 3) | (vals[1] >> 2));
-    }
-    if n >= 4 {
-        result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
-    }
-    if n >= 5 {
-        result.push((vals[3] << 4) | (vals[4] >> 1));
-    }
-    if n >= 7 {
-        result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
-    }
-    if n >= 8 {
-        result.push((vals[6] << 5) | vals[7]);
+    // Incomplete final group: do NOT output partial bytes (matching GNU base32 behavior)
+    if n > 0 {
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
-    Ok(result)
+    DecodeOutput {
+        data: result,
+        error: None,
+    }
 }
 
 // ======================== Base16 ========================
@@ -412,7 +428,7 @@ fn base16_encode(data: &[u8]) -> String {
     unsafe { String::from_utf8_unchecked(base16_encode_bytes(data)) }
 }
 
-fn base16_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
+fn base16_decode(input: &[u8], ignore_garbage: bool) -> DecodeOutput {
     let mut result = Vec::with_capacity(input.len() / 2 + 1);
     let mut pending: i16 = -1;
 
@@ -420,10 +436,14 @@ fn base16_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
         if b == b'\n' || b == b'\r' {
             continue;
         }
-        let v = hex_val(b);
+        // GNU basenc --base16 only accepts uppercase hex digits
+        let v = hex_val_upper(b);
         if v == 0xFF {
             if !ignore_garbage {
-                return Err(format!("{}: invalid input", TOOL_NAME));
+                return DecodeOutput {
+                    data: result,
+                    error: Some(format!("{}: invalid input", TOOL_NAME)),
+                };
             }
             continue;
         }
@@ -436,17 +456,23 @@ fn base16_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
     }
 
     if pending >= 0 {
-        return Err(format!("{}: invalid input", TOOL_NAME));
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
-    Ok(result)
+    DecodeOutput {
+        data: result,
+        error: None,
+    }
 }
 
-fn hex_val(b: u8) -> u8 {
+/// Uppercase-only hex decode for base16 (GNU basenc rejects lowercase in --base16 decode).
+fn hex_val_upper(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
         b'A'..=b'F' => b - b'A' + 10,
-        b'a'..=b'f' => b - b'a' + 10,
         _ => 0xFF,
     }
 }
@@ -459,7 +485,7 @@ fn base2msbf_encode(data: &[u8]) -> String {
     unsafe { String::from_utf8_unchecked(base2msbf_encode_bytes(data)) }
 }
 
-fn base2msbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
+fn base2msbf_decode(input: &[u8], ignore_garbage: bool) -> DecodeOutput {
     let mut result = Vec::with_capacity(input.len() / 8 + 1);
     let mut byte = 0u8;
     let mut bits = 0u8;
@@ -470,7 +496,10 @@ fn base2msbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, Strin
         }
         if b != b'0' && b != b'1' {
             if !ignore_garbage {
-                return Err(format!("{}: invalid input", TOOL_NAME));
+                return DecodeOutput {
+                    data: result,
+                    error: Some(format!("{}: invalid input", TOOL_NAME)),
+                };
             }
             continue;
         }
@@ -484,10 +513,16 @@ fn base2msbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, Strin
     }
 
     if bits != 0 {
-        return Err(format!("{}: invalid input", TOOL_NAME));
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
-    Ok(result)
+    DecodeOutput {
+        data: result,
+        error: None,
+    }
 }
 
 #[cfg(test)]
@@ -496,7 +531,7 @@ fn base2lsbf_encode(data: &[u8]) -> String {
     unsafe { String::from_utf8_unchecked(base2lsbf_encode_bytes(data)) }
 }
 
-fn base2lsbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
+fn base2lsbf_decode(input: &[u8], ignore_garbage: bool) -> DecodeOutput {
     let mut result = Vec::with_capacity(input.len() / 8 + 1);
     let mut byte = 0u8;
     let mut bits = 0u8;
@@ -507,7 +542,10 @@ fn base2lsbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, Strin
         }
         if b != b'0' && b != b'1' {
             if !ignore_garbage {
-                return Err(format!("{}: invalid input", TOOL_NAME));
+                return DecodeOutput {
+                    data: result,
+                    error: Some(format!("{}: invalid input", TOOL_NAME)),
+                };
             }
             continue;
         }
@@ -521,10 +559,16 @@ fn base2lsbf_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, Strin
     }
 
     if bits != 0 {
-        return Err(format!("{}: invalid input", TOOL_NAME));
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
-    Ok(result)
+    DecodeOutput {
+        data: result,
+        error: None,
+    }
 }
 
 // ======================== Z85 ========================
@@ -552,7 +596,7 @@ fn z85_encode(data: &[u8]) -> Result<String, String> {
     Ok(unsafe { String::from_utf8_unchecked(z85_encode_bytes(data)?) })
 }
 
-fn z85_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
+fn z85_decode(input: &[u8], ignore_garbage: bool) -> DecodeOutput {
     let mut result = Vec::with_capacity(input.len() * 4 / 5 + 4);
     let mut value: u32 = 0;
     let mut count = 0u8;
@@ -564,7 +608,10 @@ fn z85_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
         let v = Z85_DECODE_TABLE[b as usize];
         if v == 0xFF {
             if !ignore_garbage {
-                return Err(format!("{}: invalid input", TOOL_NAME));
+                return DecodeOutput {
+                    data: result,
+                    error: Some(format!("{}: invalid input", TOOL_NAME)),
+                };
             }
             continue;
         }
@@ -583,13 +630,19 @@ fn z85_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> {
     }
 
     if count != 0 {
-        return Err(format!(
-            "{}: invalid input (length must be a multiple of 5 for Z85 decoding)",
-            TOOL_NAME
-        ));
+        return DecodeOutput {
+            data: result,
+            error: Some(format!(
+                "{}: invalid input (length must be a multiple of 5 for Z85 decoding)",
+                TOOL_NAME
+            )),
+        };
     }
 
-    Ok(result)
+    DecodeOutput {
+        data: result,
+        error: None,
+    }
 }
 
 // ======================== Common ========================
@@ -1089,7 +1142,7 @@ fn z85_encode_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 
-fn decode_data(data: &[u8], encoding: Encoding, ignore_garbage: bool) -> Result<Vec<u8>, String> {
+fn decode_data(data: &[u8], encoding: Encoding, ignore_garbage: bool) -> DecodeOutput {
     match encoding {
         Encoding::Base64 => base64_decode(data, &BASE64_DECODE, ignore_garbage),
         Encoding::Base64Url => base64_decode(data, &BASE64URL_DECODE, ignore_garbage),
@@ -1259,20 +1312,21 @@ fn main() {
     let mut out = io::BufWriter::with_capacity(1024 * 1024, stdout.lock());
 
     if cli.decode {
-        match decode_data(&data, encoding, cli.ignore_garbage) {
-            Ok(decoded) => {
-                if let Err(e) = out.write_all(&decoded) {
-                    if e.kind() == io::ErrorKind::BrokenPipe {
-                        process::exit(0);
-                    }
-                    eprintln!("{}: write error: {}", TOOL_NAME, e);
-                    process::exit(1);
+        let result = decode_data(&data, encoding, cli.ignore_garbage);
+        if !result.data.is_empty() {
+            if let Err(e) = out.write_all(&result.data) {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    process::exit(0);
                 }
-            }
-            Err(msg) => {
-                eprintln!("{}", msg);
+                eprintln!("{}: write error: {}", TOOL_NAME, e);
                 process::exit(1);
             }
+            // Flush before printing error so partial output appears before error message
+            let _ = out.flush();
+        }
+        if let Some(msg) = result.error {
+            eprintln!("{}", msg);
+            process::exit(1);
         }
     } else if let Err(e) = encode_streaming(&data, encoding, cli.wrap, &mut out) {
         if e.kind() == io::ErrorKind::BrokenPipe {
@@ -1848,20 +1902,34 @@ mod tests {
 
     #[test]
     fn test_base64_decode_fn() {
-        assert_eq!(base64_decode(b"", &BASE64_DECODE, false).unwrap(), b"");
-        assert_eq!(base64_decode(b"Zg==", &BASE64_DECODE, false).unwrap(), b"f");
-        assert_eq!(
-            base64_decode(b"Zm8=", &BASE64_DECODE, false).unwrap(),
-            b"fo"
-        );
-        assert_eq!(
-            base64_decode(b"Zm9v", &BASE64_DECODE, false).unwrap(),
-            b"foo"
-        );
-        assert_eq!(
-            base64_decode(b"Zm9vYmFy", &BASE64_DECODE, false).unwrap(),
-            b"foobar"
-        );
+        let r = base64_decode(b"", &BASE64_DECODE, false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"");
+
+        let r = base64_decode(b"Zg==", &BASE64_DECODE, false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"f");
+
+        let r = base64_decode(b"Zm8=", &BASE64_DECODE, false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"fo");
+
+        let r = base64_decode(b"Zm9v", &BASE64_DECODE, false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"foo");
+
+        let r = base64_decode(b"Zm9vYmFy", &BASE64_DECODE, false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"foobar");
+
+        // Auto-pad: incomplete final group should decode partial bytes + error
+        let r = base64_decode(b"QQ", &BASE64_DECODE, false);
+        assert!(r.error.is_some());
+        assert_eq!(r.data, b"A");
+
+        let r = base64_decode(b"QWI", &BASE64_DECODE, false);
+        assert!(r.error.is_some());
+        assert_eq!(r.data, b"Ab");
     }
 
     #[test]
@@ -1874,10 +1942,25 @@ mod tests {
 
     #[test]
     fn test_base16_decode_fn() {
-        assert_eq!(base16_decode(b"", false).unwrap(), b"");
-        assert_eq!(base16_decode(b"00", false).unwrap(), b"\x00");
-        assert_eq!(base16_decode(b"FF", false).unwrap(), b"\xff");
-        assert_eq!(base16_decode(b"48656C6C6F", false).unwrap(), b"Hello");
+        let r = base16_decode(b"", false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"");
+
+        let r = base16_decode(b"00", false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"\x00");
+
+        let r = base16_decode(b"FF", false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"\xff");
+
+        let r = base16_decode(b"48656C6C6F", false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"Hello");
+
+        // GNU basenc --base16 rejects lowercase
+        let r = base16_decode(b"ff", false);
+        assert!(r.error.is_some());
     }
 
     #[test]
@@ -1905,8 +1988,9 @@ mod tests {
 
     #[test]
     fn test_z85_decode_fn() {
-        let decoded = z85_decode(b"HelloWorld", false).unwrap();
-        assert_eq!(decoded, b"\x86\x4F\xD2\x6F\xB5\x59\xF7\x5B");
+        let r = z85_decode(b"HelloWorld", false);
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"\x86\x4F\xD2\x6F\xB5\x59\xF7\x5B");
     }
 
     #[test]

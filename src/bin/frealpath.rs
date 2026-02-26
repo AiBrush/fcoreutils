@@ -18,11 +18,20 @@ enum Mode {
     CanonicalizeMissing,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SymlinkMode {
+    /// -P: resolve symlinks as encountered (default)
+    Physical,
+    /// -L: resolve '..' components before symlinks
+    Logical,
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
     let mut mode = Mode::Canonicalize;
     let mut no_symlinks = false;
+    let mut symlink_mode = SymlinkMode::Physical;
     let mut zero = false;
     let mut quiet = false;
     let mut relative_to: Option<String> = None;
@@ -53,6 +62,8 @@ fn main() {
             "-s" | "--strip" | "--no-symlinks" => no_symlinks = true,
             "-z" | "--zero" => zero = true,
             "-q" | "--quiet" => quiet = true,
+            "-L" | "--logical" => symlink_mode = SymlinkMode::Logical,
+            "-P" | "--physical" => symlink_mode = SymlinkMode::Physical,
             "--relative-to" => {
                 i += 1;
                 if i >= args.len() {
@@ -87,6 +98,8 @@ fn main() {
                         's' => no_symlinks = true,
                         'z' => zero = true,
                         'q' => quiet = true,
+                        'L' => symlink_mode = SymlinkMode::Logical,
+                        'P' => symlink_mode = SymlinkMode::Physical,
                         _ => {
                             eprintln!("{}: invalid option -- '{}'", TOOL_NAME, ch);
                             eprintln!("Try '{} --help' for more information.", TOOL_NAME);
@@ -106,27 +119,73 @@ fn main() {
         process::exit(1);
     }
 
+    // Validate --relative-to and --relative-base are not empty strings
+    if let Some(ref val) = relative_to
+        && val.is_empty()
+    {
+        eprintln!("{}: '': No such file or directory", TOOL_NAME);
+        process::exit(1);
+    }
+    if let Some(ref val) = relative_base
+        && val.is_empty()
+    {
+        eprintln!("{}: '': No such file or directory", TOOL_NAME);
+        process::exit(1);
+    }
+
     // Resolve relative-to and relative-base directories
     let resolved_relative_to = relative_to.as_ref().map(|d| {
-        resolve_path(d, mode, no_symlinks).unwrap_or_else(|_| make_absolute(Path::new(d)))
+        resolve_path(d, mode, no_symlinks, symlink_mode)
+            .unwrap_or_else(|_| make_absolute(Path::new(d)))
     });
     let resolved_relative_base = relative_base.as_ref().map(|d| {
-        resolve_path(d, mode, no_symlinks).unwrap_or_else(|_| make_absolute(Path::new(d)))
+        resolve_path(d, mode, no_symlinks, symlink_mode)
+            .unwrap_or_else(|_| make_absolute(Path::new(d)))
     });
+
+    // With -e mode, validate that --relative-to and --relative-base are directories
+    if mode == Mode::CanonicalizeExisting {
+        if let Some(ref resolved) = resolved_relative_to
+            && resolved.exists()
+            && !resolved.is_dir()
+        {
+            if !quiet {
+                eprintln!(
+                    "{}: {}: Not a directory",
+                    TOOL_NAME,
+                    relative_to.as_ref().unwrap()
+                );
+            }
+            process::exit(1);
+        }
+        if let Some(ref resolved) = resolved_relative_base
+            && resolved.exists()
+            && !resolved.is_dir()
+        {
+            if !quiet {
+                eprintln!(
+                    "{}: {}: Not a directory",
+                    TOOL_NAME,
+                    relative_base.as_ref().unwrap()
+                );
+            }
+            process::exit(1);
+        }
+    }
 
     let terminator = if zero { "\0" } else { "\n" };
     let mut exit_code = 0;
 
     for file in &files {
-        // Empty string is an error for all modes except CanonicalizeMissing (matches GNU)
-        if file.is_empty() && mode != Mode::CanonicalizeMissing {
+        // Empty string is an error for all modes (matches GNU)
+        if file.is_empty() {
             exit_code = 1;
             if !quiet {
                 eprintln!("{}: '': No such file or directory", TOOL_NAME);
             }
             continue;
         }
-        match resolve_path(file, mode, no_symlinks) {
+        match resolve_path(file, mode, no_symlinks, symlink_mode) {
             Ok(resolved) => {
                 let output =
                     apply_relative(&resolved, &resolved_relative_to, &resolved_relative_base);
@@ -149,7 +208,12 @@ fn main() {
     process::exit(exit_code);
 }
 
-fn resolve_path(path: &str, mode: Mode, no_symlinks: bool) -> Result<PathBuf, std::io::Error> {
+fn resolve_path(
+    path: &str,
+    mode: Mode,
+    no_symlinks: bool,
+    symlink_mode: SymlinkMode,
+) -> Result<PathBuf, std::io::Error> {
     if no_symlinks {
         // Just normalize the path logically without resolving symlinks
         let abs = make_absolute(Path::new(path));
@@ -167,11 +231,28 @@ fn resolve_path(path: &str, mode: Mode, no_symlinks: bool) -> Result<PathBuf, st
             }
             Mode::CanonicalizeMissing => Ok(normalized),
         }
+    } else if symlink_mode == SymlinkMode::Logical {
+        // Logical mode: resolve .. textually first, then canonicalize remaining
+        resolve_logical(path, mode)
     } else {
+        // Physical mode (default): resolve symlinks as encountered
         match mode {
             Mode::Canonicalize | Mode::CanonicalizeExisting => std::fs::canonicalize(path),
             Mode::CanonicalizeMissing => canonicalize_missing(Path::new(path)),
         }
+    }
+}
+
+/// Logical mode (-L): resolve '..' components before symlinks.
+/// 1. Make path absolute
+/// 2. Collapse . and .. textually
+/// 3. Canonicalize the result (resolving symlinks in what remains)
+fn resolve_logical(path: &str, mode: Mode) -> Result<PathBuf, std::io::Error> {
+    let abs = make_absolute(Path::new(path));
+    let normalized = normalize_path(&abs);
+    match mode {
+        Mode::Canonicalize | Mode::CanonicalizeExisting => std::fs::canonicalize(&normalized),
+        Mode::CanonicalizeMissing => canonicalize_missing(&normalized),
     }
 }
 
@@ -332,9 +413,11 @@ fn print_help() {
     println!();
     println!("  -e, --canonicalize-existing   all components of the path must exist");
     println!("  -m, --canonicalize-missing    no path components need exist or be a directory");
+    println!("  -L, --logical                 resolve '..' components before symlinks");
+    println!("  -P, --physical                resolve symlinks as encountered (default)");
+    println!("  -q, --quiet                   suppress most error messages");
     println!("  -s, --strip, --no-symlinks    don't expand symlinks");
     println!("  -z, --zero                    end each output line with NUL, not newline");
-    println!("  -q, --quiet                   suppress most error messages");
     println!("      --relative-to=DIR         print the resolved path relative to DIR");
     println!("      --relative-base=DIR       print absolute paths unless paths below DIR");
     println!("      --help     display this help and exit");
@@ -455,6 +538,112 @@ mod tests {
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(stdout.trim(), "../file.txt");
+    }
+
+    #[test]
+    fn test_realpath_logical_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let canon_dir = fs::canonicalize(dir.path()).unwrap();
+        let real_dir = canon_dir.join("real_dir");
+        let link = canon_dir.join("link");
+        fs::create_dir(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        // -L link/.. should resolve to parent of link (not parent of real_dir)
+        let link_dotdot = format!("{}/link/..", canon_dir.display());
+        let output = cmd().args(["-L", &link_dotdot]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), canon_dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn test_realpath_physical_mode() {
+        let output = cmd().args(["-P", "/tmp"]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_realpath_combined_flags() {
+        let output = cmd().args(["-Pqz", "/tmp"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = output.stdout;
+        // Should end with NUL, not newline
+        assert!(stdout.ends_with(b"\0"), "Expected NUL terminator");
+        assert!(!stdout.ends_with(b"\n"), "Should not end with newline");
+    }
+
+    #[test]
+    fn test_realpath_empty_string_all_modes() {
+        // Empty string should fail for ALL modes including -m
+        for flag in &["", "-e", "-m"] {
+            let mut c = cmd();
+            if !flag.is_empty() {
+                c.arg(*flag);
+            }
+            c.arg("");
+            let output = c.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "Empty string should fail with flag '{}'",
+                flag
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("No such file or directory"),
+                "Expected error message with flag '{}', got: {}",
+                flag,
+                stderr
+            );
+        }
+    }
+
+    #[test]
+    fn test_realpath_empty_relative_base() {
+        let output = cmd().args(["--relative-base=", "/tmp"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("No such file or directory"));
+    }
+
+    #[test]
+    fn test_realpath_empty_relative_to() {
+        let output = cmd().args(["--relative-to=", "/tmp"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("No such file or directory"));
+    }
+
+    #[test]
+    fn test_realpath_e_relative_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("afile");
+        fs::write(&file, "x").unwrap();
+
+        let output = cmd()
+            .args([
+                "-e",
+                &format!("--relative-to={}", file.to_str().unwrap()),
+                "/tmp",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Not a directory"));
+    }
+
+    #[test]
+    fn test_realpath_slashes() {
+        let output = cmd().args(["/", "//", "///"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+        for line in &lines {
+            assert_eq!(*line, "/", "Expected '/' but got '{}'", line);
+        }
     }
 
     #[test]

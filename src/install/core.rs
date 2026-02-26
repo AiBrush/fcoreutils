@@ -115,9 +115,14 @@ fn make_numbered_backup(path: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Parse a mode string (octal) into a u32.
+/// Parse a mode string (octal or symbolic like chmod) into a u32.
+///
+/// For install, symbolic modes are resolved relative to a base of 0
+/// and without umask filtering (GNU behaviour).
 pub fn parse_mode(mode_str: &str) -> Result<u32, String> {
-    u32::from_str_radix(mode_str, 8).map_err(|_| format!("invalid mode: '{}'", mode_str))
+    // Use the no-umask variant: install -m applies modes exactly as
+    // specified, without filtering through the process umask.
+    crate::chmod::parse_mode_no_umask(mode_str, 0)
 }
 
 /// Install a single file from `src` to `dst`.
@@ -189,11 +194,19 @@ pub fn install_file(src: &Path, dst: &Path, config: &InstallConfig) -> io::Resul
 /// Create directories (install -d).
 pub fn install_directories(dirs: &[&Path], config: &InstallConfig) -> io::Result<()> {
     for dir in dirs {
-        fs::create_dir_all(dir)?;
+        // Normalize the path to handle trailing "." (e.g. "d1/.") which
+        // causes create_dir_all to fail on Linux.
+        let normalized: std::path::PathBuf = dir.components().collect();
+        let target = if normalized.as_os_str().is_empty() {
+            dir
+        } else {
+            normalized.as_path()
+        };
+        fs::create_dir_all(target)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir, fs::Permissions::from_mode(config.mode))?;
+            fs::set_permissions(target, fs::Permissions::from_mode(config.mode))?;
         }
         if config.verbose {
             eprintln!("creating directory '{}'", dir.display());

@@ -3,7 +3,7 @@
 # Usage: bash tests/run_tests.sh ./ftrue
 
 BIN="${1:-./ftrue}"
-GNU="true"
+GNU="/usr/bin/true"
 PASS=0
 FAIL=0
 ERRORS=()
@@ -49,9 +49,43 @@ run_test() {
     fi
 }
 
+# Test that normalizes program name before comparison.
+# GNU uses argv[0] (e.g. "/usr/bin/true") in --help, while
+# our binary hardcodes "true". This normalizes both to "true".
+run_test_help() {
+    local desc="$1"
+    local args="$2"
+
+    local expected=$($GNU $args 2>&1)
+    local got=$($BIN $args 2>&1)
+
+    $GNU $args > /dev/null 2>&1
+    local expected_exit=$?
+    $BIN $args > /dev/null 2>&1
+    local got_exit=$?
+
+    # Normalize: replace any path/true with just "true"
+    local expected_norm=$(echo "$expected" | sed 's|[^ ]*/true|true|g')
+    local got_norm=$(echo "$got" | sed 's|[^ ]*/true|true|g')
+
+    if [ "$expected_norm" = "$got_norm" ] && [ "$expected_exit" = "$got_exit" ]; then
+        PASS=$((PASS+1))
+    else
+        FAIL=$((FAIL+1))
+        ERRORS+=("FAIL: $desc")
+        if [ "$expected_norm" != "$got_norm" ]; then
+            ERRORS+=("  expected (normalized): $(echo "$expected_norm" | head -3)")
+            ERRORS+=("  got (normalized):      $(echo "$got_norm" | head -3)")
+        fi
+        if [ "$expected_exit" != "$got_exit" ]; then
+            ERRORS+=("  expected exit: $expected_exit, got: $got_exit")
+        fi
+    fi
+}
+
 # ── Standard flags (required for ALL tools) ──────────────────
-# GNU true ignores --help and --version, outputs nothing, exits 0
-run_test "--help output"    "--help"    ""
+# GNU true handles --help and --version when argc == 2
+run_test_help "--help output"    "--help"
 run_test "--version output" "--version" ""
 run_test "invalid flag"     "--invalid-flag-xyz" ""
 
@@ -62,6 +96,10 @@ run_test "multiple arguments"        "foo bar baz"   ""
 run_test "dash argument"             "-"             ""
 run_test "double dash"               "--"            ""
 run_test "mixed flags and args"      "--foo bar -x"  ""
+
+# ── argc != 2 edge cases (--help/--version ignored) ──────────
+run_test "--help with extra arg"     "--help extra"  ""
+run_test "--version with extra arg"  "--version foo" ""
 
 # ── Results ──────────────────────────────────────────────────
 echo ""

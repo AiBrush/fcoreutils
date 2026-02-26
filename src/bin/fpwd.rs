@@ -87,6 +87,15 @@ fn logical_pwd() -> Option<PathBuf> {
         return None;
     }
 
+    // PWD must not contain . or .. components (GNU pwd behaviour).
+    // We check the raw string because Rust's Path::components() silently
+    // strips trailing CurDir ("/foo/." → components omit the dot).
+    for segment in pwd.split('/') {
+        if segment == "." || segment == ".." {
+            return None;
+        }
+    }
+
     // Verify PWD and current_dir point to the same file
     #[cfg(unix)]
     {
@@ -155,5 +164,128 @@ mod tests {
             assert_eq!(ours.stdout, gnu.stdout, "STDOUT mismatch for -P");
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
+    }
+
+    #[test]
+    fn test_physical_resolves_symlink() {
+        // pwd -P should resolve symlinks and return the real path
+        let tmp = std::env::temp_dir().join("fpwd_test_symlink");
+        let real_dir = tmp.join("real");
+        let link = tmp.join("link");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let output = cmd()
+            .arg("-P")
+            .current_dir(&link)
+            .env("PWD", link.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.trim();
+        // -P must resolve the symlink to the real directory
+        let real_canon = std::fs::canonicalize(&real_dir).unwrap();
+        assert_eq!(
+            result,
+            real_canon.to_str().unwrap(),
+            "pwd -P should resolve symlink to real path"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_logical_then_physical_last_option_wins() {
+        // pwd -L -P: last option wins, should behave as -P (physical)
+        let tmp = std::env::temp_dir().join("fpwd_test_lp");
+        let real_dir = tmp.join("real");
+        let link = tmp.join("link");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let output = cmd()
+            .args(["-L", "-P"])
+            .current_dir(&link)
+            .env("PWD", link.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.trim();
+        let real_canon = std::fs::canonicalize(&real_dir).unwrap();
+        assert_eq!(
+            result,
+            real_canon.to_str().unwrap(),
+            "pwd -L -P should resolve symlink (last option wins)"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_pwd_trailing_dot_falls_back_to_physical() {
+        // If PWD contains trailing dot (e.g. /tmp/dir/.), fall back to physical
+        let real = std::env::current_dir().unwrap();
+        let real_canon = std::fs::canonicalize(&real).unwrap();
+        // We need an absolute path ending with /. that still resolves to cwd
+        let dotted = format!("{}/.", real_canon.display());
+
+        let output = cmd().arg("-L").env("PWD", &dotted).output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.trim();
+        // Should fall back to physical (getcwd), not use the dotted PWD
+        assert!(
+            !result.ends_with("/."),
+            "PWD with trailing dot should fall back to physical, got: {}",
+            result
+        );
+        assert_eq!(
+            result,
+            real_canon.to_str().unwrap(),
+            "Should return physical path when PWD has trailing dot"
+        );
+    }
+
+    #[test]
+    fn test_pwd_parent_ref_falls_back_to_physical() {
+        // If PWD contains .., fall back to physical
+        let tmp = std::env::temp_dir().join("fpwd_test_dotdot");
+        let sub = tmp.join("sub");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let tmp_canon = std::fs::canonicalize(&tmp).unwrap();
+        // PWD = /tmp/fpwd_test_dotdot/sub/../sub — contains .., should be rejected
+        let dotdot_pwd = format!("{}/sub/../sub", tmp_canon.display());
+
+        let output = cmd()
+            .arg("-L")
+            .current_dir(&sub)
+            .env("PWD", &dotdot_pwd)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.trim();
+        let sub_canon = std::fs::canonicalize(&sub).unwrap();
+        // Should fall back to physical, not use the .. path
+        assert!(
+            !result.contains(".."),
+            "PWD with .. should fall back to physical, got: {}",
+            result
+        );
+        assert_eq!(
+            result,
+            sub_canon.to_str().unwrap(),
+            "Should return physical path when PWD has .."
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
