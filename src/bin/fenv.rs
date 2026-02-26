@@ -20,7 +20,31 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Preprocess -S/--split-string: expand inline before main option parsing
+    let mut args: Vec<String> = Vec::new();
+    {
+        let mut j = 0;
+        while j < raw_args.len() {
+            if raw_args[j] == "-S" || raw_args[j] == "--split-string" {
+                j += 1;
+                if j < raw_args.len() {
+                    args.extend(split_string(&raw_args[j]));
+                } else {
+                    eprintln!("{}: option requires an argument -- 'S'", TOOL_NAME);
+                    process::exit(125);
+                }
+            } else if raw_args[j].starts_with("-S") && !raw_args[j].starts_with("--") {
+                args.extend(split_string(&raw_args[j][2..]));
+            } else if let Some(val) = raw_args[j].strip_prefix("--split-string=") {
+                args.extend(split_string(val));
+            } else {
+                args.push(raw_args[j].clone());
+            }
+            j += 1;
+        }
+    }
 
     let mut ignore_env = false;
     let mut unsets: Vec<String> = Vec::new();
@@ -67,6 +91,7 @@ fn main() {
                 println!("  -0, --null           end each output line with NUL, not newline");
                 println!("  -u, --unset=NAME     remove variable from the environment");
                 println!("  -C, --chdir=DIR      change working directory to DIR");
+                println!("  -S, --split-string=S process and split S into separate arguments");
                 println!("      --help           display this help and exit");
                 println!("      --version        output version information and exit");
                 println!();
@@ -81,9 +106,20 @@ fn main() {
             "-" => ignore_env = true,
             "-0" | "--null" => null_terminated = true,
             "--" => {
+                // After --, still process NAME=VALUE assignments before command
                 i += 1;
-                if i < args.len() {
-                    command_start = Some(i);
+                while i < args.len() {
+                    if args[i].contains('=') {
+                        if let Some(pos) = args[i].find('=') {
+                            let name = &args[i][..pos];
+                            let value = &args[i][pos + 1..];
+                            sets.push((name.to_string(), value.to_string()));
+                        }
+                    } else {
+                        command_start = Some(i);
+                        break;
+                    }
+                    i += 1;
                 }
                 break;
             }
@@ -177,6 +213,16 @@ fn main() {
         i += 1;
     }
 
+    // GNU env: -0/--null is only valid when printing environment (no command)
+    if null_terminated && command_start.is_some() {
+        eprintln!(
+            "{}: cannot specify --null (-0) with command",
+            TOOL_NAME
+        );
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(125);
+    }
+
     // Apply environment modifications
     if ignore_env {
         // Clear environment
@@ -247,7 +293,105 @@ fn main() {
     }
 }
 
-// Import CommandExt for exec()
+/// Split a string into arguments following GNU env -S rules:
+/// - Split on unquoted whitespace
+/// - Single quotes preserve literal content (no escapes)
+/// - Double quotes allow \$ \` \" \\ \n escapes
+/// - Unquoted # at start of a word begins a comment (rest ignored)
+/// - Unquoted \# is a literal #
+/// - Other backslash escapes: \n=newline, \t=tab, \\=backslash, \_=space
+#[cfg(unix)]
+fn split_string(s: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut chars = s.chars().peekable();
+    let mut in_word = false;
+
+    while let Some(&ch) = chars.peek() {
+        match ch {
+            ' ' | '\t' | '\n' if !in_word => {
+                chars.next();
+            }
+            ' ' | '\t' | '\n' => {
+                if !current.is_empty() {
+                    result.push(std::mem::take(&mut current));
+                }
+                in_word = false;
+                chars.next();
+            }
+            '#' if !in_word => {
+                // Comment: skip rest of string
+                break;
+            }
+            '\'' => {
+                chars.next();
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(c) => current.push(c),
+                        None => break,
+                    }
+                }
+            }
+            '"' => {
+                chars.next();
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some('$') => current.push('$'),
+                            Some('`') => current.push('`'),
+                            Some('"') => current.push('"'),
+                            Some('\\') => current.push('\\'),
+                            Some('n') => current.push('\n'),
+                            Some(c) => {
+                                current.push('\\');
+                                current.push(c);
+                            }
+                            None => current.push('\\'),
+                        },
+                        Some(c) => current.push(c),
+                        None => break,
+                    }
+                }
+            }
+            '\\' => {
+                chars.next();
+                in_word = true;
+                match chars.next() {
+                    Some('#') => current.push('#'),
+                    Some('n') => current.push('\n'),
+                    Some('t') => current.push('\t'),
+                    Some('\\') => current.push('\\'),
+                    Some('_') => current.push(' '),
+                    Some('$') => current.push('$'),
+                    Some('"') => current.push('"'),
+                    Some('\'') => current.push('\''),
+                    Some(c) => {
+                        current.push('\\');
+                        current.push(c);
+                    }
+                    None => current.push('\\'),
+                }
+            }
+            _ => {
+                in_word = true;
+                current.push(ch);
+                chars.next();
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        result.push(current);
+    }
+
+    result
+}
+
+// Import CommandExt
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
