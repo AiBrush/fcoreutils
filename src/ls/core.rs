@@ -151,6 +151,8 @@ pub struct LsConfig {
     pub hyperlink: HyperlinkMode,
     pub context: bool,
     pub literal: bool,
+    /// --zero: use NUL as line terminator instead of newline.
+    pub zero: bool,
 }
 
 impl Default for LsConfig {
@@ -188,6 +190,7 @@ impl Default for LsConfig {
             hyperlink: HyperlinkMode::Never,
             context: false,
             literal: false,
+            zero: false,
         }
     }
 }
@@ -565,6 +568,7 @@ fn escape_name(name: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            ' ' => out.push_str("\\ "),
             c if c.is_control() => {
                 out.push_str(&format!("\\{:03o}", c as u32));
             }
@@ -1195,7 +1199,11 @@ fn should_ignore(name: &str, config: &LsConfig) -> bool {
 pub fn read_entries(path: &Path, config: &LsConfig) -> io::Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
 
-    if config.all {
+    // GNU behavior: -A overrides -a (when both are set, -aA means almost_all)
+    let show_all = config.all && !config.almost_all;
+    let show_hidden = config.all || config.almost_all;
+
+    if show_all {
         // Add . and ..
         if let Ok(e) = FileEntry::from_path_with_name(".".to_string(), path, config) {
             entries.push(e);
@@ -1211,10 +1219,7 @@ pub fn read_entries(path: &Path, config: &LsConfig) -> io::Result<Vec<FileEntry>
         let name = entry.file_name().to_string_lossy().into_owned();
 
         // Filter hidden files
-        if !config.all && !config.almost_all && name.starts_with('.') {
-            continue;
-        }
-        if config.almost_all && (name == "." || name == "..") {
+        if !show_hidden && name.starts_with('.') {
             continue;
         }
 
@@ -1425,7 +1430,11 @@ fn print_long(
             write!(out, " -> {}", target)?;
         }
 
-        writeln!(out)?;
+        if config.zero {
+            out.write_all(&[0u8])?;
+        } else {
+            writeln!(out)?;
+        }
     }
 
     Ok(())
@@ -1448,31 +1457,80 @@ fn count_digits(n: u64) -> usize {
 // Column format output
 // ---------------------------------------------------------------------------
 
-/// Print entries in multi-column format.
-fn print_columns(
+/// Write spaces (and optionally tabs) to advance from column `from` to `to`.
+/// Matches GNU ls `indent()`.
+fn indent(out: &mut impl Write, from: usize, to: usize, tab: usize) -> io::Result<()> {
+    let mut pos = from;
+    while pos < to {
+        if tab != 0 && to / tab > (pos + 1) / tab {
+            out.write_all(b"\t")?;
+            pos += tab - pos % tab;
+        } else {
+            out.write_all(b" ")?;
+            pos += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Write inode/blocks prefix for column output.
+fn write_entry_prefix(
+    out: &mut impl Write,
+    entry: &FileEntry,
+    config: &LsConfig,
+    max_inode_w: usize,
+    max_blocks_w: usize,
+) -> io::Result<()> {
+    if config.show_inode {
+        write!(out, "{:>width$} ", entry.ino, width = max_inode_w)?;
+    }
+    if config.show_size {
+        let bs = format_blocks(
+            entry.blocks,
+            config.human_readable,
+            config.si,
+            config.kibibytes,
+        );
+        write!(out, "{:>width$} ", bs, width = max_blocks_w)?;
+    }
+    Ok(())
+}
+
+/// Write a file name with optional colour.
+fn write_entry_name(
+    out: &mut impl Write,
+    display: &str,
+    entry: &FileEntry,
+    config: &LsConfig,
+    color_db: Option<&ColorDb>,
+) -> io::Result<()> {
+    if let Some(db) = color_db {
+        let c = db.color_for(entry);
+        let quoted = quote_name(&entry.name, config);
+        let ind = entry.indicator(config.indicator_style);
+        if c.is_empty() {
+            write!(out, "{}{}", quoted, ind)?;
+        } else {
+            write!(out, "{}{}{}{}", c, quoted, db.reset, ind)?;
+        }
+    } else {
+        write!(out, "{}", display)?;
+    }
+    Ok(())
+}
+
+/// GNU-compatible `print_with_separator`: entries separated by `sep` + space/newline.
+/// Used for `-w0` (unlimited width, all on one line separated by two spaces)
+/// and `-m` (comma mode, wrapping at line width).
+fn print_with_separator(
     out: &mut impl Write,
     entries: &[FileEntry],
     config: &LsConfig,
     color_db: Option<&ColorDb>,
+    sep: u8,
+    eol: u8,
 ) -> io::Result<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-
-    let term_width = config.width;
-    let tab = config.tab_size;
-
-    // Collect display names and their display widths
-    let items: Vec<(String, usize, &FileEntry)> = entries
-        .iter()
-        .map(|e| {
-            let quoted = quote_name(&e.name, config);
-            let ind = e.indicator(config.indicator_style);
-            let display = format!("{}{}", quoted, ind);
-            let w = display.len();
-            (display, w, e)
-        })
-        .collect();
+    let line_length = config.width;
 
     let max_inode_w = if config.show_inode {
         entries
@@ -1505,82 +1563,234 @@ fn print_columns(
         0
     };
 
-    // Try to fit into columns
-    let n = items.len();
-    let max_name_width = items.iter().map(|(_, w, _)| *w).max().unwrap_or(0);
-    let col_width_raw = max_name_width + prefix_width;
+    let mut pos: usize = 0;
 
-    // Round up to next tab stop
-    let col_width = if tab > 0 {
-        ((col_width_raw + tab) / tab) * tab
+    for (i, entry) in entries.iter().enumerate() {
+        let quoted = quote_name(&entry.name, config);
+        let ind = entry.indicator(config.indicator_style);
+        let len = if line_length > 0 {
+            quoted.len() + ind.len() + prefix_width
+        } else {
+            0
+        };
+
+        if i > 0 {
+            // GNU: if line_length == 0, never wrap.
+            // Otherwise check if name + 2 (sep+space) fits on current line.
+            let fits = line_length == 0
+                || (pos + len + 2 < line_length && pos <= usize::MAX - len - 2);
+            let separator: u8 = if fits { b' ' } else { eol };
+
+            out.write_all(&[sep, separator])?;
+            if fits {
+                pos += 2;
+            } else {
+                pos = 0;
+            }
+        }
+
+        write_entry_prefix(out, entry, config, max_inode_w, max_blocks_w)?;
+        if let Some(db) = color_db {
+            let c = db.color_for(entry);
+            if c.is_empty() {
+                write!(out, "{}{}", quoted, ind)?;
+            } else {
+                write!(out, "{}{}{}{}", c, quoted, db.reset, ind)?;
+            }
+        } else {
+            write!(out, "{}{}", quoted, ind)?;
+        }
+        pos += len;
+    }
+    if !entries.is_empty() {
+        out.write_all(&[eol])?;
+    }
+    Ok(())
+}
+
+/// Print entries in multi-column format.
+fn print_columns(
+    out: &mut impl Write,
+    entries: &[FileEntry],
+    config: &LsConfig,
+    color_db: Option<&ColorDb>,
+) -> io::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let eol: u8 = if config.zero { 0 } else { b'\n' };
+
+    // GNU: when line_length == 0 (-w0), use print_with_separator(' ')
+    // instead of column layout.  This outputs all entries on one line
+    // separated by two spaces (sep + separator) with no tab indentation.
+    if config.width == 0 {
+        return print_with_separator(out, entries, config, color_db, b' ', eol);
+    }
+
+    let by_columns = config.format == OutputFormat::Columns;
+    let tab = config.tab_size;
+    let term_width = config.width;
+
+    let max_inode_w = if config.show_inode {
+        entries
+            .iter()
+            .map(|e| count_digits(e.ino))
+            .max()
+            .unwrap_or(1)
     } else {
-        col_width_raw + 2
+        0
+    };
+    let max_blocks_w = if config.show_size {
+        entries
+            .iter()
+            .map(|e| {
+                format_blocks(e.blocks, config.human_readable, config.si, config.kibibytes).len()
+            })
+            .max()
+            .unwrap_or(1)
+    } else {
+        0
     };
 
-    if col_width == 0 || col_width >= term_width {
-        // Fall back to single column
+    let prefix_width = if config.show_inode && config.show_size {
+        max_inode_w + 1 + max_blocks_w + 1
+    } else if config.show_inode {
+        max_inode_w + 1
+    } else if config.show_size {
+        max_blocks_w + 1
+    } else {
+        0
+    };
+
+    // Pre-compute name display widths (including prefix and indicator)
+    let items: Vec<(String, usize, &FileEntry)> = entries
+        .iter()
+        .map(|e| {
+            let quoted = quote_name(&e.name, config);
+            let ind = e.indicator(config.indicator_style);
+            let display = format!("{}{}", quoted, ind);
+            let w = display.len() + prefix_width;
+            (display, w, e)
+        })
+        .collect();
+
+    let n = items.len();
+
+    // GNU algorithm: try every possible number of columns from max down to 1.
+    // MIN_COLUMN_WIDTH = 3 (1 char name + 2 char gap)
+    let min_col_w: usize = 3;
+    let max_possible_cols = if term_width < min_col_w {
+        1
+    } else {
+        let base = term_width / min_col_w;
+        let extra = if term_width % min_col_w != 0 { 1 } else { 0 };
+        std::cmp::min(base + extra, n)
+    };
+
+    // For each column count, maintain per-column widths and total line length
+    let mut col_arrs: Vec<Vec<usize>> = (0..max_possible_cols)
+        .map(|i| vec![min_col_w; i + 1])
+        .collect();
+    let mut line_lens: Vec<usize> = (0..max_possible_cols)
+        .map(|i| (i + 1) * min_col_w)
+        .collect();
+    let mut valid: Vec<bool> = vec![true; max_possible_cols];
+
+    for filesno in 0..n {
+        let name_length = items[filesno].1;
+
+        for i in 0..max_possible_cols {
+            if !valid[i] {
+                continue;
+            }
+            let ncols = i + 1;
+            let idx = if by_columns {
+                filesno / ((n + i) / ncols)
+            } else {
+                filesno % ncols
+            };
+            // Non-last columns get +2 gap
+            let real_length = name_length + if idx == i { 0 } else { 2 };
+
+            if col_arrs[i][idx] < real_length {
+                line_lens[i] += real_length - col_arrs[i][idx];
+                col_arrs[i][idx] = real_length;
+                valid[i] = line_lens[i] < term_width;
+            }
+        }
+    }
+
+    // Find the maximum valid column count
+    let mut num_cols = 1;
+    for cols in (1..=max_possible_cols).rev() {
+        if valid[cols - 1] {
+            num_cols = cols;
+            break;
+        }
+    }
+
+    if num_cols <= 1 {
         return print_single_column(out, entries, config, color_db);
     }
 
-    let num_cols = std::cmp::max(1, term_width / col_width);
-    let num_rows = (n + num_cols - 1) / num_cols;
+    let col_arr = &col_arrs[num_cols - 1];
 
-    for row in 0..num_rows {
-        let mut col = 0;
-        loop {
-            let idx = col * num_rows + row;
-            if idx >= n {
-                break;
-            }
+    if by_columns {
+        // Column-major (-C): entries fill down columns first
+        let num_rows = (n + num_cols - 1) / num_cols;
+        for row in 0..num_rows {
+            let mut pos = 0;
+            let mut col = 0;
+            let mut filesno = row;
 
-            let (ref display, w, entry) = items[idx];
-            let is_last_col = col + 1 >= num_cols || (col + 1) * num_rows + row >= n;
+            loop {
+                let (ref display, w, entry) = items[filesno];
+                let max_w = col_arr[col];
 
-            // inode prefix
-            if config.show_inode {
-                write!(out, "{:>width$} ", entry.ino, width = max_inode_w)?;
-            }
-            // blocks prefix
-            if config.show_size {
-                let bs = format_blocks(
-                    entry.blocks,
-                    config.human_readable,
-                    config.si,
-                    config.kibibytes,
-                );
-                write!(out, "{:>width$} ", bs, width = max_blocks_w)?;
-            }
+                write_entry_prefix(out, entry, config, max_inode_w, max_blocks_w)?;
+                write_entry_name(out, display, entry, config, color_db)?;
 
-            // Name with colour
-            if let Some(db) = color_db {
-                let c = db.color_for(entry);
-                let quoted = quote_name(&entry.name, config);
-                let ind = entry.indicator(config.indicator_style);
-                if c.is_empty() {
-                    write!(out, "{}{}", quoted, ind)?;
-                } else {
-                    write!(out, "{}{}{}{}", c, quoted, db.reset, ind)?;
+                if n.saturating_sub(num_rows) <= filesno {
+                    break;
                 }
-            } else {
-                write!(out, "{}", display)?;
-            }
+                filesno += num_rows;
 
-            if !is_last_col {
-                // Pad to column width
-                let name_w = w + prefix_width;
-                let padding = if col_width > name_w {
-                    col_width - name_w
-                } else {
-                    2
-                };
-                for _ in 0..padding {
-                    write!(out, " ")?;
-                }
+                indent(out, pos + w, pos + max_w, tab)?;
+                pos += max_w;
+                col += 1;
             }
-
-            col += 1;
+            out.write_all(&[eol])?;
         }
-        writeln!(out)?;
+    } else {
+        // Row-major (-x): entries fill across rows first
+        let (ref display0, w0, entry0) = items[0];
+        write_entry_prefix(out, entry0, config, max_inode_w, max_blocks_w)?;
+        write_entry_name(out, display0, entry0, config, color_db)?;
+
+        let mut pos: usize = 0;
+        let mut prev_w = w0;
+        let mut prev_max_w = col_arr[0];
+
+        for filesno in 1..n {
+            let col_idx = filesno % num_cols;
+
+            if col_idx == 0 {
+                out.write_all(&[eol])?;
+                pos = 0;
+            } else {
+                indent(out, pos + prev_w, pos + prev_max_w, tab)?;
+                pos += prev_max_w;
+            }
+
+            let (ref display, w, entry) = items[filesno];
+            write_entry_prefix(out, entry, config, max_inode_w, max_blocks_w)?;
+            write_entry_name(out, display, entry, config, color_db)?;
+
+            prev_w = w;
+            prev_max_w = col_arr[col_idx];
+        }
+        out.write_all(&[eol])?;
     }
 
     Ok(())
@@ -1648,7 +1858,11 @@ fn print_single_column(
             write!(out, "{}", ind)?;
         }
 
-        writeln!(out)?;
+        if config.zero {
+            out.write_all(&[0u8])?;
+        } else {
+            writeln!(out)?;
+        }
     }
     Ok(())
 }
@@ -1663,28 +1877,48 @@ pub fn print_comma(
     config: &LsConfig,
     color_db: Option<&ColorDb>,
 ) -> io::Result<()> {
+    let eol: u8 = if config.zero { 0 } else { b'\n' };
+    let line_length = config.width;
+    let mut pos: usize = 0;
+
     for (i, entry) in entries.iter().enumerate() {
-        if i > 0 {
-            write!(out, ", ")?;
-        }
         let quoted = quote_name(&entry.name, config);
+        let ind = entry.indicator(config.indicator_style);
+        let name_len = if line_length > 0 {
+            quoted.len() + ind.len()
+        } else {
+            0
+        };
+
+        if i > 0 {
+            // GNU: if line_length == 0, never wrap (no limit).
+            // Otherwise, check if name + ", " fits on current line.
+            let fits = line_length == 0
+                || (pos + name_len + 2 < line_length && pos <= usize::MAX - name_len - 2);
+            if fits {
+                write!(out, ", ")?;
+                pos += 2;
+            } else {
+                write!(out, ",")?;
+                out.write_all(&[eol])?;
+                pos = 0;
+            }
+        }
+
         if let Some(db) = color_db {
             let c = db.color_for(entry);
             if c.is_empty() {
-                write!(out, "{}", quoted)?;
+                write!(out, "{}{}", quoted, ind)?;
             } else {
-                write!(out, "{}{}{}", c, quoted, db.reset)?;
+                write!(out, "{}{}{}{}", c, quoted, db.reset, ind)?;
             }
         } else {
-            write!(out, "{}", quoted)?;
+            write!(out, "{}{}", quoted, ind)?;
         }
-        let ind = entry.indicator(config.indicator_style);
-        if !ind.is_empty() {
-            write!(out, "{}", ind)?;
-        }
+        pos += name_len;
     }
     if !entries.is_empty() {
-        writeln!(out)?;
+        out.write_all(&[eol])?;
     }
     Ok(())
 }

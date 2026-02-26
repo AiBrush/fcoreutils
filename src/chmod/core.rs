@@ -73,6 +73,28 @@ pub fn parse_mode_no_umask(mode_str: &str, current_mode: u32) -> Result<u32, Str
     parse_symbolic_mode_with_umask(mode_str, current_mode, 0)
 }
 
+/// Parse a mode and also compute whether the umask blocked any requested bits.
+/// Returns `(new_mode, umask_blocked)` where `umask_blocked` is true if the
+/// umask prevented some requested bits from being changed.
+///
+/// This is needed for GNU compatibility: when no who is specified (e.g. `-rwx`
+/// instead of `a-rwx`), umask filters the operation. If the resulting mode
+/// differs from what would have been achieved without the umask, GNU warns
+/// and exits 1 (but only when the mode was passed as an option-like arg).
+pub fn parse_mode_check_umask(mode_str: &str, current_mode: u32) -> Result<(u32, bool), String> {
+    // Octal modes are not affected by umask
+    if !mode_str.is_empty() && mode_str.chars().all(|c| c.is_ascii_digit() && c < '8') {
+        if let Ok(octal) = u32::from_str_radix(mode_str, 8) {
+            return Ok((octal & 0o7777, false));
+        }
+    }
+
+    let umask = get_umask();
+    let with_umask = parse_symbolic_mode_with_umask(mode_str, current_mode, umask)?;
+    let without_umask = parse_symbolic_mode_with_umask(mode_str, current_mode, 0)?;
+    Ok((with_umask, with_umask != without_umask))
+}
+
 /// Parse a symbolic mode string and compute the resulting mode.
 ///
 /// Format: `[ugoa]*[+-=][rwxXstugo]+` (comma-separated clauses)
@@ -103,7 +125,7 @@ fn parse_symbolic_mode_with_umask(
 }
 
 /// Get the current umask value.
-fn get_umask() -> u32 {
+pub fn get_umask() -> u32 {
     // Set umask to 0, read the old value, then restore it.
     // SAFETY: umask is always safe to call.
     let old = unsafe { libc::umask(0) };
@@ -275,10 +297,66 @@ fn format_mode(mode: u32) -> String {
     format!("{:04o}", mode & 0o7777)
 }
 
+/// Format a mode as a symbolic permission string like `rwxr-xr-x`.
+/// Includes setuid/setgid/sticky representation matching GNU coreutils.
+fn format_symbolic(mode: u32) -> String {
+    let m = mode & 0o7777;
+    let mut s = [b'-'; 9];
+
+    // User
+    if m & S_IRUSR != 0 {
+        s[0] = b'r';
+    }
+    if m & S_IWUSR != 0 {
+        s[1] = b'w';
+    }
+    if m & S_IXUSR != 0 {
+        s[2] = if m & S_ISUID != 0 { b's' } else { b'x' };
+    } else if m & S_ISUID != 0 {
+        s[2] = b'S';
+    }
+
+    // Group
+    if m & S_IRGRP != 0 {
+        s[3] = b'r';
+    }
+    if m & S_IWGRP != 0 {
+        s[4] = b'w';
+    }
+    if m & S_IXGRP != 0 {
+        s[5] = if m & S_ISGID != 0 { b's' } else { b'x' };
+    } else if m & S_ISGID != 0 {
+        s[5] = b'S';
+    }
+
+    // Other
+    if m & S_IROTH != 0 {
+        s[6] = b'r';
+    }
+    if m & S_IWOTH != 0 {
+        s[7] = b'w';
+    }
+    if m & S_IXOTH != 0 {
+        s[8] = if m & S_ISVTX != 0 { b't' } else { b'x' };
+    } else if m & S_ISVTX != 0 {
+        s[8] = b'T';
+    }
+
+    String::from_utf8(s.to_vec()).unwrap()
+}
+
+/// Format the symbolic mode string for umask-blocked warning messages.
+/// Produces output like `rwxr-xr-x`.
+pub fn format_symbolic_for_warning(mode: u32) -> String {
+    format_symbolic(mode)
+}
+
 /// Apply a mode to a file and return whether a change was made.
 ///
 /// If `config.verbose` is true, prints a message for every file.
 /// If `config.changes` is true, prints only when the mode changes.
+///
+/// GNU chmod sends verbose/changes output to stdout.
 pub fn chmod_file(path: &Path, mode: u32, config: &ChmodConfig) -> Result<bool, io::Error> {
     let metadata = fs::symlink_metadata(path)?;
 
@@ -298,25 +376,30 @@ pub fn chmod_file(path: &Path, mode: u32, config: &ChmodConfig) -> Result<bool, 
     let path_display = path.display();
     if config.verbose {
         if changed {
-            eprintln!(
-                "mode of '{}' changed from {} to {}",
+            println!(
+                "mode of '{}' changed from {} ({}) to {} ({})",
                 path_display,
                 format_mode(old_mode),
-                format_mode(mode)
+                format_symbolic(old_mode),
+                format_mode(mode),
+                format_symbolic(mode)
             );
         } else {
-            eprintln!(
-                "mode of '{}' retained as {}",
+            println!(
+                "mode of '{}' retained as {} ({})",
                 path_display,
-                format_mode(old_mode)
+                format_mode(old_mode),
+                format_symbolic(old_mode)
             );
         }
     } else if config.changes && changed {
-        eprintln!(
-            "mode of '{}' changed from {} to {}",
+        println!(
+            "mode of '{}' changed from {} ({}) to {} ({})",
             path_display,
             format_mode(old_mode),
-            format_mode(mode)
+            format_symbolic(old_mode),
+            format_mode(mode),
+            format_symbolic(mode)
         );
     }
 

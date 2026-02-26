@@ -27,10 +27,12 @@ Summarize device usage of the set of FILEs, recursively for directories.
 
   -0, --null            end each output line with NUL, not newline
   -a, --all             write counts for all files, not just directories
-      --apparent-size   print apparent sizes rather than device usage
+  -A, --apparent-size   print apparent sizes rather than device usage
   -B, --block-size=SIZE scale sizes by SIZE before printing them
   -b, --bytes           equivalent to --apparent-size --block-size=1
   -c, --total           produce a grand total
+  -D, -H, --dereference-args  dereference only symlinks that are listed on the
+                        command line
   -d, --max-depth=N     print the total for a directory only if it is N or
                         fewer levels below the command line argument
       --exclude=PATTERN exclude files that match PATTERN
@@ -109,6 +111,8 @@ fn parse_args() -> (DuConfig, Vec<String>) {
                 config.inodes = true;
             } else if arg == "--dereference" {
                 config.dereference = true;
+            } else if arg == "--dereference-args" {
+                config.dereference_args = true;
             } else if arg == "--no-dereference" {
                 config.dereference = false;
             } else if arg == "--count-links" {
@@ -181,9 +185,11 @@ fn parse_args() -> (DuConfig, Vec<String>) {
                     'k' => config.block_size = 1024,
                     'l' => config.count_links = true,
                     'm' => config.block_size = 1024 * 1024,
+                    'D' | 'H' => config.dereference_args = true,
                     'L' => config.dereference = true,
                     'P' => config.dereference = false,
                     'S' => config.separate_dirs = true,
+                    'A' => config.apparent_size = true,
                     's' => config.summarize = true,
                     'x' => config.one_file_system = true,
                     'd' => {

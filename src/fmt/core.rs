@@ -189,7 +189,7 @@ fn format_paragraph_str(
 
     if config.split_only {
         for line in &lines {
-            split_long_line(line, config, prefix_str, output)?;
+            split_line_optimal(line, config, prefix_str, output)?;
         }
         return Ok(());
     }
@@ -408,6 +408,12 @@ fn reflow_paragraph<W: Write>(
             if !bytes.is_empty() && matches!(bytes[0], b'(' | b'[' | b'{') {
                 flags |= PAREN_FLAG; // starts with opening paren
             }
+            // GNU fmt always marks the last word of a paragraph as sentence-final
+            // (period=true, final=true). This affects the cost model by adding
+            // ORPHAN_COST, discouraging short final lines (orphans).
+            if i == n - 1 {
+                flags |= SENT_FLAG | PERIOD_FLAG;
+            }
             len | flags
         })
         .collect();
@@ -514,7 +520,8 @@ fn reflow_paragraph<W: Write>(
                 };
             }
 
-            if len > width {
+            // GNU fmt uses strict less-than: lines must be < width, not <= width.
+            if len >= width {
                 if j == i {
                     try_candidate!();
                 }
@@ -549,9 +556,10 @@ fn reflow_paragraph<W: Write>(
         output.write_all(words[i].as_bytes())?;
 
         for k in (i + 1)..=j {
-            // GNU fmt uses 2 spaces after sentence-ending punctuation
-            // (only when the original input had 2+ spaces or end-of-line after it)
-            if sentence_ends[k - 1] {
+            // GNU fmt uses 2 spaces after sentence-ending punctuation.
+            // Use winfo SENT_FLAG which includes the GNU convention of
+            // marking the last word of a paragraph as sentence-final.
+            if winfo[k - 1] & SENT_FLAG != 0 {
                 output.write_all(b"  ")?;
             } else {
                 output.write_all(b" ")?;
@@ -567,9 +575,10 @@ fn reflow_paragraph<W: Write>(
     Ok(())
 }
 
-/// Split a single long line at the width boundary without reflowing.
-/// Used in split-only mode (-s).
-fn split_long_line<W: Write>(
+/// Split a single input line using the optimal paragraph algorithm.
+/// Used in split-only mode (-s): short lines are preserved as-is,
+/// long lines are broken optimally (same algorithm as normal reflow).
+fn split_line_optimal<W: Write>(
     line: &str,
     config: &FmtConfig,
     prefix: Option<&str>,
@@ -582,7 +591,9 @@ fn split_long_line<W: Write>(
     let indent = leading_indent(stripped);
     let pfx = prefix.unwrap_or("");
 
-    if line.len() <= config.width {
+    // Short line: output as-is (no splitting needed).
+    // GNU fmt uses strict less-than: lines must be < width.
+    if line.len() < config.width {
         output.write_all(line.as_bytes())?;
         output.write_all(b"\n")?;
         return Ok(());
@@ -593,40 +604,25 @@ fn split_long_line<W: Write>(
         None => line,
     };
 
-    let pfx_indent_len = pfx.len() + indent.len();
-    let mut cur_len = pfx_indent_len;
-    let mut first_word_on_line = true;
+    // Collect words and sentence info from this single line.
+    let mut words: Vec<&str> = Vec::new();
+    let mut sentence_ends: Vec<bool> = Vec::new();
+    collect_words_with_sentence_info(s, &mut words, &mut sentence_ends);
 
-    // Write initial prefix+indent
-    output.write_all(pfx.as_bytes())?;
-    output.write_all(indent.as_bytes())?;
-
-    // GNU fmt -s splits long lines at the max width (not goal width).
-    // Break before a word would exceed the maximum line width.
-    for word in s.split_whitespace() {
-        if !first_word_on_line {
-            let new_len = cur_len + 1 + word.len();
-            if new_len > config.width {
-                output.write_all(b"\n")?;
-                output.write_all(pfx.as_bytes())?;
-                output.write_all(indent.as_bytes())?;
-                cur_len = pfx_indent_len;
-                first_word_on_line = true;
-            }
-        }
-
-        if !first_word_on_line {
-            output.write_all(b" ")?;
-            cur_len += 1;
-        }
-        output.write_all(word.as_bytes())?;
-        cur_len += word.len();
-        first_word_on_line = false;
-    }
-
-    if !first_word_on_line {
+    if words.is_empty() {
+        output.write_all(line.as_bytes())?;
         output.write_all(b"\n")?;
+        return Ok(());
     }
 
-    Ok(())
+    // Use the same optimal reflow as normal mode, treating this line as a paragraph.
+    reflow_paragraph(
+        &words,
+        &sentence_ends,
+        pfx,
+        indent,
+        indent,
+        config,
+        output,
+    )
 }

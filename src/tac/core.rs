@@ -364,34 +364,28 @@ fn tac_string_before(
     Ok(())
 }
 
-/// Find regex matches using backward scanning, matching GNU tac's re_search behavior.
-fn find_regex_matches_backward(data: &[u8], re: &regex::bytes::Regex) -> Vec<(usize, usize)> {
+/// Find all non-overlapping regex matches using forward scanning.
+/// Returns matches in forward order (ascending positions).
+/// For zero-width matches, advances by one byte to avoid infinite loops.
+fn find_regex_matches_forward(data: &[u8], re: &regex::bytes::Regex) -> Vec<(usize, usize)> {
     let mut matches = Vec::new();
-    let mut past_end = data.len();
+    let mut search_start = 0;
 
-    while past_end > 0 {
-        let buf = &data[..past_end];
-        let mut found = false;
-
-        let mut pos = past_end;
-        while pos > 0 {
-            pos -= 1;
-            if let Some(m) = re.find_at(buf, pos) {
-                if m.start() == pos {
-                    matches.push((m.start(), m.end()));
-                    past_end = m.start();
-                    found = true;
-                    break;
+    while search_start <= data.len() {
+        match re.find_at(data, search_start) {
+            Some(m) => {
+                matches.push((m.start(), m.end()));
+                if m.start() == m.end() {
+                    // Zero-width match: advance by one to avoid infinite loop
+                    search_start = m.end() + 1;
+                } else {
+                    search_start = m.end();
                 }
             }
-        }
-
-        if !found {
-            break;
+            None => break,
         }
     }
 
-    matches.reverse();
     matches
 }
 
@@ -407,7 +401,10 @@ pub fn tac_regex_separator(
         return Ok(());
     }
 
-    let re = match regex::bytes::Regex::new(pattern) {
+    // Enable multi-line mode so ^ and $ match at line boundaries,
+    // matching GNU tac's POSIX regex behavior.
+    let ml_pattern = format!("(?m){}", pattern);
+    let re = match regex::bytes::Regex::new(&ml_pattern) {
         Ok(r) => r,
         Err(e) => {
             return Err(io::Error::new(
@@ -417,7 +414,7 @@ pub fn tac_regex_separator(
         }
     };
 
-    let matches = find_regex_matches_backward(data, &re);
+    let matches = find_regex_matches_forward(data, &re);
 
     if matches.is_empty() {
         out.write_all(data)?;
