@@ -32,13 +32,12 @@ org 0x400000
 %define WRAP_DEFAULT 76
 
 ; ── BSS addresses (at 0x600000, zero-initialized by kernel) ──
-; Layout: inbuf(64KB) + outbuf(80KB) + decbuf(64KB) + filename_ptr(8)
+; Layout: inbuf(64KB) + outbuf(80KB) + filename_ptr(8)
 %define BSS_BASE      0x600000
 %define inbuf         BSS_BASE                             ; 0x600000, 65536 bytes
 %define outbuf        (BSS_BASE + INBUF_SIZE)              ; 0x610000, 81920 bytes
-%define decbuf        (BSS_BASE + INBUF_SIZE + OUTBUF_SIZE) ; 0x624000, 65536 bytes
-%define filename_ptr  (BSS_BASE + INBUF_SIZE + OUTBUF_SIZE + INBUF_SIZE) ; 0x634000, 8 bytes
-%define BSS_SIZE      (INBUF_SIZE + OUTBUF_SIZE + INBUF_SIZE + 8)        ; 213000 bytes
+%define filename_ptr  (BSS_BASE + INBUF_SIZE + OUTBUF_SIZE) ; 0x624000, 8 bytes
+%define BSS_SIZE      (INBUF_SIZE + OUTBUF_SIZE + 8)       ; 147464 bytes
 
 ; ======================== ELF Header ========================================
 ehdr:
@@ -323,7 +322,9 @@ _start:
     jmp     .arg_next
 
 .arg_positional:
-    ; Positional argument = filename
+    ; Positional argument = filename (only one allowed)
+    test    r14, r14
+    jnz     .err_extra_operand
     mov     r14, rsi
     jmp     .arg_next
 
@@ -567,10 +568,12 @@ _start:
     test    rdx, rdx
     jz      .encode_read_loop
     push    r9
+    push    r9                         ; align stack to 16 bytes
     mov     rsi, outbuf
     mov     rdi, STDOUT
     call    asm_write_all
     test    eax, eax
+    pop     r9                         ; remove alignment padding
     pop     r9
     js      .handle_write_error
     jmp     .encode_read_loop
@@ -610,6 +613,7 @@ _start:
     jl      .encode_final_newline
     ; Need to insert newlines within the padding - use slow path
     sub     rdi, 4
+    sub     r8d, 4                 ; undo column advance to re-encode char-by-char
     mov     edx, eax
     shr     edx, 18
     and     edx, 0x3F
@@ -1029,6 +1033,30 @@ _start:
     ;  ERROR HANDLERS
     ; ═════════════════════════════════════════════════════════════════════════
 
+.err_extra_operand:
+    ; rsi points to the extra operand string
+    push    rsi
+    mov     rdi, STDERR
+    mov     rsi, err_extra_operand
+    mov     rdx, err_extra_operand_len
+    call    asm_write_all
+    pop     rsi
+    ; Write the operand string
+    push    rsi
+    mov     rdi, rsi
+    call    strlen
+    pop     rsi
+    mov     rdx, rax
+    mov     rdi, STDERR
+    call    asm_write_all
+    ; Write suffix (includes "'\nTry 'base64 --help'...")
+    mov     rdi, STDERR
+    mov     rsi, err_suffix
+    mov     rdx, err_suffix_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
 .err_unrecognized_opt:
     ; rsi points to the unrecognized option string
     push    rsi
@@ -1243,8 +1271,10 @@ parse_uint:
     cmp     cl, 9
     ja      .parse_uint_err        ; not a digit
     imul    eax, 10
+    jo      .parse_uint_err        ; overflow check
     movzx   ecx, cl
     add     eax, ecx
+    jo      .parse_uint_err        ; overflow check
     inc     rdi
     jmp     .parse_uint_loop
 
@@ -1422,6 +1452,10 @@ err_isdir_len equ $ - err_isdir
 err_read_error:
     db ": read error", 10
 err_read_error_len equ $ - err_read_error
+
+err_extra_operand:
+    db "base64: extra operand '"
+err_extra_operand_len equ $ - err_extra_operand
 
 newline_char:
     db 10

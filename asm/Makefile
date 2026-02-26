@@ -2,7 +2,7 @@ NASM      = nasm
 LD        = ld
 NASMFLAGS = -f elf64 -I include/
 BUILD     = build
-LDFLAGS   = --gc-sections -n
+LDFLAGS   = --gc-sections
 
 # Shared library objects
 LIB_SRC   = $(wildcard lib/*.asm)
