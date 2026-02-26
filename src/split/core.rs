@@ -542,12 +542,101 @@ fn split_by_number(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io:
     Ok(())
 }
 
+/// Fast pre-loaded line splitting: reads the entire file into a heap buffer and
+/// splits by scanning for separator positions in one pass. Each output chunk is
+/// written with a single write_all() call (no BufWriter needed).
+#[cfg(unix)]
+fn split_lines_preloaded(
+    data: &[u8],
+    config: &SplitConfig,
+    lines_per_chunk: u64,
+) -> io::Result<()> {
+    let limit = max_chunks(&config.suffix_type, config.suffix_length);
+    let sep = config.separator;
+    let mut chunk_index: u64 = 0;
+    let mut chunk_start: usize = 0;
+    let mut lines_in_chunk: u64 = 0;
+
+    for offset in memchr::memchr_iter(sep, data) {
+        lines_in_chunk += 1;
+        if lines_in_chunk >= lines_per_chunk {
+            let chunk_end = offset + 1;
+            if chunk_index >= limit {
+                return Err(io::Error::other("output file suffixes exhausted"));
+            }
+            let path = output_path(config, chunk_index);
+            if config.verbose {
+                eprintln!("creating file '{}'", path);
+            }
+            let mut file = File::create(&path)?;
+            file.write_all(&data[chunk_start..chunk_end])?;
+            chunk_start = chunk_end;
+            chunk_index += 1;
+            lines_in_chunk = 0;
+        }
+    }
+
+    // Write remaining data (partial chunk or data without trailing separator)
+    if chunk_start < data.len() {
+        if chunk_index >= limit {
+            return Err(io::Error::other("output file suffixes exhausted"));
+        }
+        let path = output_path(config, chunk_index);
+        if config.verbose {
+            eprintln!("creating file '{}'", path);
+        }
+        let mut file = File::create(&path)?;
+        file.write_all(&data[chunk_start..])?;
+    }
+
+    Ok(())
+}
+
 /// Main entry point: split a file according to the given configuration.
 /// `input_path` is the path to the input file, or "-" for stdin.
 pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
     // For number-based splitting, we need to read the whole file to know size.
     if let SplitMode::Number(n) = config.mode {
         return split_by_number(input_path, config, n);
+    }
+
+    // Fast path: read+memchr line splitting for regular files (no filter).
+    // Intentionally bypasses create_writer for single write_all() per chunk.
+    // Only used for files ≤512 MB to avoid OOM on very large files.
+    // Opens the file once and uses fstat on the fd (not stat on the path) to
+    // avoid an extra syscall and eliminate the TOCTOU race on the size guard.
+    #[cfg(unix)]
+    if let SplitMode::Lines(n) = config.mode {
+        if input_path != "-" && config.filter.is_none() {
+            const FAST_PATH_LIMIT: u64 = 512 * 1024 * 1024;
+            if let Ok(file) = File::open(input_path) {
+                if let Ok(meta) = file.metadata() {
+                    if meta.file_type().is_file() && meta.len() <= FAST_PATH_LIMIT {
+                        let len = meta.len() as usize;
+                        let data = if len > 0 {
+                            let mut buf = vec![0u8; len];
+                            let mut total = 0;
+                            let mut f = &file;
+                            while total < buf.len() {
+                                match f.read(&mut buf[total..]) {
+                                    Ok(0) => break,
+                                    Ok(n) => total += n,
+                                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+                                        continue;
+                                    }
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            buf.truncate(total);
+                            buf
+                        } else {
+                            Vec::new()
+                        };
+                        return split_lines_preloaded(&data, config, n);
+                    }
+                }
+            }
+        }
     }
 
     // Open input

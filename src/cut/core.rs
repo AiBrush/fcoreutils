@@ -1,10 +1,10 @@
 use memchr::memchr_iter;
 use std::io::{self, BufRead, IoSlice, Write};
 
-/// Minimum file size for parallel processing (16MB).
+/// Minimum file size for parallel processing (8MB).
 /// Files above this threshold use rayon parallel chunked processing.
-/// 16MB balances the split_for_scope scan overhead against parallel benefits.
-const PARALLEL_THRESHOLD: usize = 16 * 1024 * 1024;
+/// 8MB balances the split_for_scope scan overhead against parallel benefits.
+const PARALLEL_THRESHOLD: usize = 8 * 1024 * 1024;
 
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
