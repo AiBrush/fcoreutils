@@ -542,12 +542,77 @@ fn split_by_number(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io:
     Ok(())
 }
 
+/// Fast mmap-based line splitting: reads the entire file into memory and splits
+/// by scanning for separator positions in one pass. Each output chunk is written
+/// with a single write_all() call (no BufWriter needed).
+#[cfg(unix)]
+fn split_lines_mmap(data: &[u8], config: &SplitConfig, lines_per_chunk: u64) -> io::Result<()> {
+    let limit = max_chunks(&config.suffix_type, config.suffix_length);
+    let sep = config.separator;
+    let mut chunk_index: u64 = 0;
+    let mut chunk_start: usize = 0;
+    let mut lines_in_chunk: u64 = 0;
+
+    for offset in memchr::memchr_iter(sep, data) {
+        lines_in_chunk += 1;
+        if lines_in_chunk >= lines_per_chunk {
+            let chunk_end = offset + 1;
+            if chunk_index >= limit {
+                return Err(io::Error::other("output file suffixes exhausted"));
+            }
+            let path = output_path(config, chunk_index);
+            if config.verbose {
+                eprintln!("creating file '{}'", path);
+            }
+            let mut file = File::create(&path)?;
+            file.write_all(&data[chunk_start..chunk_end])?;
+            chunk_start = chunk_end;
+            chunk_index += 1;
+            lines_in_chunk = 0;
+        }
+    }
+
+    // Write remaining data (partial chunk or data without trailing separator)
+    if chunk_start < data.len() {
+        if chunk_index >= limit {
+            return Err(io::Error::other("output file suffixes exhausted"));
+        }
+        let path = output_path(config, chunk_index);
+        if config.verbose {
+            eprintln!("creating file '{}'", path);
+        }
+        let mut file = File::create(&path)?;
+        file.write_all(&data[chunk_start..])?;
+    }
+
+    Ok(())
+}
+
 /// Main entry point: split a file according to the given configuration.
 /// `input_path` is the path to the input file, or "-" for stdin.
 pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
     // For number-based splitting, we need to read the whole file to know size.
     if let SplitMode::Number(n) = config.mode {
         return split_by_number(input_path, config, n);
+    }
+
+    // Fast path: mmap-based line splitting for regular files (no filter)
+    #[cfg(unix)]
+    if let SplitMode::Lines(n) = config.mode {
+        if input_path != "-" && config.filter.is_none() {
+            let path = Path::new(input_path);
+            if !path.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "cannot open '{}' for reading: No such file or directory",
+                        input_path
+                    ),
+                ));
+            }
+            let data = crate::common::io::read_file(path)?;
+            return split_lines_mmap(&data, config, n);
+        }
     }
 
     // Open input
