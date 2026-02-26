@@ -144,6 +144,14 @@ exit_code:
     mov eax, SYS_EXIT
     syscall
 
+; die_err_try: write [rsi, edx] to stderr, then "Try..." suffix, exit(1)
+die_err_try:
+    mov edi, STDERR
+    call write_all
+    mov esi, err_try_help
+    mov edx, err_try_help_len
+    jmp die_err
+
 ; ======================== ARGUMENT PARSING ==================================
 parse_args:
     push rbx
@@ -223,8 +231,9 @@ parse_args:
     jnz .pa_nval
     mov esi, err_n_req
     mov edx, err_n_req_len
-    jmp die_err
+    jmp die_err_try
 .pa_nval:
+    mov r13, rsi             ; save original value for error messages
     cmp byte [rsi], '+'
     je .pa_nfrom
     cmp byte [rsi], '-'
@@ -246,8 +255,18 @@ parse_args:
     mov [V_COUNT], rax
     jmp .pa_next
 .pa_bad_lines:
-    mov esi, err_bad_lines
-    mov edx, err_bad_lines_len
+    mov esi, err_bad_lines_pre
+    mov edx, err_bad_lines_pre_len
+    mov edi, STDERR
+    call write_all
+    mov rdi, r13
+    call strlen_fn
+    mov edx, eax
+    mov edi, STDERR
+    mov rsi, r13
+    call write_all
+    mov esi, err_bad_val_suf
+    mov edx, err_bad_val_suf_len
     jmp die_err
 
 .pa_c:
@@ -260,8 +279,9 @@ parse_args:
     jnz .pa_cval
     mov esi, err_c_req
     mov edx, err_c_req_len
-    jmp die_err
+    jmp die_err_try
 .pa_cval:
+    mov r13, rsi             ; save original value for error messages
     cmp byte [rsi], '+'
     je .pa_cfrom
     cmp byte [rsi], '-'
@@ -283,8 +303,18 @@ parse_args:
     mov [V_COUNT], rax
     jmp .pa_next
 .pa_bad_bytes:
-    mov esi, err_bad_bytes
-    mov edx, err_bad_bytes_len
+    mov esi, err_bad_bytes_pre
+    mov edx, err_bad_bytes_pre_len
+    mov edi, STDERR
+    call write_all
+    mov rdi, r13
+    call strlen_fn
+    mov edx, eax
+    mov edi, STDERR
+    mov rsi, r13
+    call write_all
+    mov esi, err_bad_val_suf
+    mov edx, err_bad_val_suf_len
     jmp die_err
 
 .pa_q:
@@ -429,7 +459,7 @@ parse_args:
     jnz .pa_nval
     mov esi, err_lines_req
     mov edx, err_lines_req_len
-    jmp die_err
+    jmp die_err_try
 
 .pa_lb:
     cmp byte [rsi], 0
@@ -440,7 +470,7 @@ parse_args:
     jnz .pa_cval
     mov esi, err_bytes_req
     mov edx, err_bytes_req_len
-    jmp die_err
+    jmp die_err_try
 
 .pa_q_long:
     mov byte [V_QUIET], 1
@@ -1379,10 +1409,14 @@ err_lines_req:      db "tail: option '--lines' requires an argument", 10
 err_lines_req_len equ $ - err_lines_req
 err_bytes_req:      db "tail: option '--bytes' requires an argument", 10
 err_bytes_req_len equ $ - err_bytes_req
-err_bad_lines:      db "tail: invalid number of lines", 10
-err_bad_lines_len equ $ - err_bad_lines
-err_bad_bytes:      db "tail: invalid number of bytes", 10
-err_bad_bytes_len equ $ - err_bad_bytes
+err_try_help:       db "Try 'tail --help' for more information.", 10
+err_try_help_len equ $ - err_try_help
+err_bad_lines_pre:  db "tail: invalid number of lines: '"
+err_bad_lines_pre_len equ $ - err_bad_lines_pre
+err_bad_bytes_pre:  db "tail: invalid number of bytes: '"
+err_bad_bytes_pre_len equ $ - err_bad_bytes_pre
+err_bad_val_suf:    db "'", 10
+err_bad_val_suf_len equ $ - err_bad_val_suf
 err_open_pre:       db "tail: cannot open '"
 err_open_pre_len equ $ - err_open_pre
 err_open_suf:       db "' for reading: No such file or directory", 10
