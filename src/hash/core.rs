@@ -884,9 +884,11 @@ fn hash_file_pipelined_read(
 /// - Medium (256KB-16MB): streaming hash_reader with fadvise(SEQUENTIAL)
 /// - Small (8KB-256KB): single read into thread-local buffer + single-shot hash
 ///
-/// SAFETY: mmap is safe for regular local files. If the file is truncated or
-/// backing storage disappears after mapping (e.g. NFS), the kernel delivers
-/// SIGBUS — acceptable, matching other mmap tools.
+/// SAFETY: mmap is safe for regular local files opened just above. The fallback
+/// to streaming I/O (hash_reader/hash_file_pipelined) handles mmap failures at
+/// map time, but cannot protect against post-map truncation. If the file is
+/// truncated or backing storage disappears after mapping (e.g. NFS), the kernel
+/// delivers SIGBUS — acceptable, matching other mmap tools.
 fn hash_regular_file(algo: HashAlgorithm, file: File, file_size: u64) -> io::Result<String> {
     // Large files (>=SMALL_FILE_LIMIT): mmap for zero-copy single-shot hash.
     if file_size >= SMALL_FILE_LIMIT {
@@ -898,6 +900,9 @@ fn hash_regular_file(algo: HashAlgorithm, file: File, file_size: u64) -> io::Res
                     let _ = mmap.advise(memmap2::Advice::HugePage);
                 }
                 let _ = mmap.advise(memmap2::Advice::Sequential);
+                // PopulateRead (Linux 5.14+) synchronously faults all pages before
+                // returning, giving warm TLB entries for hash_bytes. WillNeed is
+                // async and best-effort — pages may still fault during hashing.
                 if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
                     let _ = mmap.advise(memmap2::Advice::WillNeed);
                 }
@@ -920,9 +925,9 @@ fn hash_regular_file(algo: HashAlgorithm, file: File, file_size: u64) -> io::Res
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::io::AsRawFd;
-            unsafe {
-                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-            }
+            let _ = unsafe {
+                libc::posix_fadvise(file.as_raw_fd(), 0, file_size as i64, libc::POSIX_FADV_SEQUENTIAL)
+            };
         }
         return hash_reader(algo, file);
     }
@@ -950,9 +955,9 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     #[cfg(target_os = "linux")]
     if file_size >= FADVISE_MIN_SIZE {
         use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-        }
+        let _ = unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, file_size as i64, libc::POSIX_FADV_SEQUENTIAL)
+        };
     }
     hash_reader(algo, file)
 }
@@ -1134,9 +1139,9 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
     #[cfg(target_os = "linux")]
     if file_size >= FADVISE_MIN_SIZE {
         use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-        }
+        let _ = unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, file_size as i64, libc::POSIX_FADV_SEQUENTIAL)
+        };
     }
     blake2b_hash_reader(file, output_bytes)
 }
