@@ -7,6 +7,7 @@
 ;
 ; Register conventions (global state across function calls):
 ;   r12 = out_buf_used (bytes currently in output buffer)
+;   r13 = processed_any flag (0=no file/stdin processed yet)
 ;   ebp = had_error flag (0=ok, 1=error occurred)
 ;
 ; Within process_fd:
@@ -29,7 +30,10 @@ extern asm_close
 
 ; ─── Constants ───────────────────────────────────────────
 %define READ_BUF_SIZE   65536
-%define OUT_BUF_SIZE    131072
+; Out buffer must be >= LINE_BUF_SIZE + 1 to guarantee a full reversed
+; line + newline fits after flushing (r12=0). Previous value of 131072
+; caused buffer overflow on lines > 128KB.
+%define OUT_BUF_SIZE    1114112     ; LINE_BUF_SIZE + FLUSH_THRESHOLD
 ; Line buffer for reversing a single line (supports lines up to 1MB)
 %define LINE_BUF_SIZE   1048576
 %define FLUSH_THRESHOLD 65536
@@ -59,10 +63,11 @@ _start:
     ; Initialize global state
     xor     ebp, ebp                ; had_error = 0
     xor     r12d, r12d              ; out_buf_used = 0
+    xor     r13d, r13d              ; processed_any = 0
 
-    ; If no args, process stdin
+    ; If no args, skip parse loop → done_files will read stdin
     test    r14, r14
-    jz      .process_stdin
+    jz      .done_files
 
     ; Parse arguments
     xor     ebx, ebx                ; arg index = 0
@@ -126,8 +131,30 @@ _start:
     ; Single "-" means stdin
     cmp     byte [rsi+1], 0
     je      .is_stdin
-    ; Otherwise it's a filename (rev has no short opts)
-    jmp     .is_file
+    ; Check for -h (help)
+    cmp     byte [rsi+1], 'h'
+    jne     .check_V
+    cmp     byte [rsi+2], 0
+    je      .do_help
+    jmp     .invalid_short_opt
+.check_V:
+    ; Check for -V (version)
+    cmp     byte [rsi+1], 'V'
+    jne     .invalid_short_opt
+    cmp     byte [rsi+2], 0
+    je      .do_version
+.invalid_short_opt:
+    ; Unknown short option (e.g., -z)
+    push    rcx
+    push    rbx
+    mov     rsi, [r15 + rbx*8]
+    call    err_invalid_option
+    pop     rbx
+    pop     rcx
+    mov     ebp, 1
+    movzx   rdi, bpl
+    mov     rax, SYS_EXIT
+    syscall
 
 .set_dashdash:
     mov     ecx, 1
@@ -136,6 +163,7 @@ _start:
 .is_stdin:
     push    rcx
     push    rbx
+    mov     r13d, 1                 ; mark as processed
     mov     edi, STDIN
     call    process_fd
     pop     rbx
@@ -145,6 +173,7 @@ _start:
 .is_file:
     push    rcx
     push    rbx
+    mov     r13d, 1                 ; mark as processed
     mov     rsi, [r15 + rbx*8]
     call    open_and_process
     pop     rbx
@@ -155,12 +184,14 @@ _start:
     inc     rbx
     jmp     .parse_loop
 
-.process_stdin:
+.done_files:
+    ; If no files/stdin were processed, read stdin (handles `rev --` and no-args)
+    test    r13, r13
+    jnz     .final_flush
     mov     edi, STDIN
     call    process_fd
-    jmp     .done_files
 
-.done_files:
+.final_flush:
     ; Flush remaining output buffer
     call    flush_output
     test    eax, eax
@@ -308,9 +339,7 @@ process_fd:
 
 .pf_simd_found_nl:
     ; eax has bitmask. Find first newline position.
-    bsf     ecx, ecx                ; ecx = position of first \n in 16-byte window
-    ; NOTE: bsf result is in ecx from eax (bsf ecx, eax)
-    bsf     ecx, eax
+    bsf     ecx, eax                ; ecx = position of first \n in 16-byte window
 
     ; Copy bytes before the newline to line_buf
     test    ecx, ecx
@@ -660,17 +689,17 @@ print_error_simple:
     pop     rbx
     ret
 
-; err_file(rdi=filename, esi=errno) — "rev: {filename}: {strerror}\n" to stderr
+; err_file(rdi=filename, esi=errno) — "rev: cannot open {filename}: {strerror}\n" to stderr
 err_file:
     push    rbx
     push    r13
     mov     rbx, rdi                ; filename
     mov     r13d, esi               ; errno
 
-    ; "rev: "
+    ; "rev: cannot open "
     mov     rdi, STDERR
-    lea     rsi, [rel str_prefix]
-    mov     rdx, str_prefix_len
+    lea     rsi, [rel str_cannot_open]
+    mov     rdx, str_cannot_open_len
     call    asm_write_all
 
     ; filename
@@ -731,6 +760,45 @@ err_unrecognized_option:
     mov     rdi, STDERR
     lea     rsi, [rel str_quote_nl]
     mov     rdx, 2
+    call    asm_write_all
+
+    ; "Try 'rev --help' for more information.\n"
+    mov     rdi, STDERR
+    lea     rsi, [rel str_try_help]
+    mov     rdx, str_try_help_len
+    call    asm_write_all
+
+    pop     rbx
+    ret
+
+; err_invalid_option(rsi=option_string) — prints "rev: invalid option -- 'X'\nTry..."
+; Extracts the character at rsi[1] for the error message.
+err_invalid_option:
+    push    rbx
+    mov     rbx, rsi
+
+    ; "rev: invalid option -- '"
+    mov     rdi, STDERR
+    lea     rsi, [rel str_invalid_opt]
+    mov     rdx, str_invalid_opt_len
+    call    asm_write_all
+
+    ; The option character (byte at rbx+1)
+    mov     rdi, STDERR
+    lea     rsi, [rbx + 1]
+    mov     rdx, 1
+    call    asm_write_all
+
+    ; "'\n"
+    mov     rdi, STDERR
+    lea     rsi, [rel str_quote_nl]
+    mov     rdx, 2
+    call    asm_write_all
+
+    ; "Try 'rev --help' for more information.\n"
+    mov     rdi, STDERR
+    lea     rsi, [rel str_try_help]
+    mov     rdx, str_try_help_len
     call    asm_write_all
 
     pop     rbx
@@ -817,6 +885,9 @@ sigact_buf:
 str_prefix:     db "rev: "
 str_prefix_len equ $ - str_prefix
 
+str_cannot_open: db "rev: cannot open "
+str_cannot_open_len equ $ - str_cannot_open
+
 str_newline:    db 10
 str_colon_space: db ": "
 
@@ -829,6 +900,12 @@ str_unrecognized_len equ $ - str_unrecognized
 str_quote_nl:   db "'", 10
 
 str_write_error: db "write error", 0
+
+str_try_help: db "Try 'rev --help' for more information.", 10
+str_try_help_len equ $ - str_try_help
+
+str_invalid_opt: db "rev: invalid option -- '"
+str_invalid_opt_len equ $ - str_invalid_opt
 
 help_text:
     db "Usage: rev [OPTION]... [FILE]...", 10

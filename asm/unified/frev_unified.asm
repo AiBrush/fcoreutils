@@ -29,7 +29,7 @@ org 0x400000
 %define SIGPIPE        13
 
 %define READ_BUF_SIZE  65536
-%define OUT_BUF_SIZE   131072
+%define OUT_BUF_SIZE   1114112     ; >= LINE_BUF_SIZE + 1 to prevent overflow
 %define LINE_BUF_SIZE  1048576
 %define FLUSH_THRESHOLD 65536
 
@@ -99,9 +99,10 @@ _start:
     ; Initialize global state
     xor     ebp, ebp                ; had_error = 0
     xor     r12d, r12d              ; out_buf_used = 0
+    xor     r13d, r13d              ; processed_any = 0
 
     test    r14, r14
-    jz      .process_stdin
+    jz      .done_files
 
     xor     ebx, ebx                ; arg index
     xor     ecx, ecx                ; seen_dashdash
@@ -158,7 +159,28 @@ _start:
 .check_dash_stdin:
     cmp     byte [rsi+1], 0
     je      .is_stdin
-    jmp     .is_file
+    ; Check for -h (help)
+    cmp     byte [rsi+1], 'h'
+    jne     .check_V
+    cmp     byte [rsi+2], 0
+    je      .do_help
+    jmp     .invalid_short_opt
+.check_V:
+    ; Check for -V (version)
+    cmp     byte [rsi+1], 'V'
+    jne     .invalid_short_opt
+    cmp     byte [rsi+2], 0
+    je      .do_version
+.invalid_short_opt:
+    push    rcx
+    push    rbx
+    mov     rsi, [r15 + rbx*8]
+    call    err_invalid_option
+    pop     rbx
+    pop     rcx
+    mov     edi, 1
+    mov     eax, SYS_EXIT
+    syscall
 
 .set_dashdash:
     mov     ecx, 1
@@ -167,6 +189,7 @@ _start:
 .is_stdin:
     push    rcx
     push    rbx
+    mov     r13d, 1                 ; mark as processed
     xor     edi, edi                ; STDIN = 0
     call    process_fd
     pop     rbx
@@ -176,6 +199,7 @@ _start:
 .is_file:
     push    rcx
     push    rbx
+    mov     r13d, 1                 ; mark as processed
     mov     rsi, [r15 + rbx*8]
     call    open_and_process
     pop     rbx
@@ -186,12 +210,14 @@ _start:
     inc     rbx
     jmp     .parse_loop
 
-.process_stdin:
+.done_files:
+    ; If no files/stdin were processed, read stdin
+    test    r13, r13
+    jnz     .final_flush
     xor     edi, edi
     call    process_fd
-    jmp     .done_files
 
-.done_files:
+.final_flush:
     call    flush_output
     test    eax, eax
     jnz     .write_error_exit
@@ -658,8 +684,8 @@ err_file:
     mov     r13d, esi
 
     mov     edi, STDERR
-    lea     rsi, [rel str_prefix]
-    mov     edx, str_prefix_len
+    lea     rsi, [rel str_cannot_open]
+    mov     edx, str_cannot_open_len
     call    write_all
 
     mov     rdi, rbx
@@ -713,6 +739,39 @@ err_unrecognized_option:
     mov     edi, STDERR
     lea     rsi, [rel str_quote_nl]
     mov     edx, 2
+    call    write_all
+
+    mov     edi, STDERR
+    lea     rsi, [rel str_try_help]
+    mov     edx, str_try_help_len
+    call    write_all
+
+    pop     rbx
+    ret
+
+; ─── err_invalid_option(rsi=opt) ─────────────────────────
+err_invalid_option:
+    push    rbx
+    mov     rbx, rsi
+
+    mov     edi, STDERR
+    lea     rsi, [rel str_invalid_opt]
+    mov     edx, str_invalid_opt_len
+    call    write_all
+
+    mov     edi, STDERR
+    lea     rsi, [rbx + 1]
+    mov     edx, 1
+    call    write_all
+
+    mov     edi, STDERR
+    lea     rsi, [rel str_quote_nl]
+    mov     edx, 2
+    call    write_all
+
+    mov     edi, STDERR
+    lea     rsi, [rel str_try_help]
+    mov     edx, str_try_help_len
     call    write_all
 
     pop     rbx
@@ -773,6 +832,9 @@ sigact_buf:
 str_prefix:     db "rev: "
 str_prefix_len equ $ - str_prefix
 
+str_cannot_open: db "rev: cannot open "
+str_cannot_open_len equ $ - str_cannot_open
+
 str_newline:    db 10
 str_colon_space: db ": "
 
@@ -784,6 +846,12 @@ str_unrec_len equ $ - str_unrec
 
 str_quote_nl:   db "'", 10
 str_write_error: db "write error", 0
+
+str_try_help: db "Try 'rev --help' for more information.", 10
+str_try_help_len equ $ - str_try_help
+
+str_invalid_opt: db "rev: invalid option -- '"
+str_invalid_opt_len equ $ - str_invalid_opt
 
 help_text:
     db "Usage: rev [OPTION]... [FILE]...", 10
