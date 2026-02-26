@@ -1,0 +1,77 @@
+; io.asm — Shared I/O functions for coreutils assembly tools
+
+%include "include/linux.inc"
+
+global asm_write_all
+global asm_read
+global asm_open
+global asm_close
+global asm_exit
+
+section .text
+
+; asm_write_all(rdi=fd, rsi=buf, rdx=len) → rax=0 success, -1 error
+; Handles EINTR and partial writes
+asm_write_all:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rbx, rdi            ; fd
+    mov     r12, rsi            ; buf
+    mov     r13, rdx            ; remaining
+.loop:
+    test    r13, r13
+    jle     .success
+    mov     rdi, rbx
+    mov     rsi, r12
+    mov     rdx, r13
+    mov     rax, SYS_WRITE
+    syscall
+    cmp     rax, EINTR
+    je      .loop               ; retry on EINTR
+    test    rax, rax
+    js      .error
+    add     r12, rax
+    sub     r13, rax
+    jmp     .loop
+.success:
+    xor     eax, eax
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+.error:
+    mov     rax, -1
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; asm_read(rdi=fd, rsi=buf, rdx=len) → rax=bytes_read
+; Handles EINTR
+asm_read:
+.retry:
+    mov     rax, SYS_READ
+    syscall
+    cmp     rax, EINTR
+    je      .retry
+    ret
+
+; asm_open(rdi=path, rsi=flags, rdx=mode) → rax=fd
+asm_open:
+    mov     rax, SYS_OPEN
+    syscall
+    ret
+
+; asm_close(rdi=fd) → rax
+asm_close:
+    mov     rax, SYS_CLOSE
+    syscall
+    ret
+
+; asm_exit(rdi=code)
+asm_exit:
+    mov     rax, SYS_EXIT
+    syscall
+
+section .note.GNU-stack noalloc noexec nowrite progbits
