@@ -151,17 +151,24 @@ fn parse_device_number(s: &str, label: &str) -> u64 {
 
 #[cfg(unix)]
 fn parse_mode_str(mode_str: &str) -> libc::mode_t {
-    libc::mode_t::from_str_radix(mode_str, 8).unwrap_or_else(|_| {
-        eprintln!("{}: invalid mode: '{}'", TOOL_NAME, mode_str);
-        process::exit(1);
-    })
+    if let Ok(m) = libc::mode_t::from_str_radix(mode_str, 8) {
+        return m;
+    }
+    // GNU mknod uses 0666 (a=rw) as the base for symbolic mode parsing
+    match coreutils_rs::chmod::parse_mode_no_umask(mode_str, 0o666) {
+        Ok(m) => m as libc::mode_t,
+        Err(_) => {
+            eprintln!("{}: invalid mode: '{}'", TOOL_NAME, mode_str);
+            process::exit(1);
+        }
+    }
 }
 
 #[cfg(unix)]
 fn create_fifo(name: &str, mode: &Option<String>) {
-    let file_mode = match mode {
-        Some(m) => parse_mode_str(m),
-        None => 0o666,
+    let (file_mode, explicit_mode) = match mode {
+        Some(m) => (parse_mode_str(m), true),
+        None => (0o666, false),
     };
 
     let c_name = match CString::new(name) {
@@ -172,8 +179,18 @@ fn create_fifo(name: &str, mode: &Option<String>) {
         }
     };
 
-    // SAFETY: c_name is a valid null-terminated C string, file_mode is a valid mode_t
+    let saved = if explicit_mode {
+        Some(unsafe { libc::umask(0) })
+    } else {
+        None
+    };
     let ret = unsafe { libc::mkfifo(c_name.as_ptr(), file_mode) };
+    if let Some(old) = saved {
+        unsafe {
+            libc::umask(old);
+        }
+    }
+
     if ret != 0 {
         let e = std::io::Error::last_os_error();
         eprintln!(
@@ -188,9 +205,9 @@ fn create_fifo(name: &str, mode: &Option<String>) {
 
 #[cfg(unix)]
 fn create_special(name: &str, node_type: &str, major: u64, minor: u64, mode: &Option<String>) {
-    let file_mode = match mode {
-        Some(m) => parse_mode_str(m),
-        None => 0o666,
+    let (file_mode, explicit_mode) = match mode {
+        Some(m) => (parse_mode_str(m), true),
+        None => (0o666, false),
     };
 
     let type_flag: libc::mode_t = match node_type {
@@ -199,7 +216,6 @@ fn create_special(name: &str, node_type: &str, major: u64, minor: u64, mode: &Op
         _ => unreachable!(),
     };
 
-    // macOS makedev uses i32 and is safe, Linux uses c_uint
     #[cfg(target_vendor = "apple")]
     let dev = libc::makedev(major as i32, minor as i32);
     #[cfg(not(target_vendor = "apple"))]
@@ -213,8 +229,18 @@ fn create_special(name: &str, node_type: &str, major: u64, minor: u64, mode: &Op
         }
     };
 
-    // SAFETY: c_name is a valid null-terminated C string, file_mode | type_flag is a valid mode_t
+    let saved = if explicit_mode {
+        Some(unsafe { libc::umask(0) })
+    } else {
+        None
+    };
     let ret = unsafe { libc::mknod(c_name.as_ptr(), file_mode | type_flag, dev) };
+    if let Some(old) = saved {
+        unsafe {
+            libc::umask(old);
+        }
+    }
+
     if ret != 0 {
         let e = std::io::Error::last_os_error();
         eprintln!(

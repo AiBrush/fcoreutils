@@ -105,7 +105,8 @@ pub fn gid_to_name(gid: u32) -> String {
 /// Returns `(Option<uid>, Option<gid>)`.
 pub fn parse_owner_spec(spec: &str) -> Result<(Option<u32>, Option<u32>), String> {
     if spec.is_empty() {
-        return Err("invalid spec: ''".to_string());
+        // GNU chown treats '' as a no-op (no owner/group change)
+        return Ok((None, None));
     }
 
     // Determine separator: prefer ':', fall back to '.' (deprecated)

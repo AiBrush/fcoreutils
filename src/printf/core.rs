@@ -130,13 +130,34 @@ fn process_conversion(
         *i += 1;
     }
 
-    // Parse width
-    let width = parse_decimal(fmt, i);
+    // Parse width (may be '*' for dynamic width from args)
+    let (width, dyn_left_align) = if *i < fmt.len() && fmt[*i] == b'*' {
+        *i += 1;
+        let width_arg = consume_arg(args, arg_idx);
+        let w: i64 = width_arg.parse().unwrap_or(0);
+        if w < 0 {
+            ((-w) as usize, true) // negative width → left-align
+        } else {
+            (w as usize, false)
+        }
+    } else {
+        (parse_decimal(fmt, i), false)
+    };
+    if dyn_left_align {
+        flags.left_align = true;
+    }
 
-    // Parse precision
+    // Parse precision (may be '*' for dynamic precision from args)
     let precision = if *i < fmt.len() && fmt[*i] == b'.' {
         *i += 1;
-        Some(parse_decimal(fmt, i))
+        if *i < fmt.len() && fmt[*i] == b'*' {
+            *i += 1;
+            let prec_arg = consume_arg(args, arg_idx);
+            let p: i64 = prec_arg.parse().unwrap_or(0);
+            Some(if p < 0 { 0 } else { p as usize })
+        } else {
+            Some(parse_decimal(fmt, i))
+        }
     } else {
         None
     };
@@ -886,6 +907,7 @@ fn shell_quote(s: &str) -> String {
     }
 
     // Check if the string needs quoting at all.
+    // Safe chars match GNU quotearg shell_escape_quoting_style.
     let needs_quoting = s.bytes().any(|b| {
         !b.is_ascii_alphanumeric()
             && b != b'_'
@@ -897,6 +919,9 @@ fn shell_quote(s: &str) -> String {
             && b != b'+'
             && b != b'@'
             && b != b'%'
+            && b != b'='
+            && b != b'^'
+            && b != b'~'
     });
 
     if !needs_quoting {

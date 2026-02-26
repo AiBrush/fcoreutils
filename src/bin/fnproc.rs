@@ -86,23 +86,35 @@ fn main() {
 
 #[cfg(unix)]
 fn get_nprocs_available() -> usize {
-    // First check OMP_NUM_THREADS (GNU nproc respects this)
+    // Start with hardware/cgroup available count
+    let mut n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    // Check OMP_NUM_THREADS (GNU nproc respects this)
     if let Ok(val) = std::env::var("OMP_NUM_THREADS") {
         // OMP_NUM_THREADS can be comma-separated list; use first value
-        if let Some(n) = val
+        // Value of 0 means "use all available"
+        if let Some(omp_n) = val
             .split(',')
             .next()
             .and_then(|first| first.trim().parse::<usize>().ok())
-            .filter(|&n| n > 0)
+            && omp_n > 0
         {
-            return n;
+            n = omp_n;
         }
     }
 
-    // Use std::thread::available_parallelism which respects cgroups on Linux
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    // Check OMP_THREAD_LIMIT — caps the result (GNU nproc compat)
+    if let Ok(val) = std::env::var("OMP_THREAD_LIMIT")
+        && let Ok(limit) = val.trim().parse::<usize>()
+        && limit > 0
+        && limit < n
+    {
+        n = limit;
+    }
+
+    n
 }
 
 #[cfg(unix)]

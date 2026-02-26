@@ -364,7 +364,15 @@ fn tac_string_before(
     Ok(())
 }
 
-/// Find regex matches using backward scanning, matching GNU tac's re_search behavior.
+/// Find regex matches using backward scanning, replicating GNU tac's re_search behavior.
+///
+/// GNU tac searches backward position by position. At each position, it tries to
+/// match the regex starting there, but only within data[..past_end]. This means
+/// greedy patterns like `[0-9]+` see a truncated view and match fewer characters
+/// than a forward scan would. After finding a match at position `pos`, GNU tac
+/// sets `past_end = pos` for the next iteration.
+///
+/// Returns matches in forward (ascending) order.
 fn find_regex_matches_backward(data: &[u8], re: &regex::bytes::Regex) -> Vec<(usize, usize)> {
     let mut matches = Vec::new();
     let mut past_end = data.len();
@@ -373,13 +381,20 @@ fn find_regex_matches_backward(data: &[u8], re: &regex::bytes::Regex) -> Vec<(us
         let buf = &data[..past_end];
         let mut found = false;
 
+        // Search backward: try matching at positions past_end-1, past_end-2, ..., 0
         let mut pos = past_end;
         while pos > 0 {
             pos -= 1;
             if let Some(m) = re.find_at(buf, pos) {
                 if m.start() == pos {
                     matches.push((m.start(), m.end()));
-                    past_end = m.start();
+                    if m.start() == m.end() {
+                        // Zero-width match: must decrease past_end to avoid infinite loop.
+                        // Move past_end to before this position.
+                        past_end = pos;
+                    } else {
+                        past_end = m.start();
+                    }
                     found = true;
                     break;
                 }
@@ -407,7 +422,10 @@ pub fn tac_regex_separator(
         return Ok(());
     }
 
-    let re = match regex::bytes::Regex::new(pattern) {
+    // Enable multi-line mode so ^ and $ match at line boundaries,
+    // matching GNU tac's POSIX regex behavior.
+    let ml_pattern = format!("(?m){}", pattern);
+    let re = match regex::bytes::Regex::new(&ml_pattern) {
         Ok(r) => r,
         Err(e) => {
             return Err(io::Error::new(

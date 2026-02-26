@@ -434,13 +434,19 @@ fn main() {
 
     let cli = parse_args();
 
+    // Validate -c and -C are not combined
+    if cli.check.is_some() && cli.check_quiet {
+        eprintln!("sort: options '-cC' are incompatible");
+        process::exit(2);
+    }
+
     // Parse key definitions
     let mut keys: Vec<KeyDef> = Vec::new();
     for key_spec in &cli.keys {
         match KeyDef::parse(key_spec) {
             Ok(k) => keys.push(k),
             Err(e) => {
-                eprintln!("sort: invalid key specification '{}': {}", key_spec, e);
+                eprintln!("sort: {}", e);
                 process::exit(2);
             }
         }
@@ -474,6 +480,12 @@ fn main() {
         version: cli.version_sort,
         reverse: cli.reverse,
     };
+
+    // Validate global option compatibility (GNU sort rules)
+    if let Err(e) = global_opts.validate() {
+        eprintln!("sort: {}", e);
+        process::exit(2);
+    }
 
     // Determine check mode
     let check = if cli.check_quiet {

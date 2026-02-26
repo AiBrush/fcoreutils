@@ -405,38 +405,123 @@ pub fn parse_general_numeric(s: &[u8]) -> f64 {
 }
 
 /// Human numeric sort (-h): handles suffixes K, M, G, T, P, E, Z, Y.
+/// GNU sort compares by suffix tier first (no-suffix < K < M < G < T < P < E < Z < Y),
+/// then by numeric value within the same tier. This means 1K > 999999 and 1G > 1023M.
 pub fn compare_human_numeric(a: &[u8], b: &[u8]) -> Ordering {
-    let va = parse_human_numeric(a);
-    let vb = parse_human_numeric(b);
-    va.partial_cmp(&vb).unwrap_or(Ordering::Equal)
-}
+    let (val_a, tier_a) = parse_human_numeric_tiered(a);
+    let (val_b, tier_b) = parse_human_numeric_tiered(b);
 
-pub fn parse_human_numeric(s: &[u8]) -> f64 {
-    let s = skip_leading_blanks(s);
-    if s.is_empty() {
-        return 0.0;
+    // Handle sign: negative values sort before positive, tier comparison inverts
+    let sign_a = if val_a < 0.0 {
+        -1i8
+    } else if val_a > 0.0 {
+        1
+    } else {
+        0
+    };
+    let sign_b = if val_b < 0.0 {
+        -1i8
+    } else if val_b > 0.0 {
+        1
+    } else {
+        0
+    };
+
+    // Different signs: compare directly
+    if sign_a != sign_b {
+        return sign_a.cmp(&sign_b);
     }
 
-    // Use the fast custom parser for the numeric part
+    // Both zero
+    if sign_a == 0 && sign_b == 0 {
+        return Ordering::Equal;
+    }
+
+    // Same sign: compare tier first, then value within tier
+    // For negative numbers, higher tier means MORE negative (reverse tier order)
+    if sign_a > 0 {
+        match tier_a.cmp(&tier_b) {
+            Ordering::Equal => val_a.partial_cmp(&val_b).unwrap_or(Ordering::Equal),
+            other => other,
+        }
+    } else {
+        // Negative: -1G < -1M (higher tier is more negative = smaller)
+        match tier_a.cmp(&tier_b) {
+            Ordering::Equal => val_a.partial_cmp(&val_b).unwrap_or(Ordering::Equal),
+            Ordering::Less => Ordering::Greater,
+            Ordering::Greater => Ordering::Less,
+        }
+    }
+}
+
+/// Parse a human-numeric value and return (numeric_value, suffix_tier).
+/// Tier: 0=no suffix, 1=K, 2=M, 3=G, 4=T, 5=P, 6=E, 7=Z, 8=Y.
+fn parse_human_numeric_tiered(s: &[u8]) -> (f64, u8) {
+    let s = skip_leading_blanks(s);
+    if s.is_empty() {
+        return (0.0, 0);
+    }
+
     let base = parse_numeric_value(s);
     let end = find_numeric_end(s);
 
     if end < s.len() {
-        let multiplier = match s[end] {
-            b'K' | b'k' => 1e3,
-            b'M' => 1e6,
-            b'G' => 1e9,
-            b'T' => 1e12,
-            b'P' => 1e15,
-            b'E' => 1e18,
-            b'Z' => 1e21,
-            b'Y' => 1e24,
-            _ => 1.0,
+        let tier = match s[end] {
+            b'K' | b'k' => 1,
+            b'M' => 2,
+            b'G' => 3,
+            b'T' => 4,
+            b'P' => 5,
+            b'E' => 6,
+            b'Z' => 7,
+            b'Y' => 8,
+            _ => 0,
         };
-        base * multiplier
+        (base, tier)
     } else {
-        base
+        (base, 0)
     }
+}
+
+/// Convert a human-numeric string directly to a sortable u64.
+/// Encodes tier in the top 4 bits and the float value in the bottom 60 bits.
+/// This avoids the f64 precision loss that would occur from encoding tier + value
+/// in a single f64 (e.g., 1e18 + 3.0 == 1e18 + 1.0 due to 52-bit mantissa).
+///
+/// Encoding:
+/// - Non-negative values: (8 + tier) << 60 | (float_sortable >> 4)
+/// - Negative values: (7 - tier) << 60 | (float_sortable >> 4)
+///
+/// This ensures: -1G < -1M < -1K < -1 < 0 < 1 < 1K < 1M < 1G
+pub fn human_numeric_to_sortable_u64(s: &[u8]) -> u64 {
+    let (val, tier) = parse_human_numeric_tiered(s);
+
+    // Convert the numeric value to a sortable u64 (preserves float ordering)
+    let sf = {
+        if val.is_nan() {
+            0u64 // NaN sorts first
+        } else {
+            let bits = val.to_bits();
+            if (bits >> 63) == 0 {
+                bits ^ 0x8000000000000000 // positive: flip sign bit
+            } else {
+                !bits // negative: flip all bits
+            }
+        }
+    };
+
+    // Encode tier in top 4 bits, float in bottom 60 bits
+    if val >= 0.0 || val == 0.0 {
+        ((8 + tier as u64) << 60) | (sf >> 4)
+    } else {
+        ((7 - tier as u64) << 60) | (sf >> 4)
+    }
+}
+
+/// Legacy parse function for backward compatibility (not used in sort hot path).
+pub fn parse_human_numeric(s: &[u8]) -> f64 {
+    let (val, _tier) = parse_human_numeric_tiered(s);
+    val
 }
 
 /// Month sort (-M).

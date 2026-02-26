@@ -536,3 +536,134 @@ fn test_high_bytes() {
     assert_gnu_compat(&ours, run_gnu_tr(input, &["-d", "\\200-\\377"]));
     assert_eq!(ours, b"abc");
 }
+
+// === Helper for exit-code tests ===
+
+fn run_ftr_exit(input: &[u8], args: &[&str]) -> std::process::Output {
+    use std::io::Write;
+    let mut child = Command::new(ftr_path())
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn ftr");
+
+    // Write stdin, ignoring BrokenPipe (process may exit before reading)
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input);
+    }
+
+    child.wait_with_output().expect("failed to wait on ftr")
+}
+
+// === Misaligned case class validation tests (GNU compat) ===
+
+#[test]
+fn test_misaligned_az_lower_vs_ay_upper() {
+    // A-Z is 26 chars, [:lower:] starts at 26 in SET1.
+    // a-y is 25 chars, [:upper:] starts at 25 in SET2.
+    // Misaligned → error.
+    let out = run_ftr_exit(b"test", &["A-Z[:lower:]", "a-y[:upper:]"]);
+    assert!(!out.status.success(), "should fail for misaligned classes");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("misaligned"),
+        "stderr should mention misaligned: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_misaligned_upper_lower_vs_ay_upper() {
+    // [:upper:] at 0-25, [:lower:] at 26-51 in SET1.
+    // a-y at 0-24, [:upper:] at 25 in SET2.
+    // [:upper:] at 0 in SET1 has no [:lower:] at 0 in SET2 → misaligned.
+    let out = run_ftr_exit(b"test", &["[:upper:][:lower:]", "a-y[:upper:]"]);
+    assert!(!out.status.success(), "should fail for misaligned classes");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("misaligned"),
+        "stderr should mention misaligned: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_misaligned_ay_lower_vs_az_upper() {
+    // A-Y is 25 chars, [:lower:] starts at 25 in SET1.
+    // a-z is 26 chars, [:upper:] starts at 26 in SET2.
+    // Misaligned → error.
+    let out = run_ftr_exit(b"test", &["A-Y[:lower:]", "a-z[:upper:]"]);
+    assert!(!out.status.success(), "should fail for misaligned classes");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("misaligned"),
+        "stderr should mention misaligned: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_misaligned_az_lower_vs_lower_upper() {
+    // SET1: A-Z (26 chars) + [:lower:] (26 chars starting at 26).
+    // SET2: [:lower:] (26 chars starting at 0) + [:upper:] (26 chars starting at 26).
+    // SET1 has [:lower:] at pos 26, SET2 has [:upper:] at pos 26 — that pair is OK.
+    // But SET2 has [:lower:] at pos 0, which needs [:upper:] at pos 0 in SET1.
+    // SET1 doesn't have [:upper:] (it has A-Z range, not the class) → misaligned.
+    let out = run_ftr_exit(b"test", &["A-Z[:lower:]", "[:lower:][:upper:]"]);
+    assert!(!out.status.success(), "should fail for misaligned classes");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("misaligned"),
+        "stderr should mention misaligned: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_misaligned_az_lower_vs_lower_az() {
+    // SET1: A-Z (26 chars) + [:lower:] (26 chars starting at 26).
+    // SET2: [:lower:] (26 chars starting at 0) + A-Z (26 chars).
+    // SET2 has [:lower:] at pos 0, which needs [:upper:] at pos 0 in SET1.
+    // SET1 doesn't have [:upper:] → misaligned.
+    let out = run_ftr_exit(b"test", &["A-Z[:lower:]", "[:lower:]A-Z"]);
+    assert!(!out.status.success(), "should fail for misaligned classes");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("misaligned"),
+        "stderr should mention misaligned: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_set1_longer_trailing_space_set2_ends_with_class() {
+    // SET1: [:upper:][:lower:] + ' ' = 53 chars.
+    // SET2: [:lower:][:upper:] = 52 chars.
+    // SET1 is longer, SET2 ends with [:upper:] → error.
+    let out = run_ftr_exit(b"test", &["[:upper:][:lower:] ", "[:lower:][:upper:]"]);
+    assert!(
+        !out.status.success(),
+        "should fail when SET1 longer and SET2 ends with class"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("must not end with a character class") || stderr.contains("misaligned"),
+        "stderr should mention trailing class error: {}",
+        stderr
+    );
+}
+
+// === Verify aligned case classes still work ===
+
+#[test]
+fn test_aligned_upper_lower_swapcase() {
+    // [:upper:][:lower:] → [:lower:][:upper:] is properly aligned (both at positions 0 and 26).
+    let out = run_ftr_exit(
+        b"Hello World",
+        &["[:upper:][:lower:]", "[:lower:][:upper:]"],
+    );
+    assert!(out.status.success(), "aligned case classes should succeed");
+    assert_eq!(out.stdout, b"hELLO wORLD");
+}

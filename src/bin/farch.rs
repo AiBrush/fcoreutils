@@ -11,6 +11,9 @@ fn main() {
     coreutils_rs::common::reset_sigpipe();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Filter out "--" (end-of-options separator); GNU arch accepts it silently
+    let args: Vec<&String> = args.iter().filter(|a| a.as_str() != "--").collect();
+
     if let Some(arg) = args.first() {
         match arg.as_str() {
             "--help" => {

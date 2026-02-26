@@ -58,14 +58,22 @@ fn main() {
     }
 
     let mut signal: i32 = 15; // SIGTERM default
-    let mut pids: Vec<String> = Vec::new();
+    let mut positional: Vec<String> = Vec::new();
     let mut list_mode = false;
     let mut table_mode = false;
-    let mut list_args: Vec<String> = Vec::new();
     let mut i = 0;
+    let mut seen_dashdash = false;
 
     while i < args.len() {
         let arg = &args[i];
+
+        // After --, everything is positional
+        if seen_dashdash {
+            positional.push(arg.clone());
+            i += 1;
+            continue;
+        }
+
         match arg.as_str() {
             "--help" => {
                 print_help();
@@ -75,15 +83,13 @@ fn main() {
                 println!("{} (fcoreutils) {}", TOOL_NAME, VERSION);
                 return;
             }
+            "--" => {
+                seen_dashdash = true;
+                i += 1;
+            }
             "-l" | "--list" => {
                 list_mode = true;
-                // Remaining args are signal specs to convert
                 i += 1;
-                while i < args.len() {
-                    list_args.push(args[i].clone());
-                    i += 1;
-                }
-                break;
             }
             "-L" | "--table" => {
                 table_mode = true;
@@ -119,20 +125,60 @@ fn main() {
                 i += 1;
             }
             s if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
-                let sig_str = &s[1..];
-                // Could be a signal number or name
-                if let Ok(n) = sig_str.parse::<i32>() {
+                let rest = &s[1..];
+                // Handle -sVALUE (signal spec) and -nVALUE (signal number)
+                if let Some(val) = rest.strip_prefix('s') {
+                    if val.is_empty() {
+                        // This case is handled by the "-s" match arm above,
+                        // but just in case:
+                        i += 1;
+                        if i >= args.len() {
+                            eprintln!("{}: option requires an argument -- 's'", TOOL_NAME);
+                            process::exit(1);
+                        }
+                        signal = parse_signal_or_die(&args[i]);
+                    } else {
+                        signal = parse_signal_or_die(val);
+                    }
+                } else if let Some(val) = rest.strip_prefix('n') {
+                    if val.is_empty() {
+                        i += 1;
+                        if i >= args.len() {
+                            eprintln!("{}: option requires an argument -- 'n'", TOOL_NAME);
+                            process::exit(1);
+                        }
+                        match args[i].parse::<i32>() {
+                            Ok(n) => signal = n,
+                            Err(_) => {
+                                eprintln!("{}: invalid signal number: '{}'", TOOL_NAME, args[i]);
+                                process::exit(1);
+                            }
+                        }
+                    } else {
+                        match val.parse::<i32>() {
+                            Ok(n) => signal = n,
+                            Err(_) => {
+                                eprintln!("{}: invalid signal number: '{}'", TOOL_NAME, val);
+                                process::exit(1);
+                            }
+                        }
+                    }
+                } else if let Ok(n) = rest.parse::<i32>() {
+                    // Could be a signal number like -9
                     signal = n;
-                } else {
-                    signal = name_to_signal(sig_str).unwrap_or_else(|| {
-                        eprintln!("{}: unknown signal: {}", TOOL_NAME, sig_str);
-                        process::exit(1);
-                    });
+                } else if let Some(n) = name_to_signal(rest) {
+                    // Could be a signal name like -TERM
+                    signal = n;
+                } else if !list_mode {
+                    // Unknown signal name is fatal unless -l is already set
+                    // (matches procps kill behavior where -l takes priority)
+                    eprintln!("{}: unknown signal: {}", TOOL_NAME, rest);
+                    process::exit(1);
                 }
                 i += 1;
             }
             _ => {
-                pids.push(arg.clone());
+                positional.push(arg.clone());
                 i += 1;
             }
         }
@@ -144,47 +190,41 @@ fn main() {
     }
 
     if list_mode {
-        if list_args.is_empty() {
+        if positional.is_empty() {
             print_signals();
         } else {
-            let mut had_error = false;
-            for spec in &list_args {
+            for spec in &positional {
                 if let Ok(num) = spec.parse::<i32>() {
-                    // Number → name (handle exit status: num > 128 → num - 128)
+                    // Number -> name (handle exit status: num > 128 -> num - 128)
                     let signum = if num > 128 { num - 128 } else { num };
                     if (1..=31).contains(&signum) {
                         println!("{}", SIGNALS[signum as usize]);
                     } else {
                         eprintln!("{}: unknown signal: {}", TOOL_NAME, spec);
-                        had_error = true;
                     }
                 } else {
-                    // Name → number
+                    // Name -> number
                     let upper = spec.to_uppercase();
                     let name = upper.strip_prefix("SIG").unwrap_or(&upper);
                     match name_to_signal(name) {
                         Some(n) => println!("{}", n),
                         None => {
                             eprintln!("{}: unknown signal: {}", TOOL_NAME, spec);
-                            had_error = true;
                         }
                     }
                 }
-            }
-            if had_error {
-                process::exit(1);
             }
         }
         return;
     }
 
-    if pids.is_empty() {
+    if positional.is_empty() {
         eprintln!("{}: not enough arguments", TOOL_NAME);
         process::exit(1);
     }
 
     let mut had_error = false;
-    for pid_str in &pids {
+    for pid_str in &positional {
         match pid_str.parse::<i32>() {
             Ok(pid) => {
                 if let Err(e) = send_signal(pid, signal) {

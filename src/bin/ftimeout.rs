@@ -348,6 +348,10 @@ fn main() {
     }
 
     if timed_out {
+        // Track the effective signal for exit status (may upgrade to SIGKILL
+        // if kill-after fires).
+        let mut effective_sig = sig;
+
         // Wait for child to die after the initial signal
         if let Some(kill_secs) = kill_after {
             // Poll until child exits or kill-after period elapses
@@ -371,6 +375,8 @@ fn main() {
                             libc::waitpid(child_pid, &mut status, 0);
                         }
                     }
+                    // The effective signal is now SIGKILL since kill-after fired
+                    effective_sig = libc::SIGKILL;
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -386,7 +392,7 @@ fn main() {
         if preserve_status {
             process::exit(status_to_code(status));
         } else {
-            if sig != libc::SIGTERM {
+            if effective_sig != libc::SIGTERM {
                 // Match GNU timeout: re-raise the signal on ourselves so the
                 // parent sees a signal death (not a normal exit with code 128+sig).
                 // This is important because bash treats signal deaths differently
@@ -395,20 +401,20 @@ fn main() {
                     // Unblock the signal in case it's masked (e.g. inherited from parent).
                     let mut unblock: libc::sigset_t = std::mem::zeroed();
                     libc::sigemptyset(&mut unblock);
-                    libc::sigaddset(&mut unblock, sig);
+                    libc::sigaddset(&mut unblock, effective_sig);
                     libc::sigprocmask(libc::SIG_UNBLOCK, &unblock, std::ptr::null_mut());
                     // Reset to default disposition. SIGKILL/SIGSTOP are always SIG_DFL
                     // and signal() returns SIG_ERR for them, so skip the call.
-                    if sig != libc::SIGKILL && sig != libc::SIGSTOP {
-                        let prev = libc::signal(sig, libc::SIG_DFL);
+                    if effective_sig != libc::SIGKILL && effective_sig != libc::SIGSTOP {
+                        let prev = libc::signal(effective_sig, libc::SIG_DFL);
                         if prev == libc::SIG_ERR {
-                            process::exit(128 + sig as i32);
+                            process::exit(128 + effective_sig as i32);
                         }
                     }
-                    libc::kill(libc::getpid(), sig);
+                    libc::kill(libc::getpid(), effective_sig);
                     // Signal should terminate us before we get here.
                     // Loop on pause() as safety net. Note: SIGSTOP will stop
-                    // the process here until SIGCONT, then loop — this matches
+                    // the process here until SIGCONT, then loop -- this matches
                     // GNU timeout behavior for the degenerate --signal=STOP case.
                     loop {
                         libc::pause();

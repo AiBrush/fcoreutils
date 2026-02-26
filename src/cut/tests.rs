@@ -1,7 +1,7 @@
 use super::*;
 
 fn cut_field_str(input: &str, delim: u8, spec: &str, complement: bool, suppress: bool) -> String {
-    let ranges = parse_ranges(spec).unwrap();
+    let ranges = parse_ranges(spec, false).unwrap();
     let output_delim = &[delim];
     let mut out = Vec::new();
     cut_fields(
@@ -18,7 +18,7 @@ fn cut_field_str(input: &str, delim: u8, spec: &str, complement: bool, suppress:
 }
 
 fn cut_byte_str(input: &str, spec: &str, complement: bool) -> String {
-    let ranges = parse_ranges(spec).unwrap();
+    let ranges = parse_ranges(spec, false).unwrap();
     let mut out = Vec::new();
     cut_bytes(input.as_bytes(), &ranges, complement, b"", &mut out).unwrap();
     String::from_utf8(out).unwrap()
@@ -34,7 +34,7 @@ fn process_data_str(
     output_delim: Option<&[u8]>,
     line_delim: u8,
 ) -> String {
-    let ranges = parse_ranges(spec).unwrap();
+    let ranges = parse_ranges(spec, false).unwrap();
     let default_od = if mode == CutMode::Fields {
         vec![delim]
     } else {
@@ -59,7 +59,7 @@ fn process_data_str(
 
 #[test]
 fn test_parse_single() {
-    let r = parse_ranges("3").unwrap();
+    let r = parse_ranges("3", false).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].start, 3);
     assert_eq!(r[0].end, 3);
@@ -67,7 +67,7 @@ fn test_parse_single() {
 
 #[test]
 fn test_parse_range() {
-    let r = parse_ranges("2-4").unwrap();
+    let r = parse_ranges("2-4", false).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].start, 2);
     assert_eq!(r[0].end, 4);
@@ -75,27 +75,27 @@ fn test_parse_range() {
 
 #[test]
 fn test_parse_open_start() {
-    let r = parse_ranges("-3").unwrap();
+    let r = parse_ranges("-3", false).unwrap();
     assert_eq!(r[0].start, 1);
     assert_eq!(r[0].end, 3);
 }
 
 #[test]
 fn test_parse_open_end() {
-    let r = parse_ranges("3-").unwrap();
+    let r = parse_ranges("3-", false).unwrap();
     assert_eq!(r[0].start, 3);
     assert_eq!(r[0].end, usize::MAX);
 }
 
 #[test]
 fn test_parse_multiple() {
-    let r = parse_ranges("1,3,5").unwrap();
+    let r = parse_ranges("1,3,5", false).unwrap();
     assert_eq!(r.len(), 3);
 }
 
 #[test]
 fn test_parse_merge_overlapping() {
-    let r = parse_ranges("1-3,2-5").unwrap();
+    let r = parse_ranges("1-3,2-5", false).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].start, 1);
     assert_eq!(r[0].end, 5);
@@ -103,7 +103,7 @@ fn test_parse_merge_overlapping() {
 
 #[test]
 fn test_parse_merge_adjacent() {
-    let r = parse_ranges("1-2,3-4").unwrap();
+    let r = parse_ranges("1-2,3-4", false).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].start, 1);
     assert_eq!(r[0].end, 4);
@@ -111,7 +111,7 @@ fn test_parse_merge_adjacent() {
 
 #[test]
 fn test_parse_zero_rejected() {
-    assert!(parse_ranges("0").is_err());
+    assert!(parse_ranges("0", false).is_err());
 }
 
 // --- Field cutting ---
@@ -446,7 +446,7 @@ fn test_zero_terminated_complement() {
 
 #[test]
 fn test_cut_fields_returns_false_when_suppressed() {
-    let ranges = parse_ranges("1").unwrap();
+    let ranges = parse_ranges("1", false).unwrap();
     let mut out = Vec::new();
     let result = cut_fields(b"no_delim", b':', &ranges, false, b":", true, &mut out).unwrap();
     assert!(!result);
@@ -455,9 +455,115 @@ fn test_cut_fields_returns_false_when_suppressed() {
 
 #[test]
 fn test_cut_fields_returns_true_when_not_suppressed() {
-    let ranges = parse_ranges("1").unwrap();
+    let ranges = parse_ranges("1", false).unwrap();
     let mut out = Vec::new();
     let result = cut_fields(b"a:b", b':', &ranges, false, b":", false, &mut out).unwrap();
     assert!(result);
     assert_eq!(&out, b"a");
+}
+
+// --- GNU compat: bare hyphen rejected ---
+
+#[test]
+fn test_parse_bare_hyphen_rejected() {
+    assert!(parse_ranges("-", false).is_err());
+}
+
+// --- GNU compat: no-merge-adjacent for output delimiter ---
+
+#[test]
+fn test_parse_no_merge_adjacent() {
+    // With no_merge_adjacent=true, adjacent ranges 1-2 and 3-4 stay separate
+    let r = parse_ranges("1-2,3-4", true).unwrap();
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[0].start, 1);
+    assert_eq!(r[0].end, 2);
+    assert_eq!(r[1].start, 3);
+    assert_eq!(r[1].end, 4);
+}
+
+#[test]
+fn test_parse_no_merge_adjacent_overlap_still_merges() {
+    // Overlapping ranges should still merge even with no_merge_adjacent
+    let r = parse_ranges("1-3,2-4", true).unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].start, 1);
+    assert_eq!(r[0].end, 4);
+}
+
+// --- GNU compat: trailing newline on unterminated lines ---
+
+#[test]
+fn test_bytes_no_trailing_newline_adds_newline() {
+    // GNU cut adds a trailing newline even when input doesn't have one
+    let result = process_data_str("123", CutMode::Bytes, "4", b'\t', false, false, None, b'\n');
+    assert_eq!(result, "\n");
+}
+
+#[test]
+fn test_bytes_two_lines_no_trailing_newline() {
+    // Input: "123\n1" -> -c4 extracts nothing from both lines, outputs "\n\n"
+    let result = process_data_str(
+        "123\n1",
+        CutMode::Bytes,
+        "4",
+        b'\t',
+        false,
+        false,
+        None,
+        b'\n',
+    );
+    assert_eq!(result, "\n\n");
+}
+
+#[test]
+fn test_fields_no_trailing_newline_adds_newline() {
+    // GNU cut adds trailing newline for -f1- on input without terminator
+    let result = process_data_str(
+        "a\nb",
+        CutMode::Fields,
+        "1-",
+        b'\t',
+        false,
+        false,
+        None,
+        b'\n',
+    );
+    assert_eq!(result, "a\nb\n");
+}
+
+#[test]
+fn test_zero_terminated_no_trailing_nul() {
+    // -z -c1 on input without trailing NUL
+    let result = process_data_str(
+        "ab\0cd",
+        CutMode::Bytes,
+        "1",
+        b'\t',
+        false,
+        false,
+        None,
+        b'\0',
+    );
+    assert_eq!(result, "a\0c\0");
+}
+
+// --- GNU compat: output delimiter with abutting byte ranges ---
+
+#[test]
+fn test_output_delimiter_abutting_byte_ranges() {
+    // --output-delimiter=: -b1-2,3-4 on "abcd" should produce "ab:cd"
+    let ranges = parse_ranges("1-2,3-4", true).unwrap();
+    let cfg = CutConfig {
+        mode: CutMode::Bytes,
+        ranges: &ranges,
+        complement: false,
+        delim: b'\t',
+        output_delim: b":",
+        suppress_no_delim: false,
+        line_delim: b'\n',
+    };
+    let mut out = Vec::new();
+    process_cut_data(b"abcd\n", &cfg, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "ab:cd\n");
 }

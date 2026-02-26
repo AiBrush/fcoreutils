@@ -42,11 +42,13 @@ pub struct StdbufConfig {
 /// Parse a buffer mode string into a BufferMode.
 ///
 /// Accepted formats:
-/// - "L" or "l" -> Line buffered
+/// - "L" -> Line buffered (only uppercase; lowercase "l" is rejected per GNU stdbuf)
 /// - "0" -> Unbuffered
-/// - A positive integer (optionally with K, M, G, T suffix) -> Size buffered
+/// - A positive integer (optionally with K, M, G, T, KB, kB, MB, GB suffix) -> Size buffered
+/// - A bare suffix like "K" is treated as "1K" (= 1024) per GNU stdbuf
 pub fn parse_buffer_mode(s: &str) -> Result<BufferMode, String> {
-    if s.eq_ignore_ascii_case("L") {
+    // Only uppercase L is accepted for line buffering (GNU stdbuf rejects lowercase)
+    if s == "L" {
         return Ok(BufferMode::Line);
     }
     if s == "0" {
@@ -54,8 +56,15 @@ pub fn parse_buffer_mode(s: &str) -> Result<BufferMode, String> {
     }
 
     // Parse size with optional suffix
+    // Check multi-char suffixes first to avoid partial matches
     let (num_str, multiplier) =
-        if let Some(prefix) = s.strip_suffix('K').or_else(|| s.strip_suffix('k')) {
+        if let Some(prefix) = s.strip_suffix("KB").or_else(|| s.strip_suffix("kB")) {
+            (prefix, 1000_usize)
+        } else if let Some(prefix) = s.strip_suffix("MB") {
+            (prefix, 1_000_000)
+        } else if let Some(prefix) = s.strip_suffix("GB") {
+            (prefix, 1_000_000_000)
+        } else if let Some(prefix) = s.strip_suffix('K').or_else(|| s.strip_suffix('k')) {
             (prefix, 1024_usize)
         } else if let Some(prefix) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
             (prefix, 1024 * 1024)
@@ -63,19 +72,18 @@ pub fn parse_buffer_mode(s: &str) -> Result<BufferMode, String> {
             (prefix, 1024 * 1024 * 1024)
         } else if let Some(prefix) = s.strip_suffix('T').or_else(|| s.strip_suffix('t')) {
             (prefix, 1024_usize.wrapping_mul(1024 * 1024 * 1024))
-        } else if let Some(prefix) = s.strip_suffix("KB").or_else(|| s.strip_suffix("kB")) {
-            (prefix, 1000)
-        } else if let Some(prefix) = s.strip_suffix("MB") {
-            (prefix, 1_000_000)
-        } else if let Some(prefix) = s.strip_suffix("GB") {
-            (prefix, 1_000_000_000)
         } else {
             (s, 1)
         };
 
-    let n: usize = num_str
-        .parse()
-        .map_err(|_| format!("invalid mode '{}'", s))?;
+    // A bare suffix with no number prefix is treated as 1 * multiplier (e.g. "K" = 1024)
+    let n: usize = if num_str.is_empty() {
+        1
+    } else {
+        num_str
+            .parse()
+            .map_err(|_| format!("invalid mode '{}'", s))?
+    };
 
     if n == 0 && multiplier == 1 {
         return Ok(BufferMode::Unbuffered);

@@ -29,7 +29,11 @@ pub struct Range {
 
 /// Parse a LIST specification like "1,3-5,7-" into ranges.
 /// Each range is 1-based. Returns sorted, merged ranges.
-pub fn parse_ranges(spec: &str) -> Result<Vec<Range>, String> {
+/// When `no_merge_adjacent` is true, overlapping ranges are still merged but
+/// adjacent ranges (e.g., 1-2,3-4) are kept separate. This is needed when
+/// `--output-delimiter` is specified for byte/char mode so the delimiter is
+/// inserted between originally separate but adjacent ranges.
+pub fn parse_ranges(spec: &str, no_merge_adjacent: bool) -> Result<Vec<Range>, String> {
     let mut ranges = Vec::new();
 
     for part in spec.split(',') {
@@ -41,6 +45,11 @@ pub fn parse_ranges(spec: &str) -> Result<Vec<Range>, String> {
         if let Some(idx) = part.find('-') {
             let left = &part[..idx];
             let right = &part[idx + 1..];
+
+            // Reject bare "-" (both sides empty)
+            if left.is_empty() && right.is_empty() {
+                return Err("invalid range with no endpoint: -".to_string());
+            }
 
             let start = if left.is_empty() {
                 1
@@ -80,15 +89,25 @@ pub fn parse_ranges(spec: &str) -> Result<Vec<Range>, String> {
         return Err("you must specify a list of bytes, characters, or fields".to_string());
     }
 
-    // Sort and merge overlapping ranges
+    // Sort and merge overlapping/adjacent ranges
     ranges.sort_by_key(|r| (r.start, r.end));
     let mut merged = vec![ranges[0].clone()];
     for r in &ranges[1..] {
         let last = merged.last_mut().unwrap();
-        if r.start <= last.end.saturating_add(1) {
-            last.end = last.end.max(r.end);
+        if no_merge_adjacent {
+            // Only merge truly overlapping ranges, not adjacent ones
+            if r.start <= last.end {
+                last.end = last.end.max(r.end);
+            } else {
+                merged.push(r.clone());
+            }
         } else {
-            merged.push(r.clone());
+            // Merge both overlapping and adjacent ranges
+            if r.start <= last.end.saturating_add(1) {
+                last.end = last.end.max(r.end);
+            } else {
+                merged.push(r.clone());
+            }
         }
     }
 
@@ -720,7 +739,7 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
         rayon::scope(|s| {
             for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
                 s.spawn(move |_| {
-                    result.reserve(chunk.len());
+                    result.reserve(chunk.len() + 1);
                     process_fields_chunk(
                         chunk,
                         delim,
@@ -743,7 +762,8 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
+        // +1 for potential trailing line_delim when input doesn't end with one
+        let mut buf = Vec::with_capacity(data.len() + 1);
         process_fields_chunk(
             data,
             delim,
@@ -3195,7 +3215,7 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
         rayon::scope(|s| {
             for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
                 s.spawn(move |_| {
-                    result.reserve(chunk.len());
+                    result.reserve(chunk.len() + 1);
                     process_bytes_chunk(
                         chunk,
                         ranges,
@@ -3214,7 +3234,8 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
+        // +1 for potential trailing line_delim when input doesn't end with one
+        let mut buf = Vec::with_capacity(data.len() + 1);
         process_bytes_chunk(data, ranges, complement, output_delim, line_delim, &mut buf);
         if !buf.is_empty() {
             out.write_all(&buf)?;
@@ -3595,8 +3616,18 @@ fn read_fully<R: BufRead>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
 /// In-place avoids allocating intermediate output buffers — the result is written
 /// directly into the input buffer (output is always <= input for non-complement modes
 /// with default output delimiter).
+///
+/// Note: if the input does not end with line_delim, we fall back to the regular
+/// path because GNU cut always adds a trailing line delimiter, and the in-place
+/// buffer cannot grow beyond the input size.
 pub fn process_cut_data_mut(data: &mut [u8], cfg: &CutConfig) -> Option<usize> {
     if cfg.complement {
+        return None;
+    }
+    // If input doesn't end with line_delim, the output may need an extra byte
+    // (GNU cut always terminates the last line). In-place can't grow the buffer,
+    // so fall back to the regular allocating path.
+    if data.is_empty() || data[data.len() - 1] != cfg.line_delim {
         return None;
     }
 

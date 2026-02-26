@@ -82,8 +82,10 @@ fn test_chown_parse_spec_invalid_group() {
 #[test]
 #[cfg(unix)]
 fn test_chown_parse_spec_empty() {
-    let result = crate::chown::parse_owner_spec("");
-    assert!(result.is_err());
+    // GNU chown treats '' as a no-op (no owner/group change)
+    let (uid, gid) = crate::chown::parse_owner_spec("").unwrap();
+    assert_eq!(uid, None);
+    assert_eq!(gid, None);
 }
 
 #[test]

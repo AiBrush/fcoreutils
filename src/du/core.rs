@@ -26,6 +26,8 @@ pub struct DuConfig {
     pub one_file_system: bool,
     /// Dereference all symbolic links.
     pub dereference: bool,
+    /// Dereference only command-line symlink arguments (-D / -H / --dereference-args).
+    pub dereference_args: bool,
     /// For directories, do not include size of subdirectories.
     pub separate_dirs: bool,
     /// Count sizes of hard-linked files multiple times.
@@ -57,6 +59,7 @@ impl Default for DuConfig {
             summarize: false,
             one_file_system: false,
             dereference: false,
+            dereference_args: false,
             separate_dirs: false,
             count_links: false,
             null_terminator: false,
@@ -99,6 +102,23 @@ pub fn du_path_with_seen(
     Ok(entries)
 }
 
+/// Check whether a path should be excluded by any of the exclude patterns.
+/// GNU du matches the pattern against the basename and the full path.
+fn is_excluded(path: &Path, config: &DuConfig) -> bool {
+    if config.exclude_patterns.is_empty() {
+        return false;
+    }
+    let path_str = path.to_string_lossy();
+    let basename = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    config
+        .exclude_patterns
+        .iter()
+        .any(|pat| glob_match(pat, &basename) || glob_match(pat, &path_str))
+}
+
 /// Recursive traversal core. Returns the cumulative size of the subtree at `path`.
 fn du_recursive(
     path: &Path,
@@ -109,7 +129,14 @@ fn du_recursive(
     root_dev: Option<u64>,
     had_error: &mut bool,
 ) -> io::Result<u64> {
-    let meta = if config.dereference {
+    // Check exclude patterns against this path (GNU du applies exclude to all entries
+    // including the root argument itself).
+    if is_excluded(path, config) {
+        return Ok(0);
+    }
+
+    // For depth 0 (command-line arguments), dereference_args means follow symlinks.
+    let meta = if config.dereference || (depth == 0 && config.dereference_args) {
         std::fs::metadata(path)?
     } else {
         std::fs::symlink_metadata(path)?
@@ -185,16 +212,9 @@ fn du_recursive(
             };
             let child_path = entry.path();
 
-            // Check exclude patterns against the file name.
-            if let Some(name) = child_path.file_name() {
-                let name_str = name.to_string_lossy();
-                if config
-                    .exclude_patterns
-                    .iter()
-                    .any(|pat| glob_match(pat, &name_str))
-                {
-                    continue;
-                }
+            // Check exclude patterns against both basename and full path (GNU compat).
+            if is_excluded(&child_path, config) {
+                continue;
             }
 
             // Check if child is a directory (for separate_dirs logic).
@@ -257,11 +277,59 @@ fn within_depth(config: &DuConfig, depth: usize) -> bool {
     }
 }
 
-/// Simple glob matching supporting `*` and `?` wildcards.
+/// Glob matching supporting `*`, `?`, and `[...]`/`[^...]` character classes.
+/// Compatible with fnmatch(3) FNM_PATHNAME-less matching used by GNU du.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
     let txt: Vec<char> = text.chars().collect();
     glob_match_inner(&pat, &txt)
+}
+
+/// Try to match a `[...]` or `[^...]` bracket expression starting at `pat[start]` (which is `[`).
+/// Returns `Some((matched_char, end_index))` where `end_index` is the index after `]`,
+/// or `None` if the bracket expression is malformed.
+fn match_bracket_class(pat: &[char], start: usize, ch: char) -> Option<(bool, usize)> {
+    let mut i = start + 1; // skip the opening `[`
+    if i >= pat.len() {
+        return None;
+    }
+
+    // Check for negation: `[^...]` or `[!...]`
+    let negate = if pat[i] == '^' || pat[i] == '!' {
+        i += 1;
+        true
+    } else {
+        false
+    };
+
+    // A `]` immediately after `[` (or `[^`) is treated as a literal character in the class.
+    let mut found = false;
+    let mut first = true;
+    while i < pat.len() {
+        if pat[i] == ']' && !first {
+            // End of bracket expression.
+            let matched = if negate { !found } else { found };
+            return Some((matched, i + 1));
+        }
+        // Check for range: a-z
+        if i + 2 < pat.len() && pat[i + 1] == '-' && pat[i + 2] != ']' {
+            let lo = pat[i];
+            let hi = pat[i + 2];
+            if ch >= lo && ch <= hi {
+                found = true;
+            }
+            i += 3;
+        } else {
+            if pat[i] == ch {
+                found = true;
+            }
+            i += 1;
+        }
+        first = false;
+    }
+
+    // No closing `]` found — malformed bracket expression.
+    None
 }
 
 fn glob_match_inner(pat: &[char], txt: &[char]) -> bool {
@@ -271,7 +339,25 @@ fn glob_match_inner(pat: &[char], txt: &[char]) -> bool {
     let mut star_ti = 0;
 
     while ti < txt.len() {
-        if pi < pat.len() && (pat[pi] == '?' || pat[pi] == txt[ti]) {
+        if pi < pat.len() && pat[pi] == '[' {
+            // Try to match a bracket expression.
+            if let Some((matched, end)) = match_bracket_class(pat, pi, txt[ti]) {
+                if matched {
+                    pi = end;
+                    ti += 1;
+                    continue;
+                }
+                // Not matched — fall through to star backtrack.
+            }
+            // Malformed bracket or no match — try star backtrack.
+            if star_pi != usize::MAX {
+                pi = star_pi + 1;
+                star_ti += 1;
+                ti = star_ti;
+            } else {
+                return false;
+            }
+        } else if pi < pat.len() && (pat[pi] == '?' || pat[pi] == txt[ti]) {
             pi += 1;
             ti += 1;
         } else if pi < pat.len() && pat[pi] == '*' {
@@ -457,6 +543,8 @@ pub fn parse_block_size(s: &str) -> Result<u64, String> {
 
 /// Parse a threshold value. Positive means "exclude entries smaller than SIZE".
 /// Negative means "exclude entries larger than -SIZE".
+/// GNU du rejects `--threshold=-0` and `--threshold=0` is allowed (positive zero is fine,
+/// but negative zero is invalid).
 pub fn parse_threshold(s: &str) -> Result<i64, String> {
     let s = s.trim();
     let (negative, rest) = if let Some(stripped) = s.strip_prefix('-') {
@@ -466,7 +554,14 @@ pub fn parse_threshold(s: &str) -> Result<i64, String> {
     };
 
     let val = parse_block_size(rest)? as i64;
-    if negative { Ok(-val) } else { Ok(val) }
+    if negative {
+        if val == 0 {
+            return Err(format!("invalid --threshold argument '-{}'", rest));
+        }
+        Ok(-val)
+    } else {
+        Ok(val)
+    }
 }
 
 /// Read exclude patterns from a file (one per line).

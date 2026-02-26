@@ -12,6 +12,8 @@ fn main() {
 //        ln [OPTION]... -t DIRECTORY TARGET...
 
 #[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process;
@@ -31,6 +33,28 @@ enum BackupMode {
     Simple,
 }
 
+/// Check if `name` is an unambiguous prefix of `full`.
+/// GNU coreutils allows long option abbreviations as long as they are unambiguous.
+/// We accept any prefix that is at least as long as the shortest unambiguous prefix.
+#[cfg(unix)]
+fn matches_long_option(arg: &str, full: &str) -> bool {
+    arg == full || (arg.len() >= 3 && full.starts_with(arg))
+}
+
+/// Match a long option with `=value` syntax, e.g. `--backup=simple`.
+/// Returns Some(value) if the arg matches the option prefix.
+#[cfg(unix)]
+fn match_long_option_value<'a>(arg: &'a str, option_name: &str) -> Option<&'a str> {
+    // option_name is like "--backup", arg might be "--backup=simple" or "--b=simple"
+    if let Some(eq_pos) = arg.find('=') {
+        let prefix = &arg[..eq_pos];
+        if matches_long_option(prefix, option_name) {
+            return Some(&arg[eq_pos + 1..]);
+        }
+    }
+    None
+}
+
 #[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
@@ -44,8 +68,8 @@ fn main() {
     let mut suffix = DEFAULT_BACKUP_SUFFIX.to_string();
     let mut target_dir: Option<String> = None;
     let mut no_target_dir = false;
-    let mut _logical = false;
-    let mut _physical = false;
+    let mut logical = false;
+    let mut physical = false;
     let mut _interactive = false;
     let mut operands: Vec<String> = Vec::new();
     let mut saw_dashdash = false;
@@ -73,15 +97,15 @@ fn main() {
             "-n" | "--no-dereference" => no_deref = true,
             "-v" | "--verbose" => verbose = true,
             "-r" | "--relative" => relative = true,
-            "-b" | "--backup" => backup = BackupMode::Simple,
+            "-b" => backup = BackupMode::Simple,
             "-i" | "--interactive" => _interactive = true,
             "-L" | "--logical" => {
-                _logical = true;
-                _physical = false;
+                logical = true;
+                physical = false;
             }
             "-P" | "--physical" => {
-                _physical = true;
-                _logical = false;
+                physical = true;
+                logical = false;
             }
             "-T" | "--no-target-directory" => no_target_dir = true,
             "-t" => {
@@ -94,13 +118,6 @@ fn main() {
                 target_dir = Some(args[i].clone());
             }
             "--" => saw_dashdash = true,
-            _ if arg.starts_with("--target-directory=") => {
-                target_dir = Some(arg["--target-directory=".len()..].to_string());
-            }
-            _ if arg.starts_with("--suffix=") => {
-                suffix = arg["--suffix=".len()..].to_string();
-                backup = BackupMode::Simple;
-            }
             _ if arg.starts_with("-S") && arg.len() > 2 => {
                 suffix = arg[2..].to_string();
                 backup = BackupMode::Simple;
@@ -115,10 +132,77 @@ fn main() {
                 suffix = args[i].clone();
                 backup = BackupMode::Simple;
             }
-            _ if arg.starts_with("-t") && arg.len() > 2 => {
+            _ if arg.starts_with("-t") && arg.len() > 2 && !arg.starts_with("--") => {
                 target_dir = Some(arg[2..].to_string());
             }
-            _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
+            _ if arg.starts_with("--") && arg.contains('=') => {
+                // Long options with =value
+                if let Some(val) = match_long_option_value(arg, "--target-directory") {
+                    target_dir = Some(val.to_string());
+                } else if let Some(val) = match_long_option_value(arg, "--suffix") {
+                    suffix = val.to_string();
+                    backup = BackupMode::Simple;
+                } else if let Some(val) = match_long_option_value(arg, "--backup") {
+                    // --backup=simple, --backup=none, etc.
+                    match val {
+                        "none" | "off" => backup = BackupMode::None,
+                        _ => backup = BackupMode::Simple,
+                    }
+                } else {
+                    eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
+                    eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                    process::exit(1);
+                }
+            }
+            _ if arg.starts_with("--") => {
+                // Long options without =value: handle abbreviations
+                if matches_long_option(arg, "--backup") {
+                    backup = BackupMode::Simple;
+                } else if matches_long_option(arg, "--symbolic") {
+                    symbolic = true;
+                } else if matches_long_option(arg, "--force") {
+                    force = true;
+                } else if matches_long_option(arg, "--no-dereference") {
+                    no_deref = true;
+                } else if matches_long_option(arg, "--verbose") {
+                    verbose = true;
+                } else if matches_long_option(arg, "--relative") {
+                    relative = true;
+                } else if matches_long_option(arg, "--interactive") {
+                    _interactive = true;
+                } else if matches_long_option(arg, "--logical") {
+                    logical = true;
+                    physical = false;
+                } else if matches_long_option(arg, "--physical") {
+                    physical = true;
+                    logical = false;
+                } else if matches_long_option(arg, "--no-target-directory") {
+                    no_target_dir = true;
+                } else if matches_long_option(arg, "--target-directory") {
+                    // --target-directory without =value: next arg is the value
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("{}: option '{}' requires an argument", TOOL_NAME, arg);
+                        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                        process::exit(1);
+                    }
+                    target_dir = Some(args[i].clone());
+                } else if matches_long_option(arg, "--suffix") {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("{}: option '{}' requires an argument", TOOL_NAME, arg);
+                        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                        process::exit(1);
+                    }
+                    suffix = args[i].clone();
+                    backup = BackupMode::Simple;
+                } else {
+                    eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
+                    eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                    process::exit(1);
+                }
+            }
+            _ if arg.starts_with('-') && arg.len() > 1 => {
                 // Combined short flags
                 let chars: Vec<char> = arg[1..].chars().collect();
                 let mut j = 0;
@@ -132,12 +216,12 @@ fn main() {
                         'b' => backup = BackupMode::Simple,
                         'i' => _interactive = true,
                         'L' => {
-                            _logical = true;
-                            _physical = false;
+                            logical = true;
+                            physical = false;
                         }
                         'P' => {
-                            _physical = true;
-                            _logical = false;
+                            physical = true;
+                            logical = false;
                         }
                         'T' => no_target_dir = true,
                         'S' => {
@@ -204,6 +288,7 @@ fn main() {
             let link_name = link_name_in_dir(target, dir);
             if let Err(code) = make_link(
                 target, &link_name, symbolic, force, no_deref, verbose, relative, backup, &suffix,
+                logical, physical,
             ) {
                 exit_code = code;
             }
@@ -232,6 +317,8 @@ fn main() {
             relative,
             backup,
             &suffix,
+            logical,
+            physical,
         ) {
             exit_code = code;
         }
@@ -244,6 +331,7 @@ fn main() {
             .unwrap_or_else(|| target.clone());
         if let Err(code) = make_link(
             target, &basename, symbolic, force, no_deref, verbose, relative, backup, &suffix,
+            logical, physical,
         ) {
             exit_code = code;
         }
@@ -261,11 +349,13 @@ fn main() {
             let link_name = link_name_in_dir(target, dest);
             if let Err(code) = make_link(
                 target, &link_name, symbolic, force, no_deref, verbose, relative, backup, &suffix,
+                logical, physical,
             ) {
                 exit_code = code;
             }
         } else if let Err(code) = make_link(
-            target, dest, symbolic, force, no_deref, verbose, relative, backup, &suffix,
+            target, dest, symbolic, force, no_deref, verbose, relative, backup, &suffix, logical,
+            physical,
         ) {
             exit_code = code;
         }
@@ -280,6 +370,7 @@ fn main() {
             let link_name = link_name_in_dir(target, dir);
             if let Err(code) = make_link(
                 target, &link_name, symbolic, force, no_deref, verbose, relative, backup, &suffix,
+                logical, physical,
             ) {
                 exit_code = code;
             }
@@ -302,6 +393,23 @@ fn link_name_in_dir(target: &str, dir: &str) -> String {
     p.to_string_lossy().to_string()
 }
 
+/// Check if target and link_name refer to the same file (by device+inode).
+/// For symbolic links with force, GNU ln detects this and errors.
+#[cfg(unix)]
+fn same_file(target: &str, link_name: &str) -> bool {
+    let target_meta = match std::fs::metadata(target) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    // Use symlink_metadata for link_name so we compare the link entry's own inode,
+    // not its resolved target (which would false-positive for symlink re-creation)
+    let link_meta = match std::fs::symlink_metadata(link_name) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    target_meta.dev() == link_meta.dev() && target_meta.ino() == link_meta.ino()
+}
+
 /// Create a link from target to link_name.
 #[allow(clippy::too_many_arguments)]
 #[cfg(unix)]
@@ -315,19 +423,46 @@ fn make_link(
     relative: bool,
     backup: BackupMode,
     suffix: &str,
+    logical: bool,
+    physical: bool,
 ) -> Result<(), i32> {
     let link_path = Path::new(link_name);
 
-    // Check if link_name already exists
+    // Check if link_name already exists (as symlink or regular file)
     let link_exists = link_path.symlink_metadata().is_ok();
 
+    // For -sf: detect same source and destination before removing
+    if link_exists && (force || backup != BackupMode::None) && same_file(target, link_name) {
+        // GNU ln: "X and Y are the same file"
+        eprintln!(
+            "{}: '{}' and '{}' are the same file",
+            TOOL_NAME, target, link_name
+        );
+        return Err(1);
+    }
+
     if link_exists {
-        // Make backup if requested
+        // Make backup if requested (backup takes priority over force)
         if backup == BackupMode::Simple {
             let backup_name = format!("{}{}", link_name, suffix);
             if let Err(e) = std::fs::rename(link_name, &backup_name) {
                 eprintln!(
                     "{}: cannot backup '{}': {}",
+                    TOOL_NAME,
+                    link_name,
+                    coreutils_rs::common::io_error_msg(&e)
+                );
+                return Err(1);
+            }
+            // If link_name still exists after rename (e.g. source and backup dest
+            // were hard links to the same inode, so rename() was a no-op), and
+            // force is also set, remove the destination.
+            if force
+                && link_path.symlink_metadata().is_ok()
+                && let Err(e) = remove_dest(link_name)
+            {
+                eprintln!(
+                    "{}: cannot remove '{}': {}",
                     TOOL_NAME,
                     link_name,
                     coreutils_rs::common::io_error_msg(&e)
@@ -364,7 +499,55 @@ fn make_link(
 
     let result = if symbolic {
         std::os::unix::fs::symlink(&actual_target, link_name)
+    } else if logical {
+        // -L: dereference target symlinks: resolve the target and hard link to the resolved path
+        // If target is a dangling symlink, this will fail (matching GNU behavior)
+        let resolved = match std::fs::canonicalize(target) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "{}: failed to create hard link '{}' => '{}': {}",
+                    TOOL_NAME,
+                    link_name,
+                    target,
+                    coreutils_rs::common::io_error_msg(&e)
+                );
+                return Err(1);
+            }
+        };
+        std::fs::hard_link(&resolved, link_name)
+    } else if physical {
+        // -P: make hard link directly to symlink (not following it)
+        // Use linkat with AT_SYMLINK_FOLLOW=0 (default) to avoid following
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_target = CString::new(Path::new(target).as_os_str().as_bytes()).map_err(|_| {
+            eprintln!("{}: invalid path '{}'", TOOL_NAME, target);
+            1
+        })?;
+        let c_link = CString::new(Path::new(link_name).as_os_str().as_bytes()).map_err(|_| {
+            eprintln!("{}: invalid path '{}'", TOOL_NAME, link_name);
+            1
+        })?;
+        let ret = unsafe {
+            libc::linkat(
+                libc::AT_FDCWD,
+                c_target.as_ptr(),
+                libc::AT_FDCWD,
+                c_link.as_ptr(),
+                0, // no flags = don't follow symlinks
+            )
+        };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     } else {
+        // Default: hard_link (which follows symlinks on Linux due to default linkat AT_SYMLINK_FOLLOW behavior)
+        // Actually std::fs::hard_link uses linkat with AT_SYMLINK_FOLLOW on some platforms.
+        // On Linux, hard_link does NOT follow symlinks by default. That's the -P behavior.
+        // So default is effectively -P.
         std::fs::hard_link(target, link_name)
     };
 
@@ -1010,5 +1193,269 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
+    }
+
+    // ── GNU compat tests ──
+
+    #[test]
+    fn test_sf_same_src_and_dest() {
+        // ln -sf file file should fail with "are the same file"
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sametest");
+        fs::write(&file, "data").unwrap();
+
+        let output = cmd()
+            .args(["-sf", file.to_str().unwrap(), file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("are the same file"),
+            "Expected 'are the same file' in stderr, got: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_sf_replace_enoent_link() {
+        // Create a dangling symlink, then replace with -sf
+        let dir = tempfile::tempdir().unwrap();
+        let sf_a = dir.path().join("sf_a");
+        fs::write(&sf_a, "foo").unwrap();
+        let enoent_link = dir.path().join("enoent_link");
+
+        // Create dangling symlink
+        let out1 = cmd()
+            .args(["-sf", "missing", enoent_link.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(out1.status.success());
+        assert!(
+            enoent_link
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        // Replace it
+        let out2 = cmd()
+            .args(["-sf", sf_a.to_str().unwrap(), enoent_link.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(out2.status.success());
+        let target = fs::read_link(&enoent_link).unwrap();
+        assert_eq!(target, sf_a);
+    }
+
+    #[test]
+    fn test_sf_replace_enotdir_link() {
+        // Create symlink to a/b, then replace with -sf
+        let dir = tempfile::tempdir().unwrap();
+        let sf_a = dir.path().join("sf_a");
+        fs::write(&sf_a, "foo").unwrap();
+        let enotdir_link = dir.path().join("enotdir_link");
+
+        // Create symlink to "a/b" (nonexistent directory path)
+        let out1 = cmd()
+            .args(["-sf", "a/b", enotdir_link.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(out1.status.success());
+
+        // Replace it
+        let out2 = cmd()
+            .args([
+                "-sf",
+                sf_a.to_str().unwrap(),
+                enotdir_link.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(out2.status.success());
+        let target = fs::read_link(&enotdir_link).unwrap();
+        assert_eq!(target, sf_a);
+    }
+
+    #[test]
+    fn test_target_dir_long_option() {
+        // ln -s --target-dir=DIR ../targetfile
+        let dir = tempfile::tempdir().unwrap();
+        let tgt_d = dir.path().join("tgt_d");
+        fs::create_dir(&tgt_d).unwrap();
+
+        let output = cmd()
+            .args([
+                "-s",
+                &format!("--target-dir={}", tgt_d.to_str().unwrap()),
+                "../targetfile",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let link = tgt_d.join("targetfile");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        let target = fs::read_link(&link).unwrap();
+        assert_eq!(target.to_str().unwrap(), "../targetfile");
+    }
+
+    #[test]
+    fn test_target_dir_abbreviated() {
+        // ln -s --target-dir=DIR should also work with abbreviation --target-d
+        let dir = tempfile::tempdir().unwrap();
+        let tgt_d = dir.path().join("tgt_d2");
+        fs::create_dir(&tgt_d).unwrap();
+
+        let output = cmd()
+            .args([
+                "-s",
+                &format!("--target-dir={}", tgt_d.to_str().unwrap()),
+                "../targetfile2",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_backup_simple_long() {
+        // ln -f --b=simple src dest (abbreviated --backup)
+        let dir = tempfile::tempdir().unwrap();
+        let bk_a = dir.path().join("bk_a");
+        let bk_b = dir.path().join("bk_b");
+        fs::write(&bk_a, "a").unwrap();
+        fs::write(&bk_b, "b").unwrap();
+
+        // Create hard link as backup dest
+        let bk_b_tilde = dir.path().join("bk_b~");
+        std::fs::hard_link(&bk_b, &bk_b_tilde).unwrap();
+
+        let output = cmd()
+            .args([
+                "-f",
+                "--b=simple",
+                bk_a.to_str().unwrap(),
+                bk_b.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn test_backup_simple_suffix_long() {
+        // ln --backup=simple --suffix=.orig src dest
+        let dir = tempfile::tempdir().unwrap();
+        let bk_x = dir.path().join("bk_x");
+        let bk_ax = dir.path().join("bk_ax");
+        fs::write(&bk_x, "x").unwrap();
+        fs::write(&bk_ax, "ax").unwrap();
+
+        let output = cmd()
+            .args([
+                "--backup=simple",
+                "--suffix=.orig",
+                bk_x.to_str().unwrap(),
+                bk_ax.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let backup = dir.path().join("bk_ax.orig");
+        assert!(
+            backup.exists(),
+            "backup file with .orig suffix should exist"
+        );
+    }
+
+    #[test]
+    fn test_logical_follows_symlink() {
+        // ln -L symlink hardlink: should follow the symlink and create hard link to target
+        let dir = tempfile::tempdir().unwrap();
+        let real_file = dir.path().join("real.txt");
+        fs::write(&real_file, "data").unwrap();
+
+        let sym = dir.path().join("sym");
+        std::os::unix::fs::symlink(&real_file, &sym).unwrap();
+
+        let hard = dir.path().join("hard");
+        let output = cmd()
+            .args(["-L", sym.to_str().unwrap(), hard.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        // hard should NOT be a symlink
+        let hard_meta = hard.symlink_metadata().unwrap();
+        assert!(!hard_meta.file_type().is_symlink());
+
+        // hard should have same inode as real_file
+        let real_meta = fs::metadata(&real_file).unwrap();
+        assert_eq!(hard_meta.ino(), real_meta.ino());
+    }
+
+    #[test]
+    fn test_logical_dangling_symlink_fails() {
+        // ln -L dangling_symlink hardlink: should fail
+        let dir = tempfile::tempdir().unwrap();
+        let dangle = dir.path().join("dangle");
+        std::os::unix::fs::symlink("/no-such-file-12345", &dangle).unwrap();
+
+        let hard = dir.path().join("hard_to_dangle");
+        let output = cmd()
+            .args(["-L", dangle.to_str().unwrap(), hard.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "Should fail for dangling symlink with -L"
+        );
+    }
+
+    #[test]
+    fn test_physical_hard_link_to_symlink() {
+        // ln -P symlink hardlink: should create hard link to the symlink itself
+        let dir = tempfile::tempdir().unwrap();
+        let dangle = dir.path().join("dangle");
+        std::os::unix::fs::symlink("/no-such-file-12345", &dangle).unwrap();
+
+        let hard = dir.path().join("hard_dangle");
+        let output = cmd()
+            .args(["-P", dangle.to_str().unwrap(), hard.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // hard should be a symlink (hard link to the symlink)
+        let hard_meta = hard.symlink_metadata().unwrap();
+        assert!(hard_meta.file_type().is_symlink());
+    }
+
+    #[test]
+    fn test_backup_same_file_fails() {
+        // ln --backup file file should fail with "are the same file"
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hb_f");
+        fs::write(&file, "data").unwrap();
+
+        let output = cmd()
+            .args(["--backup", file.to_str().unwrap(), file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
     }
 }
