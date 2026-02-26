@@ -150,14 +150,13 @@ str_improperly_len equ $ - str_improperly
 section .bss
     io_buf:     resb 65536          ; 64KB I/O read buffer (for check file reading)
     io_buf2:    resb 65536          ; 64KB I/O read buffer (for hashing files in check mode)
-    out_buf:    resb 4096           ; output line buffer
+    out_buf:    resb 8320           ; output line buffer (PATH_MAX*2 + 128 for escaped filenames)
     line_buf:   resb 65536          ; line buffer for check mode
     hash_state: resd 4              ; MD5 state (A, B, C, D)
     msg_len:    resq 1              ; total message length in bytes
     block_buf:  resb 64             ; 64-byte block assembly buffer
     block_used: resd 1              ; bytes used in block_buf
     hex_out:    resb 33             ; hex output buffer (32 chars + null)
-    fname_buf:  resb 4096           ; escaped filename buffer
     num_buf:    resb 32             ; number to string buffer
 
     ; Flags
@@ -494,7 +493,7 @@ parse_args:
 
 .add_file:
     mov     eax, [file_count]
-    cmp     eax, 255
+    cmp     eax, 256
     jge     .next_arg               ; too many files, skip
     mov     [file_args + rax*8], rsi
     inc     dword [file_count]
