@@ -62,6 +62,11 @@ fn main() {
     } else {
         let mut exit_code = 0;
         for name in &names {
+            // GNU printenv silently rejects variable names containing '='
+            if name.contains('=') {
+                exit_code = 1;
+                continue;
+            }
             match std::env::var(name) {
                 Ok(val) => print!("{}{}", val, terminator),
                 Err(_) => exit_code = 1,

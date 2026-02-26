@@ -42,6 +42,19 @@ fn raw_stat(path: &str, dereference: bool) -> Result<libc::stat, io::Error> {
     }
 }
 
+/// Perform a libc fstat call on a file descriptor.
+fn raw_fstat(fd: i32) -> Result<libc::stat, io::Error> {
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        let rc = libc::fstat(fd, &mut st);
+        if rc != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(st)
+        }
+    }
+}
+
 /// Perform a libc statfs call and return the raw `libc::statfs` structure.
 fn raw_statfs(path: &str) -> Result<libc::statfs, io::Error> {
     let c_path = CString::new(path)
@@ -61,11 +74,69 @@ fn raw_statfs(path: &str) -> Result<libc::statfs, io::Error> {
 ///
 /// Returns the formatted output string, or an error if the file cannot be accessed.
 pub fn stat_file(path: &str, config: &StatConfig) -> Result<String, io::Error> {
+    if path == "-" {
+        if config.filesystem {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "using '-' to denote standard input does not work in file system mode",
+            ));
+        }
+        return stat_stdin(config);
+    }
     if config.filesystem {
         stat_filesystem(path, config)
     } else {
         stat_regular(path, config)
     }
+}
+
+// ──────────────────────────────────────────────────
+// Stat stdin (operand "-")
+// ──────────────────────────────────────────────────
+
+fn stat_stdin(config: &StatConfig) -> Result<String, io::Error> {
+    // Use fstat(0) to get raw stat, and construct Metadata from fd
+    let st = raw_fstat(0)?;
+
+    // Get Metadata via the fd -- use ManuallyDrop so we don't close stdin
+    let f = std::mem::ManuallyDrop::new(unsafe {
+        <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(0)
+    });
+    let meta = f.metadata()?;
+
+    let display_path = "-";
+
+    if let Some(ref fmt) = config.printf_format {
+        let expanded = expand_backslash_escapes(fmt);
+        return Ok(format_file_specifiers(
+            &expanded,
+            display_path,
+            &meta,
+            &st,
+            config.dereference,
+        ));
+    }
+
+    if let Some(ref fmt) = config.format {
+        let result = format_file_specifiers(fmt, display_path, &meta, &st, config.dereference);
+        return Ok(result + "\n");
+    }
+
+    if config.terse {
+        return Ok(format_file_terse(
+            display_path,
+            &meta,
+            &st,
+            config.dereference,
+        ));
+    }
+
+    Ok(format_file_default(
+        display_path,
+        &meta,
+        &st,
+        config.dereference,
+    ))
 }
 
 // ──────────────────────────────────────────────────
@@ -339,6 +410,49 @@ fn format_file_specifiers(
     while i < chars.len() {
         if chars[i] == '%' && i + 1 < chars.len() {
             i += 1;
+
+            // Handle H/L modifiers: %Hd = major(dev), %Ld = minor(dev),
+            // %Hr = major(rdev), %Lr = minor(rdev)
+            if chars[i] == 'H' || chars[i] == 'L' {
+                if i + 1 >= chars.len() {
+                    // %H or %L at end of format string: GNU outputs '?'
+                    result.push('?');
+                    i += 1;
+                    continue;
+                }
+                let modifier = chars[i];
+                let spec = chars[i + 1];
+                match (modifier, spec) {
+                    ('H', 'd') => {
+                        result.push_str(&major(meta.dev()).to_string());
+                        i += 2;
+                        continue;
+                    }
+                    ('L', 'd') => {
+                        result.push_str(&minor(meta.dev()).to_string());
+                        i += 2;
+                        continue;
+                    }
+                    ('H', 'r') => {
+                        result.push_str(&major(meta.rdev()).to_string());
+                        i += 2;
+                        continue;
+                    }
+                    ('L', 'r') => {
+                        result.push_str(&minor(meta.rdev()).to_string());
+                        i += 2;
+                        continue;
+                    }
+                    (_, _) => {
+                        // Unknown H/L combination: GNU outputs ?<spec>
+                        result.push('?');
+                        result.push(spec);
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+
             match chars[i] {
                 'a' => {
                     result.push_str(&format!("{:o}", meta.mode() & 0o7777));

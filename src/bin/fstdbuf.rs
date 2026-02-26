@@ -189,6 +189,13 @@ fn main() {
         process::exit(125);
     }
 
+    // Line buffering stdin is meaningless (matches GNU stdbuf)
+    if matches!(input_mode, Some(coreutils_rs::stdbuf::BufferMode::Line)) {
+        eprintln!("{}: line buffering stdin is meaningless", TOOL_NAME);
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(125);
+    }
+
     let cmd_idx = command_start.unwrap();
     let config = coreutils_rs::stdbuf::StdbufConfig {
         input: input_mode,

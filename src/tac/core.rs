@@ -364,28 +364,49 @@ fn tac_string_before(
     Ok(())
 }
 
-/// Find all non-overlapping regex matches using forward scanning.
-/// Returns matches in forward order (ascending positions).
-/// For zero-width matches, advances by one byte to avoid infinite loops.
-fn find_regex_matches_forward(data: &[u8], re: &regex::bytes::Regex) -> Vec<(usize, usize)> {
+/// Find regex matches using backward scanning, replicating GNU tac's re_search behavior.
+///
+/// GNU tac searches backward position by position. At each position, it tries to
+/// match the regex starting there, but only within data[..past_end]. This means
+/// greedy patterns like `[0-9]+` see a truncated view and match fewer characters
+/// than a forward scan would. After finding a match at position `pos`, GNU tac
+/// sets `past_end = pos` for the next iteration.
+///
+/// Returns matches in forward (ascending) order.
+fn find_regex_matches_backward(data: &[u8], re: &regex::bytes::Regex) -> Vec<(usize, usize)> {
     let mut matches = Vec::new();
-    let mut search_start = 0;
+    let mut past_end = data.len();
 
-    while search_start <= data.len() {
-        match re.find_at(data, search_start) {
-            Some(m) => {
-                matches.push((m.start(), m.end()));
-                if m.start() == m.end() {
-                    // Zero-width match: advance by one to avoid infinite loop
-                    search_start = m.end() + 1;
-                } else {
-                    search_start = m.end();
+    while past_end > 0 {
+        let buf = &data[..past_end];
+        let mut found = false;
+
+        // Search backward: try matching at positions past_end-1, past_end-2, ..., 0
+        let mut pos = past_end;
+        while pos > 0 {
+            pos -= 1;
+            if let Some(m) = re.find_at(buf, pos) {
+                if m.start() == pos {
+                    matches.push((m.start(), m.end()));
+                    if m.start() == m.end() {
+                        // Zero-width match: must decrease past_end to avoid infinite loop.
+                        // Move past_end to before this position.
+                        past_end = pos;
+                    } else {
+                        past_end = m.start();
+                    }
+                    found = true;
+                    break;
                 }
             }
-            None => break,
+        }
+
+        if !found {
+            break;
         }
     }
 
+    matches.reverse();
     matches
 }
 
@@ -414,7 +435,7 @@ pub fn tac_regex_separator(
         }
     };
 
-    let matches = find_regex_matches_forward(data, &re);
+    let matches = find_regex_matches_backward(data, &re);
 
     if matches.is_empty() {
         out.write_all(data)?;

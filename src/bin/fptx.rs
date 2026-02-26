@@ -8,6 +8,24 @@ struct Cli {
     files: Vec<String>,
 }
 
+/// Helper: consume the rest of a short-option cluster or the next arg as the option value.
+fn take_short_opt_value(
+    chars: &mut std::str::Chars<'_>,
+    args: &mut impl Iterator<Item = std::ffi::OsString>,
+    opt_char: char,
+) -> String {
+    let rest: String = chars.collect();
+    if rest.is_empty() {
+        let val = args.next().unwrap_or_else(|| {
+            eprintln!("ptx: option requires an argument -- '{}'", opt_char);
+            process::exit(1);
+        });
+        val.to_string_lossy().into_owned()
+    } else {
+        rest
+    }
+}
+
 fn parse_args() -> Cli {
     let mut cli = Cli {
         config: PtxConfig::default(),
@@ -55,6 +73,10 @@ fn parse_args() -> Cli {
                 }
             } else if let Some(val) = s.strip_prefix("--break-file=") {
                 cli.config.word_regexp = Some(val.to_string());
+            } else if let Some(val) = s.strip_prefix("--flag-truncation=") {
+                cli.config.flag_truncation = Some(val.to_string());
+            } else if let Some(val) = s.strip_prefix("--macro-name=") {
+                cli.config.macro_name = Some(val.to_string());
             } else if let Some(val) = s.strip_prefix("--sentence-regexp=") {
                 cli.config.sentence_regexp = Some(val.to_string());
             } else if let Some(val) = s.strip_prefix("--word-regexp=") {
@@ -83,10 +105,11 @@ fn parse_args() -> Cli {
                             eprintln!("ptx: option '--gap-size' requires an argument");
                             process::exit(1);
                         });
-                        cli.config.gap_size = val.to_string_lossy().parse().unwrap_or_else(|_| {
-                            eprintln!("ptx: invalid gap size: '{}'", val.to_string_lossy());
-                            process::exit(1);
-                        });
+                        cli.config.gap_size =
+                            val.to_string_lossy().parse().unwrap_or_else(|_| {
+                                eprintln!("ptx: invalid gap size: '{}'", val.to_string_lossy());
+                                process::exit(1);
+                            });
                     }
                     b"--ignore-file" => {
                         let val = args.next().unwrap_or_else(|| {
@@ -115,6 +138,37 @@ fn parse_args() -> Cli {
                                 process::exit(1);
                             }
                         }
+                    }
+                    b"--flag-truncation" => {
+                        let val = args.next().unwrap_or_else(|| {
+                            eprintln!("ptx: option '--flag-truncation' requires an argument");
+                            process::exit(1);
+                        });
+                        cli.config.flag_truncation =
+                            Some(val.to_string_lossy().into_owned());
+                    }
+                    b"--macro-name" => {
+                        let val = args.next().unwrap_or_else(|| {
+                            eprintln!("ptx: option '--macro-name' requires an argument");
+                            process::exit(1);
+                        });
+                        cli.config.macro_name = Some(val.to_string_lossy().into_owned());
+                    }
+                    b"--sentence-regexp" => {
+                        let val = args.next().unwrap_or_else(|| {
+                            eprintln!("ptx: option '--sentence-regexp' requires an argument");
+                            process::exit(1);
+                        });
+                        cli.config.sentence_regexp =
+                            Some(val.to_string_lossy().into_owned());
+                    }
+                    b"--word-regexp" => {
+                        let val = args.next().unwrap_or_else(|| {
+                            eprintln!("ptx: option '--word-regexp' requires an argument");
+                            process::exit(1);
+                        });
+                        cli.config.word_regexp =
+                            Some(val.to_string_lossy().into_owned());
                     }
                     b"--help" => {
                         print_help();
@@ -145,16 +199,7 @@ fn parse_args() -> Cli {
                     'T' => cli.config.format = OutputFormat::Tex,
                     'O' => cli.config.format = OutputFormat::Roff,
                     'w' => {
-                        let rest: String = chars.collect();
-                        let val_str = if rest.is_empty() {
-                            let val = args.next().unwrap_or_else(|| {
-                                eprintln!("ptx: option requires an argument -- 'w'");
-                                process::exit(1);
-                            });
-                            val.to_string_lossy().into_owned()
-                        } else {
-                            rest
-                        };
+                        let val_str = take_short_opt_value(&mut chars, &mut args, 'w');
                         cli.config.width = val_str.parse().unwrap_or_else(|_| {
                             eprintln!("ptx: invalid width: '{}'", val_str);
                             process::exit(1);
@@ -162,16 +207,7 @@ fn parse_args() -> Cli {
                         break;
                     }
                     'g' => {
-                        let rest: String = chars.collect();
-                        let val_str = if rest.is_empty() {
-                            let val = args.next().unwrap_or_else(|| {
-                                eprintln!("ptx: option requires an argument -- 'g'");
-                                process::exit(1);
-                            });
-                            val.to_string_lossy().into_owned()
-                        } else {
-                            rest
-                        };
+                        let val_str = take_short_opt_value(&mut chars, &mut args, 'g');
                         cli.config.gap_size = val_str.parse().unwrap_or_else(|_| {
                             eprintln!("ptx: invalid gap size: '{}'", val_str);
                             process::exit(1);
@@ -179,30 +215,32 @@ fn parse_args() -> Cli {
                         break;
                     }
                     'b' => {
-                        let rest: String = chars.collect();
-                        let val_str = if rest.is_empty() {
-                            let val = args.next().unwrap_or_else(|| {
-                                eprintln!("ptx: option requires an argument -- 'b'");
-                                process::exit(1);
-                            });
-                            val.to_string_lossy().into_owned()
-                        } else {
-                            rest
-                        };
+                        let val_str = take_short_opt_value(&mut chars, &mut args, 'b');
+                        cli.config.word_regexp = Some(val_str);
+                        break;
+                    }
+                    'F' => {
+                        let val_str = take_short_opt_value(&mut chars, &mut args, 'F');
+                        cli.config.flag_truncation = Some(val_str);
+                        break;
+                    }
+                    'M' => {
+                        let val_str = take_short_opt_value(&mut chars, &mut args, 'M');
+                        cli.config.macro_name = Some(val_str);
+                        break;
+                    }
+                    'S' => {
+                        let val_str = take_short_opt_value(&mut chars, &mut args, 'S');
+                        cli.config.sentence_regexp = Some(val_str);
+                        break;
+                    }
+                    'W' => {
+                        let val_str = take_short_opt_value(&mut chars, &mut args, 'W');
                         cli.config.word_regexp = Some(val_str);
                         break;
                     }
                     'i' => {
-                        let rest: String = chars.collect();
-                        let val_str = if rest.is_empty() {
-                            let val = args.next().unwrap_or_else(|| {
-                                eprintln!("ptx: option requires an argument -- 'i'");
-                                process::exit(1);
-                            });
-                            val.to_string_lossy().into_owned()
-                        } else {
-                            rest
-                        };
+                        let val_str = take_short_opt_value(&mut chars, &mut args, 'i');
                         match ptx::read_word_file(&val_str) {
                             Ok(words) => cli.config.ignore_words = words,
                             Err(e) => {
@@ -213,16 +251,7 @@ fn parse_args() -> Cli {
                         break;
                     }
                     'o' => {
-                        let rest: String = chars.collect();
-                        let val_str = if rest.is_empty() {
-                            let val = args.next().unwrap_or_else(|| {
-                                eprintln!("ptx: option requires an argument -- 'o'");
-                                process::exit(1);
-                            });
-                            val.to_string_lossy().into_owned()
-                        } else {
-                            rest
-                        };
+                        let val_str = take_short_opt_value(&mut chars, &mut args, 'o');
                         match ptx::read_word_file(&val_str) {
                             Ok(words) => cli.config.only_words = Some(words),
                             Err(e) => {
@@ -253,20 +282,26 @@ fn print_help() {
         "Usage: ptx [OPTION]... [INPUT]...\n\
          Output a permuted index, including context, of the words in the input files.\n\n\
          With no FILE, or when FILE is -, read standard input.\n\n\
-         \x20 -A, --auto-reference         output automatically generated references\n\
-         \x20 -G, --traditional            behave more like System V 'ptx'\n\
-         \x20 -T, --format=tex             generate output as TeX directives\n\
-         \x20 -O, --format=roff            generate output as roff directives\n\
-         \x20 -R, --right-side-refs        put references at right, not counted in -w\n\
-         \x20 -f, --ignore-case            fold lower case to upper case for sorting\n\
-         \x20 -g, --gap-size=NUMBER        gap size in columns between fields\n\
-         \x20 -w, --width=NUMBER           output width in columns, reference excluded\n\
-         \x20 -b, --break-file=FILE        word break characters in this FILE\n\
-         \x20 -i, --ignore-file=FILE       read ignore word list from FILE\n\
-         \x20 -o, --only-file=FILE         read only word list from this FILE\n\
-         \x20 -r, --references             first field of each line is a reference\n\
-         \x20     --help                   display this help and exit\n\
-         \x20     --version                output version information and exit\n"
+         \x20 -A, --auto-reference           output automatically generated references\n\
+         \x20 -G, --traditional              behave more like System V 'ptx'\n\
+         \x20 -F, --flag-truncation=STRING   use STRING for flagging line truncations.\n\
+         \x20                                The default is '/'\n\
+         \x20 -M, --macro-name=STRING        macro name to use instead of 'xx'\n\
+         \x20 -O, --format=roff              generate output as roff directives\n\
+         \x20 -R, --right-side-refs          put references at right, not counted in -w\n\
+         \x20 -S, --sentence-regexp=REGEXP   for end of lines or end of sentences\n\
+         \x20 -T, --format=tex               generate output as TeX directives\n\
+         \x20 -W, --word-regexp=REGEXP       use REGEXP to match each keyword\n\
+         \x20 -b, --break-file=FILE          word break characters in this FILE\n\
+         \x20 -f, --ignore-case              fold lower case to upper case for sorting\n\
+         \x20 -g, --gap-size=NUMBER          gap size in columns between output fields\n\
+         \x20 -i, --ignore-file=FILE         read ignore word list from FILE\n\
+         \x20 -o, --only-file=FILE           read only word list from this FILE\n\
+         \x20 -r, --references               first field of each line is a reference\n\
+         \x20 -t, --typeset-mode               - not implemented -\n\
+         \x20 -w, --width=NUMBER             output width in columns, reference excluded\n\
+         \x20     --help                     display this help and exit\n\
+         \x20     --version                  output version information and exit\n"
     );
 }
 
@@ -290,40 +325,55 @@ fn main() {
             process::exit(1);
         }
     } else {
-        // Concatenate all input files
-        let mut all_input = String::new();
+        // Read each file separately, preserving file boundaries.
+        // GNU ptx processes each file's lines independently for sentence grouping.
+        let mut file_contents: Vec<(Option<String>, String)> = Vec::new();
+        let mut had_error = false;
+
         for file in &cli.files {
             if file == "-" {
                 let stdin = io::stdin();
+                let mut content = String::new();
                 for line in stdin.lock().lines() {
                     match line {
                         Ok(l) => {
-                            all_input.push_str(&l);
-                            all_input.push('\n');
+                            content.push_str(&l);
+                            content.push('\n');
                         }
                         Err(e) => {
                             eprintln!("ptx: standard input: {}", e);
-                            process::exit(1);
+                            had_error = true;
+                            break;
                         }
                     }
                 }
+                file_contents.push((None, content));
             } else {
                 match std::fs::read_to_string(file) {
-                    Ok(content) => all_input.push_str(&content),
+                    Ok(content) => {
+                        file_contents.push((Some(file.clone()), content));
+                    }
                     Err(e) => {
                         eprintln!("ptx: {}: {}", file, e);
-                        process::exit(1);
+                        had_error = true;
                     }
                 }
             }
         }
 
-        let reader = io::BufReader::new(all_input.as_bytes());
-        if let Err(e) = ptx::generate_ptx(reader, &mut out, &cli.config) {
+        if had_error && file_contents.is_empty() {
+            process::exit(1);
+        }
+
+        if let Err(e) = ptx::generate_ptx_multi(&file_contents, &mut out, &cli.config) {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 process::exit(0);
             }
             eprintln!("ptx: {}", e);
+            process::exit(1);
+        }
+
+        if had_error {
             process::exit(1);
         }
     }

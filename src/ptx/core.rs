@@ -27,6 +27,8 @@ pub struct PtxConfig {
     pub right_reference: bool,
     pub sentence_regexp: Option<String>,
     pub word_regexp: Option<String>,
+    pub flag_truncation: Option<String>,
+    pub macro_name: Option<String>,
 }
 
 impl Default for PtxConfig {
@@ -44,6 +46,8 @@ impl Default for PtxConfig {
             right_reference: false,
             sentence_regexp: None,
             word_regexp: None,
+            flag_truncation: None,
+            macro_name: None,
         }
     }
 }
@@ -68,23 +72,30 @@ struct KwicEntry {
 }
 
 /// Extract words from a line of text.
+///
+/// GNU ptx's default word regex is effectively `[a-zA-Z][a-zA-Z0-9]*`:
+/// a word must start with a letter and may continue with letters or digits.
+/// Underscores and other non-alphanumeric characters are word separators.
+/// Pure-digit tokens are not considered words.
 fn extract_words(line: &str) -> Vec<(usize, &str)> {
     let mut words = Vec::new();
-    let mut start = None;
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
 
-    for (i, ch) in line.char_indices() {
-        if ch.is_alphanumeric() || ch == '_' {
-            if start.is_none() {
-                start = Some(i);
+    while i < len {
+        // A word must start with an ASCII letter
+        if bytes[i].is_ascii_alphabetic() {
+            let start = i;
+            i += 1;
+            // Continue with letters or digits
+            while i < len && bytes[i].is_ascii_alphanumeric() {
+                i += 1;
             }
-        } else if let Some(s) = start {
-            words.push((s, &line[s..i]));
-            start = None;
+            words.push((start, &line[start..i]));
+        } else {
+            i += 1;
         }
-    }
-
-    if let Some(s) = start {
-        words.push((s, &line[s..]));
     }
 
     words
@@ -167,20 +178,23 @@ fn generate_entries(lines: &[(String, String)], config: &PtxConfig) -> Vec<KwicE
 
 /// Advance past one "word" (consecutive word chars) or one non-word char.
 /// Returns the new position after skipping.
+///
+/// A "word" here matches the default GNU ptx word definition: starts with
+/// a letter, continues with letters or digits.
 fn skip_something(s: &str, pos: usize) -> usize {
     if pos >= s.len() {
         return pos;
     }
     let bytes = s.as_bytes();
-    if bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_' {
-        // Skip word characters
-        let mut p = pos;
-        while p < s.len() && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
+    if bytes[pos].is_ascii_alphabetic() {
+        // Skip a word: letter followed by alphanumeric chars
+        let mut p = pos + 1;
+        while p < s.len() && bytes[p].is_ascii_alphanumeric() {
             p += 1;
         }
         p
     } else {
-        // Skip one non-word character
+        // Skip one non-word character (digit, underscore, punctuation, etc.)
         pos + 1
     }
 }
@@ -331,7 +345,8 @@ fn format_plain(
     // ========== Step 3: Compute tail ==========
     // tail is the overflow from keyafter that wraps to the left half.
     // tail_max_width = before_max_width - before_len - gap_size
-    let tail_max_width_raw: isize = before_max_width as isize - before_len as isize - gap as isize;
+    let tail_max_width_raw: isize =
+        before_max_width as isize - before_len as isize - gap as isize;
     let mut tail_start: usize = 0;
     let mut tail_end: usize = 0;
     let mut tail_truncation = false;
@@ -611,30 +626,30 @@ fn format_tex(entry: &KwicEntry, config: &PtxConfig) -> String {
     )
 }
 
-/// Generate a permuted index from input.
+/// Process lines from a single source, grouping them into sentence contexts.
 ///
-/// Reads lines from `input`, generates KWIC entries for each indexable word,
-/// sorts them, and writes the formatted output to `output`.
-pub fn generate_ptx<R: BufRead, W: Write>(
-    input: R,
-    output: &mut W,
+/// GNU ptx joins consecutive lines within a single file into one context
+/// unless a line ends with a sentence terminator (`.`, `?`, `!`).
+/// File boundaries always break sentences.
+fn process_lines_into_contexts(
+    content: &str,
+    filename: Option<&str>,
     config: &PtxConfig,
-) -> io::Result<()> {
-    // Read all lines and group them into contexts based on sentence terminators.
-    // GNU ptx joins consecutive lines into one circular context unless a line
-    // ends with a sentence terminator (`.`, `?`, `!`).
-    let mut lines: Vec<(String, String)> = Vec::new();
-    let mut line_num = 0usize;
+    lines_out: &mut Vec<(String, String)>,
+    global_line_num: &mut usize,
+) {
     let mut current_text = String::new();
     let mut context_ref = String::new();
     let mut first_line_of_context = true;
 
-    for line_result in input.lines() {
-        let line = line_result?;
-        line_num += 1;
+    for line in content.lines() {
+        *global_line_num += 1;
 
         let reference = if config.auto_reference {
-            format!("{}", line_num)
+            match filename {
+                Some(name) => format!("{}:{}", name, global_line_num),
+                None => format!("{}", global_line_num),
+            }
         } else {
             String::new()
         };
@@ -647,7 +662,7 @@ pub fn generate_ptx<R: BufRead, W: Write>(
         if !current_text.is_empty() {
             current_text.push(' ');
         }
-        current_text.push_str(&line);
+        current_text.push_str(line);
 
         // Check if line ends with a sentence terminator
         let trimmed = line.trim_end();
@@ -656,20 +671,26 @@ pub fn generate_ptx<R: BufRead, W: Write>(
 
         if ends_with_terminator || line.is_empty() {
             if !current_text.trim().is_empty() {
-                lines.push((context_ref.clone(), current_text.clone()));
+                lines_out.push((context_ref.clone(), current_text.clone()));
             }
             current_text.clear();
             first_line_of_context = true;
         }
     }
 
-    // Don't forget any remaining context (lines without terminators at end)
+    // Don't forget any remaining context (lines without terminators at end of file)
     if !current_text.trim().is_empty() {
-        lines.push((context_ref.clone(), current_text.clone()));
+        lines_out.push((context_ref.clone(), current_text.clone()));
     }
+}
 
+fn format_and_write<W: Write>(
+    lines: &[(String, String)],
+    output: &mut W,
+    config: &PtxConfig,
+) -> io::Result<()> {
     // Generate KWIC entries
-    let entries = generate_entries(&lines, config);
+    let entries = generate_entries(lines, config);
 
     // Compute maximum word length across all input (needed for left_field_start)
     let max_word_length = lines
@@ -682,10 +703,18 @@ pub fn generate_ptx<R: BufRead, W: Write>(
     // Compute maximum reference width (for consistent left-alignment)
     let ref_max_width = if config.auto_reference {
         // GNU ptx adds 1 for ":" and computes max across all references
-        // For auto_reference, reference is "filename:linenum" - we just use line number
-        entries.iter().map(|e| e.reference.len()).max().unwrap_or(0) + 1 // +1 for ":"
+        entries
+            .iter()
+            .map(|e| e.reference.len())
+            .max()
+            .unwrap_or(0)
+            + 1 // +1 for ":"
     } else {
-        entries.iter().map(|e| e.reference.len()).max().unwrap_or(0)
+        entries
+            .iter()
+            .map(|e| e.reference.len())
+            .max()
+            .unwrap_or(0)
     };
 
     // Format and output
@@ -699,6 +728,55 @@ pub fn generate_ptx<R: BufRead, W: Write>(
     }
 
     Ok(())
+}
+
+/// Generate a permuted index from input.
+///
+/// Reads lines from `input`, generates KWIC entries for each indexable word,
+/// sorts them, and writes the formatted output to `output`.
+pub fn generate_ptx<R: BufRead, W: Write>(
+    input: R,
+    output: &mut W,
+    config: &PtxConfig,
+) -> io::Result<()> {
+    let mut content = String::new();
+    for line_result in input.lines() {
+        let line = line_result?;
+        content.push_str(&line);
+        content.push('\n');
+    }
+
+    let mut lines: Vec<(String, String)> = Vec::new();
+    let mut global_line_num = 0usize;
+    process_lines_into_contexts(&content, None, config, &mut lines, &mut global_line_num);
+
+    format_and_write(&lines, output, config)
+}
+
+/// Generate a permuted index from multiple named file contents.
+///
+/// Each file's lines are processed independently for sentence grouping
+/// (file boundaries always break sentences), matching GNU ptx behavior.
+/// When auto_reference is enabled, references include the filename.
+pub fn generate_ptx_multi<W: Write>(
+    file_contents: &[(Option<String>, String)],
+    output: &mut W,
+    config: &PtxConfig,
+) -> io::Result<()> {
+    let mut lines: Vec<(String, String)> = Vec::new();
+    let mut global_line_num = 0usize;
+
+    for (filename, content) in file_contents {
+        process_lines_into_contexts(
+            content,
+            filename.as_deref(),
+            config,
+            &mut lines,
+            &mut global_line_num,
+        );
+    }
+
+    format_and_write(&lines, output, config)
 }
 
 /// Read a word list file (one word per line) into a HashSet.

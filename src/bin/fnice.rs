@@ -53,6 +53,7 @@ fn main() {
     coreutils_rs::common::reset_sigpipe();
 
     let mut adjustment: i32 = 10;
+    let mut adjustment_given = false;
     let mut command_start = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -82,6 +83,7 @@ fn main() {
                     eprintln!("{}: invalid adjustment '{}'", TOOL_NAME, val);
                     process::exit(125);
                 });
+                adjustment_given = true;
             }
             "--adjustment" | "-n" => {
                 i += 1;
@@ -93,6 +95,7 @@ fn main() {
                     eprintln!("{}: invalid adjustment '{}'", TOOL_NAME, args[i]);
                     process::exit(125);
                 });
+                adjustment_given = true;
             }
             s if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
                 // Could be -n N or -N (numeric)
@@ -116,9 +119,11 @@ fn main() {
                             process::exit(125);
                         });
                     }
+                    adjustment_given = true;
                 } else if let Ok(n) = rest.parse::<i32>() {
                     // -N (numeric adjustment shorthand, deprecated but GNU supports it)
                     adjustment = n;
+                    adjustment_given = true;
                 } else {
                     // Not a flag, start of command
                     command_start = Some(i);
@@ -138,7 +143,16 @@ fn main() {
     }
 
     if command_start.is_none() || command_start.unwrap() >= args.len() {
-        // No command — print current niceness + adjustment
+        if adjustment_given {
+            // GNU nice: if an adjustment was explicitly given, a command is required
+            eprintln!(
+                "{}: a command must be given with an adjustment",
+                TOOL_NAME
+            );
+            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+            process::exit(125);
+        }
+        // No command and no explicit adjustment — print current niceness
         // SAFETY: getpriority with PRIO_PROCESS and 0 (current process) is always valid.
         // getpriority() can legitimately return -1, so we must clear errno first
         // and check it after the call to detect real errors.

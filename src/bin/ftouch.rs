@@ -215,31 +215,43 @@ fn mktime_local(
     Ok(t)
 }
 
+/// Parse a -d DATE string (using current time as base for relative dates).
+#[cfg(unix)]
+fn parse_date_string(s: &str) -> Result<(i64, i64), String> {
+    parse_date_string_with_base(s, None)
+}
+
 /// Parse a -d DATE string.
 /// Supports: YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, YYYY-MM-DDTHH:MM:SS, @epoch,
 ///           "now", "yesterday", "tomorrow", "N days ago", "N days"
+/// When `base_time` is Some, relative dates use that as the base instead of current time.
 #[cfg(unix)]
-fn parse_date_string(s: &str) -> Result<(i64, i64), String> {
+fn parse_date_string_with_base(
+    s: &str,
+    base_time: Option<(i64, i64)>,
+) -> Result<(i64, i64), String> {
     let trimmed = s.trim();
 
+    let base = || -> (i64, i64) { base_time.unwrap_or_else(current_time) };
+
     if trimmed.eq_ignore_ascii_case("now") {
-        let (sec, nsec) = current_time();
+        let (sec, nsec) = base();
         return Ok((sec, nsec));
     }
 
-    // Relative date: "yesterday" — GNU date -d yesterday means 24 hours ago from now
+    // Relative date: "yesterday" — 24 hours before base
     if trimmed.eq_ignore_ascii_case("yesterday") {
-        let (sec, _) = current_time();
+        let (sec, _) = base();
         return Ok((sec - 86400, 0));
     }
 
-    // Relative date: "tomorrow" — 24 hours from now
+    // Relative date: "tomorrow" — 24 hours after base
     if trimmed.eq_ignore_ascii_case("tomorrow") {
-        let (sec, _) = current_time();
+        let (sec, _) = base();
         return Ok((sec + 86400, 0));
     }
 
-    // Relative date: "N days ago" — N*86400 seconds before now
+    // Relative date: "N days ago" — N*86400 seconds before base
     if let Some(rest) = trimmed.strip_suffix(" ago") {
         let rest = rest.trim();
         if let Some(num_str) = rest
@@ -247,18 +259,18 @@ fn parse_date_string(s: &str) -> Result<(i64, i64), String> {
             .or_else(|| rest.strip_suffix(" day"))
             && let Ok(n) = num_str.trim().parse::<i64>()
         {
-            let (sec, _) = current_time();
+            let (sec, _) = base();
             return Ok((sec - n * 86400, 0));
         }
     }
 
-    // Relative date: "N days" (future) — N*86400 seconds from now
+    // Relative date: "N days" (future/past depending on sign) — N*86400 seconds from base
     if let Some(num_str) = trimmed
         .strip_suffix(" days")
         .or_else(|| trimmed.strip_suffix(" day"))
         && let Ok(n) = num_str.trim().parse::<i64>()
     {
-        let (sec, _) = current_time();
+        let (sec, _) = base();
         return Ok((sec + n * 86400, 0));
     }
 
@@ -525,7 +537,6 @@ fn main() {
 
     // Parse and validate timestamps once, reusing the result below
     let parsed_stamp = stamp.as_deref().map(parse_touch_timestamp);
-    let parsed_date = date_str.as_deref().map(parse_date_string);
 
     if let Some(Err(_)) = &parsed_stamp {
         eprintln!(
@@ -535,22 +546,11 @@ fn main() {
         );
         process::exit(1);
     }
-    if let Some(Err(_)) = &parsed_date {
-        eprintln!(
-            "{}: invalid date format '{}'",
-            TOOL_NAME,
-            date_str.as_deref().unwrap()
-        );
-        process::exit(1);
-    }
 
-    // Determine the timestamp to apply
-    let (ts_sec, ts_nsec) = if let Some(ref r) = reference {
+    // Get reference file times if specified
+    let ref_times = if let Some(ref r) = reference {
         match get_file_times(r) {
-            Ok(tp) => match target {
-                TimeTarget::Both | TimeTarget::AccessOnly => (tp.atime_sec, tp.atime_nsec),
-                TimeTarget::ModifyOnly => (tp.mtime_sec, tp.mtime_nsec),
-            },
+            Ok(tp) => Some(tp),
             Err(e) => {
                 eprintln!(
                     "{}: failed to get attributes of '{}': {}",
@@ -561,8 +561,41 @@ fn main() {
                 process::exit(1);
             }
         }
-    } else if let Some(Ok((sec, nsec))) = parsed_date {
+    } else {
+        None
+    };
+
+    // When both --reference and --date are given, parse date relative to reference time.
+    // GNU touch uses the reference file's mtime as the base for relative date strings.
+    let parsed_date =
+        if let (Some(date_s), Some(tp)) = (date_str.as_deref(), &ref_times) {
+            Some(parse_date_string_with_base(
+                date_s,
+                Some((tp.mtime_sec, tp.mtime_nsec)),
+            ))
+        } else {
+            date_str.as_deref().map(parse_date_string)
+        };
+
+    if let Some(Err(_)) = &parsed_date {
+        eprintln!(
+            "{}: invalid date format '{}'",
+            TOOL_NAME,
+            date_str.as_deref().unwrap()
+        );
+        process::exit(1);
+    }
+
+    // Determine the timestamp to apply.
+    // When --date is given (possibly combined with --reference), --date wins.
+    // Otherwise --reference, then --stamp, then current time.
+    let (ts_sec, ts_nsec) = if let Some(Ok((sec, nsec))) = parsed_date {
         (sec, nsec)
+    } else if let Some(ref tp) = ref_times {
+        match target {
+            TimeTarget::Both | TimeTarget::AccessOnly => (tp.atime_sec, tp.atime_nsec),
+            TimeTarget::ModifyOnly => (tp.mtime_sec, tp.mtime_nsec),
+        }
     } else if let Some(Ok((sec, nsec))) = parsed_stamp {
         (sec, nsec)
     } else {
@@ -571,8 +604,64 @@ fn main() {
 
     let mut exit_code = 0;
     for file in &files {
-        // Create file if it doesn't exist and -c not specified
-        if !path_exists(file) {
+        // Trailing slash on a non-directory should fail with ENOTDIR (GNU compat)
+        if file.ends_with('/') {
+            let base = file.trim_end_matches('/');
+            if !base.is_empty() {
+                if let Ok(meta) = fs::symlink_metadata(base) {
+                    if !meta.is_dir() {
+                        eprintln!(
+                            "{}: setting times of '{}': Not a directory",
+                            TOOL_NAME, file
+                        );
+                        exit_code = 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Check for dangling symlink: symlink itself exists but target does not.
+        // When not in no-dereference mode, create the target file so touch
+        // through a dangling symlink works like GNU touch.
+        if !no_deref && is_dangling_symlink(file) {
+            if no_create {
+                continue;
+            }
+            match fs::read_link(file) {
+                Ok(target_path) => {
+                    let create_path = if target_path.is_absolute() {
+                        target_path
+                    } else {
+                        let parent = std::path::Path::new(file)
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."));
+                        parent.join(target_path)
+                    };
+                    if let Err(e) = fs::File::create(&create_path) {
+                        eprintln!(
+                            "{}: cannot touch '{}': {}",
+                            TOOL_NAME,
+                            file,
+                            coreutils_rs::common::io_error_msg(&e)
+                        );
+                        exit_code = 1;
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{}: cannot touch '{}': {}",
+                        TOOL_NAME,
+                        file,
+                        coreutils_rs::common::io_error_msg(&e)
+                    );
+                    exit_code = 1;
+                    continue;
+                }
+            }
+        } else if !path_exists(file) {
+            // Create file if it doesn't exist and -c not specified
             if no_create {
                 continue;
             }
@@ -607,6 +696,18 @@ fn main() {
 #[cfg(unix)]
 fn path_exists(path: &str) -> bool {
     fs::symlink_metadata(path).is_ok()
+}
+
+/// Check if path is a symlink whose target does not exist (dangling symlink).
+#[cfg(unix)]
+fn is_dangling_symlink(path: &str) -> bool {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            // fs::metadata follows symlinks; if it fails, the target doesn't exist
+            return fs::metadata(path).is_err();
+        }
+    }
+    false
 }
 
 #[cfg(unix)]

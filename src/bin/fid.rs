@@ -110,6 +110,15 @@ fn main() {
         process::exit(1);
     }
 
+    // --zero only valid with -u, -g, or -G (not default format)
+    if flag_zero && !flag_user && !flag_group && !flag_groups {
+        eprintln!(
+            "{}: option --zero not permitted in default format",
+            TOOL_NAME
+        );
+        process::exit(1);
+    }
+
     // Only one of -u, -g, -G may be specified
     let mode_count = flag_user as u8 + flag_group as u8 + flag_groups as u8;
     if mode_count > 1 {
@@ -123,19 +132,27 @@ fn main() {
     let delim = if flag_zero { '\0' } else { '\n' };
 
     if let Some(ref name) = username {
-        // Look up user by name
+        // Look up user by name, then fall back to numeric UID
         let c_name = CString::new(name.as_str()).unwrap_or_else(|_| {
             eprintln!("{}: '{}': no such user", TOOL_NAME, name);
             process::exit(1);
         });
-        let pw = unsafe { libc::getpwnam(c_name.as_ptr()) };
+        let mut pw = unsafe { libc::getpwnam(c_name.as_ptr()) };
         if pw.is_null() {
-            eprintln!("{}: '{}': no such user", TOOL_NAME, name);
-            process::exit(1);
+            // Try as numeric UID
+            if let Ok(numeric_uid) = name.parse::<libc::uid_t>() {
+                pw = unsafe { libc::getpwuid(numeric_uid) };
+            }
+            if pw.is_null() {
+                eprintln!("{}: '{}': no such user", TOOL_NAME, name);
+                process::exit(1);
+            }
         }
         let uid = unsafe { (*pw).pw_uid };
         let gid = unsafe { (*pw).pw_gid };
-        let groups = get_user_groups(&c_name, gid);
+        let pw_name = unsafe { CStr::from_ptr((*pw).pw_name) };
+        let pw_name_cstring = CString::new(pw_name.to_bytes()).unwrap();
+        let groups = get_user_groups(&pw_name_cstring, gid);
 
         if flag_user {
             print_id(uid, flag_name, delim);
