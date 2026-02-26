@@ -196,7 +196,7 @@ fn process_bytes(input: &[u8], out: &mut BufWriter<io::StdoutLock>) -> bool {
 }
 
 /// Process numbers from stdin using raw byte scanning for maximum throughput.
-/// Uses mmap for file redirections (zero-copy), read_to_end for pipes.
+/// Uses mmap for file redirections (zero-copy), streaming chunks for pipes.
 fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
     // Try mmap for file redirections (zero-copy, zero-allocation input)
     #[cfg(unix)]
@@ -206,15 +206,195 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
         }
     }
 
-    // Pipe fallback: read all stdin into memory
+    // Pipe: stream-process in chunks so cat and factor overlap.
+    // read_to_end would block until all input arrives, preventing overlap.
     use std::io::Read;
     let stdin = io::stdin();
-    let mut input = Vec::new();
-    if let Err(e) = stdin.lock().read_to_end(&mut input) {
-        eprintln!("{}: read error: {}", TOOL_NAME, e);
-        return true;
+    let mut reader = stdin.lock();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut leftover = 0usize; // bytes carried over from previous chunk
+    let mut had_error = false;
+    let mut out_buf = Vec::with_capacity(256 * 1024);
+
+    loop {
+        let n = match reader.read(&mut buf[leftover..]) {
+            Ok(0) => {
+                // EOF: process any remaining leftover bytes
+                if leftover > 0 {
+                    if process_chunk(&buf[..leftover], &mut out_buf, out) {
+                        had_error = true;
+                    }
+                }
+                break;
+            }
+            Ok(n) => n,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                eprintln!("{}: read error: {}", TOOL_NAME, e);
+                return true;
+            }
+        };
+
+        let total = leftover + n;
+        // Find last newline/whitespace boundary to avoid splitting a number
+        let boundary = match memchr::memrchr(b'\n', &buf[..total]) {
+            Some(pos) => pos + 1,
+            None => {
+                // No newline in buffer — carry everything forward
+                leftover = total;
+                if leftover >= buf.len() {
+                    // Buffer full with no newline: process as-is (very long line)
+                    if process_chunk(&buf[..leftover], &mut out_buf, out) {
+                        had_error = true;
+                    }
+                    leftover = 0;
+                }
+                continue;
+            }
+        };
+
+        // Process complete lines
+        if process_chunk(&buf[..boundary], &mut out_buf, out) {
+            had_error = true;
+        }
+
+        // Move leftover (incomplete line) to start of buffer
+        let remaining = total - boundary;
+        if remaining > 0 {
+            buf.copy_within(boundary..total, 0);
+        }
+        leftover = remaining;
     }
-    process_bytes(&input, out)
+
+    if !out_buf.is_empty() && out.write_all(&out_buf).is_err() {
+        process::exit(0);
+    }
+
+    had_error
+}
+
+/// Process a chunk of bytes containing whitespace-delimited numbers.
+/// Returns true if any error occurred.
+fn process_chunk(input: &[u8], out_buf: &mut Vec<u8>, out: &mut BufWriter<io::StdoutLock>) -> bool {
+    let mut had_error = false;
+    let mut pos = 0;
+    let len = input.len();
+
+    while pos < len {
+        // Skip whitespace
+        while pos < len
+            && (input[pos] == b' '
+                || input[pos] == b'\n'
+                || input[pos] == b'\r'
+                || input[pos] == b'\t')
+        {
+            pos += 1;
+        }
+        if pos >= len {
+            break;
+        }
+
+        // Scan token
+        let start = pos;
+        while pos < len
+            && input[pos] != b' '
+            && input[pos] != b'\n'
+            && input[pos] != b'\r'
+            && input[pos] != b'\t'
+        {
+            pos += 1;
+        }
+
+        let token = &input[start..pos];
+        if token.is_empty() {
+            continue;
+        }
+
+        // Try u64 fast path first
+        let mut n64: u64 = 0;
+        let mut valid_u64 = true;
+        let mut overflowed = false;
+        for &b in token {
+            let d = b.wrapping_sub(b'0');
+            if d > 9 {
+                valid_u64 = false;
+                break;
+            }
+            n64 = match n64.checked_mul(10) {
+                Some(v) => match v.checked_add(d as u64) {
+                    Some(v) => v,
+                    None => {
+                        overflowed = true;
+                        break;
+                    }
+                },
+                None => {
+                    overflowed = true;
+                    break;
+                }
+            };
+        }
+        if valid_u64 && !overflowed {
+            factor::write_factors_u64(n64, out_buf);
+            if out_buf.len() >= 128 * 1024 {
+                if out.write_all(out_buf).is_err() {
+                    process::exit(0);
+                }
+                out_buf.clear();
+            }
+            continue;
+        }
+        // u128 path for overflow
+        if overflowed {
+            let mut n: u128 = 0;
+            let mut valid_u128 = true;
+            for &b in token {
+                let d = b.wrapping_sub(b'0');
+                if d > 9 {
+                    valid_u128 = false;
+                    break;
+                }
+                n = match n.checked_mul(10) {
+                    Some(v) => match v.checked_add(d as u128) {
+                        Some(v) => v,
+                        None => {
+                            valid_u128 = false;
+                            break;
+                        }
+                    },
+                    None => {
+                        valid_u128 = false;
+                        break;
+                    }
+                };
+            }
+            if valid_u128 {
+                factor::write_factors(n, out_buf);
+                if out_buf.len() >= 128 * 1024 {
+                    if out.write_all(out_buf).is_err() {
+                        process::exit(0);
+                    }
+                    out_buf.clear();
+                }
+                continue;
+            }
+        }
+
+        // Invalid token
+        if !out_buf.is_empty() {
+            let _ = out.write_all(out_buf);
+            out_buf.clear();
+        }
+        let _ = out.flush();
+        let token_str = String::from_utf8_lossy(token);
+        eprintln!(
+            "{}: \u{2018}{}\u{2019} is not a valid positive integer",
+            TOOL_NAME, token_str
+        );
+        had_error = true;
+    }
+
+    had_error
 }
 
 fn main() {
