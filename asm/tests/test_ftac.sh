@@ -143,6 +143,10 @@ run_stdin "multi-byte before"     "aXYbXYc" -b -s XY
 run_stdin "sep in word"           "line1\nline2\n" -s in
 run_stdin "sep ABC"               "oneABCtwoABCthree" -s ABC
 run_stdin "sep ABC before"        "oneABCtwoABCthree" -b -s ABC
+run_stdin "overlap sep after"     "aXaXaXa" -s XaX
+run_stdin "overlap sep before"    "aXaXaXa" -b -s XaX
+run_stdin "consecutive seps"      "XYXY" -s XY
+run_stdin "sep same as input"     "XY" -s XY
 
 # ── SECTION: Combined flags ──
 echo ""
@@ -153,6 +157,7 @@ run_stdin "combined -b -sX"       "aXbXc" -b -sX
 # ── SECTION: Edge cases ──
 echo ""
 echo "── Edge cases ──"
+run_stdin "empty separator"        "hello" -s ""
 run_file  "empty file"            "$TMPDIR/empty.txt"
 run_file  "binary input"          "$TMPDIR/binary.txt"
 run_file  "very long line"        "$TMPDIR/longline.txt"

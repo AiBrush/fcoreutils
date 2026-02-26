@@ -605,6 +605,10 @@ process_one_file:
     mov     r13, [G_SEP_PTR]
     mov     r15, [G_SEP_LEN]
 
+    ; Handle empty separator — output data unchanged (GNU behavior)
+    test    r15, r15
+    jz      .pof_passthrough
+
     cmp     r15, 1
     jne     .pof_multi_byte
 
@@ -622,6 +626,13 @@ process_one_file:
     mov     rdi, r14
     mov     rsi, rbp
     call    tac_before
+    jmp     .pof_cleanup
+
+.pof_passthrough:
+    ; Empty separator — just write data as-is
+    mov     rdi, r14
+    mov     rsi, rbp
+    call    buffered_write
     jmp     .pof_cleanup
 
 .pof_multi_byte:
@@ -1062,14 +1073,14 @@ tac_multi_byte:
 
     mov     r12, rax
     xor     r13d, r13d
-    xor     r15d, r15d
+
+    ; Backward scan for separator positions (matches GNU tac behavior)
+    mov     r15, rbp
+    sub     r15, [rsp+8]            ; r15 = last possible start position
 
 .tmb_scan:
-    mov     rax, rbp
-    mov     rcx, [rsp+8]
-    sub     rax, r15
-    cmp     rax, rcx
-    jl      .tmb_scan_done
+    test    r15, r15
+    js      .tmb_scan_done
 
     lea     rdi, [r14 + r15]
     mov     rsi, [rsp]
@@ -1088,14 +1099,30 @@ tac_multi_byte:
 .tmb_match:
     mov     [r12 + r13*8], r15
     inc     r13
-    add     r15, [rsp+8]
+    sub     r15, [rsp+8]
     jmp     .tmb_scan
 
 .tmb_no_match:
-    inc     r15
+    dec     r15
     jmp     .tmb_scan
 
 .tmb_scan_done:
+    ; Reverse positions array (stored decreasing, need increasing)
+    cmp     r13, 2
+    jl      .tmb_reversed
+    xor     ecx, ecx
+    lea     rdx, [r13 - 1]
+.tmb_reverse:
+    cmp     rcx, rdx
+    jge     .tmb_reversed
+    mov     rax, [r12 + rcx*8]
+    mov     r8, [r12 + rdx*8]
+    mov     [r12 + rcx*8], r8
+    mov     [r12 + rdx*8], rax
+    inc     rcx
+    dec     rdx
+    jmp     .tmb_reverse
+.tmb_reversed:
     test    r13, r13
     jz      .tmb_no_seps
 
