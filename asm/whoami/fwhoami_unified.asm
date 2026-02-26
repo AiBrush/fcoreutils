@@ -100,6 +100,8 @@ str_err_operand1:   db "whoami: extra operand '", 0
 str_err_operand2:   db "'", 10, "Try 'whoami --help' for more information.", 10, 0
 str_err_unrec1:     db "whoami: unrecognized option '", 0
 str_err_unrec2:     db "'", 10, "Try 'whoami --help' for more information.", 10, 0
+str_err_invalid1:   db "whoami: invalid option -- '", 0
+str_err_invalid2:   db "'", 10, "Try 'whoami --help' for more information.", 10, 0
 newline:            db 10
 
 ; ── Code ───────────────────────────────────────────────────
@@ -115,11 +117,20 @@ _start:
     ; Get argv[1]
     mov     rsi, [r15 + 8]      ; argv[1]
 
-    ; Check if argv[1] starts with '--'
+    ; Check if argv[1] starts with '-'
     cmp     byte [rsi], '-'
-    jne     .extra_operand
+    jne     .extra_operand_argv1
+
+    ; argv[1] starts with '-'
+    cmp     byte [rsi + 1], 0
+    je      .extra_operand_argv1 ; "-" alone is an extra operand
+
     cmp     byte [rsi + 1], '-'
-    jne     .extra_operand
+    jne     .invalid_short_option ; "-x" is an invalid short option
+
+    ; argv[1] starts with '--'
+    cmp     byte [rsi + 2], 0
+    je      .end_of_options     ; "--" alone is end-of-options marker
 
     ; Check --help
     mov     rdi, rsi
@@ -138,18 +149,54 @@ _start:
     ; Unrecognized option starting with --
     jmp     .unrecognized_option
 
-.extra_operand:
+.end_of_options:
+    ; "--" means end of options
+    ; If argc == 2, no more args after "--" -> run main
+    cmp     r14, 2
+    je      .run_main
+    ; If argc > 2, argv[2] is an extra operand
+    mov     rbx, [r15 + 16]     ; argv[2]
+    jmp     .report_extra_operand
+
+.invalid_short_option:
+    ; "-x" -> "whoami: invalid option -- 'x'"
+    mov     rdi, STDERR
+    mov     rsi, str_err_invalid1
+    call    _strlen_and_write
+
+    ; Write the single option character (argv[1][1])
+    mov     rsi, [r15 + 8]
+    add     rsi, 1              ; point to char after '-'
+    mov     rdi, STDERR
+    mov     rdx, 1
+    call    _write
+
+    ; Write closing quote + try message
+    mov     rdi, STDERR
+    mov     rsi, str_err_invalid2
+    call    _strlen_and_write
+
+    mov     rdi, 1
+    jmp     _exit
+
+.extra_operand_argv1:
+    mov     rbx, [r15 + 8]      ; argv[1]
+
+.report_extra_operand:
+    ; whoami: extra operand 'ARG'
+    ; rbx = pointer to the operand string
     mov     rdi, STDERR
     mov     rsi, str_err_operand1
     call    _strlen_and_write
+
     ; Write the argument
-    mov     rdi, [r15 + 8]
-    push    rdi
+    mov     rdi, rbx
     call    _strlen
     mov     rdx, rax
-    pop     rsi
+    mov     rsi, rbx
     mov     rdi, STDERR
     call    _write
+
     ; Write closing quote + rest
     mov     rdi, STDERR
     mov     rsi, str_err_operand2
