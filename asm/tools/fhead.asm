@@ -40,6 +40,12 @@ extern asm_exit
 %define MODE_LINES_END   2              ; -n -N
 %define MODE_BYTES_END   3              ; -c -N
 
+; mmap constants
+%define PROT_READ        1
+%define PROT_WRITE       2
+%define MAP_PRIVATE      2
+%define MAP_ANONYMOUS    0x20
+
 section .text
 global _start
 
@@ -145,6 +151,29 @@ _start:
     ; Check for EPIPE
     cmp     rax, -EPIPE
     je      .epipe_exit
+    ; Print read error: "head: error reading 'FILE': ERROR\n"
+    push    rax
+    mov     rdi, STDERR
+    lea     rsi, [rel err_reading_pre]
+    mov     rdx, err_reading_pre_len
+    call    asm_write_all
+    mov     rdi, rbx
+    call    str_len
+    mov     rdx, rax
+    mov     rdi, STDERR
+    mov     rsi, rbx
+    call    asm_write_all
+    mov     rdi, STDERR
+    lea     rsi, [rel err_reading_mid]
+    mov     rdx, err_reading_mid_len
+    call    asm_write_all
+    pop     rax
+    neg     rax
+    call    print_errno
+    mov     rdi, STDERR
+    lea     rsi, [rel newline_str]
+    mov     rdx, 1
+    call    asm_write_all
     mov     byte [rel had_error], 1
     jmp     .file_next
 
@@ -160,6 +189,27 @@ _start:
     jns     .file_next
     cmp     rax, -EPIPE
     je      .epipe_exit
+    ; Print read error for stdin
+    push    rax
+    mov     rdi, STDERR
+    lea     rsi, [rel err_reading_pre]
+    mov     rdx, err_reading_pre_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    lea     rsi, [rel stdin_name]
+    mov     rdx, 14
+    call    asm_write_all
+    mov     rdi, STDERR
+    lea     rsi, [rel err_reading_mid]
+    mov     rdx, err_reading_mid_len
+    call    asm_write_all
+    pop     rax
+    neg     rax
+    call    print_errno
+    mov     rdi, STDERR
+    lea     rsi, [rel newline_str]
+    mov     rdx, 1
+    call    asm_write_all
     mov     byte [rel had_error], 1
     jmp     .file_next
 
@@ -431,7 +481,7 @@ head_lines:
     ret
 
 .hl_read_error:
-    mov     rax, -1
+    ; rax already has the negative errno from asm_read
     pop     rbp
     pop     r15
     pop     r14
@@ -503,7 +553,7 @@ head_bytes:
     ret
 
 .hb_read_error:
-    mov     rax, -1
+    ; rax already has the negative errno from asm_read
     pop     rbp
     pop     r14
     pop     r13
@@ -519,8 +569,130 @@ head_bytes:
 
 
 ; ============================================================================
+;  read_all_dynamic — Read entire fd into a dynamically-growing buffer
+;  Starts with frombuf (4MB BSS), grows via mmap if needed.
+;  Input: rdi = fd
+;  Output: rax = buf pointer, rdx = total bytes read, rcx = buf capacity
+;          rax = negative errno on error
+;  Caller must call free_dynamic_buf after use if buf != frombuf.
+; ============================================================================
+read_all_dynamic:
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    rbp
+
+    mov     r12, rdi                    ; fd
+    lea     r13, [rel frombuf]          ; current buffer pointer
+    mov     r14, FROMBUF_SIZE           ; current capacity
+    xor     r15d, r15d                  ; total bytes read
+
+.rad_read_loop:
+    mov     rdx, r14
+    sub     rdx, r15
+    jz      .rad_grow                   ; buffer full, need to grow
+    mov     rdi, r12
+    mov     rsi, r13
+    add     rsi, r15
+    call    asm_read
+    test    rax, rax
+    jz      .rad_done                   ; EOF
+    js      .rad_error
+    add     r15, rax
+    jmp     .rad_read_loop
+
+.rad_grow:
+    ; Double the capacity via mmap
+    mov     rbp, r14                    ; old capacity
+    shl     r14, 1                      ; new capacity = 2x
+
+    ; mmap(NULL, new_cap, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    mov     rax, SYS_MMAP
+    xor     edi, edi                    ; addr = NULL
+    mov     rsi, r14                    ; length = new capacity
+    mov     edx, PROT_READ | PROT_WRITE
+    mov     r10d, MAP_PRIVATE | MAP_ANONYMOUS
+    mov     r8, -1                      ; fd = -1
+    xor     r9d, r9d                    ; offset = 0
+    syscall
+    test    rax, rax
+    js      .rad_error                  ; mmap failed
+
+    ; Copy old data to new buffer
+    push    rax                         ; save new buffer ptr
+    mov     rdi, rax                    ; dst = new buffer
+    mov     rsi, r13                    ; src = old buffer
+    mov     rcx, r15                    ; count = bytes read so far
+    rep     movsb
+    pop     rax
+
+    ; Free old buffer if it was mmap'd (not the static frombuf)
+    push    rax                         ; save new buffer ptr
+    lea     rdx, [rel frombuf]
+    cmp     r13, rdx
+    je      .rad_skip_munmap
+    ; munmap(old_buf, old_cap)
+    mov     rdi, r13
+    mov     rsi, rbp                    ; old capacity
+    push    rax
+    mov     rax, SYS_MUNMAP
+    syscall
+    pop     rax
+.rad_skip_munmap:
+    pop     r13                         ; r13 = new buffer pointer (was rax)
+    jmp     .rad_read_loop
+
+.rad_done:
+    mov     rax, r13                    ; buffer pointer
+    mov     rdx, r15                    ; total bytes
+    mov     rcx, r14                    ; capacity
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    ret
+
+.rad_error:
+    ; rax has the negative errno; clean up mmap'd buffer if needed
+    push    rax
+    lea     rdx, [rel frombuf]
+    cmp     r13, rdx
+    je      .rad_err_done
+    mov     rdi, r13
+    mov     rsi, r14
+    mov     rax, SYS_MUNMAP
+    syscall
+.rad_err_done:
+    pop     rax
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    ret
+
+
+; ============================================================================
+;  free_dynamic_buf — Free buffer if it was mmap'd (not frombuf)
+;  Input: rdi = buf pointer, rsi = capacity
+; ============================================================================
+free_dynamic_buf:
+    lea     rax, [rel frombuf]
+    cmp     rdi, rax
+    je      .fdb_noop
+    ; munmap
+    mov     rax, SYS_MUNMAP
+    ; rdi = addr (already set), rsi = len (already set)
+    syscall
+.fdb_noop:
+    ret
+
+
+; ============================================================================
 ;  head_lines_from_end — Output all but last N lines from fd
-;  Reads entire input into frombuf, then scans backward
+;  Reads entire input via dynamic buffer, then scans backward
 ;  Input: rdi = fd, rsi = n
 ;  Output: rax = 0 on success, negative on error
 ; ============================================================================
@@ -536,70 +708,60 @@ head_lines_from_end:
     test    r13, r13
     jz      .hlfe_output_all            ; -n -0 means output everything
 
-    ; Read entire input into frombuf
-    xor     r14d, r14d                  ; total bytes read
-.hlfe_read_loop:
-    mov     rdx, FROMBUF_SIZE
-    sub     rdx, r14
-    jz      .hlfe_read_done             ; buffer full
+    ; Read entire input into dynamic buffer
     mov     rdi, r12
-    lea     rsi, [rel frombuf]
-    add     rsi, r14
-    call    asm_read
+    call    read_all_dynamic
     test    rax, rax
-    jz      .hlfe_read_done             ; EOF
-    js      .hlfe_read_error
-    add     r14, rax
-    jmp     .hlfe_read_loop
+    js      .hlfe_read_error            ; rax = negative errno
+    mov     rbp, rax                    ; buf pointer
+    mov     r14, rdx                    ; total bytes
+    mov     r15, rcx                    ; buf capacity (for cleanup)
 
-.hlfe_read_done:
-    ; r14 = total bytes in frombuf
+    ; r14 = total bytes in buffer
     test    r14, r14
-    jz      .hlfe_done_ok               ; empty input
+    jz      .hlfe_done_ok_cleanup       ; empty input
 
     ; Determine delimiter
-    movzx   r15d, byte [rel zero_term]
-    test    r15d, r15d
+    movzx   ecx, byte [rel zero_term]
+    test    cl, cl
     jz      .hlfe_delim_nl
-    xor     r15d, r15d                  ; NUL
+    xor     ecx, ecx                    ; NUL
     jmp     .hlfe_scan_back
 .hlfe_delim_nl:
-    mov     r15d, 10                    ; newline
+    mov     cl, 10                      ; newline
 
 .hlfe_scan_back:
     ; Scan backward from end, skip N delimiters
-    ; If last byte is not delimiter, the trailing content counts as 1 extra line
-    lea     rsi, [rel frombuf]
-    mov     rcx, r14                    ; total length
+    mov     rsi, rbp                    ; buffer start
+    mov     r12, r14                    ; working offset = total length
     xor     edx, edx                    ; delimiter count
 
     ; Check if last byte is the delimiter
-    cmp     byte [rsi + rcx - 1], r15b
+    cmp     byte [rsi + r12 - 1], cl
     je      .hlfe_back_loop
-    ; Last byte is NOT delimiter — trailing content counts as 1 line
-    inc     edx                         ; start count at 1
+    inc     edx                         ; trailing content counts as 1 line
 
 .hlfe_back_loop:
-    dec     rcx
+    dec     r12
     js      .hlfe_nothing               ; went past beginning
-    cmp     byte [rsi + rcx], r15b
+    cmp     byte [rsi + r12], cl
     jne     .hlfe_back_loop
     inc     edx
     cmp     rdx, r13
     jbe     .hlfe_back_loop
     ; Found the (N+1)th delimiter from end; output up to and including it
-    inc     rcx                         ; include the delimiter
-    mov     rdx, rcx
+    inc     r12
+    mov     rdx, r12
     mov     rdi, STDOUT
-    lea     rsi, [rel frombuf]
+    mov     rsi, rbp
     call    asm_write_all
     test    rax, rax
     js      .hlfe_write_err
-    jmp     .hlfe_done_ok
+    jmp     .hlfe_done_ok_cleanup
 
 .hlfe_nothing:
     ; Fewer than N+1 delimiters → N >= total lines → output nothing
-    jmp     .hlfe_done_ok
+    jmp     .hlfe_done_ok_cleanup
 
 .hlfe_output_all:
     ; -n -0: output entire file by streaming
@@ -612,7 +774,11 @@ head_lines_from_end:
     pop     r12
     jmp     head_lines                  ; tail call
 
-.hlfe_done_ok:
+.hlfe_done_ok_cleanup:
+    ; Free dynamic buffer if needed
+    mov     rdi, rbp
+    mov     rsi, r15
+    call    free_dynamic_buf
     xor     eax, eax
     pop     rbp
     pop     r15
@@ -622,7 +788,7 @@ head_lines_from_end:
     ret
 
 .hlfe_read_error:
-    mov     rax, -1
+    ; rax already has the negative errno
     pop     rbp
     pop     r15
     pop     r14
@@ -631,6 +797,12 @@ head_lines_from_end:
     ret
 
 .hlfe_write_err:
+    ; Free dynamic buffer then return error
+    push    rax
+    mov     rdi, rbp
+    mov     rsi, r15
+    call    free_dynamic_buf
+    pop     rax
     pop     rbp
     pop     r15
     pop     r14
@@ -641,7 +813,7 @@ head_lines_from_end:
 
 ; ============================================================================
 ;  head_bytes_from_end — Output all but last N bytes from fd
-;  Reads entire input into frombuf, outputs data[:len-N]
+;  Reads entire input via dynamic buffer, outputs data[:len-N]
 ;  Input: rdi = fd, rsi = n
 ;  Output: rax = 0 on success, negative on error
 ; ============================================================================
@@ -649,6 +821,7 @@ head_bytes_from_end:
     push    r12
     push    r13
     push    r14
+    push    r15
     push    rbp
 
     mov     r12, rdi                    ; fd
@@ -656,63 +829,67 @@ head_bytes_from_end:
     test    r13, r13
     jz      .hbfe_output_all            ; -c -0 means output everything
 
-    ; Read entire input into frombuf
-    xor     r14d, r14d                  ; total bytes
-.hbfe_read_loop:
-    mov     rdx, FROMBUF_SIZE
-    sub     rdx, r14
-    jz      .hbfe_read_done
+    ; Read entire input into dynamic buffer
     mov     rdi, r12
-    lea     rsi, [rel frombuf]
-    add     rsi, r14
-    call    asm_read
+    call    read_all_dynamic
     test    rax, rax
-    jz      .hbfe_read_done
-    js      .hbfe_read_error
-    add     r14, rax
-    jmp     .hbfe_read_loop
+    js      .hbfe_read_error            ; rax = negative errno
+    mov     rbp, rax                    ; buf pointer
+    mov     r14, rdx                    ; total bytes
+    mov     r15, rcx                    ; buf capacity (for cleanup)
 
-.hbfe_read_done:
     ; Output data[0..len-N]
     mov     rax, r14
     sub     rax, r13
-    jle     .hbfe_done_ok               ; N >= len, output nothing
+    jle     .hbfe_done_ok_cleanup       ; N >= len, output nothing
     mov     rdx, rax                    ; bytes to write
     mov     rdi, STDOUT
-    lea     rsi, [rel frombuf]
+    mov     rsi, rbp
     call    asm_write_all
     test    rax, rax
     js      .hbfe_write_err
-    jmp     .hbfe_done_ok
+    jmp     .hbfe_done_ok_cleanup
 
 .hbfe_output_all:
     ; -c -0: output everything by streaming
     mov     rdi, r12
     mov     rsi, 0x7FFFFFFFFFFFFFFF
     pop     rbp
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
     jmp     head_bytes                  ; tail call
 
-.hbfe_done_ok:
+.hbfe_done_ok_cleanup:
+    mov     rdi, rbp
+    mov     rsi, r15
+    call    free_dynamic_buf
     xor     eax, eax
     pop     rbp
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
     ret
 
 .hbfe_read_error:
-    mov     rax, -1
+    ; rax already has the negative errno
     pop     rbp
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
     ret
 
 .hbfe_write_err:
+    push    rax
+    mov     rdi, rbp
+    mov     rsi, r15
+    call    free_dynamic_buf
+    pop     rax
     pop     rbp
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
@@ -793,6 +970,7 @@ parse_args:
 
     ; Legacy: -NUM
     mov     rdi, rsi                    ; parse from current pos
+    mov     [rel parse_val_ptr], rdi    ; save for error messages
     call    parse_number_with_suffix
     test    rax, rax
     js      .pa_invalid_lines_num
@@ -816,8 +994,9 @@ parse_args:
 .pa_parse_lines_val:
     ; Check for leading '-'
     cmp     byte [rdi], '-'
-    jne     .pa_lines_positive
+    jne     .pa_lines_check_plus
     inc     rdi
+    mov     [rel parse_val_ptr], rdi    ; save value (after '-') for error messages
     call    parse_number_with_suffix
     test    rax, rax
     js      .pa_invalid_lines
@@ -825,7 +1004,13 @@ parse_args:
     mov     qword [rel mode], MODE_LINES_END
     jmp     .pa_next
 
+.pa_lines_check_plus:
+    ; Check for leading '+' (GNU treats +N same as N)
+    cmp     byte [rdi], '+'
+    jne     .pa_lines_positive
+    inc     rdi
 .pa_lines_positive:
+    mov     [rel parse_val_ptr], rdi    ; save value for error messages
     call    parse_number_with_suffix
     test    rax, rax
     js      .pa_invalid_lines
@@ -847,8 +1032,9 @@ parse_args:
     mov     rdi, rsi
 .pa_parse_bytes_val:
     cmp     byte [rdi], '-'
-    jne     .pa_bytes_positive
+    jne     .pa_bytes_check_plus
     inc     rdi
+    mov     [rel parse_val_ptr], rdi    ; save value (after '-') for error messages
     call    parse_number_with_suffix
     test    rax, rax
     js      .pa_invalid_bytes
@@ -856,7 +1042,13 @@ parse_args:
     mov     qword [rel mode], MODE_BYTES_END
     jmp     .pa_next
 
+.pa_bytes_check_plus:
+    ; Check for leading '+' (GNU treats +N same as N)
+    cmp     byte [rdi], '+'
+    jne     .pa_bytes_positive
+    inc     rdi
 .pa_bytes_positive:
+    mov     [rel parse_val_ptr], rdi    ; save value for error messages
     call    parse_number_with_suffix
     test    rax, rax
     js      .pa_invalid_bytes
@@ -1132,9 +1324,14 @@ parse_args:
     call    asm_write_all
 
 .pa_invalid_num_finish:
-    ; Print the problematic value — we use the current arg
-    ; For -nVAL or --lines=VAL, print just the value part
-    ; For simplicity, we'll print the raw value
+    ; Print the problematic value from parse_val_ptr
+    mov     rdi, [rel parse_val_ptr]
+    call    str_len
+    mov     rdx, rax
+    mov     rdi, STDERR
+    mov     rsi, [rel parse_val_ptr]
+    call    asm_write_all
+    ; Print closing "'\n"
     mov     rdi, STDERR
     lea     rsi, [rel err_quote_nl]
     mov     rdx, 2                      ; "'\n"
@@ -1161,11 +1358,14 @@ parse_number_with_suffix:
     sub     dl, '0'
     cmp     dl, 9
     ja      .pns_suffix                 ; not a digit
-    ; acc = acc * 10 + digit
+    ; acc = acc * 10 + digit (with overflow check)
     imul    rax, 10
+    jo      .pns_error                  ; overflow
     movzx   edx, byte [rsi]
     sub     edx, '0'
     add     rax, rdx
+    jo      .pns_error                  ; overflow
+    js      .pns_error                  ; wrapped negative
     inc     rsi
     inc     ecx
     jmp     .pns_digit
@@ -1554,6 +1754,14 @@ version_text:
 version_text_len equ $ - version_text
 
 ; Error message fragments
+err_reading_pre:
+    db "head: error reading '"
+err_reading_pre_len equ $ - err_reading_pre
+
+err_reading_mid:
+    db "': "
+err_reading_mid_len equ $ - err_reading_mid
+
 err_cannot_open_pre:
     db "head: cannot open '",
 err_cannot_open_pre_len equ $ - err_cannot_open_pre
@@ -1639,6 +1847,7 @@ had_error:      resb    1
 first_file:     resb    1
 nfiles:         resq    1
 cur_fd:         resq    1
+parse_val_ptr:  resq    1               ; saved pointer for error messages
 files:          resq    256             ; max 256 file arguments
 
 iobuf:          resb    IOBUF_SIZE      ; 64KB I/O buffer
