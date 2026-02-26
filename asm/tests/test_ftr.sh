@@ -249,9 +249,13 @@ echo "── Error handling ──"
 run_test_stderr "missing operand"
 run_test_stderr "missing SET2 translate"         'a'
 run_test_stderr "delete extra operand"           -d 'a' 'b'
+run_test_stderr "extra operand translate"        'a' 'b' 'c'
+run_test_stderr "extra operand squeeze"          -s 'a' 'b' 'c'
+run_test_stderr "extra operand ds"               -ds 'a' 'b' 'c'
 run_test_stderr "invalid option -z"              -z 'a'
 run_test_stderr "unrecognized --bogus"           --bogus 'a'
 run_test_stderr "delete+squeeze missing SET2"    -ds 'a'
+run_test_stderr "reversed range"                 'z-a' 'x'
 
 # ── SECTION: --help and --version ──
 echo ""

@@ -114,6 +114,14 @@ err_quote_nl:
     db "'", 10
 err_quote_nl_len equ $ - err_quote_nl
 
+err_range_reversed_prefix:
+    db "tr: range-endpoints of '"
+err_range_reversed_prefix_len equ $ - err_range_reversed_prefix
+
+err_range_reversed_suffix:
+    db "' are in reverse collating sequence order", 10
+err_range_reversed_suffix_len equ $ - err_range_reversed_suffix
+
 ; ── SIMD constants ──
 align 16
 mask_0f:
@@ -370,8 +378,11 @@ _start:
     inc     ebx
     jmp     .next_arg
 .store_extra:
-    ; More than 2 positional args — store but continue parsing
-    ; (error will be caught in validation)
+    ; Save first extra operand pointer for error reporting
+    cmp     ebx, 2
+    jne     .store_extra_skip
+    mov     rbp, rdi                ; save third operand pointer
+.store_extra_skip:
     inc     ebx
     jmp     .next_arg
 
@@ -395,6 +406,10 @@ _start:
     inc     ebx
     jmp     .eo_next
 .eo_extra:
+    cmp     ebx, 2
+    jne     .eo_extra_skip
+    mov     rbp, rdi
+.eo_extra_skip:
     inc     ebx
 .eo_next:
     add     rsi, 8
@@ -412,18 +427,16 @@ _start:
     test    ebx, ebx
     jz      .err_no_operand
 
-    ; Store set counts for validation
-    mov     [set1_len], rbx         ; temporarily store positional count
-
     ; ── Dispatch to appropriate mode ──
     test    r12d, FLAG_DELETE
     jnz     .mode_delete_check
     test    r12d, FLAG_SQUEEZE
     jnz     .mode_squeeze_check
 
-    ; Pure translate mode: need 2 sets
+    ; Pure translate mode: need exactly 2 sets
     cmp     ebx, 2
     jl      .err_missing_set2_translate
+    jg      .err_extra_operand_general
     jmp     do_translate
 
 .mode_delete_check:
@@ -435,14 +448,16 @@ _start:
     jmp     do_delete
 
 .mode_delete_squeeze:
-    ; Delete + squeeze: need 2 sets
+    ; Delete + squeeze: need exactly 2 sets
     cmp     ebx, 2
     jl      .err_missing_set2_ds
+    jg      .err_extra_operand_general
     jmp     do_delete_squeeze
 
 .mode_squeeze_check:
     ; Squeeze: 1 set = squeeze only, 2 sets = translate + squeeze
     cmp     ebx, 2
+    jg      .err_extra_operand_general
     jge     do_translate_squeeze
     jmp     do_squeeze
 
@@ -488,6 +503,17 @@ _start:
     WRITE   STDERR, err_try_help, err_try_help_len
     EXIT    1
 
+.err_extra_operand_general:
+    ; rbp = pointer to the extra (3rd) operand, saved during arg parsing
+    WRITE   STDERR, err_extra_operand, err_extra_operand_len
+    mov     rdi, rbp
+    call    strlen
+    mov     r15, rax
+    WRITE   STDERR, rbp, r15
+    WRITE   STDERR, err_quote_nl, err_quote_nl_len
+    WRITE   STDERR, err_try_help, err_try_help_len
+    EXIT    1
+
 .err_invalid_opt:
     ; rdi points to the bad character, al = the bad char
     push    rax                     ; save bad char
@@ -519,6 +545,22 @@ _start:
 .do_version:
     WRITE   STDOUT, version_text, version_text_len
     EXIT    0
+
+; ── Range error handler (called from parse_set, not a local label) ──
+; ecx = start char, edx = end char of the reversed range
+err_range_reversed:
+    ; Format: tr: range-endpoints of 'X-Y' are in reverse collating sequence order
+    ; Build the range string "X-Y" on the stack
+    sub     rsp, 8
+    mov     byte [rsp], cl          ; start char
+    mov     byte [rsp+1], '-'
+    mov     byte [rsp+2], dl        ; end char
+    WRITE   STDERR, err_range_reversed_prefix, err_range_reversed_prefix_len
+    lea     rsi, [rsp]
+    WRITE   STDERR, rsi, 3
+    WRITE   STDERR, err_range_reversed_suffix, err_range_reversed_suffix_len
+    add     rsp, 8
+    EXIT    1
 
 ; ============================================================================
 ;                       UTILITY FUNCTIONS
@@ -565,6 +607,12 @@ parse_set:
     mov     rbx, rsi                ; rbx = output start (for length calc)
 
 .ps_loop:
+    ; Bounds check: stop if output buffer is full
+    lea     rax, [r9]
+    sub     rax, rbx
+    cmp     rax, 8192
+    jge     .ps_done
+
     movzx   eax, byte [r8]
     test    al, al
     jz      .ps_done
@@ -592,8 +640,13 @@ parse_set:
     movzx   ecx, r10b
     movzx   edx, r11b
     cmp     ecx, edx
-    jg      .ps_loop                ; empty range if start > end
+    jg      err_range_reversed      ; reversed range is an error (GNU compat)
 .ps_range_loop:
+    ; Bounds check in range expansion
+    lea     rax, [r9]
+    sub     rax, rbx
+    cmp     rax, 8192
+    jge     .ps_done
     mov     [r9], cl
     inc     r9
     inc     ecx
@@ -621,7 +674,7 @@ parse_set:
     movzx   ecx, r10b
     movzx   edx, r11b
     cmp     ecx, edx
-    jg      .ps_loop
+    jg      err_range_reversed
     jmp     .ps_range_loop
 
 .ps_bracket:
@@ -662,6 +715,8 @@ parse_set:
     mov     r11b, al
     movzx   ecx, r10b
     movzx   edx, r11b
+    cmp     ecx, edx
+    jg      err_range_reversed
     jmp     .ps_range_loop
 
 .ps_char_class:
@@ -920,20 +975,32 @@ parse_set:
 ; ============================================================================
 
 ; Helper macro: emit byte range [start, end] inclusive to [r9], advancing r9
+; Includes bounds check against 8192-byte output buffer (rbx = output start)
 %macro EMIT_RANGE 2
     mov     ecx, %1
 %%loop:
+    lea     rax, [r9]
+    sub     rax, rbx
+    cmp     rax, 8192
+    jge     %%done
     mov     [r9], cl
     inc     r9
     inc     ecx
     cmp     ecx, %2 + 1
     jl      %%loop
+%%done:
 %endmacro
 
 ; Helper macro: emit single byte to [r9], advancing r9
+; Includes bounds check against 8192-byte output buffer (rbx = output start)
 %macro EMIT_BYTE 1
+    lea     rax, [r9]
+    sub     rax, rbx
+    cmp     rax, 8192
+    jge     %%skip
     mov     byte [r9], %1
     inc     r9
+%%skip:
 %endmacro
 
 ; expand_char_class(rdi=name_ptr, rcx=name_len, r9=output_ptr)
@@ -983,6 +1050,9 @@ expand_char_class:
     jmp     .ecc_loop
 
 .ecc_expand:
+    ; Restore rbx to output buffer start (saved by parse_set) for EMIT bounds checks
+    ; Stack layout: [rsp+0]=r8, [rsp+8]=r11, [rsp+16]=r10, [rsp+24]=rbx
+    mov     rbx, [rsp + 24]
     ; r8d = class index (0=alnum, 1=alpha, ..., 11=xdigit)
     cmp     r8d, 0
     je      .ecc_alnum
@@ -1101,6 +1171,16 @@ build_translate_table:
     mov     r13, [set1_len]
     mov     r14, [set2_len]
 
+    ; Cap set lengths to 256 (max meaningful for byte-to-byte translation)
+    cmp     r13, 256
+    jle     .btt_s1_ok
+    mov     r13, 256
+.btt_s1_ok:
+    cmp     r14, 256
+    jle     .btt_s2_ok
+    mov     r14, 256
+.btt_s2_ok:
+
     ; Handle complement
     test    r12d, FLAG_COMPLEMENT
     jz      .btt_no_complement
@@ -1164,7 +1244,7 @@ build_translate_table:
     mov     r13, r14
 .btt_no_truncate:
 
-    ; Extend set2 to match set1 length by repeating last char
+    ; Extend set2 to match set1 length by repeating last char (capped at 256)
     cmp     r14, r13
     jge     .btt_sets_ready
     test    r14, r14
@@ -1173,6 +1253,8 @@ build_translate_table:
     movzx   eax, byte [rsi + r14 - 1]
 .btt_extend_set2:
     cmp     r14, r13
+    jge     .btt_sets_ready
+    cmp     r14, 256
     jge     .btt_sets_ready
     mov     [rsi + r14], al
     inc     r14
@@ -1357,7 +1439,7 @@ do_translate:
 
     ; Unrolled: for each high nibble value 0-15, do pshufb lookup and mask
     ; Row 0
-    movdqa  xmm3, [rbx + 0*16]     ; table row 0
+    movdqu  xmm3, [rbx + 0*16]     ; table row 0
     pshufb  xmm3, xmm1             ; lookup by low nibble
     movdqa  xmm4, xmm2
     pxor    xmm5, xmm5
@@ -1366,7 +1448,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 1
-    movdqa  xmm3, [rbx + 1*16]
+    movdqu  xmm3, [rbx + 1*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_1]
@@ -1374,7 +1456,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 2
-    movdqa  xmm3, [rbx + 2*16]
+    movdqu  xmm3, [rbx + 2*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_2]
@@ -1382,7 +1464,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 3
-    movdqa  xmm3, [rbx + 3*16]
+    movdqu  xmm3, [rbx + 3*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_3]
@@ -1390,7 +1472,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 4
-    movdqa  xmm3, [rbx + 4*16]
+    movdqu  xmm3, [rbx + 4*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_4]
@@ -1398,7 +1480,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 5
-    movdqa  xmm3, [rbx + 5*16]
+    movdqu  xmm3, [rbx + 5*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_5]
@@ -1406,7 +1488,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 6
-    movdqa  xmm3, [rbx + 6*16]
+    movdqu  xmm3, [rbx + 6*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_6]
@@ -1414,7 +1496,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 7
-    movdqa  xmm3, [rbx + 7*16]
+    movdqu  xmm3, [rbx + 7*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_7]
@@ -1422,7 +1504,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 8
-    movdqa  xmm3, [rbx + 8*16]
+    movdqu  xmm3, [rbx + 8*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_8]
@@ -1430,7 +1512,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 9
-    movdqa  xmm3, [rbx + 9*16]
+    movdqu  xmm3, [rbx + 9*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_9]
@@ -1438,7 +1520,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 10
-    movdqa  xmm3, [rbx + 10*16]
+    movdqu  xmm3, [rbx + 10*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_10]
@@ -1446,7 +1528,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 11
-    movdqa  xmm3, [rbx + 11*16]
+    movdqu  xmm3, [rbx + 11*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_11]
@@ -1454,7 +1536,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 12
-    movdqa  xmm3, [rbx + 12*16]
+    movdqu  xmm3, [rbx + 12*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_12]
@@ -1462,7 +1544,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 13
-    movdqa  xmm3, [rbx + 13*16]
+    movdqu  xmm3, [rbx + 13*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_13]
@@ -1470,7 +1552,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 14
-    movdqa  xmm3, [rbx + 14*16]
+    movdqu  xmm3, [rbx + 14*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_14]
@@ -1478,7 +1560,7 @@ do_translate:
     por     xmm0, xmm3
 
     ; Row 15
-    movdqa  xmm3, [rbx + 15*16]
+    movdqu  xmm3, [rbx + 15*16]
     pshufb  xmm3, xmm1
     movdqa  xmm4, xmm2
     pcmpeqb xmm4, [nibble_15]
