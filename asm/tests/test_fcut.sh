@@ -248,6 +248,21 @@ echo "── Combined short options ──"
 run_test "combined: -sf1"        "$(printf 'a,b\nnone\nc,d')"  -sf1 -d,
 run_test "combined: -snf1"       "$(printf 'a,b\nnone\nc,d')"  -snf1 -d,
 
+# ── SECTION: Long options with separate values ──
+echo ""
+echo "── Long options with separate values ──"
+run_test "long: --bytes 1"        "hello"       --bytes 1
+run_test "long: --bytes 1-3"      "hello"       --bytes 1-3
+run_test "long: --characters 2"   "hello"       --characters 2
+run_test "long: --fields 2 --delimiter ,"  "a,b,c"  --fields 2 --delimiter ,
+run_test "long: --output-delimiter" "a,b,c"  --fields=1,3 --delimiter=, --output-delimiter ::
+
+# ── SECTION: Unrecognized options ──
+echo ""
+echo "── Unrecognized options ──"
+run_test_noargs "unrec: --xyz"       --xyz
+run_test_noargs "unrec: --bad-opt"   --bad-opt
+
 # ── SUMMARY ──
 echo ""
 echo "============================================"

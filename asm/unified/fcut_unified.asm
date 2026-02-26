@@ -157,7 +157,8 @@ org 0x400000
 %define out_buf_pos  0x523930
 %define line_buf  0x523940
 %define line_buf_pos  0x563940
-%define BSS_SIZE  407876
+%define current_filename  0x563948
+%define BSS_SIZE  407888
 
 ; ── ELF64 Header ──
 ehdr:
@@ -383,6 +384,11 @@ _start:
 
 .process_fd:
     mov     [current_fd], edi
+    ; Save current filename for error reporting in process_input
+    lea     rax, [files]
+    mov     rdx, r12
+    mov     rax, [rax + rdx*8]
+    mov     [current_filename], rax
     call    process_input
     mov     edi, [current_fd]
     test    edi, edi
@@ -431,97 +437,77 @@ parse_long_option:
     lea     rdi, [rsi + 2]         ; skip "--"
 
     ; --help
-    push    rdi
+    ; Note: streq and str_match_eq do not clobber rdi, so no push/pop needed
     lea     rax, [opt_help]
     mov     rsi, rdi
     call    streq
-    pop     rdi
     test    eax, eax
     jnz     .lo_help
 
     ; --version
-    push    rdi
     lea     rax, [opt_version]
     mov     rsi, rdi
     call    streq
-    pop     rdi
     test    eax, eax
     jnz     .lo_version
 
     ; --complement
-    push    rdi
     lea     rax, [opt_complement]
     mov     rsi, rdi
     call    streq
-    pop     rdi
     test    eax, eax
     jnz     .lo_complement
 
     ; --only-delimited
-    push    rdi
     lea     rax, [opt_only_delimited]
     mov     rsi, rdi
     call    streq
-    pop     rdi
     test    eax, eax
     jnz     .lo_only_delimited
 
     ; --zero-terminated
-    push    rdi
     lea     rax, [opt_zero_terminated]
     mov     rsi, rdi
     call    streq
-    pop     rdi
     test    eax, eax
     jnz     .lo_zero_terminated
 
     ; --bytes, --bytes=VALUE
-    push    rdi
     lea     rax, [opt_bytes]
     mov     rsi, rdi
     call    str_match_eq
-    pop     rdi
     test    eax, eax
     jnz     .lo_bytes
 
     ; --characters, --characters=VALUE
-    push    rdi
     lea     rax, [opt_characters]
     mov     rsi, rdi
     call    str_match_eq
-    pop     rdi
     test    eax, eax
     jnz     .lo_characters
 
     ; --fields, --fields=VALUE
-    push    rdi
     lea     rax, [opt_fields]
     mov     rsi, rdi
     call    str_match_eq
-    pop     rdi
     test    eax, eax
     jnz     .lo_fields
 
     ; --delimiter, --delimiter=VALUE
-    push    rdi
     lea     rax, [opt_delimiter]
     mov     rsi, rdi
     call    str_match_eq
-    pop     rdi
     test    eax, eax
     jnz     .lo_delimiter
 
     ; --output-delimiter, --output-delimiter=VALUE
-    push    rdi
     lea     rax, [opt_output_delim]
     mov     rsi, rdi
     call    str_match_eq
-    pop     rdi
     test    eax, eax
     jnz     .lo_output_delim
 
     ; Unrecognized
-    sub     rdi, 2                 ; back to include --
     jmp     .lo_unrec
 
 .lo_help:
@@ -607,6 +593,16 @@ parse_long_option:
 .lo_output_delim:
     mov     rdi, rdx
     call    my_strlen
+    test    rax, rax
+    jnz     .lo_od_nonzero
+    ; Empty string → NUL byte delimiter (matches GNU behavior)
+    mov     byte [out_delim_buf], 0
+    mov     dword [out_delim_len], 1
+    mov     byte [out_delim_set], 1
+    pop     rcx
+    pop     rbx
+    ret
+.lo_od_nonzero:
     cmp     rax, MAX_OUTDELIM
     jl      .lo_od_ok
     mov     rax, MAX_OUTDELIM - 1
@@ -646,18 +642,21 @@ parse_long_option:
     EXIT    1
 
 .lo_unrec:
+    ; rdi = option name past "--"; sub 2 to get full option string
+    sub     rdi, 2
+    push    rdi                    ; save option pointer before WRITE clobbers rdi
     lea     rsi, [err_prefix]
     mov     edx, err_prefix_len
     WRITE   STDERR, rsi, rdx
     lea     rsi, [err_unrec1]
     mov     edx, err_unrec1_len
     WRITE   STDERR, rsi, rdx
-    ; Print option name (rdi)
-    push    rdi
-    mov     rdi, rdi
+    ; Print option name
+    pop     rdi                    ; restore option pointer
+    push    rdi                    ; save again for use as rsi
     call    my_strlen
     mov     rdx, rax
-    pop     rsi
+    pop     rsi                    ; rsi = option pointer
     WRITE   STDERR, rsi, rdx
     lea     rsi, [err_unrec2]
     mov     edx, err_unrec2_len
@@ -730,14 +729,14 @@ str_match_eq:
 .sme_need_next:
     ; Exact match, need next arg as value
     ; outer rbx and ecx are on the stack from parse_long_option
-    ; stack: [r8, r9, rbx_saved, rcx_saved, return_addr, ...]
-    mov     rax, [rsp + 24]        ; outer rbx
-    mov     r8d, [rsp + 16]        ; outer ecx
+    ; stack (from rsp): r9, r8, ret_addr, rcx_saved, rbx_saved
+    mov     rax, [rsp + 32]        ; outer rbx (argv pointer)
+    mov     r8d, [rsp + 24]        ; outer ecx (remaining count)
     cmp     r8d, 1
     jle     .sme_missing
     mov     rdx, [rax + 8]         ; next argv
-    add     qword [rsp + 24], 8    ; advance outer rbx
-    dec     dword [rsp + 16]       ; dec outer ecx
+    add     qword [rsp + 32], 8    ; advance outer rbx
+    dec     dword [rsp + 24]       ; dec outer ecx
     mov     eax, 1
     pop     r9
     pop     r8
@@ -1712,6 +1711,10 @@ process_input:
     ret
 
 .pi_read_err:
+    ; rax = negative errno from read
+    neg     eax                    ; positive errno
+    mov     rsi, [current_filename]
+    call    print_file_error
     mov     byte [had_error], 1
     jmp     .pi_done
 
@@ -2056,7 +2059,7 @@ process_line:
     ; Check if field is selected
     push    rdi
     push    rcx
-    movzx   edi, r15w
+    mov     edi, r15d
     call    check_pos
     pop     rcx
     pop     rdi
@@ -2105,7 +2108,7 @@ process_line:
 
     push    rdi
     push    rcx
-    movzx   edi, r15w
+    mov     edi, r15d
     call    check_pos
     pop     rcx
     pop     rdi
