@@ -154,7 +154,7 @@ fn run_numeric(input: &[u8], source_name: &str) -> Option<i32> {
         }
     }
 
-    if token_count % 2 != 0 {
+    if !token_count.is_multiple_of(2) {
         eprintln!(
             "{}: {}: input contains an odd number of tokens",
             TOOL_NAME, source_name
@@ -194,8 +194,8 @@ fn kahn_sort_numeric(
     let mut removed = vec![false; total];
     let mut new_zeros: Vec<u32> = Vec::new();
 
-    for id in 0..total {
-        if in_deg[id] == 0 {
+    for (id, &deg) in in_deg.iter().enumerate().take(total) {
+        if deg == 0 {
             queue.push_back(id as u32);
         }
     }
@@ -294,7 +294,7 @@ fn run_general(input: &[u8], source_name: &str) -> i32 {
         }
     }
 
-    if token_count % 2 != 0 {
+    if !token_count.is_multiple_of(2) {
         eprintln!(
             "{}: {}: input contains an odd number of tokens",
             TOOL_NAME, source_name
@@ -339,8 +339,8 @@ fn kahn_sort<T: AsRef<[u8]>>(
     let mut new_zeros: Vec<u32> = Vec::new();
 
     // Seed queue with initial zero-degree nodes
-    for id in 0..total {
-        if in_deg[id] == 0 {
+    for (id, &deg) in in_deg.iter().enumerate().take(total) {
+        if deg == 0 {
             queue.push_back(id as u32);
         }
     }
@@ -490,11 +490,11 @@ fn main() {
         {
             if let Ok(f) = std::fs::File::open(file) {
                 let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-                if size > 0 {
-                    if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&f) } {
-                        let exit_code = run_bytes(&mmap, file);
-                        process::exit(exit_code);
-                    }
+                if size > 0
+                    && let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&f) }
+                {
+                    let exit_code = run_bytes(&mmap, file);
+                    process::exit(exit_code);
                 }
             }
         }
