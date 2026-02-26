@@ -610,7 +610,7 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
             const FAST_PATH_LIMIT: u64 = 512 * 1024 * 1024;
             let fits_in_memory = path
                 .metadata()
-                .map(|m| m.len() <= FAST_PATH_LIMIT)
+                .map(|m| m.file_type().is_file() && m.len() <= FAST_PATH_LIMIT)
                 .unwrap_or(false);
             if fits_in_memory {
                 let data = crate::common::io::read_file_direct(path).map_err(|e| {
