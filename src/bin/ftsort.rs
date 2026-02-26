@@ -49,7 +49,6 @@ impl Hasher for FxHasher {
 type FxBuildHasher = BuildHasherDefault<FxHasher>;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
-
 fn print_help() {
     println!("Usage: {} [OPTION] [FILE]", TOOL_NAME);
     println!("Write totally ordered list consistent with the partial ordering in FILE.");
@@ -247,11 +246,7 @@ fn kahn_sort_numeric(
 
         eprintln!("{}: {}: input contains a loop:", TOOL_NAME, source_name);
         for &member in &cycle {
-            eprintln!(
-                "{}: {}",
-                TOOL_NAME,
-                itoa_buf.format(node_values[member])
-            );
+            eprintln!("{}: {}", TOOL_NAME, itoa_buf.format(node_values[member]));
         }
 
         in_deg[cycle[0]] = 0;

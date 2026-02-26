@@ -373,7 +373,6 @@ fn encode_5_to_8(b0: u8, b1: u8, b2: u8, b3: u8, b4: u8, out: &mut [u8]) {
     out[7] = BASE32_ALPHABET[(b4 & 0x1F) as usize];
 }
 
-
 /// Encode and write with line wrapping using raw fd1 writes.
 /// Two-phase approach: batch-encode raw base32 chars, then insert newlines.
 /// Eliminates per-5-byte copy_with_wrap overhead (was 2M calls for 10MB).
@@ -414,7 +413,11 @@ fn encode_streaming(data: &[u8], wrap: usize) -> io::Result<()> {
         let mut raw_offset = 0usize;
         for chunk in batch.chunks_exact(5) {
             encode_5_to_8(
-                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4],
+                chunk[0],
+                chunk[1],
+                chunk[2],
+                chunk[3],
+                chunk[4],
                 &mut raw_buf[raw_offset..],
             );
             raw_offset += 8;
@@ -426,12 +429,7 @@ fn encode_streaming(data: &[u8], wrap: usize) -> io::Result<()> {
             }
         } else {
             // Insert newlines in a single pass
-            let written = insert_newlines(
-                &raw_buf[..raw_offset],
-                &mut wrap_buf,
-                wrap,
-                &mut col,
-            );
+            let written = insert_newlines(&raw_buf[..raw_offset], &mut wrap_buf, wrap, &mut col);
             if !write_all_fd1(&wrap_buf[..written]) {
                 return Ok(());
             }
@@ -482,12 +480,7 @@ fn encode_streaming(data: &[u8], wrap: usize) -> io::Result<()> {
 /// Single pass: copies chunks of (wrap - col) bytes, inserting \n between.
 /// Returns number of bytes written to `out`.
 #[inline]
-fn insert_newlines(
-    raw: &[u8],
-    out: &mut [u8],
-    wrap: usize,
-    col: &mut usize,
-) -> usize {
+fn insert_newlines(raw: &[u8], out: &mut [u8], wrap: usize, col: &mut usize) -> usize {
     let mut ri = 0usize;
     let mut wi = 0usize;
 

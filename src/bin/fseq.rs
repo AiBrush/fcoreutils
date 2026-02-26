@@ -882,9 +882,19 @@ fn format_fixed(value: f64, prec: usize) -> String {
 /// E.g., val=12345, prec=1, scale=10 → "1234.5"
 /// Works entirely in integer space — no FP ops, no Formatter.
 #[inline(always)]
-fn write_scaled_int(buf: &mut Vec<u8>, val: i64, prec: usize, scale: i64, itoa_buf: &mut itoa::Buffer) {
+fn write_scaled_int(
+    buf: &mut Vec<u8>,
+    val: i64,
+    prec: usize,
+    scale: i64,
+    itoa_buf: &mut itoa::Buffer,
+) {
     let negative = val < 0;
-    let abs_val = if negative { val.wrapping_neg() as u64 } else { val as u64 };
+    let abs_val = if negative {
+        val.wrapping_neg() as u64
+    } else {
+        val as u64
+    };
     let scale_u = scale as u64;
     let int_part = abs_val / scale_u;
     let frac_part = abs_val % scale_u;
