@@ -591,7 +591,10 @@ fn main() {
                             }
                             let remaining = FLUSH_AT - offset;
                             let can_fit = remaining / ENTRY;
-                            let run_end = std::cmp::min(current.saturating_add(can_fit as i64 - 1), batch_end);
+                            let run_end = std::cmp::min(
+                                current.saturating_add(can_fit as i64 - 1),
+                                batch_end,
+                            );
                             // Handle prefix: numbers before next decade boundary
                             while current <= run_end && (current % 10) != 0 {
                                 unsafe {
