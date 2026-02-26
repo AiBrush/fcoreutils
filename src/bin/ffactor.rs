@@ -220,10 +220,10 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
         let n = match reader.read(&mut buf[leftover..]) {
             Ok(0) => {
                 // EOF: process any remaining leftover bytes
-                if leftover > 0 {
-                    if process_chunk(&buf[..leftover], &mut out_buf, out) {
-                        had_error = true;
-                    }
+                if leftover > 0
+                    && process_chunk(&buf[..leftover], &mut out_buf, out)
+                {
+                    had_error = true;
                 }
                 break;
             }
