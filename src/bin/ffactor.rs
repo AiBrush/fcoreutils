@@ -26,23 +26,23 @@ fn print_version() {
     println!("{} (fcoreutils) {}", TOOL_NAME, env!("CARGO_PKG_VERSION"));
 }
 
-/// Process a single token: parse as u128, print factors, return true on success.
+/// Process a single CLI argument: parse as u128, print factors.
+/// Returns true on error (matching all other functions in this file).
 fn process_number(token: &str, out: &mut impl Write) -> bool {
     match token.parse::<u128>() {
         Ok(n) => {
             let line = factor::format_factors(n);
             if writeln!(out, "{}", line).is_err() {
-                // Broken pipe or write error; exit cleanly
                 process::exit(0);
             }
-            true
+            false
         }
         Err(_) => {
             eprintln!(
                 "{}: \u{2018}{}\u{2019} is not a valid positive integer",
                 TOOL_NAME, token
             );
-            false
+            true
         }
     }
 }
@@ -201,6 +201,11 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => {
+                // Flush any buffered output before reporting the error
+                if !out_buf.is_empty() {
+                    let _ = out.write_all(&out_buf);
+                }
+                let _ = out.flush();
                 eprintln!("{}: read error: {}", TOOL_NAME, e);
                 return true;
             }
@@ -220,7 +225,7 @@ fn process_stdin(out: &mut BufWriter<io::StdoutLock>) -> bool {
                         .iter()
                         .rposition(|&b| b == b' ' || b == b'\t' || b == b'\r')
                         .map(|p| p + 1)
-                        .unwrap_or(leftover); // no whitespace at all: process entire buffer
+                        .unwrap_or(leftover); // no whitespace: process entire buffer (single huge token)
                     if process_tokens(&buf[..split], &mut out_buf, out) {
                         had_error = true;
                     }
@@ -342,7 +347,7 @@ fn main() {
         had_error = process_stdin(&mut out);
     } else {
         for num_str in &numbers {
-            if !process_number(num_str, &mut out) {
+            if process_number(num_str, &mut out) {
                 had_error = true;
             }
         }
