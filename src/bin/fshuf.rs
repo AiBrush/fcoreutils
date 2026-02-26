@@ -293,31 +293,21 @@ fn main() {
 
     // Validate option conflicts (GNU compat)
     if input_range_count > 1 {
-        eprintln!(
-            "{}: multiple -i options specified",
-            TOOL_NAME
-        );
+        eprintln!("{}: multiple -i options specified", TOOL_NAME);
         process::exit(1);
     }
     if output_file_count > 1 {
-        eprintln!(
-            "{}: multiple -o options specified",
-            TOOL_NAME
-        );
+        eprintln!("{}: multiple -o options specified", TOOL_NAME);
         process::exit(1);
     }
     if echo_mode && input_range.is_some() {
-        eprintln!(
-            "{}: cannot combine -e and -i options",
-            TOOL_NAME
-        );
+        eprintln!("{}: cannot combine -e and -i options", TOOL_NAME);
         process::exit(1);
     }
     if input_range.is_some() && !positional.is_empty() {
         eprintln!(
             "{}: extra operand \u{2018}{}\u{2019}",
-            TOOL_NAME,
-            positional[0]
+            TOOL_NAME, positional[0]
         );
         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(1);
@@ -746,16 +736,9 @@ mod tests {
     #[test]
     fn test_multiple_i_is_error() {
         let output = cmd().args(["-i", "0-1", "-i", "0-2"]).output().unwrap();
-        assert!(
-            !output.status.success(),
-            "multiple -i should error"
-        );
+        assert!(!output.status.success(), "multiple -i should error");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("multiple -i"),
-            "stderr: {}",
-            stderr
-        );
+        assert!(stderr.contains("multiple -i"), "stderr: {}", stderr);
     }
 
     #[test]
@@ -766,11 +749,7 @@ mod tests {
             "-i with extra operand should error"
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("extra operand"),
-            "stderr: {}",
-            stderr
-        );
+        assert!(stderr.contains("extra operand"), "stderr: {}", stderr);
     }
 
     #[test]
@@ -780,22 +759,18 @@ mod tests {
         let p2 = dir.join("fshuf_multi_o_2.txt");
         let output = cmd()
             .args([
-                "-i", "0-0",
-                "-o", p1.to_str().unwrap(),
-                "-o", p2.to_str().unwrap(),
+                "-i",
+                "0-0",
+                "-o",
+                p1.to_str().unwrap(),
+                "-o",
+                p2.to_str().unwrap(),
             ])
             .output()
             .unwrap();
-        assert!(
-            !output.status.success(),
-            "multiple -o should error"
-        );
+        assert!(!output.status.success(), "multiple -o should error");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("multiple -o"),
-            "stderr: {}",
-            stderr
-        );
+        assert!(stderr.contains("multiple -o"), "stderr: {}", stderr);
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
     }

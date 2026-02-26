@@ -230,11 +230,7 @@ struct DecodeOutput {
     error: Option<String>,
 }
 
-fn base64_decode(
-    input: &[u8],
-    decode_table: &[u8; 256],
-    ignore_garbage: bool,
-) -> DecodeOutput {
+fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -> DecodeOutput {
     let mut result = Vec::with_capacity(input.len() * 3 / 4 + 3);
     let mut vals = [0u8; 4];
     let mut n = 0usize;
@@ -325,11 +321,7 @@ const fn build_base32_decode_table(alphabet: &[u8; 32]) -> [u8; 256] {
 const BASE32_DECODE: [u8; 256] = build_base32_decode_table(BASE32_ALPHABET);
 const BASE32HEX_DECODE: [u8; 256] = build_base32_decode_table(BASE32HEX_ALPHABET);
 
-fn base32_decode(
-    input: &[u8],
-    decode_table: &[u8; 256],
-    ignore_garbage: bool,
-) -> DecodeOutput {
+fn base32_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -> DecodeOutput {
     let mut result = Vec::with_capacity(input.len() * 5 / 8 + 5);
     let mut vals = [0u8; 8];
     let mut n = 0usize;
@@ -484,7 +476,6 @@ fn hex_val_upper(b: u8) -> u8 {
         _ => 0xFF,
     }
 }
-
 
 // ======================== Base2 ========================
 

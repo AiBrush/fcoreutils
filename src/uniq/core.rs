@@ -100,7 +100,9 @@ fn get_compare_slice<'a>(line: &'a [u8], config: &UniqConfig) -> &'a [u8] {
     let len = line.len();
 
     // Skip N fields (GNU: each field = run of blanks + run of non-blanks)
-    for _ in 0..config.skip_fields {
+    // Early-exit if already past end of line to avoid O(skip_fields) loop
+    let mut fields_remaining = config.skip_fields;
+    while fields_remaining > 0 && start < len {
         // Skip blanks (space and tab)
         while start < len && (line[start] == b' ' || line[start] == b'\t') {
             start += 1;
@@ -109,6 +111,7 @@ fn get_compare_slice<'a>(line: &'a [u8], config: &UniqConfig) -> &'a [u8] {
         while start < len && line[start] != b' ' && line[start] != b'\t' {
             start += 1;
         }
+        fields_remaining -= 1;
     }
 
     // Skip N characters

@@ -461,3 +461,109 @@ fn test_cut_fields_returns_true_when_not_suppressed() {
     assert!(result);
     assert_eq!(&out, b"a");
 }
+
+// --- GNU compat: bare hyphen rejected ---
+
+#[test]
+fn test_parse_bare_hyphen_rejected() {
+    assert!(parse_ranges("-", false).is_err());
+}
+
+// --- GNU compat: no-merge-adjacent for output delimiter ---
+
+#[test]
+fn test_parse_no_merge_adjacent() {
+    // With no_merge_adjacent=true, adjacent ranges 1-2 and 3-4 stay separate
+    let r = parse_ranges("1-2,3-4", true).unwrap();
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[0].start, 1);
+    assert_eq!(r[0].end, 2);
+    assert_eq!(r[1].start, 3);
+    assert_eq!(r[1].end, 4);
+}
+
+#[test]
+fn test_parse_no_merge_adjacent_overlap_still_merges() {
+    // Overlapping ranges should still merge even with no_merge_adjacent
+    let r = parse_ranges("1-3,2-4", true).unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].start, 1);
+    assert_eq!(r[0].end, 4);
+}
+
+// --- GNU compat: trailing newline on unterminated lines ---
+
+#[test]
+fn test_bytes_no_trailing_newline_adds_newline() {
+    // GNU cut adds a trailing newline even when input doesn't have one
+    let result = process_data_str("123", CutMode::Bytes, "4", b'\t', false, false, None, b'\n');
+    assert_eq!(result, "\n");
+}
+
+#[test]
+fn test_bytes_two_lines_no_trailing_newline() {
+    // Input: "123\n1" -> -c4 extracts nothing from both lines, outputs "\n\n"
+    let result = process_data_str(
+        "123\n1",
+        CutMode::Bytes,
+        "4",
+        b'\t',
+        false,
+        false,
+        None,
+        b'\n',
+    );
+    assert_eq!(result, "\n\n");
+}
+
+#[test]
+fn test_fields_no_trailing_newline_adds_newline() {
+    // GNU cut adds trailing newline for -f1- on input without terminator
+    let result = process_data_str(
+        "a\nb",
+        CutMode::Fields,
+        "1-",
+        b'\t',
+        false,
+        false,
+        None,
+        b'\n',
+    );
+    assert_eq!(result, "a\nb\n");
+}
+
+#[test]
+fn test_zero_terminated_no_trailing_nul() {
+    // -z -c1 on input without trailing NUL
+    let result = process_data_str(
+        "ab\0cd",
+        CutMode::Bytes,
+        "1",
+        b'\t',
+        false,
+        false,
+        None,
+        b'\0',
+    );
+    assert_eq!(result, "a\0c\0");
+}
+
+// --- GNU compat: output delimiter with abutting byte ranges ---
+
+#[test]
+fn test_output_delimiter_abutting_byte_ranges() {
+    // --output-delimiter=: -b1-2,3-4 on "abcd" should produce "ab:cd"
+    let ranges = parse_ranges("1-2,3-4", true).unwrap();
+    let cfg = CutConfig {
+        mode: CutMode::Bytes,
+        ranges: &ranges,
+        complement: false,
+        delim: b'\t',
+        output_delim: b":",
+        suppress_no_delim: false,
+        line_delim: b'\n',
+    };
+    let mut out = Vec::new();
+    process_cut_data(b"abcd\n", &cfg, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "ab:cd\n");
+}

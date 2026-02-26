@@ -149,10 +149,7 @@ fn main() {
                         _ => backup = BackupMode::Simple,
                     }
                 } else {
-                    eprintln!(
-                        "{}: unrecognized option '{}'",
-                        TOOL_NAME, arg
-                    );
+                    eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
                     eprintln!("Try '{} --help' for more information.", TOOL_NAME);
                     process::exit(1);
                 }
@@ -200,10 +197,7 @@ fn main() {
                     suffix = args[i].clone();
                     backup = BackupMode::Simple;
                 } else {
-                    eprintln!(
-                        "{}: unrecognized option '{}'",
-                        TOOL_NAME, arg
-                    );
+                    eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
                     eprintln!("Try '{} --help' for more information.", TOOL_NAME);
                     process::exit(1);
                 }
@@ -360,8 +354,8 @@ fn main() {
                 exit_code = code;
             }
         } else if let Err(code) = make_link(
-            target, dest, symbolic, force, no_deref, verbose, relative, backup, &suffix,
-            logical, physical,
+            target, dest, symbolic, force, no_deref, verbose, relative, backup, &suffix, logical,
+            physical,
         ) {
             exit_code = code;
         }
@@ -527,16 +521,14 @@ fn make_link(
         // Use linkat with AT_SYMLINK_FOLLOW=0 (default) to avoid following
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let c_target = CString::new(Path::new(target).as_os_str().as_bytes())
-            .map_err(|_| {
-                eprintln!("{}: invalid path '{}'", TOOL_NAME, target);
-                1
-            })?;
-        let c_link = CString::new(Path::new(link_name).as_os_str().as_bytes())
-            .map_err(|_| {
-                eprintln!("{}: invalid path '{}'", TOOL_NAME, link_name);
-                1
-            })?;
+        let c_target = CString::new(Path::new(target).as_os_str().as_bytes()).map_err(|_| {
+            eprintln!("{}: invalid path '{}'", TOOL_NAME, target);
+            1
+        })?;
+        let c_link = CString::new(Path::new(link_name).as_os_str().as_bytes()).map_err(|_| {
+            eprintln!("{}: invalid path '{}'", TOOL_NAME, link_name);
+            1
+        })?;
         let ret = unsafe {
             libc::linkat(
                 libc::AT_FDCWD,
@@ -1239,7 +1231,13 @@ mod tests {
             .output()
             .unwrap();
         assert!(out1.status.success());
-        assert!(enoent_link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(
+            enoent_link
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
 
         // Replace it
         let out2 = cmd()
@@ -1268,7 +1266,11 @@ mod tests {
 
         // Replace it
         let out2 = cmd()
-            .args(["-sf", sf_a.to_str().unwrap(), enotdir_link.to_str().unwrap()])
+            .args([
+                "-sf",
+                sf_a.to_str().unwrap(),
+                enotdir_link.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
         assert!(out2.status.success());
@@ -1369,7 +1371,10 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let backup = dir.path().join("bk_ax.orig");
-        assert!(backup.exists(), "backup file with .orig suffix should exist");
+        assert!(
+            backup.exists(),
+            "backup file with .orig suffix should exist"
+        );
     }
 
     #[test]
@@ -1448,11 +1453,7 @@ mod tests {
         fs::write(&file, "data").unwrap();
 
         let output = cmd()
-            .args([
-                "--backup",
-                file.to_str().unwrap(),
-                file.to_str().unwrap(),
-            ])
+            .args(["--backup", file.to_str().unwrap(), file.to_str().unwrap()])
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(1));

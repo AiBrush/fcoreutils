@@ -87,11 +87,126 @@ fn print_version() {
     println!("{} (fcoreutils) {}", TOOL_NAME, VERSION);
 }
 
+/// Parse a number string, handling hex integers (0x...), hex floats (0x...p...),
+/// and standard decimal/scientific notation.
+fn parse_number(s: &str) -> Result<f64, String> {
+    let trimmed = s.trim();
+    let (negative, rest) = if let Some(r) = trimmed.strip_prefix('-') {
+        (true, r)
+    } else if let Some(r) = trimmed.strip_prefix('+') {
+        (false, r)
+    } else {
+        (false, trimmed)
+    };
+
+    let val = if rest.starts_with("0x") || rest.starts_with("0X") {
+        let hex_body = &rest[2..];
+        if let Some(p_pos) = hex_body.find(['p', 'P']) {
+            // Hex float: 0x1p-1, 0x1.8p2, etc.
+            parse_hex_float(hex_body, p_pos)?
+        } else {
+            // Hex integer: 0xF423F
+            let v = u64::from_str_radix(hex_body, 16)
+                .map_err(|e| format!("invalid hex integer: {e}"))?;
+            v as f64
+        }
+    } else {
+        // Standard decimal or scientific notation — Rust handles these
+        rest.parse::<f64>()
+            .map_err(|e| format!("invalid number: {e}"))?
+    };
+
+    Ok(if negative { -val } else { val })
+}
+
+/// Parse hex float body (after 0x prefix): e.g., "1p-1", "1.8p2"
+fn parse_hex_float(hex_body: &str, p_pos: usize) -> Result<f64, String> {
+    let mantissa_str = &hex_body[..p_pos];
+    let exp_str = &hex_body[p_pos + 1..];
+
+    let mantissa = if let Some(dot_pos) = mantissa_str.find('.') {
+        let int_part = &mantissa_str[..dot_pos];
+        let frac_part = &mantissa_str[dot_pos + 1..];
+        let int_val = if int_part.is_empty() {
+            0u64
+        } else {
+            u64::from_str_radix(int_part, 16).map_err(|e| format!("invalid hex mantissa: {e}"))?
+        };
+        let frac_val = if frac_part.is_empty() {
+            0.0
+        } else {
+            let frac_int = u64::from_str_radix(frac_part, 16)
+                .map_err(|e| format!("invalid hex fraction: {e}"))?;
+            frac_int as f64 / 16f64.powi(frac_part.len() as i32)
+        };
+        int_val as f64 + frac_val
+    } else {
+        let v = u64::from_str_radix(mantissa_str, 16)
+            .map_err(|e| format!("invalid hex mantissa: {e}"))?;
+        v as f64
+    };
+
+    let exp: i32 = exp_str
+        .parse()
+        .map_err(|e| format!("invalid hex exponent: {e}"))?;
+
+    Ok(mantissa * 2f64.powi(exp))
+}
+
+/// Detect if a string is a hex literal (integer or float).
+fn is_hex_str(s: &str) -> bool {
+    let s = s
+        .strip_prefix('-')
+        .or_else(|| s.strip_prefix('+'))
+        .unwrap_or(s);
+    s.starts_with("0x") || s.starts_with("0X")
+}
+
+/// Detect if a string uses scientific (exponential) notation like 1.1e1 or 1e5.
+fn is_scientific_str(s: &str) -> bool {
+    let s = s
+        .strip_prefix('-')
+        .or_else(|| s.strip_prefix('+'))
+        .unwrap_or(s);
+    if is_hex_str(s) {
+        return false;
+    }
+    s.contains(['e', 'E'])
+}
+
 /// Count the number of decimal places in a number string.
+/// For scientific notation like "1.100e1", computes effective decimal places
+/// as: (decimal digits in mantissa) - exponent, clamped to 0.
 fn decimal_places(s: &str) -> usize {
-    // Strip leading minus
-    let s = s.strip_prefix('-').unwrap_or(s);
-    if let Some(pos) = s.find('.') {
+    // Strip leading sign
+    let s = s
+        .strip_prefix('-')
+        .or_else(|| s.strip_prefix('+'))
+        .unwrap_or(s);
+
+    // Hex strings: precision is determined by %g behavior, return 0
+    if s.starts_with("0x") || s.starts_with("0X") {
+        return 0;
+    }
+
+    // Scientific notation: e.g., "1.100e1" → mantissa "1.100" has 3 decimal digits,
+    // exponent 1, effective precision = max(0, 3 - 1) = 2
+    if let Some(e_pos) = s.find(['e', 'E']) {
+        let mantissa_part = &s[..e_pos];
+        let exp_str = &s[e_pos + 1..];
+        let exp: i64 = exp_str.parse().unwrap_or(0);
+
+        if let Some(dot_pos) = mantissa_part.find('.') {
+            let frac = &mantissa_part[dot_pos + 1..];
+            // NOTE: for scientific notation, do NOT trim trailing zeros.
+            // GNU seq treats "1.100e1" as having 2 decimal places (3 - 1).
+            let frac_len = frac.len() as i64;
+            let effective = frac_len - exp;
+            if effective > 0 { effective as usize } else { 0 }
+        } else {
+            0
+        }
+    } else if let Some(pos) = s.find('.') {
         let frac = &s[pos + 1..];
         // Trim trailing zeros for precision determination
         let trimmed = frac.trim_end_matches('0');
@@ -102,17 +217,46 @@ fn decimal_places(s: &str) -> usize {
 }
 
 /// Count total width needed for equal-width formatting.
-fn number_width(s: &str) -> usize {
-    s.len()
+/// For hex and scientific notation, compute width from the evaluated decimal value.
+fn number_width(s: &str, value: f64, prec: usize) -> usize {
+    if is_hex_str(s) || is_scientific_str(s) {
+        // Width based on evaluated decimal representation
+        if prec == 0 {
+            format!("{}", value as i64).len()
+        } else {
+            format!("{value:.prec$}", prec = prec).len()
+        }
+    } else {
+        s.len()
+    }
 }
 
-/// Determine if a string represents a pure integer.
+/// Determine if a string represents a pure integer (after evaluation).
+/// Handles plain integers, hex integers (0xF423F), and scientific notation (1.1e1).
 fn is_integer_str(s: &str) -> bool {
-    let s = s.strip_prefix('-').unwrap_or(s);
-    if s.is_empty() {
+    let stripped = s
+        .strip_prefix('-')
+        .or_else(|| s.strip_prefix('+'))
+        .unwrap_or(s);
+    if stripped.is_empty() {
         return false;
     }
-    s.chars().all(|c| c.is_ascii_digit())
+
+    // Hex integer: 0xABC (no 'p' = not hex float)
+    if (stripped.starts_with("0x") || stripped.starts_with("0X")) && !stripped.contains(['p', 'P'])
+    {
+        let hex_body = &stripped[2..];
+        return !hex_body.is_empty() && hex_body.chars().all(|c| c.is_ascii_hexdigit());
+    }
+
+    // Scientific notation that evaluates to an integer: e.g., 1.1e1 = 11
+    if stripped.contains(['e', 'E']) {
+        // Use decimal_places to check if effective precision is 0
+        return decimal_places(s) == 0;
+    }
+
+    // Plain decimal integer
+    stripped.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Format a number according to printf-style format string.
@@ -436,7 +580,7 @@ fn main() {
         }
     };
 
-    let first: f64 = match first_str.parse() {
+    let first: f64 = match parse_number(&first_str) {
         Ok(v) => v,
         Err(_) => {
             eprintln!(
@@ -446,7 +590,7 @@ fn main() {
             process::exit(1);
         }
     };
-    let increment: f64 = match increment_str.parse() {
+    let increment: f64 = match parse_number(&increment_str) {
         Ok(v) => v,
         Err(_) => {
             eprintln!(
@@ -456,7 +600,7 @@ fn main() {
             process::exit(1);
         }
     };
-    let last: f64 = match last_str.parse() {
+    let last: f64 = match parse_number(&last_str) {
         Ok(v) => v,
         Err(_) => {
             eprintln!(
@@ -481,12 +625,25 @@ fn main() {
         .max(decimal_places(&increment_str))
         .max(decimal_places(&last_str));
 
+    // Detect if any argument is hex (integer or float)
+    let any_hex = is_hex_str(&first_str) || is_hex_str(&increment_str) || is_hex_str(&last_str);
+
+    // Detect if any argument is a hex float (0x...p...) — these require %g formatting
+    let any_hex_float = [&first_str, &increment_str, &last_str].iter().any(|s| {
+        let t = s
+            .strip_prefix('-')
+            .or_else(|| s.strip_prefix('+'))
+            .unwrap_or(s);
+        (t.starts_with("0x") || t.starts_with("0X")) && t.contains(['p', 'P'])
+    });
+
     // Determine if we should use integer mode
     let use_int = prec == 0
         && is_integer_str(&first_str)
         && is_integer_str(&increment_str)
         && is_integer_str(&last_str)
-        && format.is_none();
+        && format.is_none()
+        && !any_hex_float;
 
     // Determine format string
     let mut int_pad_width: usize = 0; // For integer equal-width, use native formatting
@@ -499,7 +656,11 @@ fn main() {
             process::exit(1);
         }
         f.clone()
-    } else if equal_width {
+    } else if any_hex_float {
+        // Hex float arguments use %g formatting (like GNU seq)
+        "%g".to_string()
+    } else if equal_width && !any_hex {
+        // Equal-width padding; disabled for hex integer inputs (GNU behavior)
         // Determine the width needed
         let first_width = if use_int {
             format_int_value(first as i64).len()
@@ -1134,8 +1295,8 @@ fn write_fixed_to_buf(buf: &mut Vec<u8>, value: f64, prec: usize) {
 
 /// Return the width needed for equal-width display of a number string.
 #[allow(dead_code)]
-fn display_width(s: &str) -> usize {
-    number_width(s)
+fn display_width(s: &str, value: f64, prec: usize) -> usize {
+    number_width(s, value, prec)
 }
 
 #[cfg(test)]
@@ -1374,5 +1535,50 @@ mod tests {
         // Should zero-pad to match widths
         assert!(stdout.contains("-5\n"));
         assert!(stdout.contains("05\n") || stdout.contains("5\n"));
+    }
+
+    #[test]
+    fn test_hex_integer_args() {
+        // seq 0xF423F 0xF4240 → 999999, 1000000
+        let output = cmd().args(["0xF423F", "0xF4240"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stdout, "999999\n1000000\n");
+    }
+
+    #[test]
+    fn test_hex_float_step() {
+        // seq 1 0x1p-1 2 → 1, 1.5, 2 (hex float step = 0.5)
+        let output = cmd().args(["1", "0x1p-1", "2"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stdout, "1\n1.5\n2\n");
+    }
+
+    #[test]
+    fn test_scientific_first_arg() {
+        // seq 1.1e1 12 → 11, 12 (scientific notation first arg)
+        let output = cmd().args(["1.1e1", "12"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stdout, "11\n12\n");
+    }
+
+    #[test]
+    fn test_scientific_last_arg() {
+        // seq 11 1.2e1 → 11, 12 (scientific notation last arg)
+        let output = cmd().args(["11", "1.2e1"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stdout, "11\n12\n");
+    }
+
+    #[test]
+    fn test_equal_width_scientific() {
+        // seq -w 1.10000e5 110000 → 110000
+        let output = cmd().args(["-w", "1.10000e5", "110000"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stdout, "110000\n");
     }
 }

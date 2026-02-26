@@ -304,11 +304,9 @@ pub fn validate_set2_class_at_end(
     // A case class always has 26 characters
     let class_end = last_class.position + 26;
     if class_end == set2_raw_len {
-        return Err(
-            "when translating with string1 longer than string2,\n\
+        return Err("when translating with string1 longer than string2,\n\
              the latter string must not end with a character class"
-                .to_string(),
-        );
+            .to_string());
     }
     Ok(())
 }

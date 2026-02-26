@@ -282,7 +282,10 @@ fn main() {
 
     // -C (compare) is mutually exclusive with --strip and --preserve-timestamps
     if config.compare && config.strip {
-        eprintln!("{}: options --compare and --strip are mutually exclusive", TOOL_NAME);
+        eprintln!(
+            "{}: options --compare and --strip are mutually exclusive",
+            TOOL_NAME
+        );
         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(1);
     }

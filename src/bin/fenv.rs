@@ -215,10 +215,7 @@ fn main() {
 
     // GNU env: -0/--null is only valid when printing environment (no command)
     if null_terminated && command_start.is_some() {
-        eprintln!(
-            "{}: cannot specify --null (-0) with command",
-            TOOL_NAME
-        );
+        eprintln!("{}: cannot specify --null (-0) with command", TOOL_NAME);
         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(125);
     }

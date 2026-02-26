@@ -101,23 +101,39 @@ fn main() {
     };
 
     let line_bytes = line.as_bytes();
+    let line_len = line_bytes.len();
 
-    // Build a large buffer filled with repeated copies of the line.
-    let mut buf = Vec::with_capacity(BUF_SIZE + line_bytes.len());
-    while buf.len() < BUF_SIZE {
-        buf.extend_from_slice(line_bytes);
-    }
+    // Build a buffer filled with repeated copies of the line.
+    // The buffer length is always an exact multiple of line_len so that
+    // every write boundary falls between complete lines. This prevents
+    // partial lines from appearing when downstream consumers (e.g.,
+    // `head -n 2 | uniq`) read at write boundaries.
+    //
+    // When a single line is already >= BUF_SIZE, use exactly one copy
+    // to avoid allocating a needlessly huge buffer.
+    let buf = if line_len >= BUF_SIZE {
+        line_bytes.to_vec()
+    } else {
+        // Number of copies that fills at least BUF_SIZE bytes,
+        // rounded up to a full line.
+        let copies = (BUF_SIZE + line_len - 1) / line_len;
+        let mut v = Vec::with_capacity(copies * line_len);
+        for _ in 0..copies {
+            v.extend_from_slice(line_bytes);
+        }
+        v
+    };
+    let total = buf.len();
 
     // Enlarge pipe buffer to match our write size for minimal syscalls
     #[cfg(target_os = "linux")]
     unsafe {
-        libc::fcntl(1, libc::F_SETPIPE_SZ, BUF_SIZE as libc::c_int);
+        libc::fcntl(1, libc::F_SETPIPE_SZ, total as libc::c_int);
     }
 
     // Raw write(2) loop — simpler and faster than vmsplice (which without
     // SPLICE_F_GIFT copies into pipe buffers anyway, with extra overhead)
     let ptr = buf.as_ptr();
-    let total = buf.len();
     loop {
         let mut written = 0usize;
         while written < total {
@@ -416,5 +432,73 @@ mod tests {
                 "Output mismatch with GNU yes"
             );
         }
+    }
+
+    /// Helper: run `fyes <padded_arg> | head -n 2` and verify both lines are identical.
+    /// This catches buffer-boundary splits that produce partial lines.
+    #[cfg(unix)]
+    fn assert_padded_string_unique(pad_len: usize) {
+        let padded: String = " ".repeat(pad_len);
+        let mut child = cmd().arg(&padded).stdout(Stdio::piped()).spawn().unwrap();
+
+        let child_stdout = child.stdout.take().unwrap();
+
+        let head = Command::new("head")
+            .args(["-n", "2"])
+            .stdin(child_stdout)
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let text = String::from_utf8_lossy(&head.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "pad_len={}: expected 2 lines from head, got {}",
+            pad_len,
+            lines.len()
+        );
+        assert_eq!(
+            lines[0],
+            lines[1],
+            "pad_len={}: the two lines differ (buffer split mid-line)\n  line0 len={}\n  line1 len={}",
+            pad_len,
+            lines[0].len(),
+            lines[1].len()
+        );
+        assert_eq!(
+            lines[0].len(),
+            pad_len,
+            "pad_len={}: line length mismatch",
+            pad_len
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_yes_4095_char_padded_string() {
+        assert_padded_string_unique(4095);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_yes_4096_char_padded_string() {
+        assert_padded_string_unique(4096);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_yes_8191_char_padded_string() {
+        assert_padded_string_unique(8191);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_yes_8192_char_padded_string() {
+        assert_padded_string_unique(8192);
     }
 }

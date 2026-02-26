@@ -7,7 +7,9 @@ use std::io::{self, Read};
 use std::process;
 
 use coreutils_rs::common::reset_sigpipe;
-use coreutils_rs::od::{AddressRadix, Endian, OdConfig, OutputFormat, od_process, parse_format_type};
+use coreutils_rs::od::{
+    AddressRadix, Endian, OdConfig, OutputFormat, od_process, parse_format_type,
+};
 
 const TOOL_NAME: &str = "od";
 const VERSION: &str = env!("CARGO_PKG_VERSION");

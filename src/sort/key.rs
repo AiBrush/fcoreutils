@@ -162,17 +162,12 @@ impl KeyDef {
             return Err("field number is zero: invalid field specification".to_string());
         }
 
-        // GNU sort rejects character offset 0 (positions are 1-indexed)
+        // GNU sort rejects character offset 0 in the START position only.
+        // A 0 in the end position is valid (treated as end of field).
         if start_char == 0 && parts[0].contains('.') {
             return Err(format!(
                 "character offset is zero: invalid field specification '{}'",
-                parts[0]
-            ));
-        }
-        if parts.len() > 1 && end_char == 0 && parts[1].contains('.') {
-            return Err(format!(
-                "character offset is zero: invalid field specification '{}'",
-                parts[1]
+                spec
             ));
         }
 
@@ -318,9 +313,30 @@ fn is_blank(b: u8) -> bool {
     b == b' ' || b == b'\t'
 }
 
+/// Skip leading blanks (space and tab) starting from position `from` within `line`.
+/// Returns the byte offset of the first non-blank character at or after `from`.
+#[inline]
+fn skip_blanks_from(line: &[u8], from: usize, end: usize) -> usize {
+    let mut i = from;
+    while i < end && is_blank(line[i]) {
+        i += 1;
+    }
+    i
+}
+
 /// Extract the key portion of a line based on a KeyDef.
 /// Allocation-free: uses find_nth_field instead of collecting all fields.
-pub fn extract_key<'a>(line: &'a [u8], key: &KeyDef, separator: Option<u8>) -> &'a [u8] {
+///
+/// When `ignore_leading_blanks` is true (from the key's -b flag or global -b),
+/// leading blanks in each field are skipped before applying character position
+/// offsets. This matches GNU sort's behavior where `-b` affects where character
+/// counting starts within a field.
+pub fn extract_key<'a>(
+    line: &'a [u8],
+    key: &KeyDef,
+    separator: Option<u8>,
+    ignore_leading_blanks: bool,
+) -> &'a [u8] {
     let sf = key.start_field.saturating_sub(1);
     let (sf_start, sf_end) = find_nth_field(line, sf, separator);
 
@@ -329,9 +345,15 @@ pub fn extract_key<'a>(line: &'a [u8], key: &KeyDef, separator: Option<u8>) -> &
     }
 
     let start_byte = if key.start_char > 0 {
-        let field_len = sf_end - sf_start;
+        // When -b is active, skip leading blanks in the field before counting chars
+        let effective_start = if ignore_leading_blanks {
+            skip_blanks_from(line, sf_start, sf_end)
+        } else {
+            sf_start
+        };
+        let field_len = sf_end - effective_start;
         let char_offset = (key.start_char - 1).min(field_len);
-        sf_start + char_offset
+        effective_start + char_offset
     } else {
         sf_start
     };
@@ -340,9 +362,15 @@ pub fn extract_key<'a>(line: &'a [u8], key: &KeyDef, separator: Option<u8>) -> &
         let ef = key.end_field.saturating_sub(1);
         let (ef_start, ef_end) = find_nth_field(line, ef, separator);
         if key.end_char > 0 {
-            let field_len = ef_end - ef_start;
+            // When -b is active, skip leading blanks in the end field too
+            let effective_start = if ignore_leading_blanks {
+                skip_blanks_from(line, ef_start, ef_end)
+            } else {
+                ef_start
+            };
+            let field_len = ef_end - effective_start;
             let char_offset = key.end_char.min(field_len);
-            ef_start + char_offset
+            effective_start + char_offset
         } else {
             ef_end
         }

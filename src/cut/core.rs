@@ -48,9 +48,7 @@ pub fn parse_ranges(spec: &str, no_merge_adjacent: bool) -> Result<Vec<Range>, S
 
             // Reject bare "-" (both sides empty)
             if left.is_empty() && right.is_empty() {
-                return Err(format!(
-                    "invalid range with no endpoint: -"
-                ));
+                return Err(format!("invalid range with no endpoint: -"));
             }
 
             let start = if left.is_empty() {
@@ -741,7 +739,7 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
         rayon::scope(|s| {
             for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
                 s.spawn(move |_| {
-                    result.reserve(chunk.len());
+                    result.reserve(chunk.len() + 1);
                     process_fields_chunk(
                         chunk,
                         delim,
@@ -764,7 +762,8 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
+        // +1 for potential trailing line_delim when input doesn't end with one
+        let mut buf = Vec::with_capacity(data.len() + 1);
         process_fields_chunk(
             data,
             delim,
@@ -3216,7 +3215,7 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
         rayon::scope(|s| {
             for (chunk, result) in chunks.iter().zip(results.iter_mut()) {
                 s.spawn(move |_| {
-                    result.reserve(chunk.len());
+                    result.reserve(chunk.len() + 1);
                     process_bytes_chunk(
                         chunk,
                         ranges,
@@ -3235,7 +3234,8 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
+        // +1 for potential trailing line_delim when input doesn't end with one
+        let mut buf = Vec::with_capacity(data.len() + 1);
         process_bytes_chunk(data, ranges, complement, output_delim, line_delim, &mut buf);
         if !buf.is_empty() {
             out.write_all(&buf)?;

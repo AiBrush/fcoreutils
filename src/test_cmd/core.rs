@@ -377,16 +377,6 @@ fn is_unary_op(s: &str) -> bool {
 fn is_binary_op(s: &str) -> bool {
     matches!(
         s,
-        "=" | "=="
-            | "!="
-            | "-eq"
-            | "-ne"
-            | "-lt"
-            | "-le"
-            | "-gt"
-            | "-ge"
-            | "-nt"
-            | "-ot"
-            | "-ef"
+        "=" | "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef"
     )
 }

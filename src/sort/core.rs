@@ -18,9 +18,8 @@ use rayon::prelude::*;
 use crate::common::io_error_msg;
 
 use super::compare::{
-    compare_with_opts, human_numeric_to_sortable_u64, int_to_sortable_u64,
-    parse_general_numeric, parse_numeric_value, select_comparator, skip_leading_blanks,
-    try_parse_integer,
+    compare_with_opts, human_numeric_to_sortable_u64, int_to_sortable_u64, parse_general_numeric,
+    parse_numeric_value, select_comparator, skip_leading_blanks, try_parse_integer,
 };
 use super::key::{KeyDef, KeyOpts, extract_key};
 
@@ -207,9 +206,6 @@ fn compare_lines_inner(
     let stable = config.stable || skip_last_resort;
     if !config.keys.is_empty() {
         for key in &config.keys {
-            let ka = extract_key(a, key, config.separator);
-            let kb = extract_key(b, key, config.separator);
-
             let opts = if key.opts.has_sort_type()
                 || key.opts.ignore_case
                 || key.opts.dictionary_order
@@ -221,6 +217,9 @@ fn compare_lines_inner(
             } else {
                 &config.global_opts
             };
+
+            let ka = extract_key(a, key, config.separator, opts.ignore_leading_blanks);
+            let kb = extract_key(b, key, config.separator, opts.ignore_leading_blanks);
 
             let result = compare_with_opts(ka, kb, opts, config.random_seed);
 
@@ -870,6 +869,7 @@ fn pre_extract_key_offsets(
     offsets: &[(usize, usize)],
     key: &KeyDef,
     separator: Option<u8>,
+    ignore_leading_blanks: bool,
 ) -> Vec<(usize, usize)> {
     // Fast path: separator-based single whole field extraction (e.g., -t, -k2 or -t, -k2,2)
     // No char offsets, and end_field is either 0 (to end of line) or same as start_field.
@@ -916,7 +916,7 @@ fn pre_extract_key_offsets(
 
     let extract = |&(s, e): &(usize, usize)| {
         let line = &data[s..e];
-        let extracted = extract_key(line, key, separator);
+        let extracted = extract_key(line, key, separator, ignore_leading_blanks);
         if extracted.is_empty() {
             (0, 0)
         } else {
@@ -2237,23 +2237,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 offsets
                     .par_iter()
                     .enumerate()
-                    .map(|(i, &(s, e))| {
-                        (
-                            parse_to_sortable_u64(&data[s..e], gopts),
-                            i,
-                        )
-                    })
+                    .map(|(i, &(s, e))| (parse_to_sortable_u64(&data[s..e], gopts), i))
                     .collect()
             } else {
                 offsets
                     .iter()
                     .enumerate()
-                    .map(|(i, &(s, e))| {
-                        (
-                            parse_to_sortable_u64(&data[s..e], gopts),
-                            i,
-                        )
-                    })
+                    .map(|(i, &(s, e))| (parse_to_sortable_u64(&data[s..e], gopts), i))
                     .collect()
             }
         };
@@ -2340,7 +2330,13 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             gopts
         };
 
-        let key_offs = pre_extract_key_offsets(data, &offsets, key, config.separator);
+        let key_offs = pre_extract_key_offsets(
+            data,
+            &offsets,
+            key,
+            config.separator,
+            opts.ignore_leading_blanks,
+        );
         let is_key_numeric = opts.numeric || opts.general_numeric || opts.human_numeric;
 
         if is_key_numeric {
@@ -3029,13 +3025,21 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             config
                 .keys
                 .par_iter()
-                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .enumerate()
+                .map(|(ki, key)| {
+                    let (_, needs_blank, _) = comparators[ki];
+                    pre_extract_key_offsets(data, &offsets, key, config.separator, needs_blank)
+                })
                 .collect()
         } else {
             config
                 .keys
                 .iter()
-                .map(|key| pre_extract_key_offsets(data, &offsets, key, config.separator))
+                .enumerate()
+                .map(|(ki, key)| {
+                    let (_, needs_blank, _) = comparators[ki];
+                    pre_extract_key_offsets(data, &offsets, key, config.separator, needs_blank)
+                })
                 .collect()
         };
 
@@ -3206,8 +3210,8 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             let lb = unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) };
 
             for (ki, &(cmp_fn, needs_blank, needs_reverse)) in comparators.iter().enumerate() {
-                let ka = extract_key(la, &keys[ki], config.separator);
-                let kb = extract_key(lb, &keys[ki], config.separator);
+                let ka = extract_key(la, &keys[ki], config.separator, needs_blank);
+                let kb = extract_key(lb, &keys[ki], config.separator, needs_blank);
                 let ka = if needs_blank {
                     skip_leading_blanks(ka)
                 } else {

@@ -87,7 +87,13 @@ fn parse_size(s: &str) -> Result<(SizeMode, u64), String> {
     // GNU compat: reject mixed modifiers like '>+0' or '/<0'
     if mode != SizeMode::Absolute && !rest.is_empty() {
         let first = rest.as_bytes()[0];
-        if first == b'+' || first == b'-' || first == b'<' || first == b'>' || first == b'/' || first == b'%' {
+        if first == b'+'
+            || first == b'-'
+            || first == b'<'
+            || first == b'>'
+            || first == b'/'
+            || first == b'%'
+        {
             return Err(format!("invalid number: '{}'", s));
         }
     }

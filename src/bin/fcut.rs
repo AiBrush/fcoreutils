@@ -396,7 +396,9 @@ fn main() {
 
     // GNU cut: -s (--only-delimited) is only valid with -f
     if cli.only_delimited && mode != CutMode::Fields {
-        eprintln!("cut: suppressing non-delimited lines makes sense\n\tonly when operating on fields");
+        eprintln!(
+            "cut: suppressing non-delimited lines makes sense\n\tonly when operating on fields"
+        );
         eprintln!("Try 'cut --help' for more information.");
         process::exit(1);
     }

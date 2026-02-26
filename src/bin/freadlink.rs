@@ -215,8 +215,7 @@ fn canonicalize_f(path: &Path) -> Result<PathBuf, std::io::Error> {
                         last.1 = is_last;
                     }
                     // Replace the rest of the queue
-                    let remaining: Vec<(std::ffi::OsString, bool)> =
-                        queue[qi + 1..].to_vec();
+                    let remaining: Vec<(std::ffi::OsString, bool)> = queue[qi + 1..].to_vec();
                     queue.truncate(qi);
                     queue.extend(exp);
                     queue.extend(remaining);
@@ -473,7 +472,10 @@ mod tests {
             .args(["-f", missing.to_str().unwrap()])
             .output()
             .unwrap();
-        assert!(output.status.success(), "should succeed for -f with missing last component");
+        assert!(
+            output.status.success(),
+            "should succeed for -f with missing last component"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(stdout.trim(), canon_dir.join("nonexist").to_str().unwrap());
     }
@@ -487,11 +489,11 @@ mod tests {
         let link = dir.path().join("link-to-missing");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let output = cmd()
-            .args(["-f", link.to_str().unwrap()])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "should succeed for -f on symlink to missing");
+        let output = cmd().args(["-f", link.to_str().unwrap()]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "should succeed for -f on symlink to missing"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         // Should resolve through the symlink to the (missing) target
         assert_eq!(stdout.trim(), target.to_str().unwrap());
@@ -506,10 +508,7 @@ mod tests {
         fs::create_dir(&subdir).unwrap();
 
         let path = subdir.join("nonexist");
-        let output = cmd()
-            .args(["-f", path.to_str().unwrap()])
-            .output()
-            .unwrap();
+        let output = cmd().args(["-f", path.to_str().unwrap()]).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(
@@ -529,10 +528,7 @@ mod tests {
         std::os::unix::fs::symlink(&subdir, &link).unwrap();
 
         let path = link.join("nonexist");
-        let output = cmd()
-            .args(["-f", path.to_str().unwrap()])
-            .output()
-            .unwrap();
+        let output = cmd().args(["-f", path.to_str().unwrap()]).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         // Should resolve link-to-dir -> subdir, then append nonexist
@@ -553,10 +549,7 @@ mod tests {
         std::os::unix::fs::symlink(&subdir, &link).unwrap();
 
         let path = link.join("missing");
-        let output = cmd()
-            .args(["-f", path.to_str().unwrap()])
-            .output()
-            .unwrap();
+        let output = cmd().args(["-f", path.to_str().unwrap()]).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(
@@ -576,16 +569,13 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         let path = link.join("more");
-        let output = cmd()
-            .args(["-m", path.to_str().unwrap()])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "should succeed for -m with missing intermediates");
+        let output = cmd().args(["-m", path.to_str().unwrap()]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "should succeed for -m with missing intermediates"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         // Should follow symlink to doesnotexist, then append "more"
-        assert_eq!(
-            stdout.trim(),
-            target.join("more").to_str().unwrap()
-        );
+        assert_eq!(stdout.trim(), target.join("more").to_str().unwrap());
     }
 }
