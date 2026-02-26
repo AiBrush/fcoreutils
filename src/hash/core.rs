@@ -728,13 +728,6 @@ const SMALL_FILE_LIMIT: u64 = 16 * 1024 * 1024;
 /// completely avoiding any heap allocation for the data path.
 const TINY_FILE_LIMIT: u64 = 8 * 1024;
 
-/// Threshold above which streaming hash_reader replaces hash_file_small.
-/// Below this, hash_file_small (single read into thread-local buffer + single-shot
-/// SIMD hash) is faster because the buffer is small enough that page faults are
-/// negligible (~64 pages = ~256µs). Above this, the file-sized buffer causes
-/// significant page fault overhead on first access (cold thread-local).
-const STREAMING_THRESHOLD: u64 = 256 * 1024;
-
 // Thread-local reusable buffer for single-read hash.
 // Grows lazily up to SMALL_FILE_LIMIT (16MB). Initial 64KB allocation
 // handles tiny files; larger files trigger one grow that persists for reuse.
@@ -881,8 +874,7 @@ fn hash_file_pipelined_read(
 
 /// Hash a known-regular file using tiered I/O strategy based on size.
 /// - Large (>=16MB): mmap with HugePage/PopulateRead hints, pipelined fallback
-/// - Medium (256KB-16MB): streaming hash_reader with fadvise(SEQUENTIAL)
-/// - Small (8KB-256KB): single read into thread-local buffer + single-shot hash
+/// - Small/Medium (8KB-16MB): single read into thread-local buffer + single-shot hash
 ///
 /// SAFETY: mmap is safe for regular local files opened just above. The fallback
 /// to streaming I/O (hash_reader/hash_file_pipelined) handles mmap failures at
@@ -919,24 +911,11 @@ fn hash_regular_file(algo: HashAlgorithm, file: File, file_size: u64) -> io::Res
             return hash_reader(algo, file);
         }
     }
-    // Medium-large files (STREAMING_THRESHOLD..SMALL_FILE_LIMIT): streaming
-    // hash with fadvise. Avoids large buffer page faults.
-    if file_size >= STREAMING_THRESHOLD {
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::io::AsRawFd;
-            let _ = unsafe {
-                libc::posix_fadvise(
-                    file.as_raw_fd(),
-                    0,
-                    file_size as i64,
-                    libc::POSIX_FADV_SEQUENTIAL,
-                )
-            };
-        }
-        return hash_reader(algo, file);
-    }
-    // Small files (8KB..STREAMING_THRESHOLD): single read + single-shot hash.
+    // Files below SMALL_FILE_LIMIT (8KB-16MB): single read into thread-local
+    // buffer + single-shot SIMD hash. This is faster than streaming hash_reader
+    // (128KB chunked incremental updates) because: one read() syscall vs ~N,
+    // one hash_bytes() call vs N context.update() calls, and the thread-local
+    // buffer stays warm across sequential file hashing.
     hash_file_small(algo, file, file_size as usize)
 }
 
