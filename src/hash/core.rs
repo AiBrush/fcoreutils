@@ -926,7 +926,12 @@ fn hash_regular_file(algo: HashAlgorithm, file: File, file_size: u64) -> io::Res
         {
             use std::os::unix::io::AsRawFd;
             let _ = unsafe {
-                libc::posix_fadvise(file.as_raw_fd(), 0, file_size as i64, libc::POSIX_FADV_SEQUENTIAL)
+                libc::posix_fadvise(
+                    file.as_raw_fd(),
+                    0,
+                    file_size as i64,
+                    libc::POSIX_FADV_SEQUENTIAL,
+                )
             };
         }
         return hash_reader(algo, file);
@@ -956,7 +961,12 @@ pub fn hash_file(algo: HashAlgorithm, path: &Path) -> io::Result<String> {
     if file_size >= FADVISE_MIN_SIZE {
         use std::os::unix::io::AsRawFd;
         let _ = unsafe {
-            libc::posix_fadvise(file.as_raw_fd(), 0, file_size as i64, libc::POSIX_FADV_SEQUENTIAL)
+            libc::posix_fadvise(
+                file.as_raw_fd(),
+                0,
+                file_size as i64,
+                libc::POSIX_FADV_SEQUENTIAL,
+            )
         };
     }
     hash_reader(algo, file)
@@ -1140,7 +1150,12 @@ pub fn blake2b_hash_file(path: &Path, output_bytes: usize) -> io::Result<String>
     if file_size >= FADVISE_MIN_SIZE {
         use std::os::unix::io::AsRawFd;
         let _ = unsafe {
-            libc::posix_fadvise(file.as_raw_fd(), 0, file_size as i64, libc::POSIX_FADV_SEQUENTIAL)
+            libc::posix_fadvise(
+                file.as_raw_fd(),
+                0,
+                file_size as i64,
+                libc::POSIX_FADV_SEQUENTIAL,
+            )
         };
     }
     blake2b_hash_reader(file, output_bytes)
