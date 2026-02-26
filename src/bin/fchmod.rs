@@ -176,8 +176,7 @@ fn main() {
                 continue;
             }
 
-            if let Err(e) =
-                coreutils_rs::chmod::chmod_recursive(path, &effective_mode_str, &config)
+            if let Err(e) = coreutils_rs::chmod::chmod_recursive(path, &effective_mode_str, &config)
             {
                 if !config.quiet {
                     eprintln!("{}: {}", TOOL_NAME, e);
@@ -242,8 +241,7 @@ fn main() {
                     Ok(m) => m,
                     Err(_) => new_mode,
                 };
-                let requested_sym =
-                    coreutils_rs::chmod::format_symbolic_for_warning(unmasked_mode);
+                let requested_sym = coreutils_rs::chmod::format_symbolic_for_warning(unmasked_mode);
                 eprintln!(
                     "{}: {}: new permissions are {}, not {}",
                     TOOL_NAME, file, actual_sym, requested_sym

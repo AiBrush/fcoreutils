@@ -145,10 +145,7 @@ fn main() {
     if command_start.is_none() || command_start.unwrap() >= args.len() {
         if adjustment_given {
             // GNU nice: if an adjustment was explicitly given, a command is required
-            eprintln!(
-                "{}: a command must be given with an adjustment",
-                TOOL_NAME
-            );
+            eprintln!("{}: a command must be given with an adjustment", TOOL_NAME);
             eprintln!("Try '{} --help' for more information.", TOOL_NAME);
             process::exit(125);
         }

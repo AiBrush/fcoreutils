@@ -567,15 +567,14 @@ fn main() {
 
     // When both --reference and --date are given, parse date relative to reference time.
     // GNU touch uses the reference file's mtime as the base for relative date strings.
-    let parsed_date =
-        if let (Some(date_s), Some(tp)) = (date_str.as_deref(), &ref_times) {
-            Some(parse_date_string_with_base(
-                date_s,
-                Some((tp.mtime_sec, tp.mtime_nsec)),
-            ))
-        } else {
-            date_str.as_deref().map(parse_date_string)
-        };
+    let parsed_date = if let (Some(date_s), Some(tp)) = (date_str.as_deref(), &ref_times) {
+        Some(parse_date_string_with_base(
+            date_s,
+            Some((tp.mtime_sec, tp.mtime_nsec)),
+        ))
+    } else {
+        date_str.as_deref().map(parse_date_string)
+    };
 
     if let Some(Err(_)) = &parsed_date {
         eprintln!(

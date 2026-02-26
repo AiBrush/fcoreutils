@@ -432,10 +432,7 @@ fn make_link(
     let link_exists = link_path.symlink_metadata().is_ok();
 
     // For -sf: detect same source and destination before removing
-    if link_exists
-        && (force || backup != BackupMode::None)
-        && same_file(target, link_name)
-    {
+    if link_exists && (force || backup != BackupMode::None) && same_file(target, link_name) {
         // GNU ln: "X and Y are the same file"
         eprintln!(
             "{}: '{}' and '{}' are the same file",

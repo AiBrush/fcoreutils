@@ -179,9 +179,17 @@ fn create_fifo(name: &str, mode: &Option<String>) {
         }
     };
 
-    let saved = if explicit_mode { Some(unsafe { libc::umask(0) }) } else { None };
+    let saved = if explicit_mode {
+        Some(unsafe { libc::umask(0) })
+    } else {
+        None
+    };
     let ret = unsafe { libc::mkfifo(c_name.as_ptr(), file_mode) };
-    if let Some(old) = saved { unsafe { libc::umask(old); } }
+    if let Some(old) = saved {
+        unsafe {
+            libc::umask(old);
+        }
+    }
 
     if ret != 0 {
         let e = std::io::Error::last_os_error();
@@ -221,9 +229,17 @@ fn create_special(name: &str, node_type: &str, major: u64, minor: u64, mode: &Op
         }
     };
 
-    let saved = if explicit_mode { Some(unsafe { libc::umask(0) }) } else { None };
+    let saved = if explicit_mode {
+        Some(unsafe { libc::umask(0) })
+    } else {
+        None
+    };
     let ret = unsafe { libc::mknod(c_name.as_ptr(), file_mode | type_flag, dev) };
-    if let Some(old) = saved { unsafe { libc::umask(old); } }
+    if let Some(old) = saved {
+        unsafe {
+            libc::umask(old);
+        }
+    }
 
     if ret != 0 {
         let e = std::io::Error::last_os_error();

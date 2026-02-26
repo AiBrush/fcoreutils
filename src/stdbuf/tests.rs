@@ -92,7 +92,10 @@ fn test_parse_buffer_mode_line() {
 fn test_parse_buffer_mode_line_lowercase() {
     // GNU stdbuf only accepts uppercase 'L' for line buffering
     let result = parse_buffer_mode("l");
-    assert!(result.is_err(), "lowercase 'l' should be rejected per GNU stdbuf");
+    assert!(
+        result.is_err(),
+        "lowercase 'l' should be rejected per GNU stdbuf"
+    );
 }
 
 #[test]

@@ -616,13 +616,5 @@ fn split_line_optimal<W: Write>(
     }
 
     // Use the same optimal reflow as normal mode, treating this line as a paragraph.
-    reflow_paragraph(
-        &words,
-        &sentence_ends,
-        pfx,
-        indent,
-        indent,
-        config,
-        output,
-    )
+    reflow_paragraph(&words, &sentence_ends, pfx, indent, indent, config, output)
 }

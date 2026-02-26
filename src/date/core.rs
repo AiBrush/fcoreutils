@@ -368,7 +368,11 @@ fn try_parse_time_only(s: &str, utc: bool) -> Option<SystemTime> {
     }
 
     let time_str = parts[0];
-    let tz_str = if parts.len() == 2 { Some(parts[1]) } else { None };
+    let tz_str = if parts.len() == 2 {
+        Some(parts[1])
+    } else {
+        None
+    };
 
     // Validate time format: HH:MM or HH:MM:SS
     let time_fields: Vec<&str> = time_str.split(':').collect();
@@ -394,9 +398,7 @@ fn try_parse_time_only(s: &str, utc: bool) -> Option<SystemTime> {
     if let Some(tz) = tz_str {
         if tz.eq_ignore_ascii_case("UTC") || tz == "Z" {
             use_utc = true;
-        } else if (tz.starts_with('+') || tz.starts_with('-'))
-            && (tz.len() == 5 || tz.len() == 3)
-        {
+        } else if (tz.starts_with('+') || tz.starts_with('-')) && (tz.len() == 5 || tz.len() == 3) {
             let sign: i64 = if tz.starts_with('-') { -1 } else { 1 };
             let digits = &tz[1..];
             if !digits.chars().all(|c| c.is_ascii_digit()) {
@@ -424,10 +426,14 @@ fn try_parse_time_only(s: &str, utc: bool) -> Option<SystemTime> {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     if use_utc {
         let now_t = now_secs as libc::time_t;
-        unsafe { libc::gmtime_r(&now_t, &mut tm); }
+        unsafe {
+            libc::gmtime_r(&now_t, &mut tm);
+        }
     } else {
         let now_t = now_secs as libc::time_t;
-        unsafe { libc::localtime_r(&now_t, &mut tm); }
+        unsafe {
+            libc::localtime_r(&now_t, &mut tm);
+        }
     }
 
     tm.tm_hour = hour as i32;

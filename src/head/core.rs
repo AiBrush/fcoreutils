@@ -65,7 +65,10 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
         Err(_) => {
             // If the string is valid digits but overflows u64, clamp to u64::MAX
             // like GNU coreutils does for huge counts
-            let digits = num_str.strip_prefix('+').or_else(|| num_str.strip_prefix('-')).unwrap_or(num_str);
+            let digits = num_str
+                .strip_prefix('+')
+                .or_else(|| num_str.strip_prefix('-'))
+                .unwrap_or(num_str);
             if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
                 u64::MAX
             } else {

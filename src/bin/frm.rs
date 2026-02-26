@@ -92,10 +92,7 @@ fn prompt_yes(msg: &str) -> bool {
 /// GNU rm with -f ignores ENOENT and ENOTDIR (e.g., `rm -f existing-file/child`).
 #[cfg(unix)]
 fn is_ignorable_force_error(e: &io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(libc::ENOENT) | Some(libc::ENOTDIR)
-    )
+    matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ENOTDIR))
 }
 
 /// Format an I/O error message the way GNU coreutils does (no "(os error N)").

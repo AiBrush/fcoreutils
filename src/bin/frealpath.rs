@@ -570,10 +570,7 @@ mod tests {
         let stdout = output.stdout;
         // Should end with NUL, not newline
         assert!(stdout.ends_with(b"\0"), "Expected NUL terminator");
-        assert!(
-            !stdout.ends_with(b"\n"),
-            "Should not end with newline"
-        );
+        assert!(!stdout.ends_with(b"\n"), "Should not end with newline");
     }
 
     #[test]

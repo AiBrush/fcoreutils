@@ -345,8 +345,7 @@ fn format_plain(
     // ========== Step 3: Compute tail ==========
     // tail is the overflow from keyafter that wraps to the left half.
     // tail_max_width = before_max_width - before_len - gap_size
-    let tail_max_width_raw: isize =
-        before_max_width as isize - before_len as isize - gap as isize;
+    let tail_max_width_raw: isize = before_max_width as isize - before_len as isize - gap as isize;
     let mut tail_start: usize = 0;
     let mut tail_end: usize = 0;
     let mut tail_truncation = false;
@@ -703,18 +702,9 @@ fn format_and_write<W: Write>(
     // Compute maximum reference width (for consistent left-alignment)
     let ref_max_width = if config.auto_reference {
         // GNU ptx adds 1 for ":" and computes max across all references
-        entries
-            .iter()
-            .map(|e| e.reference.len())
-            .max()
-            .unwrap_or(0)
-            + 1 // +1 for ":"
+        entries.iter().map(|e| e.reference.len()).max().unwrap_or(0) + 1 // +1 for ":"
     } else {
-        entries
-            .iter()
-            .map(|e| e.reference.len())
-            .max()
-            .unwrap_or(0)
+        entries.iter().map(|e| e.reference.len()).max().unwrap_or(0)
     };
 
     // Format and output

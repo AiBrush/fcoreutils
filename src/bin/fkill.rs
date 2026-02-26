@@ -150,10 +150,7 @@ fn main() {
                         match args[i].parse::<i32>() {
                             Ok(n) => signal = n,
                             Err(_) => {
-                                eprintln!(
-                                    "{}: invalid signal number: '{}'",
-                                    TOOL_NAME, args[i]
-                                );
+                                eprintln!("{}: invalid signal number: '{}'", TOOL_NAME, args[i]);
                                 process::exit(1);
                             }
                         }

@@ -128,10 +128,7 @@ fn main() {
             // GNU chgrp treats '' as a no-op: no group change, just validate files exist
             let files = &positional[1..];
             if files.is_empty() {
-                eprintln!(
-                    "{}: missing operand after '{}'",
-                    TOOL_NAME, group_spec
-                );
+                eprintln!("{}: missing operand after '{}'", TOOL_NAME, group_spec);
                 eprintln!("Try '{} --help' for more information.", TOOL_NAME);
                 process::exit(1);
             }

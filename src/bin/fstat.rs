@@ -133,11 +133,7 @@ fn main() {
             Err(e) => {
                 if path == "-" && filesystem {
                     // Special error message for '-' in filesystem mode
-                    eprintln!(
-                        "{}: {}",
-                        TOOL_NAME,
-                        coreutils_rs::common::io_error_msg(&e)
-                    );
+                    eprintln!("{}: {}", TOOL_NAME, coreutils_rs::common::io_error_msg(&e));
                 } else {
                     eprintln!(
                         "{}: cannot stat '{}': {}",

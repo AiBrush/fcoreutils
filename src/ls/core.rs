@@ -1577,8 +1577,8 @@ fn print_with_separator(
         if i > 0 {
             // GNU: if line_length == 0, never wrap.
             // Otherwise check if name + 2 (sep+space) fits on current line.
-            let fits = line_length == 0
-                || (pos + len + 2 < line_length && pos <= usize::MAX - len - 2);
+            let fits =
+                line_length == 0 || (pos + len + 2 < line_length && pos <= usize::MAX - len - 2);
             let separator: u8 = if fits { b' ' } else { eol };
 
             out.write_all(&[sep, separator])?;
@@ -1684,7 +1684,11 @@ fn print_columns(
         1
     } else {
         let base = term_width / min_col_w;
-        let extra = if !term_width.is_multiple_of(min_col_w) { 1 } else { 0 };
+        let extra = if !term_width.is_multiple_of(min_col_w) {
+            1
+        } else {
+            0
+        };
         std::cmp::min(base + extra, n)
     };
 

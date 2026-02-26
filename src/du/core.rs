@@ -113,9 +113,10 @@ fn is_excluded(path: &Path, config: &DuConfig) -> bool {
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
-    config.exclude_patterns.iter().any(|pat| {
-        glob_match(pat, &basename) || glob_match(pat, &path_str)
-    })
+    config
+        .exclude_patterns
+        .iter()
+        .any(|pat| glob_match(pat, &basename) || glob_match(pat, &path_str))
 }
 
 /// Recursive traversal core. Returns the cumulative size of the subtree at `path`.

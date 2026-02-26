@@ -277,11 +277,9 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
 
     // Parse with hex (0x/0X) and octal (0) prefix support
     let value: u64 = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-        u64::from_str_radix(&num_str[2..], 16)
-            .map_err(|_| format!("invalid size: '{}'", s))?
+        u64::from_str_radix(&num_str[2..], 16).map_err(|_| format!("invalid size: '{}'", s))?
     } else if num_str.starts_with('0') && num_str.len() > 1 {
-        u64::from_str_radix(num_str, 8)
-            .map_err(|_| format!("invalid size: '{}'", s))?
+        u64::from_str_radix(num_str, 8).map_err(|_| format!("invalid size: '{}'", s))?
     } else {
         num_str
             .parse()
