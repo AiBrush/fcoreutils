@@ -120,6 +120,18 @@ str_eisdir:     db "Is a directory", 10, 0
 str_read_err:   db "read error", 10, 0
 str_generic_err: db "Error", 10, 0
 
+str_inv_total_pre: db "invalid argument '", 0
+str_inv_total_mid:
+    db "' for '--total'", 10
+str_inv_total_mid_len equ $ - str_inv_total_mid
+str_inv_total_valid:
+    db "Valid arguments are:", 10
+    db "  - 'auto'", 10
+    db "  - 'always'", 10
+    db "  - 'only'", 10
+    db "  - 'never'", 10
+str_inv_total_valid_len equ $ - str_inv_total_valid
+
 str_extra_operand: db "extra operand '", 0
 str_extra_operand2: db "'", 10, 0
 str_files0_combined:
@@ -274,8 +286,8 @@ files0_buf:     resb BUF_SIZE
 ; Itoa scratch buffer
 itoa_buf:       resb ITOA_BUF_SIZE
 
-; Output line buffer
-line_buf:       resb 512
+; Output line buffer (must hold 5 numeric fields + spaces + PATH_MAX filename + newline)
+line_buf:       resb 4352
 
 ; ═══════════════════════════════════════════════════════════════════
 ; Code section
@@ -325,6 +337,7 @@ _start:
     mov     qword [rel outbuf_pos], 0
     mov     byte [rel stdin_implicit], 0
     mov     byte [rel has_stdin], 0
+    mov     byte [rel has_nonreg], 0
     mov     qword [rel result_count], 0
 
     ; Detect UTF-8 locale by scanning environment variables
@@ -416,23 +429,22 @@ parse_args:
     je      .set_maxlen
 
     ; Invalid short option
-    push    rdi
-    push    rax
+    ; Save bad char early, then maintain stack alignment for calls
+    mov     [rel itoa_buf], al      ; save bad char
+    mov     byte [rel itoa_buf + 1], 0
+    sub     rsp, 16                 ; align stack (parse_args has 3 pushes,
+                                    ; rsp was 0-mod-16; sub 16 keeps 0-mod-16)
     ; Write "wc: invalid option -- 'X'\n"
     mov     rdi, STDERR
     lea     rsi, [rel str_wc_prefix]
     mov     rdx, str_wc_prefix_len
     call    asm_write_all
-    mov     rdi, STDERR
-    lea     rsi, [rel str_inv_opt]
+    lea     rdi, [rel str_inv_opt]
     call    asm_strlen
     mov     rdx, rax
     lea     rsi, [rel str_inv_opt]
     mov     rdi, STDERR
     call    asm_write_all
-    pop     rax
-    mov     [rel itoa_buf], al      ; the bad char
-    mov     byte [rel itoa_buf + 1], 0
     mov     rdi, STDERR
     lea     rsi, [rel itoa_buf]
     mov     rdx, 1
@@ -446,7 +458,7 @@ parse_args:
     lea     rsi, [rel str_try_help]
     mov     rdx, str_try_help_len
     call    asm_write_all
-    pop     rdi
+    ; EXIT never returns, no need to restore stack
     mov     edi, 1
     EXIT    rdi
 
@@ -616,8 +628,47 @@ parse_args:
     test    eax, eax
     jnz     .total_only
 
-    ; Invalid --total value: treat as auto
-    jmp     .next_arg
+    ; Invalid --total value: print error and exit
+    ; "wc: invalid argument 'VALUE' for '--total'\n"
+    push    rdi                     ; save value ptr
+    sub     rsp, 8                  ; align stack to 0-mod-16
+    mov     rdi, STDERR
+    lea     rsi, [rel str_wc_prefix]
+    mov     rdx, str_wc_prefix_len
+    call    asm_write_all
+
+    lea     rdi, [rel str_inv_total_pre]
+    call    asm_strlen
+    mov     rdx, rax
+    lea     rsi, [rel str_inv_total_pre]
+    mov     rdi, STDERR
+    call    asm_write_all
+
+    mov     rdi, [rsp + 8]          ; read saved value ptr without popping
+    call    asm_strlen
+    mov     rdx, rax
+    mov     rsi, [rsp + 8]
+    mov     rdi, STDERR
+    call    asm_write_all
+
+    mov     rdi, STDERR
+    lea     rsi, [rel str_inv_total_mid]
+    mov     rdx, str_inv_total_mid_len
+    call    asm_write_all
+
+    mov     rdi, STDERR
+    lea     rsi, [rel str_inv_total_valid]
+    mov     rdx, str_inv_total_valid_len
+    call    asm_write_all
+
+    mov     rdi, STDERR
+    lea     rsi, [rel str_try_help]
+    mov     rdx, str_try_help_len
+    call    asm_write_all
+
+    ; EXIT never returns, no need to restore stack
+    mov     edi, 1
+    EXIT    rdi
 
 .total_auto:
     mov     byte [rel total_mode], TOTAL_AUTO
@@ -650,22 +701,23 @@ parse_args:
     mov     rdx, str_wc_prefix_len
     call    asm_write_all
 
-    mov     rdi, STDERR
-    lea     rsi, [rel str_extra_operand]
+    lea     rdi, [rel str_extra_operand]
     call    asm_strlen
     mov     rdx, rax
     lea     rsi, [rel str_extra_operand]
     mov     rdi, STDERR
     call    asm_write_all
 
-    ; Print the offending operand
+    ; Print the offending operand (maintain stack alignment)
     mov     rdi, [r13 + rbx * 8]
-    push    rdi
+    push    rdi                     ; save operand, rsp now 0-mod-16
+    sub     rsp, 8                  ; align to 0-mod-16 for calls
     call    asm_strlen
     mov     rdx, rax
-    pop     rsi
+    mov     rsi, [rsp + 8]          ; read saved operand from stack
     mov     rdi, STDERR
     call    asm_write_all
+    add     rsp, 16                 ; clean up push + alignment padding
 
     mov     rdi, STDERR
     lea     rsi, [rel str_extra_operand2]
@@ -931,26 +983,24 @@ str_prefix:
 ; Print unrecognized option error
 ; ───────────────────────────────────────────────────────────────────
 err_unrecognized_opt:
-    push    rdi
+    push    rdi                     ; save bad option string, stack now 0-mod-16
     mov     rdi, STDERR
     lea     rsi, [rel str_wc_prefix]
     mov     rdx, str_wc_prefix_len
     call    asm_write_all
 
-    mov     rdi, STDERR
-    lea     rsi, [rel str_unrec_opt]
+    lea     rdi, [rel str_unrec_opt]
     call    asm_strlen
     mov     rdx, rax
     lea     rsi, [rel str_unrec_opt]
     mov     rdi, STDERR
     call    asm_write_all
 
-    pop     rsi
-    push    rsi
-    mov     rdi, rsi
+    ; Read saved option string without popping (keeps stack aligned)
+    mov     rdi, [rsp]
     call    asm_strlen
     mov     rdx, rax
-    pop     rsi
+    mov     rsi, [rsp]
     mov     rdi, STDERR
     call    asm_write_all
 
@@ -963,6 +1013,7 @@ err_unrecognized_opt:
     lea     rsi, [rel str_try_help]
     mov     rdx, str_try_help_len
     call    asm_write_all
+    add     rsp, 8                  ; clean up pushed rdi
     ret
 
 ; ───────────────────────────────────────────────────────────────────
@@ -1100,6 +1151,7 @@ process_all_files:
     xor     r14d, r14d              ; fd = 0 (stdin)
     mov     r15, rdi                ; save filename ptr
     mov     byte [rel has_stdin], 1
+    mov     byte [rel has_nonreg], 1
     jmp     .do_count
 
 .open_regular:
@@ -1126,7 +1178,10 @@ process_all_files:
     mov     eax, [rel stat_buf + STAT_MODE]
     and     eax, S_IFMT
     cmp     eax, S_IFREG
-    jne     .close_and_count        ; not regular file, must read
+    je      .is_regular_c_only
+    mov     byte [rel has_nonreg], 1
+    jmp     .close_and_count        ; not regular file, must read
+.is_regular_c_only:
 
     ; Get file size from stat
     mov     rax, [rel stat_buf + STAT_SIZE]
@@ -1156,6 +1211,17 @@ process_all_files:
     test    rax, rax
     js      .file_error
     mov     r14, rax                ; fd
+
+    ; Check if regular file for column width heuristic
+    FSTAT   r14, stat_buf
+    test    rax, rax
+    js      .open_nonreg            ; fstat failed, assume non-regular
+    mov     eax, [rel stat_buf + STAT_MODE]
+    and     eax, S_IFMT
+    cmp     eax, S_IFREG
+    je      .do_count
+.open_nonreg:
+    mov     byte [rel has_nonreg], 1
 
 .do_count:
     ; Count the file contents
@@ -1281,8 +1347,7 @@ process_all_files:
     pop     r14                     ; errno
     call    print_file_error
     mov     byte [rel had_error], 1
-    inc     rbx
-    jmp     .file_loop
+    jmp     .accumulate             ; still store (zero) results for this file
 
 .files_done:
     ; Store result count
@@ -2024,13 +2089,11 @@ compute_width_and_print:
     call    num_width
     mov     ebx, eax
 
-    ; Minimum width: 7 when stdin is involved and there's only 1 result
-    ; This applies to both implicit stdin and explicit "-"
-    cmp     byte [rel has_stdin], 1
+    ; Minimum width: 7 when any non-regular file is involved
+    ; (stdin, char devices like /dev/null, directories, pipes, etc.)
+    ; Matches GNU wc behavior: unknown file sizes default to width 7
+    cmp     byte [rel has_nonreg], 1
     jne     .check_min_1
-    cmp     r12, 1
-    jne     .check_min_1
-    ; Single stdin result with multiple columns: min width 7
     cmp     ebx, 7
     jge     .do_print
     mov     ebx, 7
@@ -2465,6 +2528,7 @@ prev_was_space: resb 1
 cur_flags:      resb 1
 stdin_implicit: resb 1
 has_stdin:      resb 1
+has_nonreg:     resb 1
 utf8_mode:      resb 1
 align 8
 files0_from_ptr: resq 1
