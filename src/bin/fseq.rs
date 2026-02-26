@@ -559,6 +559,12 @@ fn main() {
                         const ENTRY: usize = $w + 1; // digits + newline
                         const START: usize = 20 - $w;
                         while current <= batch_end {
+                            if FLUSH_AT - offset < ENTRY {
+                                if !write_all_fd1(&buf[..offset]) {
+                                    return;
+                                }
+                                offset = 0;
+                            }
                             let remaining = FLUSH_AT - offset;
                             let can_fit = remaining / ENTRY;
                             let run_end = std::cmp::min(current + can_fit as i64 - 1, batch_end);
@@ -605,7 +611,9 @@ fn main() {
                                 }
                                 offset = base + ENTRY * 10;
                                 current += 10;
-                                // Carry for tens digit (once per 10 numbers)
+                                // Carry for tens digit (once per 10 numbers).
+                                // INVARIANT: digits[19] == b'0' here (set at start of
+                                // decade block), so carry begins at tens position (p=18).
                                 let mut p = 18usize;
                                 loop {
                                     if digits[p] < b'9' {
@@ -667,7 +675,11 @@ fn main() {
                     17 => batch!(17),
                     18 => batch!(18),
                     19 => batch!(19),
-                    _ => unreachable!("i64 has at most 19 digits"),
+                    _ => {
+                        // SAFETY: len is from itoa::Buffer::format(i64); i64 has at most 19 digits
+                        debug_assert!(false, "i64 has at most 19 digits");
+                        unsafe { std::hint::unreachable_unchecked() }
+                    }
                 }
 
                 // Next digit width: set leading '1' for the new power of 10.
