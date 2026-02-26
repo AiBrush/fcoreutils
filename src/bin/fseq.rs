@@ -747,7 +747,11 @@ fn main() {
         if !buf.is_empty() {
             let _ = write_all_fd1(&buf);
         }
-    } else if fmt.is_empty() && prec > 0 && prec <= 15 {
+    } else if fmt.is_empty()
+        && prec > 0
+        && prec <= 15
+        && scaled_fits_i64(first, last, increment, prec)
+    {
         // Fast integer-based float path: convert to scaled integers to
         // eliminate FP operations from the inner loop entirely.
         // E.g., seq 0 0.1 100000 → iterate 0..1000000 with scale=10.
@@ -756,7 +760,7 @@ fn main() {
         let int_last = (last * scale as f64).round() as i64;
         let int_inc = (increment * scale as f64).round() as i64;
 
-        if int_inc != 0 {
+        {
             let mut val = int_first;
             let mut buf = Vec::with_capacity(256 * 1024);
             let flush_threshold = 240 * 1024;
@@ -878,6 +882,23 @@ fn format_fixed(value: f64, prec: usize) -> String {
     }
 }
 
+/// Check if all scaled float values fit safely in i64 and increment is non-zero.
+fn scaled_fits_i64(first: f64, last: f64, increment: f64, prec: usize) -> bool {
+    let scale_f = 10f64.powi(prec as i32);
+    let f = (first * scale_f).round();
+    let l = (last * scale_f).round();
+    let inc = (increment * scale_f).round();
+    let i64_max = i64::MAX as f64;
+    let i64_min = i64::MIN as f64;
+    f >= i64_min
+        && f <= i64_max
+        && l >= i64_min
+        && l <= i64_max
+        && inc >= i64_min
+        && inc <= i64_max
+        && inc != 0.0
+}
+
 /// Write a scaled integer as a fixed-point decimal string into the buffer.
 /// E.g., val=12345, prec=1, scale=10 → "1234.5"
 /// Works entirely in integer space — no FP ops, no Formatter.
@@ -925,12 +946,18 @@ fn write_fixed_to_buf(buf: &mut Vec<u8>, value: f64, prec: usize) {
         return;
     }
 
-    // For prec 1-15, use fast integer-based formatting
+    // For prec 1-15, use fast integer-based formatting (with overflow guard)
     if prec <= 15 {
         let negative = value < 0.0;
         let abs_val = value.abs();
         let scale = 10u64.pow(prec as u32);
-        let scaled = (abs_val * scale as f64).round() as u64;
+        let scaled_f = (abs_val * scale as f64).round();
+        if scaled_f >= u64::MAX as f64 {
+            use std::io::Write;
+            write!(buf, "{value:.prec$}").unwrap();
+            return;
+        }
+        let scaled = scaled_f as u64;
         let int_part = scaled / scale;
         let frac_part = scaled % scale;
 

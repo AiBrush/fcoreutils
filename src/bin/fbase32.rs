@@ -4,6 +4,7 @@ use std::io::{self, Read, Write};
 use std::process;
 
 /// Write buffer directly to fd 1, bypassing BufWriter overhead.
+#[cfg(unix)]
 fn write_all_fd1(buf: &[u8]) -> bool {
     let mut pos = 0;
     while pos < buf.len() {
@@ -27,6 +28,12 @@ fn write_all_fd1(buf: &[u8]) -> bool {
         }
     }
     true
+}
+
+#[cfg(not(unix))]
+fn write_all_fd1(buf: &[u8]) -> bool {
+    use std::io::Write;
+    std::io::stdout().lock().write_all(buf).is_ok()
 }
 
 const TOOL_NAME: &str = "base32";

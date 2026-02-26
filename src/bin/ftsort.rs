@@ -4,7 +4,7 @@
 // Read pairs of strings from FILE (or stdin), representing edges in a
 // directed graph, and output a topological ordering.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, Read, Write};
 use std::process;
@@ -48,6 +48,7 @@ impl Hasher for FxHasher {
 
 type FxBuildHasher = BuildHasherDefault<FxHasher>;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 
 fn print_help() {
     println!("Usage: {} [OPTION] [FILE]", TOOL_NAME);
@@ -62,10 +63,11 @@ fn print_version() {
     println!("{} (fcoreutils) {}", TOOL_NAME, VERSION);
 }
 
-/// Try to parse a byte slice as a u32. Returns None for non-numeric or overflow.
+/// Try to parse a byte slice as a u32. Returns None for non-numeric, overflow,
+/// or leading zeros (to preserve original token string for GNU compatibility).
 #[inline]
 fn try_parse_u32(token: &[u8]) -> Option<u32> {
-    if token.is_empty() || token.len() > 7 {
+    if token.is_empty() || token.len() > 7 || (token.len() > 1 && token[0] == b'0') {
         return None;
     }
     let mut n: u32 = 0;
@@ -299,17 +301,19 @@ fn run_general(input: &[u8], source_name: &str) -> i32 {
 
     let total = node_names.len();
 
-    // Build adjacency with edge dedup via linear scan (fast for low fan-out)
+    // Build adjacency with edge dedup using HashSet for O(1) amortized lookup
     let mut adj: Vec<Vec<u32>> = vec![Vec::new(); total];
     let mut in_deg: Vec<u32> = vec![0; total];
+    let mut edge_set: FxHashSet<(u32, u32)> = FxHashSet::default();
 
     for &(from, to) in &edge_pairs {
-        if from != to && !adj[from as usize].contains(&to) {
+        if from != to && edge_set.insert((from, to)) {
             adj[from as usize].push(to);
             in_deg[to as usize] += 1;
         }
     }
     drop(edge_pairs);
+    drop(edge_set);
 
     kahn_sort(&node_names, &adj, &mut in_deg, total, source_name)
 }
