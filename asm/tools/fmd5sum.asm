@@ -139,7 +139,7 @@ str_line_improper_1_len equ $ - str_line_improper_1
 str_lines_improper: db " lines are improperly formatted", 10
 str_lines_improper_len equ $ - str_lines_improper
 
-str_no_proper: db ": no properly formatted MD5 checksum lines found", 10
+str_no_proper: db ": no properly formatted checksum lines found", 10
 str_no_proper_len equ $ - str_no_proper
 str_no_file_verified: db ": no file was verified", 10
 str_no_file_verified_len equ $ - str_no_file_verified
@@ -1166,7 +1166,13 @@ hash_one_file:
     call    strlen
     mov     rdx, rax
     WRITE   STDERR, r12, rdx
+    ; Select error message based on errno
+    cmp     r13d, 21                ; EISDIR
+    je      .re_isdir
     WRITE   STDERR, err_io, err_io_len
+    jmp     .hash_file_done
+.re_isdir:
+    WRITE   STDERR, err_is_dir, err_is_dir_len
 
 .hash_file_done:
     pop     r13
@@ -1263,7 +1269,7 @@ do_check_mode:
     cmp     dword [cnt_format_err], 0
     je      .cm_skip_no_proper
 
-    ; "no properly formatted MD5 checksum lines found"
+    ; "no properly formatted checksum lines found"
     cmp     byte [flag_status], 0
     jne     .cm_set_error
     WRITE   STDERR, err_prefix, err_prefix_len
@@ -1286,7 +1292,8 @@ do_check_mode:
     WRITE   STDERR, str_no_proper, str_no_proper_len
 .cm_set_error:
     mov     byte [had_error], 1
-    jmp     .cm_print_warnings
+    ; Skip per-category warnings when "no properly formatted" was shown
+    jmp     .cm_exit
 
 .cm_has_valid:
 .cm_skip_no_proper:
@@ -1295,19 +1302,19 @@ do_check_mode:
     cmp     byte [flag_status], 0
     jne     .cm_exit
 
-    ; Print warning summaries
-    cmp     dword [cnt_mismatch], 0
-    je      .cm_no_mismatch
+    ; Print warning summaries (GNU order: format errors, read errors, mismatches)
+    cmp     dword [cnt_format_err], 0
+    je      .cm_no_fmt_err
     WRITE   STDERR, str_warn_prefix, str_warn_prefix_len
-    cmp     dword [cnt_mismatch], 1
-    jne     .cm_mismatch_plural
-    WRITE   STDERR, str_checksum_not_match_1, str_checksum_not_match_1_len
-    jmp     .cm_no_mismatch
-.cm_mismatch_plural:
-    mov     edi, [cnt_mismatch]
+    cmp     dword [cnt_format_err], 1
+    jne     .cm_fmt_err_plural
+    WRITE   STDERR, str_line_improper_1, str_line_improper_1_len
+    jmp     .cm_no_fmt_err
+.cm_fmt_err_plural:
+    mov     edi, [cnt_format_err]
     call    print_number_stderr
-    WRITE   STDERR, str_checksums_not_match, str_checksums_not_match_len
-.cm_no_mismatch:
+    WRITE   STDERR, str_lines_improper, str_lines_improper_len
+.cm_no_fmt_err:
 
     cmp     dword [cnt_read_err], 0
     je      .cm_no_read_err
@@ -1322,18 +1329,18 @@ do_check_mode:
     WRITE   STDERR, str_files_not_read, str_files_not_read_len
 .cm_no_read_err:
 
-    cmp     dword [cnt_format_err], 0
-    je      .cm_no_fmt_err
+    cmp     dword [cnt_mismatch], 0
+    je      .cm_no_mismatch
     WRITE   STDERR, str_warn_prefix, str_warn_prefix_len
-    cmp     dword [cnt_format_err], 1
-    jne     .cm_fmt_err_plural
-    WRITE   STDERR, str_line_improper_1, str_line_improper_1_len
-    jmp     .cm_no_fmt_err
-.cm_fmt_err_plural:
-    mov     edi, [cnt_format_err]
+    cmp     dword [cnt_mismatch], 1
+    jne     .cm_mismatch_plural
+    WRITE   STDERR, str_checksum_not_match_1, str_checksum_not_match_1_len
+    jmp     .cm_no_mismatch
+.cm_mismatch_plural:
+    mov     edi, [cnt_mismatch]
     call    print_number_stderr
-    WRITE   STDERR, str_lines_improper, str_lines_improper_len
-.cm_no_fmt_err:
+    WRITE   STDERR, str_checksums_not_match, str_checksums_not_match_len
+.cm_no_mismatch:
 
 .cm_exit:
     ; Determine exit code
@@ -1363,7 +1370,7 @@ check_one_file:
     push    r13
     push    r14
     push    r15
-    sub     rsp, 16                 ; local: [rsp]=fd, [rsp+4]=line_pos, [rsp+8]=buf_len
+    sub     rsp, 16                 ; local: [rsp+0]=checksum_fd, [rsp+4]=line_pos, [rsp+8]=buf_len
 
     mov     r12, rdi                ; checksum filename
 
@@ -1387,6 +1394,7 @@ check_one_file:
 
 .cof_read_lines:
     ; Read file and process line by line
+    mov     [rsp], ebx              ; save checksum file fd
     mov     dword [rsp+4], 0        ; line_pos = 0
     mov     dword [rsp+8], 0        ; buf_len = 0
     xor     r13d, r13d              ; line number counter
@@ -1530,7 +1538,7 @@ check_one_file:
     push    rsi                     ; save expected hash
     push    rdi                     ; save filename
 
-    ; Hash the file
+    ; Hash the file (ebx will be reused for target fd, restored later)
     call    md5_init
     ; Open and hash
     mov     rdi, [rsp]              ; filename
@@ -1659,22 +1667,22 @@ check_one_file:
     cmp     byte [flag_status], 0
     jne     .cof_next_line_jmp
 
-    ; Print error
+    ; Save filename in r15 (callee-saved, preserved across syscalls)
+    mov     r15, rdi
+
+    ; Print error to stderr: "md5sum: <filename>: No such file or directory\n"
     WRITE   STDERR, err_prefix, err_prefix_len
-    push    rdi
+    mov     rdi, r15
     call    strlen
     mov     rdx, rax
-    pop     rsi
-    WRITE   STDERR, rsi, rdx
+    WRITE   STDERR, r15, rdx
     WRITE   STDERR, err_no_such, err_no_such_len
 
     ; Print "<filename>: FAILED open or read\n" to stdout
-    push    rsi
-    mov     rdi, rsi
+    mov     rdi, r15
     call    strlen
     mov     rdx, rax
-    pop     rsi
-    WRITE   STDOUT, rsi, rdx
+    WRITE   STDOUT, r15, rdx
     WRITE   STDOUT, str_failed_open, str_failed_open_len
     jmp     .cof_next_line_jmp
 
@@ -1683,6 +1691,15 @@ check_one_file:
     jmp     .cof_next_line_jmp
 
 .cv_read_err:
+    ; Close target file fd if not stdin
+    test    ebx, ebx
+    jz      .cv_re_no_close
+    push    rax
+    mov     rax, SYS_CLOSE
+    mov     edi, ebx
+    syscall
+    pop     rax
+.cv_re_no_close:
     pop     rdi
     pop     rsi
     inc     dword [cnt_read_err]
@@ -1719,6 +1736,7 @@ check_one_file:
     pop     r12
 
 .cof_next_line_jmp:
+    mov     ebx, [rsp]              ; restore checksum file fd
     jmp     .cof_next_line
 
 .cof_done:
