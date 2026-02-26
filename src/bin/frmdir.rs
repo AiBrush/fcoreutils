@@ -218,9 +218,9 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(0));
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stderr.contains("removing directory"),
+            stdout_str.contains("removing directory"),
             "verbose should report removal"
         );
     }
