@@ -134,6 +134,23 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
         return Err("empty size string".to_string());
     }
 
+    // GNU dd supports 'x' as multiplication: e.g. "2x512", "1Mx2"
+    if let Some(pos) = s.find('x') {
+        let left = parse_size_single(&s[..pos])?;
+        let right = parse_size_single(&s[pos + 1..])?;
+        return left
+            .checked_mul(right)
+            .ok_or_else(|| format!("size overflow: {} * {}", left, right));
+    }
+
+    parse_size_single(s)
+}
+
+fn parse_size_single(s: &str) -> Result<u64, String> {
+    if s.is_empty() {
+        return Err("empty size string".to_string());
+    }
+
     // Find where the numeric part ends
     let num_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
 
@@ -146,22 +163,30 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid number '{}': {}", &s[..num_end], e))?;
 
     let suffix = &s[num_end..];
+    // GNU dd suffix convention: single letter = binary (powers of 1024),
+    // xB suffix = decimal (powers of 1000), xIB suffix = binary (explicit).
     let multiplier: u64 = match suffix {
         "" => 1,
         "c" => 1,
         "w" => 2,
         "b" => 512,
-        "K" | "kB" => 1000,
-        "KiB" | "k" => 1024,
-        "M" | "MB" => 1_000_000,
+        "k" | "K" => 1024,
+        "kB" | "KB" => 1000,
+        "KiB" => 1024,
+        "M" => 1_048_576,
+        "MB" => 1_000_000,
         "MiB" => 1_048_576,
-        "G" | "GB" => 1_000_000_000,
+        "G" => 1_073_741_824,
+        "GB" => 1_000_000_000,
         "GiB" => 1_073_741_824,
-        "T" | "TB" => 1_000_000_000_000,
+        "T" => 1_099_511_627_776,
+        "TB" => 1_000_000_000_000,
         "TiB" => 1_099_511_627_776,
-        "P" | "PB" => 1_000_000_000_000_000,
+        "P" => 1_125_899_906_842_624,
+        "PB" => 1_000_000_000_000_000,
         "PiB" => 1_125_899_906_842_624,
-        "E" | "EB" => 1_000_000_000_000_000_000,
+        "E" => 1_152_921_504_606_846_976,
+        "EB" => 1_000_000_000_000_000_000,
         "EiB" => 1_152_921_504_606_846_976,
         _ => return Err(format!("invalid suffix: '{}'", suffix)),
     };
