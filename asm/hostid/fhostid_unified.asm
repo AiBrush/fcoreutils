@@ -49,7 +49,7 @@ ehdr:
     dd 0                         ; flags
     dw 64                        ; ELF header size
     dw 56                        ; program header entry size
-    dw 2                         ; 2 program headers
+    dw 3                         ; 3 program headers (code, bss, gnu_stack)
     dw 64                        ; section header entry size
     dw 0                         ; section header count
     dw 0                         ; section name index
@@ -76,6 +76,17 @@ phdr_bss:
     dq 0                         ; file size (0 = zero-filled)
     dq BSS_SIZE                  ; memory size
     dq 0x200000                  ; alignment
+
+; PT_GNU_STACK: non-executable stack
+phdr_stack:
+    dd 0x6474E551                ; PT_GNU_STACK
+    dd 6                         ; PF_R | PF_W (no PF_X = non-executable)
+    dq 0                         ; offset
+    dq 0                         ; virtual address
+    dq 0                         ; physical address
+    dq 0                         ; file size
+    dq 0                         ; memory size
+    dq 0x10                      ; alignment
 
 ; ── Data Section ─────────────────────────────────────────────
 str_help: db "Usage: hostid [OPTION]", 10
@@ -121,13 +132,32 @@ str_version_flag: db "--version", 0
 
 ; ── Code Section ─────────────────────────────────────────────
 
-; ── Library: asm_write (with EINTR retry) ────────────────────
+; ── Library: asm_write (with EINTR retry and partial write handling) ──
 asm_write:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rbx, rdi            ; fd
+    mov     r12, rsi            ; buf
+    mov     r13, rdx            ; remaining len
 .aw_retry:
     mov     rax, SYS_WRITE
+    mov     rdi, rbx
+    mov     rsi, r12
+    mov     rdx, r13
     syscall
-    cmp     rax, -4
+    cmp     rax, -4             ; -EINTR?
     je      .aw_retry
+    test    rax, rax
+    js      .aw_done            ; error, return it
+    add     r12, rax            ; advance buffer
+    sub     r13, rax            ; decrease remaining
+    jnz     .aw_retry           ; partial write, retry
+    mov     rax, r12            ; return total bytes written
+.aw_done:
+    pop     r13
+    pop     r12
+    pop     rbx
     ret
 
 ; ── Library: asm_write_err ───────────────────────────────────
@@ -172,29 +202,56 @@ asm_strcmp:
     sub     rax, rdx
     ret
 
-; ── Library: asm_check_flag ──────────────────────────────────
+; ── Library: prefix_match ────────────────────────────────────
+; prefix_match(rdi=input, rsi=full_option) -> rax: 1=match, 0=no match
+; Input must be a prefix of full_option (at least 3 chars: '--' + first char)
+prefix_match:
+    cmp     byte [rdi], '-'
+    jne     .pm_no
+    cmp     byte [rdi + 1], '-'
+    jne     .pm_no
+    cmp     byte [rdi + 2], 0
+    je      .pm_no              ; bare "--" is not a prefix match
+    xor     rcx, rcx
+.pm_loop:
+    mov     al, [rdi + rcx]
+    test    al, al
+    jz      .pm_yes             ; input ended, it was a prefix
+    cmp     al, [rsi + rcx]
+    jne     .pm_no              ; mismatch
+    inc     rcx
+    jmp     .pm_loop
+.pm_yes:
+    mov     rax, 1
+    ret
+.pm_no:
+    xor     rax, rax
+    ret
+
+; ── Library: asm_check_flag (with prefix matching) ───────────
 asm_check_flag:
     push    rbx
     mov     rbx, rdi
-    mov     rdi, rbx
+    ; Try prefix match against --help
     lea     rsi, [rel str_help_flag]
-    call    asm_strcmp
+    call    prefix_match
     test    rax, rax
-    jnz     .cf_check_ver
+    jnz     .cf_help
+    ; Try prefix match against --version
+    mov     rdi, rbx
+    lea     rsi, [rel str_version_flag]
+    call    prefix_match
+    test    rax, rax
+    jnz     .cf_version
+    xor     rax, rax
+    pop     rbx
+    ret
+.cf_help:
     mov     rax, 1
     pop     rbx
     ret
-.cf_check_ver:
-    mov     rdi, rbx
-    lea     rsi, [rel str_version_flag]
-    call    asm_strcmp
-    test    rax, rax
-    jnz     .cf_none
+.cf_version:
     mov     rax, 2
-    pop     rbx
-    ret
-.cf_none:
-    xor     rax, rax
     pop     rbx
     ret
 
@@ -202,31 +259,29 @@ asm_check_flag:
 _start:
     mov     r14, [rsp]
     lea     r15, [rsp + 8]
+    sub     rsp, 8              ; align stack: rsp%16==8 for ABI-correct calls
 
     cmp     r14, 1
     jle     .run_main
 
-    mov     rdi, [r15 + 8]
+    mov     r12, [r15 + 8]      ; argv[1], saved in callee-saved r12
 
     ; Check for "--"
-    push    rdi
+    mov     rdi, r12
     lea     rsi, [rel str_dashdash]
     call    asm_strcmp
-    pop     rdi
     test    rax, rax
     jz      .handle_dashdash
 
-    ; Check --help / --version
-    mov     rdi, [r15 + 8]
-    push    rdi
+    ; Check --help / --version (with prefix matching)
+    mov     rdi, r12
     call    asm_check_flag
-    pop     rdi
     cmp     rax, 1
     je      .do_help
     cmp     rax, 2
     je      .do_version
 
-    mov     rdi, [r15 + 8]
+    mov     rdi, r12
     jmp     .report_error
 
 .handle_dashdash:
@@ -277,13 +332,13 @@ _start:
     lea     rsi, [rel str_err_invalid]
     mov     rdx, str_err_invalid_len
     call    asm_write
-    sub     rsp, 8
+    sub     rsp, 16             ; maintain alignment
     mov     byte [rsp], r12b
     mov     rdi, STDERR
     mov     rsi, rsp
     mov     rdx, 1
     call    asm_write
-    add     rsp, 8
+    add     rsp, 16
     mov     rdi, STDERR
     lea     rsi, [rel str_err_apost_nl]
     mov     rdx, str_err_apost_nl_len
@@ -349,11 +404,14 @@ _start:
     js      .try_hostname
 
     mov     r12, rax
-    mov     rdi, rax
+.read_hostid_retry:
+    mov     rdi, r12
     lea     rsi, [BSS_ADDR + OFF_HOSTID_VAL]
     mov     rdx, 4
     mov     rax, SYS_READ
     syscall
+    cmp     rax, -4             ; EINTR?
+    je      .read_hostid_retry
     mov     r13, rax
 
     mov     rdi, r12
@@ -385,11 +443,14 @@ _start:
 
     mov     r12, rax
 
+.read_hosts_retry:
     mov     rdi, r12
     lea     rsi, [BSS_ADDR + OFF_HOSTS_BUF]
     mov     rdx, 4095
     mov     rax, SYS_READ
     syscall
+    cmp     rax, -4             ; EINTR?
+    je      .read_hosts_retry
     mov     r14, rax
 
     mov     rdi, r12
@@ -565,6 +626,8 @@ _start:
 .ph_after_name:
     inc     rbx
 .ph_after_name_ws:
+    cmp     byte [rbx], 0
+    je      .ph_not_found
     cmp     byte [rbx], ' '
     je      .ph_after_name_ws_inc
     cmp     byte [rbx], 9

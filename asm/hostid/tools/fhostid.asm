@@ -2,7 +2,7 @@
 ; GNU-compatible implementation of hostid
 ;
 ; Logic:
-; 1. Parse args for --help/--version, reject any other arg
+; 1. Parse args for --help/--version (with prefix matching), reject any other arg
 ; 2. Try reading 4 bytes from /etc/hostid
 ; 3. If not available, get hostname via uname(), look up in /etc/hosts
 ; 4. Apply rol 16 to IP address (matching glibc gethostid behavior)
@@ -73,36 +73,35 @@ section .text
 
 _start:
     ; Get argc/argv from stack
+    ; At ELF entry, rsp is 16-byte aligned
     mov     r14, [rsp]          ; argc
     lea     r15, [rsp + 8]      ; argv
+    sub     rsp, 8              ; align stack: rsp%16==8 for ABI-correct calls
 
     ; If argc == 1, no arguments, go to main logic
     cmp     r14, 1
     jle     .run_main
 
     ; Check argv[1]
-    mov     rdi, [r15 + 8]      ; argv[1]
+    mov     r12, [r15 + 8]      ; argv[1], saved in callee-saved r12
 
     ; Check for "--" (end of options marker)
-    push    rdi
+    mov     rdi, r12
     lea     rsi, [rel str_dashdash]
     call    asm_strcmp
-    pop     rdi
     test    rax, rax
     jz      .handle_dashdash
 
-    ; Check for --help / --version
-    mov     rdi, [r15 + 8]      ; argv[1] (reload since rdi may be clobbered)
-    push    rdi
+    ; Check for --help / --version (with prefix matching)
+    mov     rdi, r12
     call    asm_check_flag
-    pop     rdi
     cmp     rax, 1
     je      .do_help
     cmp     rax, 2
     je      .do_version
 
     ; Not --help or --version: error on any other argument
-    mov     rdi, [r15 + 8]     ; argv[1]
+    mov     rdi, r12
     jmp     .report_error
 
 .handle_dashdash:
@@ -158,13 +157,13 @@ _start:
     mov     rdx, str_err_invalid_len
     call    asm_write
     ; Write the single char from stack
-    sub     rsp, 8
+    sub     rsp, 16             ; maintain 16-byte alignment
     mov     byte [rsp], r12b
     mov     rdi, STDERR
     mov     rsi, rsp
     mov     rdx, 1
     call    asm_write
-    add     rsp, 8
+    add     rsp, 16
     mov     rdi, STDERR
     lea     rsi, [rel str_err_apost_nl]
     mov     rdx, str_err_apost_nl_len
@@ -232,13 +231,16 @@ _start:
     test    rax, rax
     js      .try_hostname
 
-    ; Read 4 bytes
+    ; Read 4 bytes (with EINTR retry)
     mov     r12, rax            ; save fd
-    mov     rdi, rax
+.read_hostid_retry:
+    mov     rdi, r12
     lea     rsi, [rel hostid_val]
     mov     rdx, 4
     mov     rax, SYS_READ
     syscall
+    cmp     rax, -4             ; EINTR?
+    je      .read_hostid_retry
     mov     r13, rax            ; save bytes read
 
     ; Close file
@@ -276,12 +278,15 @@ _start:
 
     mov     r12, rax            ; fd
 
-    ; Read /etc/hosts into buffer
+    ; Read /etc/hosts into buffer (with EINTR retry)
+.read_hosts_retry:
     mov     rdi, r12
     lea     rsi, [rel hosts_buf]
     mov     rdx, 4095
     mov     rax, SYS_READ
     syscall
+    cmp     rax, -4             ; EINTR?
+    je      .read_hosts_retry
     mov     r14, rax            ; bytes read
 
     ; Close file
@@ -494,6 +499,8 @@ _start:
     ; Skip whitespace, then check next hostname
     inc     rbx
 .ph_after_name_ws:
+    cmp     byte [rbx], 0
+    je      .ph_not_found
     cmp     byte [rbx], ' '
     je      .ph_after_name_ws_inc
     cmp     byte [rbx], 9
@@ -583,3 +590,5 @@ _start:
     pop     r11
     pop     r10
     ret
+
+section .note.GNU-stack noalloc noexec nowrite progbits
