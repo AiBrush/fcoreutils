@@ -525,9 +525,13 @@ fn main() {
 
         let mut current = first_i;
         if inc_i == 1 && first_i >= 0 && sep_is_newline {
-            // Ultra-fast path for the most common case: seq 1 N (increment 1, positive, newline)
-            // Use an incrementing ASCII counter to avoid all integer-to-string conversion.
-            let mut digits = [0u8; 20]; // max 20 digits for u64
+            // Digit-width-batched ASCII counter: process numbers in groups
+            // of equal digit count (1-9, 10-99, 100-999, ...) so each batch
+            // has a compile-time-known copy size. This lets the compiler
+            // inline copy_nonoverlapping as a single MOV instruction instead
+            // of a memcpy function call.
+            let mut digits = [b'0'; 21]; // ASCII '0' fill for carry propagation
+            digits[20] = b'\n'; // sentinel newline
             let mut len: usize;
 
             // Initialize with first number
@@ -540,42 +544,163 @@ fn main() {
             }
 
             while current <= last_i {
-                // Copy current number to output buffer
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        digits.as_ptr().add(20 - len),
-                        buf.as_mut_ptr().add(offset),
-                        len,
-                    );
-                }
-                offset += len;
-                buf[offset] = b'\n';
-                offset += 1;
-                if offset >= FLUSH_AT {
-                    if !write_all_fd1(&buf[..offset]) {
-                        return;
-                    }
-                    offset = 0;
-                }
-                current += 1;
+                // End of current digit-width batch (e.g., 999 for 3-digit)
+                let batch_end = if len < 19 {
+                    std::cmp::min(10i64.pow(len as u32) - 1, last_i)
+                } else {
+                    last_i
+                };
 
-                // Increment the ASCII counter
-                let mut pos = 19;
-                loop {
-                    if digits[pos] < b'9' {
-                        digits[pos] += 1;
-                        break;
+                // Each invocation generates a loop with compile-time ENTRY size.
+                // Decade-unrolled: writes 10 numbers per carry by cycling last
+                // digit 0-9 directly in the output buffer.
+                macro_rules! batch {
+                    ($w:literal) => {{
+                        const ENTRY: usize = $w + 1; // digits + newline
+                        const START: usize = 20 - $w;
+                        while current <= batch_end {
+                            let remaining = FLUSH_AT - offset;
+                            let can_fit = remaining / ENTRY;
+                            let run_end = std::cmp::min(
+                                current + can_fit as i64,
+                                batch_end,
+                            );
+                            // Handle prefix: numbers before next decade boundary
+                            while current <= run_end && (current % 10) != 0 {
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(
+                                        digits.as_ptr().add(START),
+                                        buf.as_mut_ptr().add(offset),
+                                        ENTRY,
+                                    );
+                                }
+                                offset += ENTRY;
+                                current += 1;
+                                let mut p = 19usize;
+                                loop {
+                                    if digits[p] < b'9' {
+                                        digits[p] += 1;
+                                        break;
+                                    }
+                                    digits[p] = b'0';
+                                    p -= 1;
+                                }
+                            }
+                            // Decade-unrolled: write 10 numbers per iteration
+                            // Last digit is stamped directly, no carry logic needed.
+                            while current + 9 <= run_end {
+                                let base = offset;
+                                digits[19] = b'0';
+                                // Copy all 10 entries with cycling last digit
+                                let mut d = 0usize;
+                                while d < 10 {
+                                    unsafe {
+                                        let dst = buf.as_mut_ptr().add(base + d * ENTRY);
+                                        std::ptr::copy_nonoverlapping(
+                                            digits.as_ptr().add(START),
+                                            dst,
+                                            ENTRY,
+                                        );
+                                        // Stamp last digit directly in output
+                                        *dst.add($w - 1) = b'0' + d as u8;
+                                    }
+                                    d += 1;
+                                }
+                                offset = base + ENTRY * 10;
+                                current += 10;
+                                // Carry for tens digit (once per 10 numbers)
+                                let mut p = 18usize;
+                                loop {
+                                    if digits[p] < b'9' {
+                                        digits[p] += 1;
+                                        break;
+                                    }
+                                    digits[p] = b'0';
+                                    p -= 1;
+                                }
+                                digits[19] = b'0';
+                            }
+                            // Handle suffix: remaining numbers after last full decade
+                            while current <= run_end {
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(
+                                        digits.as_ptr().add(START),
+                                        buf.as_mut_ptr().add(offset),
+                                        ENTRY,
+                                    );
+                                }
+                                offset += ENTRY;
+                                current += 1;
+                                let mut p = 19usize;
+                                loop {
+                                    if digits[p] < b'9' {
+                                        digits[p] += 1;
+                                        break;
+                                    }
+                                    digits[p] = b'0';
+                                    p -= 1;
+                                }
+                            }
+                            if offset >= FLUSH_AT {
+                                if !write_all_fd1(&buf[..offset]) {
+                                    return;
+                                }
+                                offset = 0;
+                            }
+                        }
+                    }};
+                }
+
+                match len {
+                    1 => batch!(1),
+                    2 => batch!(2),
+                    3 => batch!(3),
+                    4 => batch!(4),
+                    5 => batch!(5),
+                    6 => batch!(6),
+                    7 => batch!(7),
+                    8 => batch!(8),
+                    9 => batch!(9),
+                    10 => batch!(10),
+                    _ => {
+                        // Fallback for >10 digits (rare: numbers > 10 billion)
+                        while current <= batch_end {
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    digits.as_ptr().add(20 - len),
+                                    buf.as_mut_ptr().add(offset),
+                                    len,
+                                );
+                                *buf.as_mut_ptr().add(offset + len) = b'\n';
+                            }
+                            offset += len + 1;
+                            if offset >= FLUSH_AT {
+                                if !write_all_fd1(&buf[..offset]) {
+                                    return;
+                                }
+                                offset = 0;
+                            }
+                            current += 1;
+                            let mut p = 19usize;
+                            loop {
+                                if digits[p] < b'9' {
+                                    digits[p] += 1;
+                                    break;
+                                }
+                                digits[p] = b'0';
+                                p -= 1;
+                            }
+                        }
                     }
-                    digits[pos] = b'0';
-                    if pos == 20 - len {
-                        // Need one more digit (e.g., 999 -> 1000)
-                        len += 1;
-                        digits[20 - len] = b'1';
-                        break;
-                    }
-                    pos -= 1;
+                }
+
+                // Next digit width (carry already propagated by ASCII increment)
+                if current <= last_i {
+                    len += 1;
+                    digits[20 - len] = b'1';
                 }
             }
+
             if offset > 0 {
                 let _ = write_all_fd1(&buf[..offset]);
             }
