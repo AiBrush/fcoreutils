@@ -221,9 +221,12 @@ mod tests {
     }
 
     #[test]
-    fn test_nice_custom_adjustment() {
+    fn test_nice_custom_adjustment_no_command() {
+        // GNU nice: -n 5 without a command exits 125
         let output = cmd().args(["-n", "5"]).output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.status.code(), Some(125));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("a command must be given"));
     }
 
     #[test]
