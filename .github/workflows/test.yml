@@ -33,7 +33,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  # Rust build + test on all platforms
+  # Rust build + test on all platforms (runs in parallel with assembly)
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -52,10 +52,34 @@ jobs:
       - name: Install nasm and libssl-dev (Linux only)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
-      - name: Build binaries
-        run: cargo build --release
-      - name: Run tests
-        run: cargo test --release
+      - name: Build and test
+        run: |
+          cargo build --release
+          cargo test --release
+
+  # Benchmarks run in parallel with tests (uses cached build from previous runs)
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-v2-ubuntu-latest
+      - name: Install nasm and libssl-dev
+        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
+      - name: Run benchmarks
+        run: cargo bench --bench wc_benchmark 2>&1 | tee bench_output.txt
+      - name: Upload results
+        uses: actions/upload-artifact@v6
+        with:
+          name: benchmark-results
+          path: |
+            bench_output.txt
+            target/criterion
 
   # Assembly: build all 20 tools once, upload as artifact
   assembly-build:
@@ -132,6 +156,7 @@ jobs:
       - uses: actions/download-artifact@v6
         with:
           name: assembly-binaries
+          path: assembly
       - name: Setup
         run: |
           chmod +x assembly/${{ matrix.tool }}/f${{ matrix.tool }}
@@ -154,39 +179,13 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
-      - name: Build ARM64 assembly fyes
+      - name: Build and test ARM64 assembly fyes
         run: |
           as -o /tmp/fyes_arm64.o assembly/yes/fyes_arm64.s
           ld -static -s -e _start -o /tmp/fyes_arm64 /tmp/fyes_arm64.o
           chmod +x /tmp/fyes_arm64
-      - name: Smoke-test ARM64 assembly fyes
-        run: |
           /tmp/fyes_arm64 | head -5
           /tmp/fyes_arm64 hello | head -3
           /tmp/fyes_arm64 --help
           /tmp/fyes_arm64 --version
           echo "All ARM64 assembly fyes smoke tests passed."
-
-  benchmarks:
-    name: Benchmarks
-    needs: [test]
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: ""
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: test-v2-ubuntu-latest
-      - name: Install nasm and libssl-dev
-        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
-      - name: Run benchmarks
-        run: cargo bench --bench wc_benchmark 2>&1 | tee bench_output.txt
-      - name: Upload results
-        uses: actions/upload-artifact@v6
-        with:
-          name: benchmark-results
-          path: |
-            bench_output.txt
-            target/criterion
