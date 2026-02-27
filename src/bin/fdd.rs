@@ -8,8 +8,14 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Handle --help and --version before parsing key=value operands
+    // Handle --help, --version, and strip leading '--' separator
+    let mut operand_args = Vec::new();
+    let mut saw_separator = false;
     for arg in &args {
+        if saw_separator {
+            operand_args.push(arg.clone());
+            continue;
+        }
         match arg.as_str() {
             "--help" => {
                 dd::print_help();
@@ -19,11 +25,14 @@ fn main() {
                 dd::print_version();
                 process::exit(0);
             }
-            _ => {}
+            "--" => {
+                saw_separator = true;
+            }
+            _ => operand_args.push(arg.clone()),
         }
     }
 
-    let config: DdConfig = match dd::parse_dd_args(&args) {
+    let config: DdConfig = match dd::parse_dd_args(&operand_args) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("dd: {}", e);

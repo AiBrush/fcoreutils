@@ -908,21 +908,23 @@ fn shell_quote(s: &str) -> String {
 
     // Check if the string needs quoting at all.
     // Safe chars match GNU quotearg shell_escape_quoting_style.
-    let needs_quoting = s.bytes().any(|b| {
-        !b.is_ascii_alphanumeric()
-            && b != b'_'
-            && b != b'/'
-            && b != b'.'
-            && b != b'-'
-            && b != b':'
-            && b != b','
-            && b != b'+'
-            && b != b'@'
-            && b != b'%'
-            && b != b'='
-            && b != b'^'
-            && b != b'~'
-    });
+    // Leading tilde is unsafe (triggers shell tilde expansion).
+    let needs_quoting = s.starts_with('~')
+        || s.bytes().any(|b| {
+            !b.is_ascii_alphanumeric()
+                && b != b'_'
+                && b != b'/'
+                && b != b'.'
+                && b != b'-'
+                && b != b':'
+                && b != b','
+                && b != b'+'
+                && b != b'@'
+                && b != b'%'
+                && b != b'='
+                && b != b'^'
+                && b != b'~'
+        });
 
     if !needs_quoting {
         return s.to_string();

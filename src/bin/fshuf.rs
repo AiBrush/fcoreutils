@@ -182,50 +182,59 @@ fn main() {
     let mut input_range_count = 0u32;
     let mut head_count: Option<usize> = None;
     let mut output_file: Option<String> = None;
-    // output_file_count removed — GNU allows multiple -o
+    let mut output_file_count = 0u32;
     let mut repeat = false;
     let mut zero_terminated = false;
     let mut random_source: Option<String> = None;
+    let mut random_source_count = 0u32;
     let mut positional: Vec<String> = Vec::new();
     let mut echo_args: Vec<String> = Vec::new();
 
     let mut i = 0;
     // First pass: check for -e/--echo to determine positional arg handling
-    let has_echo = args.iter().any(|a| a == "-e" || a == "--echo");
+    let has_echo = args.iter().any(|a| {
+        a == "-e"
+            || a == "--echo"
+            || (a.starts_with('-') && !a.starts_with("--") && a.len() > 1 && a[1..].contains('e'))
+    });
+
+    // Helper: check if a long option matches (supports abbreviation, min 3 chars)
+    fn match_long(arg: &str, full: &str) -> bool {
+        arg == full || (arg.len() >= 3 && full.starts_with(arg))
+    }
 
     while i < args.len() {
         let arg = &args[i];
-        match arg.as_str() {
-            "--help" => {
+
+        // Handle long options
+        if arg.starts_with("--") {
+            if arg == "--help" {
                 print_help();
                 return;
-            }
-            "--version" => {
+            } else if arg == "--version" {
                 print_version();
                 return;
-            }
-            "-e" | "--echo" => {
+            } else if match_long(arg, "--echo") {
                 echo_mode = true;
-            }
-            "-r" | "--repeat" => {
+            } else if match_long(arg, "--repeat") {
                 repeat = true;
-            }
-            "-z" | "--zero-terminated" => {
+            } else if match_long(arg, "--zero-terminated") {
                 zero_terminated = true;
-            }
-            "-i" | "--input-range" => {
+            } else if arg == "--input-range" || match_long(arg, "--input-range") {
                 i += 1;
                 if i >= args.len() {
-                    eprintln!("{}: option requires an argument -- 'i'", TOOL_NAME);
+                    eprintln!("{}: option '--input-range' requires an argument", TOOL_NAME);
                     process::exit(1);
                 }
                 input_range = Some(parse_range(&args[i]));
                 input_range_count += 1;
-            }
-            "-n" | "--head-count" => {
+            } else if let Some(rest) = arg.strip_prefix("--input-range=") {
+                input_range = Some(parse_range(rest));
+                input_range_count += 1;
+            } else if arg == "--head-count" || match_long(arg, "--head-count") {
                 i += 1;
                 if i >= args.len() {
-                    eprintln!("{}: option requires an argument -- 'n'", TOOL_NAME);
+                    eprintln!("{}: option '--head-count' requires an argument", TOOL_NAME);
                     process::exit(1);
                 }
                 let val = parse_count(&args[i]);
@@ -233,57 +242,121 @@ fn main() {
                     Some(prev) => prev.min(val),
                     None => val,
                 });
-            }
-            "-o" | "--output" => {
+            } else if let Some(rest) = arg.strip_prefix("--head-count=") {
+                let val = parse_count(rest);
+                head_count = Some(match head_count {
+                    Some(prev) => prev.min(val),
+                    None => val,
+                });
+            } else if arg == "--output" || match_long(arg, "--output") {
                 i += 1;
                 if i >= args.len() {
-                    eprintln!("{}: option requires an argument -- 'o'", TOOL_NAME);
+                    eprintln!("{}: option '--output' requires an argument", TOOL_NAME);
                     process::exit(1);
                 }
                 output_file = Some(args[i].clone());
-            }
-            "--random-source" => {
+                output_file_count += 1;
+            } else if let Some(rest) = arg.strip_prefix("--output=") {
+                output_file = Some(rest.to_string());
+                output_file_count += 1;
+            } else if arg == "--random-source" || match_long(arg, "--random-source") {
                 i += 1;
                 if i >= args.len() {
                     eprintln!(
-                        "{}: option requires an argument -- 'random-source'",
+                        "{}: option '--random-source' requires an argument",
                         TOOL_NAME
                     );
                     process::exit(1);
                 }
                 random_source = Some(args[i].clone());
+                random_source_count += 1;
+            } else if let Some(rest) = arg.strip_prefix("--random-source=") {
+                random_source = Some(rest.to_string());
+                random_source_count += 1;
+            } else {
+                eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
+                eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                process::exit(1);
             }
-            _ => {
-                if let Some(rest) = arg.strip_prefix("--input-range=") {
-                    input_range = Some(parse_range(rest));
-                    input_range_count += 1;
-                } else if let Some(rest) = arg.strip_prefix("--head-count=") {
-                    let val = parse_count(rest);
-                    head_count = Some(match head_count {
-                        Some(prev) => prev.min(val),
-                        None => val,
-                    });
-                } else if let Some(rest) = arg.strip_prefix("--output=") {
-                    output_file = Some(rest.to_string());
-                } else if let Some(rest) = arg.strip_prefix("--random-source=") {
-                    random_source = Some(rest.to_string());
-                } else if let Some(rest) = arg.strip_prefix("-i") {
-                    input_range = Some(parse_range(rest));
-                    input_range_count += 1;
-                } else if let Some(rest) = arg.strip_prefix("-n") {
-                    let val = parse_count(rest);
-                    head_count = Some(match head_count {
-                        Some(prev) => prev.min(val),
-                        None => val,
-                    });
-                } else if let Some(rest) = arg.strip_prefix("-o") {
-                    output_file = Some(rest.to_string());
-                } else if has_echo {
-                    echo_args.push(arg.clone());
-                } else {
-                    positional.push(arg.clone());
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            // Handle short options (possibly combined like -er, -rn3, etc.)
+            let bytes = arg.as_bytes();
+            let mut j = 1;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'e' => echo_mode = true,
+                    b'r' => repeat = true,
+                    b'z' => zero_terminated = true,
+                    b'i' => {
+                        // Rest of this arg or next arg is the range value
+                        if j + 1 < bytes.len() {
+                            let rest = &arg[j + 1..];
+                            input_range = Some(parse_range(rest));
+                            input_range_count += 1;
+                        } else {
+                            i += 1;
+                            if i >= args.len() {
+                                eprintln!("{}: option requires an argument -- 'i'", TOOL_NAME);
+                                process::exit(1);
+                            }
+                            input_range = Some(parse_range(&args[i]));
+                            input_range_count += 1;
+                        }
+                        j = bytes.len(); // consumed rest
+                        continue;
+                    }
+                    b'n' => {
+                        if j + 1 < bytes.len() {
+                            let rest = &arg[j + 1..];
+                            let val = parse_count(rest);
+                            head_count = Some(match head_count {
+                                Some(prev) => prev.min(val),
+                                None => val,
+                            });
+                        } else {
+                            i += 1;
+                            if i >= args.len() {
+                                eprintln!("{}: option requires an argument -- 'n'", TOOL_NAME);
+                                process::exit(1);
+                            }
+                            let val = parse_count(&args[i]);
+                            head_count = Some(match head_count {
+                                Some(prev) => prev.min(val),
+                                None => val,
+                            });
+                        }
+                        j = bytes.len();
+                        continue;
+                    }
+                    b'o' => {
+                        if j + 1 < bytes.len() {
+                            let rest = &arg[j + 1..];
+                            output_file = Some(rest.to_string());
+                            output_file_count += 1;
+                        } else {
+                            i += 1;
+                            if i >= args.len() {
+                                eprintln!("{}: option requires an argument -- 'o'", TOOL_NAME);
+                                process::exit(1);
+                            }
+                            output_file = Some(args[i].clone());
+                            output_file_count += 1;
+                        }
+                        j = bytes.len();
+                        continue;
+                    }
+                    _ => {
+                        eprintln!("{}: invalid option -- '{}'", TOOL_NAME, bytes[j] as char);
+                        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                        process::exit(1);
+                    }
                 }
+                j += 1;
             }
+        } else if has_echo {
+            echo_args.push(arg.clone());
+        } else {
+            positional.push(arg.clone());
         }
         i += 1;
     }
@@ -293,7 +366,14 @@ fn main() {
         eprintln!("{}: multiple -i options specified", TOOL_NAME);
         process::exit(1);
     }
-    // GNU shuf allows multiple -o options, using the last one
+    if output_file_count > 1 {
+        eprintln!("{}: multiple output files specified", TOOL_NAME);
+        process::exit(1);
+    }
+    if random_source_count > 1 {
+        eprintln!("{}: multiple random sources specified", TOOL_NAME);
+        process::exit(1);
+    }
     if echo_mode && input_range.is_some() {
         eprintln!("{}: cannot combine -e and -i options", TOOL_NAME);
         process::exit(1);
@@ -747,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_o_uses_last() {
+    fn test_multiple_o_is_error() {
         let dir = std::env::temp_dir();
         let p1 = dir.join("fshuf_multi_o_1.txt");
         let p2 = dir.join("fshuf_multi_o_2.txt");
@@ -762,12 +842,13 @@ mod tests {
             ])
             .output()
             .unwrap();
+        assert!(!output.status.success(), "multiple -o should fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            output.status.success(),
-            "multiple -o should succeed (use last)"
+            stderr.contains("multiple output files"),
+            "stderr: {}",
+            stderr
         );
-        // Output should be written to p2 (last -o), not p1
-        assert!(p2.exists(), "Output should be in second -o file");
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
     }

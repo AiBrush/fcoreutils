@@ -323,7 +323,7 @@ fn main() {
         match parse_size(ss) {
             Ok((m, v)) => (m, v),
             Err(e) => {
-                eprintln!("{}: invalid number: '{}'", TOOL_NAME, e);
+                eprintln!("{}: {}", TOOL_NAME, e);
                 process::exit(1);
             }
         }

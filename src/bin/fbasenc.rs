@@ -279,8 +279,10 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
     }
 
     // Incomplete final group: GNU auto-pads when there are enough chars to
-    // produce output bytes.  For base64, 2 chars → 1 byte (still reports error
-    // because 2 padding chars are missing), 3 chars → 2 bytes (auto-padded, no error).
+    // produce output bytes.  For base64:
+    // 1 char → invalid (can't produce a full byte)
+    // 2 chars → 1 byte (auto-padded, no error)
+    // 3 chars → 2 bytes (auto-padded, no error)
     if n > 0 {
         if n >= 2 {
             result.push((vals[0] << 2) | (vals[1] >> 4));
@@ -288,9 +290,8 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         if n >= 3 {
             result.push((vals[1] << 4) | (vals[2] >> 2));
         }
-        // GNU only errors when the incomplete group can't be cleanly auto-padded
-        // (i.e., only 1 char or exactly 2 chars which need 2 padding chars)
-        if n < 3 {
+        // Only 1 char is truly invalid (can't produce any output byte)
+        if n == 1 {
             return DecodeOutput {
                 data: result,
                 error: Some(format!("{}: invalid input", TOOL_NAME)),
@@ -1944,15 +1945,19 @@ mod tests {
         assert!(r.error.is_none());
         assert_eq!(r.data, b"foobar");
 
-        // Auto-pad: incomplete final group should decode partial bytes + error
+        // Auto-pad: 2 chars - GNU auto-pads without error
         let r = base64_decode(b"QQ", &BASE64_DECODE, false);
-        assert!(r.error.is_some());
+        assert!(r.error.is_none());
         assert_eq!(r.data, b"A");
 
         // 3 chars: GNU auto-pads (only 1 padding char missing), so no error
         let r = base64_decode(b"QWI", &BASE64_DECODE, false);
         assert!(r.error.is_none());
         assert_eq!(r.data, b"Ab");
+
+        // 1 char: invalid (not enough data), should error
+        let r = base64_decode(b"Q", &BASE64_DECODE, false);
+        assert!(r.error.is_some());
     }
 
     #[test]

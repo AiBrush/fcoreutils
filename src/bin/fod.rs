@@ -335,9 +335,32 @@ fn main() {
     let mut out = io::BufWriter::with_capacity(256 * 1024, stdout.lock());
 
     if operands.is_empty() || (operands.len() == 1 && operands[0] == "-") {
-        let stdin = io::stdin();
-        let reader = stdin.lock();
-        if let Err(e) = od_process(reader, &mut out, &config) {
+        // On Unix, use unbuffered stdin reads when -N is specified so that
+        // sequential invocations like `(od -N3 -c; od -N3 -c) < file` work
+        // correctly — buffered StdinLock would over-read from the fd.
+        let result = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::FromRawFd;
+                if config.read_bytes.is_some() {
+                    // SAFETY: fd 0 (stdin) is always valid in normal process execution.
+                    // ManuallyDrop prevents closing fd 0 on drop. Using &File gives
+                    // direct unbuffered read(2) so exactly read_bytes bytes are consumed.
+                    let stdin_file =
+                        std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
+                    od_process(&*stdin_file, &mut out, &config)
+                } else {
+                    let stdin = io::stdin();
+                    od_process(stdin.lock(), &mut out, &config)
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let stdin = io::stdin();
+                od_process(stdin.lock(), &mut out, &config)
+            }
+        };
+        if let Err(e) = result {
             eprintln!("{}: {}", TOOL_NAME, e);
             process::exit(1);
         }
