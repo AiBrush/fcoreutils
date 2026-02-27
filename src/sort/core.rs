@@ -1014,18 +1014,13 @@ fn write_debug_output(
                 );
                 // Find key's byte offset within the line
                 let key_start = if !key.is_empty() {
-                    // Search for the key within the line
-                    if let Some(pos) = find_subslice(line, key) {
-                        pos
-                    } else {
-                        0
-                    }
+                    find_subslice(line, key).unwrap_or_default()
                 } else {
                     0
                 };
                 let key_len = key.len().max(1);
                 let mut annotation = vec![b' '; key_start];
-                annotation.extend(std::iter::repeat(b'_').take(key_len));
+                annotation.extend(std::iter::repeat_n(b'_', key_len));
                 writer.write_all(&annotation)?;
                 writer.write_all(&[term_byte])?;
             }
@@ -1033,7 +1028,7 @@ fn write_debug_output(
 
         // Last-resort comparison annotation (entire line)
         let line_len = line.len();
-        let annotation: Vec<u8> = std::iter::repeat(b'_').take(line_len).collect();
+        let annotation: Vec<u8> = std::iter::repeat_n(b'_', line_len).collect();
         writer.write_all(&annotation)?;
         writer.write_all(&[term_byte])?;
     }
