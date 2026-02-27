@@ -33,7 +33,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  # Build + test on all platforms
+  # Rust build + test on all platforms (runs in parallel with assembly jobs)
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -59,8 +59,16 @@ jobs:
         run: cargo build --release
       - name: Run tests
         run: cargo test --release
-      - name: Build assembly tools (Linux x86_64 only)
-        if: matrix.os == 'ubuntu-latest'
+
+  # Assembly x86_64: build once, then run functional + security tests in parallel
+  test-assembly:
+    name: Test assembly (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install nasm and strace
+        run: sudo apt-get install -y --no-install-recommends nasm strace
+      - name: Build all assembly tools
         run: |
           set -e
           # fyes (Python build script)
@@ -88,65 +96,90 @@ jobs:
           chmod +x assembly/arch/farch
           rm -f /tmp/farch.o
           echo "All 20 assembly tools built successfully"
-      - name: Run assembly functional tests (Linux x86_64 only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Run all assembly tests in parallel
         run: |
           set -e
-          total_pass=0
-          total_fail=0
-          # fyes tests
-          cd assembly/yes
-          python3 ../../tests/assembly/fyes_vs_yes_tests.py --test-only
-          cd ../..
-          # All other tools
-          for tool in true arch logname hostid tty whoami pwd sync sleep echo head tail tac rev wc cut tr base64 md5sum; do
-            result=$(bash assembly/$tool/tests/run_tests.sh ./assembly/$tool/f$tool 2>&1 | grep "^Results:")
-            pass=$(echo "$result" | grep -oP "\d+ passed" | grep -oP "\d+" || echo "0")
-            fail=$(echo "$result" | grep -oP "\d+ failed" | grep -oP "\d+" || echo "0")
-            total_pass=$((total_pass + pass))
-            total_fail=$((total_fail + fail))
-            if [ "${fail:-0}" != "0" ]; then
-              echo "FAIL: $tool ($pass pass, $fail fail)"
-              bash assembly/$tool/tests/run_tests.sh ./assembly/$tool/f$tool 2>&1 | grep "FAIL"
-            else
-              echo "PASS: $tool ($pass tests)"
+          # Run functional and security tests in parallel
+          (
+            set -e
+            echo "=== FUNCTIONAL TESTS ==="
+            # fyes tests
+            cd assembly/yes
+            python3 ../../tests/assembly/fyes_vs_yes_tests.py --test-only
+            cd ../..
+            # All other tools
+            total_pass=0
+            total_fail=0
+            for tool in true arch logname hostid tty whoami pwd sync sleep echo head tail tac rev wc cut tr base64 md5sum; do
+              result=$(bash assembly/$tool/tests/run_tests.sh ./assembly/$tool/f$tool 2>&1 | grep "^Results:")
+              pass=$(echo "$result" | grep -oP "\d+ passed" | grep -oP "\d+" || echo "0")
+              fail=$(echo "$result" | grep -oP "\d+ failed" | grep -oP "\d+" || echo "0")
+              total_pass=$((total_pass + pass))
+              total_fail=$((total_fail + fail))
+              if [ "${fail:-0}" != "0" ]; then
+                echo "FAIL: $tool ($pass pass, $fail fail)"
+                bash assembly/$tool/tests/run_tests.sh ./assembly/$tool/f$tool 2>&1 | grep "FAIL"
+              else
+                echo "PASS: $tool ($pass tests)"
+              fi
+            done
+            echo ""
+            echo "Functional tests: $total_pass passed, $total_fail failed (+ fyes above)"
+            if [ "$total_fail" -gt 0 ]; then
+              echo "FUNCTIONAL TESTS FAILED"
+              exit 1
             fi
-          done
+            echo "ALL FUNCTIONAL TESTS PASSED"
+          ) > /tmp/functional.log 2>&1 &
+          FUNC_PID=$!
+          (
+            set -e
+            echo "=== SECURITY TESTS ==="
+            sec_pass=0
+            sec_fail=0
+            for tool in true arch logname hostid tty whoami pwd sync sleep echo head tail tac rev wc cut tr base64 md5sum; do
+              if [ -f "assembly/$tool/tests/security_tests.py" ]; then
+                echo "--- Security tests: $tool ---"
+                if python3 "assembly/$tool/tests/security_tests.py"; then
+                  sec_pass=$((sec_pass + 1))
+                else
+                  sec_fail=$((sec_fail + 1))
+                  echo "SECURITY FAIL: $tool"
+                fi
+              else
+                echo "SKIP: $tool (no security_tests.py)"
+              fi
+            done
+            echo ""
+            echo "Security tests: $sec_pass passed, $sec_fail failed"
+            if [ "$sec_fail" -gt 0 ]; then
+              echo "SECURITY TESTS FAILED"
+              exit 1
+            fi
+            echo "ALL SECURITY TESTS PASSED"
+          ) > /tmp/security.log 2>&1 &
+          SEC_PID=$!
+          # Wait for both and collect exit codes
+          FUNC_RC=0
+          SEC_RC=0
+          wait $FUNC_PID || FUNC_RC=$?
+          wait $SEC_PID || SEC_RC=$?
+          # Print results
+          echo "====================================="
+          cat /tmp/functional.log
           echo ""
-          echo "Assembly tests: $total_pass passed, $total_fail failed (+ fyes above)"
-          if [ "$total_fail" -gt 0 ]; then
-            echo "ASSEMBLY TESTS FAILED"
+          echo "====================================="
+          cat /tmp/security.log
+          echo ""
+          echo "====================================="
+          # Fail if either suite failed
+          if [ "$FUNC_RC" -ne 0 ] || [ "$SEC_RC" -ne 0 ]; then
+            echo "ASSEMBLY TESTS FAILED (functional=$FUNC_RC, security=$SEC_RC)"
             exit 1
           fi
           echo "ALL ASSEMBLY TESTS PASSED"
-      - name: Run assembly security tests (Linux x86_64 only)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get install -y strace
-          set -e
-          sec_pass=0
-          sec_fail=0
-          for tool in true arch logname hostid tty whoami pwd sync sleep echo head tail tac rev wc cut tr base64 md5sum; do
-            if [ -f "assembly/$tool/tests/security_tests.py" ]; then
-              echo "--- Security tests: $tool ---"
-              if python3 "assembly/$tool/tests/security_tests.py"; then
-                sec_pass=$((sec_pass + 1))
-              else
-                sec_fail=$((sec_fail + 1))
-                echo "SECURITY FAIL: $tool"
-              fi
-            else
-              echo "SKIP: $tool (no security_tests.py)"
-            fi
-          done
-          echo ""
-          echo "Security tests: $sec_pass passed, $sec_fail failed"
-          if [ "$sec_fail" -gt 0 ]; then
-            echo "SECURITY TESTS FAILED"
-            exit 1
-          fi
-          echo "ALL SECURITY TESTS PASSED"
 
+  # ARM64 assembly (runs in parallel with everything else)
   test-assembly-arm64:
     name: Test assembly fyes (Linux ARM64)
     runs-on: ubuntu-24.04-arm
