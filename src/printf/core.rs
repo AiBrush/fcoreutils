@@ -909,7 +909,7 @@ fn shell_quote(s: &str) -> String {
     // Check if the string needs quoting at all.
     // Safe chars match GNU quotearg shell_escape_quoting_style.
     // Leading tilde is unsafe (triggers shell tilde expansion).
-    let needs_quoting = s.as_bytes()[0] == b'~'
+    let needs_quoting = s.starts_with('~')
         || s.bytes().any(|b| {
             !b.is_ascii_alphanumeric()
                 && b != b'_'

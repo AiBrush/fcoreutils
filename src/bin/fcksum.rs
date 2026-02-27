@@ -84,6 +84,7 @@ impl Algorithm {
 
 struct Cli {
     algorithm: Algorithm,
+    algorithm_explicit: bool,
     check: bool,
     tag: bool,
     untagged: bool,
@@ -102,6 +103,7 @@ struct Cli {
 fn parse_args() -> Cli {
     let mut cli = Cli {
         algorithm: Algorithm::Crc,
+        algorithm_explicit: false,
         check: false,
         tag: false,
         untagged: false,
@@ -131,7 +133,10 @@ fn parse_args() -> Cli {
             let s = arg.to_string_lossy();
             if let Some(val) = s.strip_prefix("--algorithm=") {
                 match Algorithm::from_name(val) {
-                    Some(a) => cli.algorithm = a,
+                    Some(a) => {
+                        cli.algorithm = a;
+                        cli.algorithm_explicit = true;
+                    }
                     None => {
                         eprintln!("{}: unknown algorithm: {}", TOOL_NAME, val);
                         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
@@ -232,7 +237,10 @@ fn parse_args() -> Cli {
                             }
                         };
                         match Algorithm::from_name(&val) {
-                            Some(a) => cli.algorithm = a,
+                            Some(a) => {
+                                cli.algorithm = a;
+                                cli.algorithm_explicit = true;
+                            }
                             None => {
                                 eprintln!("{}: unknown algorithm: {}", TOOL_NAME, val);
                                 eprintln!("Try '{} --help' for more information.", TOOL_NAME);
@@ -764,8 +772,10 @@ fn main() {
         );
         process::exit(1);
     }
-    // GNU cksum: --check with bsd/sysv/crc is not supported
+    // GNU cksum: --check with explicitly specified bsd/sysv/crc is not supported
+    // When no algorithm is specified, --check auto-detects from the checksum file
     if cli.check
+        && cli.algorithm_explicit
         && matches!(
             cli.algorithm,
             Algorithm::Bsd | Algorithm::SysV | Algorithm::Crc
