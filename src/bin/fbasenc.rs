@@ -279,8 +279,10 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
     }
 
     // Incomplete final group: GNU auto-pads when there are enough chars to
-    // produce output bytes.  For base64, 2 chars → 1 byte (still reports error
-    // because 2 padding chars are missing), 3 chars → 2 bytes (auto-padded, no error).
+    // produce output bytes.  For base64:
+    // 1 char → invalid (can't produce a full byte)
+    // 2 chars → 1 byte (auto-padded, no error)
+    // 3 chars → 2 bytes (auto-padded, no error)
     if n > 0 {
         if n >= 2 {
             result.push((vals[0] << 2) | (vals[1] >> 4));
@@ -288,9 +290,8 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         if n >= 3 {
             result.push((vals[1] << 4) | (vals[2] >> 2));
         }
-        // GNU only errors when the incomplete group can't be cleanly auto-padded
-        // (i.e., only 1 char or exactly 2 chars which need 2 padding chars)
-        if n < 3 {
+        // Only 1 char is truly invalid (can't produce any output byte)
+        if n == 1 {
             return DecodeOutput {
                 data: result,
                 error: Some(format!("{}: invalid input", TOOL_NAME)),

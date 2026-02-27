@@ -756,9 +756,23 @@ fn main() {
         eprintln!("Try '{} --help' for more information.", TOOL_NAME);
         process::exit(1);
     }
+    // GNU cksum 9.x: --text --tag is allowed (silently accepts)
     if cli.length.is_some() && cli.algorithm != Algorithm::Blake2b {
         eprintln!(
             "{}: --length is only supported with --algorithm=blake2b",
+            TOOL_NAME
+        );
+        process::exit(1);
+    }
+    // GNU cksum: --check with bsd/sysv/crc is not supported
+    if cli.check
+        && matches!(
+            cli.algorithm,
+            Algorithm::Bsd | Algorithm::SysV | Algorithm::Crc
+        )
+    {
+        eprintln!(
+            "{}: --check is not supported with --algorithm={{bsd,sysv,crc,crc32b}}",
             TOOL_NAME
         );
         process::exit(1);

@@ -195,6 +195,12 @@ fn main() {
                     j += 1;
                 }
             }
+            s if s.starts_with("--") => {
+                // Unknown long option (e.g. ---, --invalid)
+                eprintln!("{}: unrecognized option '{}'", TOOL_NAME, s);
+                eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                process::exit(125);
+            }
             s if s.contains('=') => {
                 // NAME=VALUE — stop processing options after this
                 if let Some(pos) = s.find('=') {
@@ -231,6 +237,14 @@ fn main() {
     }
 
     for name in &unsets {
+        // GNU env: reject invalid variable names (empty or containing '=')
+        if name.is_empty() || name.contains('=') {
+            eprintln!(
+                "{}: cannot unset \u{2018}{}\u{2019}: Invalid argument",
+                TOOL_NAME, name
+            );
+            process::exit(125);
+        }
         // SAFETY: we are unsetting the environment variable by name; name is valid
         unsafe { std::env::remove_var(name) };
     }
