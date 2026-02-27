@@ -182,7 +182,7 @@ fn main() {
     let mut input_range_count = 0u32;
     let mut head_count: Option<usize> = None;
     let mut output_file: Option<String> = None;
-    let mut output_file_count = 0u32;
+    // output_file_count removed — GNU allows multiple -o
     let mut repeat = false;
     let mut zero_terminated = false;
     let mut random_source: Option<String> = None;
@@ -241,7 +241,6 @@ fn main() {
                     process::exit(1);
                 }
                 output_file = Some(args[i].clone());
-                output_file_count += 1;
             }
             "--random-source" => {
                 i += 1;
@@ -266,7 +265,6 @@ fn main() {
                     });
                 } else if let Some(rest) = arg.strip_prefix("--output=") {
                     output_file = Some(rest.to_string());
-                    output_file_count += 1;
                 } else if let Some(rest) = arg.strip_prefix("--random-source=") {
                     random_source = Some(rest.to_string());
                 } else if let Some(rest) = arg.strip_prefix("-i") {
@@ -280,7 +278,6 @@ fn main() {
                     });
                 } else if let Some(rest) = arg.strip_prefix("-o") {
                     output_file = Some(rest.to_string());
-                    output_file_count += 1;
                 } else if has_echo {
                     echo_args.push(arg.clone());
                 } else {
@@ -296,10 +293,7 @@ fn main() {
         eprintln!("{}: multiple -i options specified", TOOL_NAME);
         process::exit(1);
     }
-    if output_file_count > 1 {
-        eprintln!("{}: multiple -o options specified", TOOL_NAME);
-        process::exit(1);
-    }
+    // GNU shuf allows multiple -o options, using the last one
     if echo_mode && input_range.is_some() {
         eprintln!("{}: cannot combine -e and -i options", TOOL_NAME);
         process::exit(1);
@@ -753,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_o_is_error() {
+    fn test_multiple_o_uses_last() {
         let dir = std::env::temp_dir();
         let p1 = dir.join("fshuf_multi_o_1.txt");
         let p2 = dir.join("fshuf_multi_o_2.txt");
@@ -768,9 +762,12 @@ mod tests {
             ])
             .output()
             .unwrap();
-        assert!(!output.status.success(), "multiple -o should error");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("multiple -o"), "stderr: {}", stderr);
+        assert!(
+            output.status.success(),
+            "multiple -o should succeed (use last)"
+        );
+        // Output should be written to p2 (last -o), not p1
+        assert!(p2.exists(), "Output should be in second -o file");
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
     }

@@ -1939,7 +1939,12 @@ fn print_total(out: &mut impl Write, entries: &[FileEntry], config: &LsConfig) -
         config.si,
         config.kibibytes,
     );
-    writeln!(out, "total {}", formatted)
+    write!(out, "total {}", formatted)?;
+    if config.zero {
+        out.write_all(&[0u8])
+    } else {
+        writeln!(out)
+    }
 }
 
 // ---------------------------------------------------------------------------

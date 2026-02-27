@@ -278,8 +278,9 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         }
     }
 
-    // Incomplete final group: decode partial bytes (matching GNU behavior)
-    // then report error
+    // Incomplete final group: GNU auto-pads when there are enough chars to
+    // produce output bytes.  For base64, 2 chars → 1 byte (still reports error
+    // because 2 padding chars are missing), 3 chars → 2 bytes (auto-padded, no error).
     if n > 0 {
         if n >= 2 {
             result.push((vals[0] << 2) | (vals[1] >> 4));
@@ -287,10 +288,14 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         if n >= 3 {
             result.push((vals[1] << 4) | (vals[2] >> 2));
         }
-        return DecodeOutput {
-            data: result,
-            error: Some(format!("{}: invalid input", TOOL_NAME)),
-        };
+        // GNU only errors when the incomplete group can't be cleanly auto-padded
+        // (i.e., only 1 char or exactly 2 chars which need 2 padding chars)
+        if n < 3 {
+            return DecodeOutput {
+                data: result,
+                error: Some(format!("{}: invalid input", TOOL_NAME)),
+            };
+        }
     }
 
     DecodeOutput {
@@ -406,12 +411,29 @@ fn base32_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         }
     }
 
-    // Incomplete final group: do NOT output partial bytes (matching GNU base32 behavior)
+    // Incomplete final group: GNU auto-pads when there are enough chars to
+    // produce output bytes.  For base32, 2+ chars can produce partial output.
     if n > 0 {
-        return DecodeOutput {
-            data: result,
-            error: Some(format!("{}: invalid input", TOOL_NAME)),
-        };
+        if n >= 2 {
+            result.push((vals[0] << 3) | (vals[1] >> 2));
+        }
+        if n >= 4 {
+            result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
+        }
+        if n >= 5 {
+            result.push((vals[3] << 4) | (vals[4] >> 1));
+        }
+        if n >= 7 {
+            result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
+        }
+        // Only error if we have exactly 1, 3, or 6 chars (invalid partial groups)
+        // Valid partial groups: 2 (1 byte), 4 (2 bytes), 5 (3 bytes), 7 (4 bytes)
+        if n == 1 || n == 3 || n == 6 {
+            return DecodeOutput {
+                data: result,
+                error: Some(format!("{}: invalid input", TOOL_NAME)),
+            };
+        }
     }
 
     DecodeOutput {
@@ -436,8 +458,7 @@ fn base16_decode(input: &[u8], ignore_garbage: bool) -> DecodeOutput {
         if b == b'\n' || b == b'\r' {
             continue;
         }
-        // GNU basenc --base16 only accepts uppercase hex digits
-        let v = hex_val_upper(b);
+        let v = hex_val(b);
         if v == 0xFF {
             if !ignore_garbage {
                 return DecodeOutput {
@@ -468,11 +489,12 @@ fn base16_decode(input: &[u8], ignore_garbage: bool) -> DecodeOutput {
     }
 }
 
-/// Uppercase-only hex decode for base16 (GNU basenc rejects lowercase in --base16 decode).
-fn hex_val_upper(b: u8) -> u8 {
+/// Hex decode for base16 (GNU basenc accepts both upper and lowercase in --base16 decode).
+fn hex_val(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
         b'A'..=b'F' => b - b'A' + 10,
+        b'a'..=b'f' => b - b'a' + 10,
         _ => 0xFF,
     }
 }

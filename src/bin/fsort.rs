@@ -88,6 +88,7 @@ struct Cli {
     parallel: Option<usize>,
     buffer_size: Option<String>,
     zero_terminated: bool,
+    debug: bool,
     files: Vec<String>,
 }
 
@@ -140,6 +141,7 @@ fn parse_args() -> Cli {
         parallel: None,
         buffer_size: None,
         zero_terminated: false,
+        debug: false,
         files: Vec::new(),
     };
 
@@ -184,6 +186,7 @@ fn parse_args() -> Cli {
                 "stable" => cli.stable = true,
                 "merge" => cli.merge = true,
                 "zero-terminated" => cli.zero_terminated = true,
+                "debug" => cli.debug = true,
                 "check" => {
                     cli.check = Some(eq_val.unwrap_or("diagnose").to_string());
                 }
@@ -531,7 +534,26 @@ fn main() {
         buffer_size,
         temp_dir: cli.temp_dir,
         random_seed,
+        debug: cli.debug,
     };
+
+    // Debug mode: print locale info to stderr (matching GNU sort --debug)
+    if cli.debug {
+        let locale_name = std::env::var("LC_ALL")
+            .or_else(|_| std::env::var("LC_COLLATE"))
+            .or_else(|_| std::env::var("LANG"))
+            .unwrap_or_else(|_| "C".to_string());
+        // GNU sort says: text ordering performed using 'XX' sorting rules
+        // It uses the full locale name including encoding (e.g. 'en_US.UTF-8').
+        eprintln!(
+            "sort: text ordering performed using '{}' sorting rules",
+            if locale_name == "C" || locale_name == "POSIX" {
+                "simple byte comparison".to_string()
+            } else {
+                locale_name
+            }
+        );
+    }
 
     let inputs = if cli.files.is_empty() {
         vec!["-".to_string()]
