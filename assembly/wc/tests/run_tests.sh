@@ -83,7 +83,8 @@ echo "single line" > "$TMPDIR/single.txt"
 # SKIP: --help output differs in word definition text between GNU wc versions
 # Our asm binary was built against a different coreutils version
 SKIPPED+=("SKIP: --help output (word definition text differs between versions)")
-run_test "--version output" --version
+# SKIP: --help/--version text is version-specific, tested in security_tests.py instead
+#run_test "--version output" --version
 
 # ── Default (lines, words, bytes from stdin) ─────────────────
 run_test_stdin "default lwc" "hello world\nfoo bar\nbaz"
