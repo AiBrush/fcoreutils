@@ -1945,15 +1945,19 @@ mod tests {
         assert!(r.error.is_none());
         assert_eq!(r.data, b"foobar");
 
-        // Auto-pad: incomplete final group should decode partial bytes + error
+        // Auto-pad: 2 chars - GNU auto-pads without error
         let r = base64_decode(b"QQ", &BASE64_DECODE, false);
-        assert!(r.error.is_some());
+        assert!(r.error.is_none());
         assert_eq!(r.data, b"A");
 
         // 3 chars: GNU auto-pads (only 1 padding char missing), so no error
         let r = base64_decode(b"QWI", &BASE64_DECODE, false);
         assert!(r.error.is_none());
         assert_eq!(r.data, b"Ab");
+
+        // 1 char: invalid (not enough data), should error
+        let r = base64_decode(b"Q", &BASE64_DECODE, false);
+        assert!(r.error.is_some());
     }
 
     #[test]
