@@ -195,11 +195,13 @@ fn test_int_comparisons() {
     assert_eq!(evaluate(&args(&["10", "-ge", "11"])), Ok(false));
 }
 
-// GNU test does not support < and > operators — they return error
+// String ordering with < and > operators
 #[test]
-fn test_string_ordering_unsupported() {
-    assert!(evaluate(&args(&["abc", "<", "abd"])).is_err());
-    assert!(evaluate(&args(&["abd", ">", "abc"])).is_err());
+fn test_string_ordering() {
+    assert_eq!(evaluate(&args(&["abc", "<", "abd"])), Ok(true));
+    assert_eq!(evaluate(&args(&["abd", ">", "abc"])), Ok(true));
+    assert_eq!(evaluate(&args(&["abc", "<", "abc"])), Ok(false));
+    assert_eq!(evaluate(&args(&["abc", ">", "abc"])), Ok(false));
 }
 
 // -a and -o operators in 3-arg form (GNU compat)
