@@ -198,9 +198,9 @@ fn main() {
             || (a.starts_with('-') && !a.starts_with("--") && a.len() > 1 && a[1..].contains('e'))
     });
 
-    // Helper: check if a long option matches (supports abbreviation)
+    // Helper: check if a long option matches (supports abbreviation, min 3 chars)
     fn match_long(arg: &str, full: &str) -> bool {
-        arg == full || (arg.len() >= 4 && full.starts_with(arg))
+        arg == full || (arg.len() >= 3 && full.starts_with(arg))
     }
 
     while i < args.len() {

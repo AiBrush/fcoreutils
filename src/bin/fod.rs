@@ -343,6 +343,9 @@ fn main() {
             {
                 use std::os::unix::io::FromRawFd;
                 if config.read_bytes.is_some() {
+                    // SAFETY: fd 0 (stdin) is always valid in normal process execution.
+                    // ManuallyDrop prevents closing fd 0 on drop. Using &File gives
+                    // direct unbuffered read(2) so exactly read_bytes bytes are consumed.
                     let stdin_file =
                         std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
                     od_process(&*stdin_file, &mut out, &config)

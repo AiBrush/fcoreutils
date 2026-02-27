@@ -236,8 +236,8 @@ fn main() {
         }
     }
 
+    // Pre-validate all -u names before modifying environment (GNU behavior)
     for name in &unsets {
-        // GNU env: reject invalid variable names (empty or containing '=')
         if name.is_empty() || name.contains('=') {
             eprintln!(
                 "{}: cannot unset \u{2018}{}\u{2019}: Invalid argument",
@@ -245,6 +245,8 @@ fn main() {
             );
             process::exit(125);
         }
+    }
+    for name in &unsets {
         // SAFETY: we are unsetting the environment variable by name; name is valid
         unsafe { std::env::remove_var(name) };
     }

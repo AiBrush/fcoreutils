@@ -772,7 +772,7 @@ fn main() {
         )
     {
         eprintln!(
-            "{}: --check is not supported with --algorithm={{bsd,sysv,crc,crc32b}}",
+            "{}: --check is not supported with --algorithm={{bsd,sysv,crc}}",
             TOOL_NAME
         );
         process::exit(1);
