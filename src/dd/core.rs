@@ -14,6 +14,8 @@ pub enum StatusLevel {
     Progress,
     /// Like default but also suppress error messages.
     NoError,
+    /// Print record counts but suppress transfer speed/bytes line.
+    NoXfer,
 }
 
 /// Conversion flags for dd (`conv=` option).
@@ -39,6 +41,10 @@ pub struct DdConv {
     pub excl: bool,
     /// Do not create the output file.
     pub nocreat: bool,
+    /// Convert fixed-length records to newline-terminated (unblock).
+    pub unblock: bool,
+    /// Convert newline-terminated records to fixed-length (block).
+    pub block: bool,
 }
 
 /// Input/output flags for dd (`iflag=`/`oflag=` options).
@@ -70,6 +76,8 @@ pub struct DdConfig {
     pub ibs: usize,
     /// Output block size in bytes.
     pub obs: usize,
+    /// Conversion block size (for block/unblock).
+    pub cbs: usize,
     /// Copy only this many input blocks (None = unlimited).
     pub count: Option<u64>,
     /// Skip this many ibs-sized blocks at start of input.
@@ -93,6 +101,7 @@ impl Default for DdConfig {
             output: None,
             ibs: 512,
             obs: 512,
+            cbs: 0,
             count: None,
             skip: 0,
             seek: 0,
@@ -223,6 +232,7 @@ pub fn parse_dd_args(args: &[String]) -> Result<DdConfig, String> {
                         config.obs = parse_size(value)? as usize;
                     }
                 }
+                "cbs" => config.cbs = parse_size(value)? as usize,
                 "count" => config.count = Some(parse_size(value)?),
                 "skip" => config.skip = parse_size(value)?,
                 "seek" => config.seek = parse_size(value)?,
@@ -239,6 +249,8 @@ pub fn parse_dd_args(args: &[String]) -> Result<DdConfig, String> {
                             "fsync" => config.conv.fsync = true,
                             "excl" => config.conv.excl = true,
                             "nocreat" => config.conv.nocreat = true,
+                            "block" => config.conv.block = true,
+                            "unblock" => config.conv.unblock = true,
                             "" => {}
                             _ => return Err(format!("invalid conversion: '{}'", flag)),
                         }
@@ -257,6 +269,7 @@ pub fn parse_dd_args(args: &[String]) -> Result<DdConfig, String> {
                 "status" => {
                     config.status = match value {
                         "none" => StatusLevel::None,
+                        "noxfer" => StatusLevel::NoXfer,
                         "noerror" => StatusLevel::NoError,
                         "progress" => StatusLevel::Progress,
                         _ => return Err(format!("invalid status level: '{}'", value)),
@@ -350,6 +363,21 @@ fn skip_input(reader: &mut dyn Read, blocks: u64, block_size: usize) -> io::Resu
     Ok(())
 }
 
+/// Skip input by reading and discarding exactly `bytes` bytes.
+fn skip_input_bytes(reader: &mut dyn Read, bytes: u64) -> io::Result<()> {
+    let mut remaining = bytes;
+    let mut discard_buf = [0u8; 8192];
+    while remaining > 0 {
+        let chunk = std::cmp::min(remaining, discard_buf.len() as u64) as usize;
+        let n = reader.read(&mut discard_buf[..chunk])?;
+        if n == 0 {
+            break;
+        }
+        remaining -= n as u64;
+    }
+    Ok(())
+}
+
 /// Skip input blocks by seeking (for seekable file inputs).
 fn skip_input_seek(file: &mut File, blocks: u64, block_size: usize) -> io::Result<()> {
     let offset = blocks * block_size as u64;
@@ -378,7 +406,7 @@ fn seek_output_file(file: &mut File, seek_blocks: u64, block_size: usize) -> io:
 /// Check if any data conversion options are enabled.
 #[cfg(target_os = "linux")]
 fn has_conversions(conv: &DdConv) -> bool {
-    conv.lcase || conv.ucase || conv.swab || conv.sync
+    conv.lcase || conv.ucase || conv.swab || conv.sync || conv.block || conv.unblock
 }
 
 /// Check if any iflag/oflag fields require the generic path.
@@ -685,7 +713,7 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
     }
 
     if config.status != StatusLevel::None {
-        print_stats(&stats, start_time.elapsed());
+        print_stats(&stats, start_time.elapsed(), config.status);
     }
 
     Some(Ok(stats))
@@ -812,7 +840,7 @@ fn try_copy_file_range_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
     }
 
     if config.status != StatusLevel::None {
-        print_stats(&stats, start_time.elapsed());
+        print_stats(&stats, start_time.elapsed(), config.status);
     }
 
     Some(Ok(stats))
@@ -889,9 +917,18 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
         Box::new(io::stdout())
     };
 
-    // Skip input blocks — use seek() for file inputs to avoid reading and discarding data
+    // Skip input — use seek() for file inputs to avoid reading and discarding data
     if config.skip > 0 {
-        if let Some(ref mut f) = input_file {
+        if config.iflag.skip_bytes {
+            // skip_bytes: skip N bytes, not N blocks
+            if let Some(ref mut f) = input_file {
+                f.seek(SeekFrom::Start(config.skip))?;
+                let seeked = f.try_clone()?;
+                input = Box::new(seeked);
+            } else {
+                skip_input_bytes(&mut input, config.skip)?;
+            }
+        } else if let Some(ref mut f) = input_file {
             skip_input_seek(f, config.skip, config.ibs)?;
             // Rebuild the input Box with a clone at the seeked position
             let seeked = f.try_clone()?;
@@ -916,17 +953,39 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
     let mut stats = DdStats::default();
     let mut ibuf = vec![0u8; config.ibs];
     let mut obuf: Vec<u8> = Vec::with_capacity(config.obs);
+    let mut unblock_buf: Vec<u8> = Vec::new();
+    // For count_bytes mode, track total bytes read
+    let mut bytes_read_total: u64 = 0;
 
     loop {
         // Check count limit
         if let Some(count) = config.count {
-            if stats.records_in_full + stats.records_in_partial >= count {
+            if config.iflag.count_bytes {
+                if bytes_read_total >= count {
+                    break;
+                }
+            } else if stats.records_in_full + stats.records_in_partial >= count {
                 break;
             }
         }
 
+        // When count_bytes is active, limit the read to the remaining bytes
+        let read_size = if config.iflag.count_bytes {
+            if let Some(count) = config.count {
+                let remaining = count.saturating_sub(bytes_read_total);
+                std::cmp::min(config.ibs, remaining as usize)
+            } else {
+                config.ibs
+            }
+        } else {
+            config.ibs
+        };
+        if read_size == 0 {
+            break;
+        }
+
         // Read one input block
-        let n = match read_full_block(&mut input, &mut ibuf) {
+        let n = match read_full_block(&mut input, &mut ibuf[..read_size]) {
             Ok(n) => n,
             Err(e) => {
                 if config.conv.noerror {
@@ -950,14 +1009,21 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
             break;
         }
 
+        bytes_read_total += n as u64;
+
         // Track full vs partial blocks
         if n == config.ibs {
             stats.records_in_full += 1;
         } else {
             stats.records_in_partial += 1;
-            // Pad with NULs if conv=sync
+            // Pad if conv=sync: spaces for block/unblock, NULs otherwise
             if config.conv.sync {
-                ibuf[n..].fill(0);
+                let pad_byte = if config.conv.block || config.conv.unblock {
+                    b' '
+                } else {
+                    0u8
+                };
+                ibuf[n..config.ibs].fill(pad_byte);
             }
         }
 
@@ -965,23 +1031,48 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
         let effective_len = if config.conv.sync { config.ibs } else { n };
         apply_conversions(&mut ibuf[..effective_len], &config.conv);
 
+        // Apply unblock conversion: split fixed-length records into
+        // newline-terminated records with trailing spaces stripped
+        let write_data: &[u8] = if config.conv.unblock && config.cbs > 0 {
+            unblock_buf.clear();
+            let data = &ibuf[..effective_len];
+            let mut pos = 0;
+            while pos < data.len() {
+                let end = std::cmp::min(pos + config.cbs, data.len());
+                let record = &data[pos..end];
+                // Strip trailing spaces
+                let trimmed_len = record
+                    .iter()
+                    .rposition(|&b| b != b' ')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                unblock_buf.extend_from_slice(&record[..trimmed_len]);
+                unblock_buf.push(b'\n');
+                pos = end;
+            }
+            &unblock_buf
+        } else {
+            &ibuf[..effective_len]
+        };
+
         // Buffer output and flush when we have enough for a full output block.
         // Use efficient buffer management: write directly from ibuf when possible,
         // only buffer when ibs != obs.
-        if config.ibs == config.obs && obuf.is_empty() {
+        let wd_len = write_data.len();
+        if config.ibs == config.obs && obuf.is_empty() && !config.conv.unblock {
             // Fast path: ibs == obs, write directly
-            output.write_all(&ibuf[..effective_len])?;
-            if effective_len == config.obs {
+            output.write_all(write_data)?;
+            if wd_len == config.obs {
                 stats.records_out_full += 1;
             } else {
                 stats.records_out_partial += 1;
             }
-            stats.bytes_copied += effective_len as u64;
+            stats.bytes_copied += wd_len as u64;
             // Skip the drain loop below since we wrote directly
             continue;
         }
 
-        obuf.extend_from_slice(&ibuf[..effective_len]);
+        obuf.extend_from_slice(write_data);
         let mut consumed = 0;
         while obuf.len() - consumed >= config.obs {
             output.write_all(&obuf[consumed..consumed + config.obs])?;
@@ -1022,14 +1113,14 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
 
     // Print status
     if config.status != StatusLevel::None {
-        print_stats(&stats, elapsed);
+        print_stats(&stats, elapsed, config.status);
     }
 
     Ok(stats)
 }
 
 /// Print dd transfer statistics to stderr.
-fn print_stats(stats: &DdStats, elapsed: std::time::Duration) {
+fn print_stats(stats: &DdStats, elapsed: std::time::Duration, status: StatusLevel) {
     eprintln!(
         "{}+{} records in",
         stats.records_in_full, stats.records_in_partial
@@ -1038,6 +1129,10 @@ fn print_stats(stats: &DdStats, elapsed: std::time::Duration) {
         "{}+{} records out",
         stats.records_out_full, stats.records_out_partial
     );
+
+    if status == StatusLevel::NoXfer {
+        return;
+    }
 
     let secs = elapsed.as_secs_f64();
     if secs > 0.0 {
