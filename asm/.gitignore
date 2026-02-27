@@ -1,6 +1,0 @@
-# Built binaries (not tracked in git)
-*/f[a-z]*
-!*/f[a-z]*.asm
-!*/f[a-z]*.s
-*/build/
-*.o

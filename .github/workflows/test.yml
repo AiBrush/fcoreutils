@@ -71,38 +71,38 @@ jobs:
           set -e
           total_pass=0
           total_fail=0
-          # Build all NASM unified tools
+          # Build all NASM unified tools (root level)
           for tool in true logname hostid tty whoami pwd sync sleep echo; do
-            nasm -f bin asm/$tool/f${tool}_unified.asm -o asm/$tool/f$tool
-            chmod +x asm/$tool/f$tool
+            nasm -f bin assembly/$tool/f${tool}_unified.asm -o assembly/$tool/f$tool
+            chmod +x assembly/$tool/f$tool
           done
           # Build tools with unified/ subdirectory
           for tool in head tail tac rev cut tr base64 md5sum; do
-            nasm -f bin asm/$tool/unified/f${tool}_unified.asm -o asm/$tool/f$tool
-            chmod +x asm/$tool/f$tool
+            nasm -f bin assembly/$tool/unified/f${tool}_unified.asm -o assembly/$tool/f$tool
+            chmod +x assembly/$tool/f$tool
           done
           # Build wc (modular build)
-          mkdir -p asm/wc/build/lib asm/wc/build/tools
-          nasm -f elf64 -I asm/wc/include/ asm/wc/lib/io.asm -o asm/wc/build/lib/io.o
-          nasm -f elf64 -I asm/wc/include/ asm/wc/lib/str.asm -o asm/wc/build/lib/str.o
-          nasm -f elf64 -I asm/wc/include/ asm/wc/tools/fwc.asm -o asm/wc/build/tools/fwc.o
-          ld --gc-sections -n asm/wc/build/tools/fwc.o asm/wc/build/lib/io.o asm/wc/build/lib/str.o -o asm/wc/fwc
-          chmod +x asm/wc/fwc
+          mkdir -p assembly/wc/build/lib assembly/wc/build/tools
+          nasm -f elf64 -I assembly/wc/ assembly/wc/lib/io.asm -o assembly/wc/build/lib/io.o
+          nasm -f elf64 -I assembly/wc/ assembly/wc/lib/str.asm -o assembly/wc/build/lib/str.o
+          nasm -f elf64 -I assembly/wc/ assembly/wc/tools/fwc.asm -o assembly/wc/build/tools/fwc.o
+          ld --gc-sections -n -s assembly/wc/build/tools/fwc.o assembly/wc/build/lib/io.o assembly/wc/build/lib/str.o -o assembly/wc/fwc
+          chmod +x assembly/wc/fwc
           # Build arch (GAS syntax)
-          as --64 asm/arch/farch_unified.s -o /tmp/farch.o
-          ld -o asm/arch/farch /tmp/farch.o
-          chmod +x asm/arch/farch
+          as --64 assembly/arch/farch_unified.s -o /tmp/farch.o
+          ld -o assembly/arch/farch /tmp/farch.o
+          chmod +x assembly/arch/farch
           rm -f /tmp/farch.o
-          # Run all test suites
+          # Run all functional test suites
           for tool in true arch logname hostid tty whoami pwd sync sleep echo head tail tac rev wc cut tr base64 md5sum; do
-            result=$(bash asm/$tool/tests/run_tests.sh ./asm/$tool/f$tool 2>&1 | grep "^Results:")
+            result=$(bash assembly/$tool/tests/run_tests.sh ./assembly/$tool/f$tool 2>&1 | grep "^Results:")
             pass=$(echo "$result" | grep -oP "\d+ passed" | grep -oP "\d+")
             fail=$(echo "$result" | grep -oP "\d+ failed" | grep -oP "\d+")
             total_pass=$((total_pass + pass))
             total_fail=$((total_fail + fail))
             if [ "$fail" != "0" ]; then
               echo "FAIL: $tool ($pass pass, $fail fail)"
-              bash asm/$tool/tests/run_tests.sh ./asm/$tool/f$tool 2>&1 | grep "FAIL"
+              bash assembly/$tool/tests/run_tests.sh ./assembly/$tool/f$tool 2>&1 | grep "FAIL"
             else
               echo "PASS: $tool ($pass tests)"
             fi
@@ -114,6 +114,33 @@ jobs:
             exit 1
           fi
           echo "ALL ASSEMBLY TESTS PASSED"
+      - name: Run assembly security tests (Linux x86_64 only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get install -y strace
+          set -e
+          sec_pass=0
+          sec_fail=0
+          for tool in true arch logname hostid tty whoami pwd sync sleep echo head tail tac rev wc cut tr base64 md5sum; do
+            if [ -f "assembly/$tool/tests/security_tests.py" ]; then
+              echo "--- Security tests: $tool ---"
+              if python3 "assembly/$tool/tests/security_tests.py"; then
+                sec_pass=$((sec_pass + 1))
+              else
+                sec_fail=$((sec_fail + 1))
+                echo "SECURITY FAIL: $tool"
+              fi
+            else
+              echo "SKIP: $tool (no security_tests.py)"
+            fi
+          done
+          echo ""
+          echo "Security tests: $sec_pass passed, $sec_fail failed"
+          if [ "$sec_fail" -gt 0 ]; then
+            echo "SECURITY TESTS FAILED"
+            exit 1
+          fi
+          echo "ALL SECURITY TESTS PASSED"
 
   test-assembly-arm64:
     name: Test assembly fyes (Linux ARM64)
