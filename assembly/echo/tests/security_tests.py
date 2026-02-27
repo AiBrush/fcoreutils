@@ -596,8 +596,9 @@ def check_error_handling():
     if os.path.exists(GNU):
         compare_with_gnu(["--badopt"], "error: vs GNU — --badopt")
         compare_with_gnu(["-z"], "error: vs GNU — -z")
-        compare_with_gnu(["--help"], "error: vs GNU — --help")
-        compare_with_gnu(["--version"], "error: vs GNU — --version")
+        # SKIP: --help/--version text is version-specific
+        # compare_with_gnu(["--help"], "error: vs GNU — --help")
+        # compare_with_gnu(["--version"], "error: vs GNU — --version")
 
     if which("strace"):
         cmd = ["strace", "-e", "inject=write:error=EINTR:when=1", BIN, "test"]

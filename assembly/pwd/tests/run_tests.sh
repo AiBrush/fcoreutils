@@ -12,7 +12,7 @@ ERRORS=()
 # Replaces the binary path with "PROG" so we can compare structurally
 normalize() {
     local bin_name="$1"
-    sed "s|${bin_name}|PROG|g"
+    sed -e "s|${bin_name}|PROG|g" -e "s|^pwd:|PROG:|g"
 }
 
 run_test() {
