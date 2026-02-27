@@ -59,16 +59,12 @@ jobs:
         run: cargo build --release
       - name: Run tests
         run: cargo test --release
-      - name: Build and test assembly fyes (Linux x86_64 only)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          cd assembly/yes
-          python3 build.py --no-verify
-          python3 ../../tests/assembly/fyes_vs_yes_tests.py --test-only
-      - name: Build assembly coreutils (Linux x86_64 only)
+      - name: Build assembly tools (Linux x86_64 only)
         if: matrix.os == 'ubuntu-latest'
         run: |
           set -e
+          # fyes (Python build script)
+          cd assembly/yes && python3 build.py --no-verify && cd ../..
           # NASM unified tools (flat binary)
           for tool in true logname hostid tty whoami pwd sync sleep echo; do
             nasm -f bin assembly/$tool/f${tool}_unified.asm -o assembly/$tool/f$tool
@@ -91,13 +87,18 @@ jobs:
           ld -o assembly/arch/farch /tmp/farch.o
           chmod +x assembly/arch/farch
           rm -f /tmp/farch.o
-          echo "All 19 assembly tools built successfully"
+          echo "All 20 assembly tools built successfully"
       - name: Run assembly functional tests (Linux x86_64 only)
         if: matrix.os == 'ubuntu-latest'
         run: |
           set -e
           total_pass=0
           total_fail=0
+          # fyes tests
+          cd assembly/yes
+          python3 ../../tests/assembly/fyes_vs_yes_tests.py --test-only
+          cd ../..
+          # All other tools
           for tool in true arch logname hostid tty whoami pwd sync sleep echo head tail tac rev wc cut tr base64 md5sum; do
             result=$(bash assembly/$tool/tests/run_tests.sh ./assembly/$tool/f$tool 2>&1 | grep "^Results:")
             pass=$(echo "$result" | grep -oP "\d+ passed" | grep -oP "\d+" || echo "0")
@@ -112,7 +113,7 @@ jobs:
             fi
           done
           echo ""
-          echo "Assembly tests: $total_pass passed, $total_fail failed"
+          echo "Assembly tests: $total_pass passed, $total_fail failed (+ fyes above)"
           if [ "$total_fail" -gt 0 ]; then
             echo "ASSEMBLY TESTS FAILED"
             exit 1
