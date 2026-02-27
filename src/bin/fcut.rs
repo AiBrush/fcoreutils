@@ -405,7 +405,7 @@ fn main() {
 
     // GNU cut: -d (--delimiter) is only valid with -f
     if cli.delimiter.is_some() && mode != CutMode::Fields {
-        eprintln!("cut: an input delimiter may be specified only\n\twhen operating on fields");
+        eprintln!("cut: an input delimiter may be specified only when operating on fields");
         eprintln!("Try 'cut --help' for more information.");
         process::exit(1);
     }
@@ -419,6 +419,7 @@ fn main() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("cut: {}", e);
+            eprintln!("Try 'cut --help' for more information.");
             process::exit(1);
         }
     };

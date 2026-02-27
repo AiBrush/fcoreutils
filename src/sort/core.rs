@@ -151,6 +151,7 @@ pub struct SortConfig {
     pub buffer_size: Option<usize>,
     pub temp_dir: Option<String>,
     pub random_seed: u64,
+    pub debug: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,6 +178,7 @@ impl Default for SortConfig {
             buffer_size: None,
             temp_dir: None,
             random_seed: 0,
+            debug: false,
         }
     }
 }
@@ -964,6 +966,82 @@ fn float_to_sortable_u64(f: f64) -> u64 {
 /// Write sorted indices to output, with optional unique dedup.
 /// Zero-copy writev: writes directly from mmap data through BufWriter.
 /// Eliminates ~110MB intermediate buffer allocation for 100MB files.
+/// Write sorted output with debug annotations (--debug mode).
+/// Outputs each line followed by underscore annotations showing sort key spans.
+fn write_debug_output(
+    data: &[u8],
+    offsets: &[(usize, usize)],
+    sorted_indices: &[usize],
+    config: &SortConfig,
+    writer: &mut SortOutput,
+    terminator: &[u8],
+) -> io::Result<()> {
+    let dp = data.as_ptr();
+    let term_byte = terminator[0];
+    let mut prev: Option<usize> = None;
+
+    for &idx in sorted_indices {
+        let (s, e) = offsets[idx];
+        let line = unsafe { std::slice::from_raw_parts(dp.add(s), e - s) };
+
+        if config.unique {
+            let should_output = match prev {
+                Some(p) => {
+                    let (ps, pe) = offsets[p];
+                    let prev_line = unsafe { std::slice::from_raw_parts(dp.add(ps), pe - ps) };
+                    compare_lines_for_dedup(prev_line, line, config) != Ordering::Equal
+                }
+                None => true,
+            };
+            if !should_output {
+                continue;
+            }
+            prev = Some(idx);
+        }
+
+        // Write the line itself
+        writer.write_all(line)?;
+        writer.write_all(&[term_byte])?;
+
+        // For each key, write an underscore annotation line (to stdout, interleaved)
+        if !config.keys.is_empty() {
+            for key_def in &config.keys {
+                let key = extract_key(
+                    line,
+                    key_def,
+                    config.separator,
+                    key_def.opts.ignore_leading_blanks || config.global_opts.ignore_leading_blanks,
+                );
+                // Use pointer arithmetic to find exact key offset within line
+                let key_start = if !key.is_empty() {
+                    let line_ptr = line.as_ptr() as usize;
+                    let key_ptr = key.as_ptr() as usize;
+                    if key_ptr >= line_ptr && key_ptr < line_ptr + line.len() {
+                        key_ptr - line_ptr
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let key_len = key.len().max(1);
+                let mut annotation = vec![b' '; key_start];
+                annotation.extend(std::iter::repeat_n(b'_', key_len));
+                writer.write_all(&annotation)?;
+                writer.write_all(&[term_byte])?;
+            }
+        }
+
+        // Last-resort comparison annotation (entire line)
+        let line_len = line.len();
+        let annotation: Vec<u8> = std::iter::repeat_n(b'_', line_len).collect();
+        writer.write_all(&annotation)?;
+        writer.write_all(&[term_byte])?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 fn write_sorted_output(
     data: &[u8],
     offsets: &[(usize, usize)],
@@ -1516,6 +1594,33 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
     } else {
         SortOutput::stdout()
     };
+
+    // Debug mode: simple sort + annotated output (skips all fast paths)
+    if config.debug {
+        let terminator: &[u8] = if config.zero_terminated { b"\0" } else { b"\n" };
+        if num_lines == 0 {
+            return Ok(());
+        }
+        let mut indices: Vec<usize> = (0..num_lines).collect();
+        if config.stable {
+            indices.sort_by(|&a, &b| {
+                compare_lines(
+                    &data[offsets[a].0..offsets[a].1],
+                    &data[offsets[b].0..offsets[b].1],
+                    config,
+                )
+            });
+        } else {
+            indices.sort_unstable_by(|&a, &b| {
+                compare_lines(
+                    &data[offsets[a].0..offsets[a].1],
+                    &data[offsets[b].0..offsets[b].1],
+                    config,
+                )
+            });
+        }
+        return write_debug_output(data, &offsets, &indices, config, &mut writer, terminator);
+    }
 
     if num_lines == 0 {
         return Ok(());

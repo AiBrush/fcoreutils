@@ -711,12 +711,18 @@ pub fn run_cp(
         };
 
         if let Err(e) = do_copy(src, &dst, config) {
-            let msg = format!(
-                "cp: cannot copy '{}' to '{}': {}",
-                src.display(),
-                dst.display(),
-                strip_os_error(&e)
-            );
+            let inner = strip_os_error(&e);
+            let msg = if inner.contains("are the same file") {
+                // GNU cp: "cp: 'X' and 'Y' are the same file" (no "cannot copy" prefix)
+                format!("cp: {}", inner)
+            } else {
+                format!(
+                    "cp: cannot copy '{}' to '{}': {}",
+                    src.display(),
+                    dst.display(),
+                    inner
+                )
+            };
             errors.push(msg);
             had_error = true;
         } else if config.verbose {
@@ -741,6 +747,19 @@ fn do_copy(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::Other,
             format!("omitting directory '{}'", src.display()),
+        ));
+    }
+
+    // Reject copying a directory over a non-directory.
+    #[cfg(unix)]
+    if src_meta.is_dir() && dst.exists() && !dst.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "cannot overwrite non-directory '{}' with directory '{}'",
+                dst.display(),
+                src.display()
+            ),
         ));
     }
 
@@ -771,9 +790,35 @@ fn do_copy(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
         }
     }
 
-    // Force: remove existing destination if it cannot be opened for writing.
+    // Same-file detection: must come before force removal to prevent data loss.
+    // GNU cp always errors on same file, even with -b.
+    #[cfg(unix)]
+    if !src_meta.is_dir() && dst.exists() {
+        if let Ok(dst_meta) = std::fs::metadata(dst) {
+            if src_meta.dev() == dst_meta.dev() && src_meta.ino() == dst_meta.ino() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "'{}' and '{}' are the same file",
+                        src.display(),
+                        dst.display()
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Force: remove existing destination if it cannot be opened for writing,
+    // or when using --link/--symbolic-link (must remove existing to create new link).
     if config.force && dst.exists() {
-        if let Ok(m) = dst.metadata() {
+        if config.link || config.symbolic_link {
+            // For link/symlink modes, must always remove existing first
+            if dst.is_dir() {
+                std::fs::remove_dir(dst).ok();
+            } else {
+                std::fs::remove_file(dst).ok();
+            }
+        } else if let Ok(m) = dst.metadata() {
             if m.permissions().readonly() {
                 std::fs::remove_file(dst)?;
             }
