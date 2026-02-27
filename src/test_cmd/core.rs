@@ -103,7 +103,8 @@ fn eval_binary(left: &str, op: &str, right: &str) -> Result<bool, String> {
     match op {
         "=" | "==" => Ok(left == right),
         "!=" => Ok(left != right),
-        // Note: < and > are NOT supported by GNU test (they're bash [[ ]] only)
+        "<" => Ok(left < right),
+        ">" => Ok(left > right),
         "-eq" => int_cmp(left, right, |a, b| a == b),
         "-ne" => int_cmp(left, right, |a, b| a != b),
         "-lt" => int_cmp(left, right, |a, b| a < b),
@@ -377,6 +378,18 @@ fn is_unary_op(s: &str) -> bool {
 fn is_binary_op(s: &str) -> bool {
     matches!(
         s,
-        "=" | "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef"
+        "=" | "=="
+            | "!="
+            | "<"
+            | ">"
+            | "-eq"
+            | "-ne"
+            | "-lt"
+            | "-le"
+            | "-gt"
+            | "-ge"
+            | "-nt"
+            | "-ot"
+            | "-ef"
     )
 }

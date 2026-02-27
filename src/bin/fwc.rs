@@ -233,6 +233,21 @@ fn main() {
 
     let total_mode = cli.total.as_str();
 
+    // Validate --total value (GNU wc rejects invalid values)
+    match total_mode {
+        "auto" | "always" | "only" | "never" => {}
+        _ => {
+            eprintln!("wc: invalid argument '{}' for '--total'", cli.total);
+            eprintln!("Valid arguments are:");
+            eprintln!("  - 'auto'");
+            eprintln!("  - 'always'");
+            eprintln!("  - 'only'");
+            eprintln!("  - 'never'");
+            eprintln!("Try 'wc --help' for more information.");
+            process::exit(1);
+        }
+    }
+
     // Collect files to process
     let files: Vec<String> = if let Some(ref f0f) = cli.files0_from {
         if !cli.files.is_empty() {

@@ -23,18 +23,44 @@ impl Default for EchoConfig {
 /// `e`, or `E`.  Combined flags like `-neE` are valid.  Anything else (e.g.
 /// `-z`, `--foo`, or even `-`) is treated as a normal text argument.
 ///
-/// When `POSIXLY_CORRECT` is set, no flags are recognized and escape
-/// interpretation is always enabled (POSIX XSI behavior).
+/// When `POSIXLY_CORRECT` is set, escapes are always interpreted.
+/// GNU coreutils 9.x: if the FIRST arg is exactly "-n", recognize it and
+/// subsequent option-like args (including combined flags like -nE, -ne).
+/// Only -n has effect (suppress newline); -e/-E are consumed but ignored
+/// (escapes stay on). If the first arg is NOT "-n", no options recognized.
 pub fn parse_echo_args(args: &[String]) -> (EchoConfig, &[String]) {
-    // POSIXLY_CORRECT: no options recognized, escapes always interpreted
+    // POSIXLY_CORRECT: escapes always interpreted
     if std::env::var_os("POSIXLY_CORRECT").is_some() {
-        return (
-            EchoConfig {
-                trailing_newline: true,
-                interpret_escapes: true,
-            },
-            args,
-        );
+        let mut config = EchoConfig {
+            trailing_newline: true,
+            interpret_escapes: true,
+        };
+        // Only recognize options if first arg is exactly "-n"
+        if args.first().map(|s| s.as_str()) == Some("-n") {
+            config.trailing_newline = false;
+            let mut idx = 1;
+            // Consume subsequent option-like args
+            for arg in &args[1..] {
+                let bytes = arg.as_bytes();
+                if bytes.len() < 2 || bytes[0] != b'-' {
+                    break;
+                }
+                let all_flags = bytes[1..]
+                    .iter()
+                    .all(|&b| b == b'n' || b == b'e' || b == b'E');
+                if !all_flags {
+                    break;
+                }
+                for &b in &bytes[1..] {
+                    if b == b'n' {
+                        config.trailing_newline = false;
+                    }
+                }
+                idx += 1;
+            }
+            return (config, &args[idx..]);
+        }
+        return (config, args);
     }
 
     let mut config = EchoConfig::default();
