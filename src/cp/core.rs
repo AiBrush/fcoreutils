@@ -143,17 +143,16 @@ pub fn apply_preserve(list: &str, config: &mut CpConfig) {
 
 /// Create a backup of `dst` if it exists, according to the configured backup mode.
 /// Returns `Ok(())` when no backup is needed or the backup was made successfully.
-/// Make a backup of `dst` if configured. Returns the backup path if a backup was made.
-fn make_backup(dst: &Path, config: &CpConfig) -> io::Result<Option<std::path::PathBuf>> {
+fn make_backup(dst: &Path, config: &CpConfig) -> io::Result<()> {
     let mode = match config.backup {
         Some(m) => m,
-        None => return Ok(None),
+        None => return Ok(()),
     };
     if mode == BackupMode::None {
-        return Ok(None);
+        return Ok(());
     }
     if !dst.exists() {
-        return Ok(None);
+        return Ok(());
     }
 
     let backup_path = match mode {
@@ -177,7 +176,7 @@ fn make_backup(dst: &Path, config: &CpConfig) -> io::Result<Option<std::path::Pa
     };
 
     std::fs::rename(dst, &backup_path)?;
-    Ok(Some(backup_path))
+    Ok(())
 }
 
 fn numbered_backup_path(dst: &Path) -> std::path::PathBuf {
@@ -791,6 +790,24 @@ fn do_copy(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
         }
     }
 
+    // Same-file detection: must come before force removal to prevent data loss.
+    // GNU cp always errors on same file, even with -b.
+    #[cfg(unix)]
+    if !src_meta.is_dir() && dst.exists() {
+        if let Ok(dst_meta) = std::fs::metadata(dst) {
+            if src_meta.dev() == dst_meta.dev() && src_meta.ino() == dst_meta.ino() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "'{}' and '{}' are the same file",
+                        src.display(),
+                        dst.display()
+                    ),
+                ));
+            }
+        }
+    }
+
     // Force: remove existing destination if it cannot be opened for writing,
     // or when using --link/--symbolic-link (must remove existing to create new link).
     if config.force && dst.exists() {
@@ -804,23 +821,6 @@ fn do_copy(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
         } else if let Ok(m) = dst.metadata() {
             if m.permissions().readonly() {
                 std::fs::remove_file(dst)?;
-            }
-        }
-    }
-
-    // Same-file detection: GNU cp always errors on same file, even with -b.
-    #[cfg(unix)]
-    if !src_meta.is_dir() && dst.exists() {
-        if let Ok(dst_meta) = std::fs::metadata(dst) {
-            if src_meta.dev() == dst_meta.dev() && src_meta.ino() == dst_meta.ino() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "'{}' and '{}' are the same file",
-                        src.display(),
-                        dst.display()
-                    ),
-                ));
             }
         }
     }

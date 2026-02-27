@@ -1003,7 +1003,7 @@ fn write_debug_output(
         writer.write_all(line)?;
         writer.write_all(&[term_byte])?;
 
-        // For each key, write an underscore annotation line
+        // For each key, write an underscore annotation line (to stdout, interleaved)
         if !config.keys.is_empty() {
             for key_def in &config.keys {
                 let key = extract_key(
@@ -1012,9 +1012,15 @@ fn write_debug_output(
                     config.separator,
                     key_def.opts.ignore_leading_blanks || config.global_opts.ignore_leading_blanks,
                 );
-                // Find key's byte offset within the line
+                // Use pointer arithmetic to find exact key offset within line
                 let key_start = if !key.is_empty() {
-                    find_subslice(line, key).unwrap_or_default()
+                    let line_ptr = line.as_ptr() as usize;
+                    let key_ptr = key.as_ptr() as usize;
+                    if key_ptr >= line_ptr && key_ptr < line_ptr + line.len() {
+                        key_ptr - line_ptr
+                    } else {
+                        0
+                    }
                 } else {
                     0
                 };
@@ -1034,14 +1040,6 @@ fn write_debug_output(
     }
     writer.flush()?;
     Ok(())
-}
-
-/// Find subslice within a slice.
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 fn write_sorted_output(
@@ -1584,7 +1582,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
     }
 
     // Read all input BEFORE opening output file (supports -o same-file)
-    let (buffer, offsets, _has_cr) = read_all_input(inputs, config.zero_terminated)?;
+    let (buffer, offsets, has_cr) = read_all_input(inputs, config.zero_terminated)?;
     let data: &[u8] = &buffer;
     let num_lines = offsets.len();
 
@@ -1623,8 +1621,6 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
         }
         return write_debug_output(data, &offsets, &indices, config, &mut writer, terminator);
     }
-
-    let has_cr = _has_cr;
 
     if num_lines == 0 {
         return Ok(());
