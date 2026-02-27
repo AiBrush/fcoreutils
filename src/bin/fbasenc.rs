@@ -1949,8 +1949,9 @@ mod tests {
         assert!(r.error.is_some());
         assert_eq!(r.data, b"A");
 
+        // 3 chars: GNU auto-pads (only 1 padding char missing), so no error
         let r = base64_decode(b"QWI", &BASE64_DECODE, false);
-        assert!(r.error.is_some());
+        assert!(r.error.is_none());
         assert_eq!(r.data, b"Ab");
     }
 
@@ -1980,9 +1981,10 @@ mod tests {
         assert!(r.error.is_none());
         assert_eq!(r.data, b"Hello");
 
-        // GNU basenc --base16 rejects lowercase
+        // GNU basenc --base16 -d accepts lowercase hex
         let r = base16_decode(b"ff", false);
-        assert!(r.error.is_some());
+        assert!(r.error.is_none());
+        assert_eq!(r.data, b"\xff");
     }
 
     #[test]
