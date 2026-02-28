@@ -515,7 +515,6 @@ mod tests {
         path.push("fsha1sum");
         Command::new(path)
     }
-    #[cfg(unix)]
     #[test]
     fn test_hash_stdin() {
         use std::io::Write;
@@ -529,6 +528,7 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
         assert!(stdout.contains("  -"), "Should contain filename marker");
     }
 
@@ -636,7 +636,6 @@ mod tests {
         assert!(!output.status.success());
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_binary_data() {
         let dir = tempfile::tempdir().unwrap();
@@ -645,6 +644,7 @@ mod tests {
         let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
         assert_eq!(stdout.lines().count(), 1);
         // Hash should be 40 hex chars
         let hash_part: &str = stdout.split_whitespace().next().unwrap();

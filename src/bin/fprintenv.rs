@@ -137,10 +137,13 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_printenv_multiple_vars() {
-        let output = cmd().args(["PATH", "HOME"]).output().unwrap();
+        let output = cmd()
+            .args(["PATH", "MY_MULTI_TEST_VAR"])
+            .env("MY_MULTI_TEST_VAR", "value2")
+            .output()
+            .unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = stdout.lines().collect();
@@ -157,13 +160,12 @@ mod tests {
         assert!(!output.status.success());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn test_printenv_home() {
-        let output = cmd().arg("HOME").output().unwrap();
+    fn test_printenv_path_var() {
+        let output = cmd().arg("PATH").output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.starts_with('/'));
+        assert!(!stdout.trim().is_empty(), "PATH should not be empty");
     }
 
     #[test]

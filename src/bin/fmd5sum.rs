@@ -508,7 +508,6 @@ mod tests {
         path.push("fmd5sum");
         Command::new(path)
     }
-    #[cfg(unix)]
     #[test]
     fn test_hash_stdin() {
         use std::io::Write;
@@ -522,6 +521,7 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
         assert!(stdout.contains("  -"), "Should contain filename marker");
     }
 
@@ -751,7 +751,6 @@ mod tests {
         assert!(output.stdout.is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_dash_as_stdin() {
         use std::io::Write;
@@ -766,6 +765,7 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
         assert!(stdout.contains("  -"));
     }
 }

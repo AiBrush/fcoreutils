@@ -530,7 +530,6 @@ mod tests {
         path.push("fsha256sum");
         Command::new(path)
     }
-    #[cfg(unix)]
     #[test]
     fn test_hash_stdin() {
         use std::io::Write;
@@ -544,6 +543,7 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
         assert!(stdout.contains("  -"), "Should contain filename marker");
     }
 
@@ -650,7 +650,6 @@ mod tests {
         assert!(!output.status.success());
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_binary_data() {
         let dir = tempfile::tempdir().unwrap();
@@ -659,6 +658,7 @@ mod tests {
         let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
         let hash_part: &str = stdout.split_whitespace().next().unwrap();
         assert_eq!(hash_part.len(), 64); // SHA256 = 64 hex chars
     }

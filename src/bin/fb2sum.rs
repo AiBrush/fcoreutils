@@ -613,7 +613,6 @@ mod tests {
         path.push("fb2sum");
         Command::new(path)
     }
-    #[cfg(unix)]
     #[test]
     fn test_hash_stdin() {
         use std::io::Write;
@@ -627,6 +626,7 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
         assert!(stdout.contains("  -"), "Should contain filename marker");
     }
 
@@ -673,7 +673,6 @@ mod tests {
         assert!(stdout.contains("BLAKE2b"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_length_option() {
         let dir = tempfile::tempdir().unwrap();
@@ -685,12 +684,12 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
         // 256 bits = 64 hex chars
         let hash = stdout.split_whitespace().next().unwrap();
         assert_eq!(hash.len(), 64, "256-bit hash should be 64 hex chars");
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_empty_file_hash() {
         let dir = tempfile::tempdir().unwrap();
@@ -699,6 +698,7 @@ mod tests {
         let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
         let hash = stdout.split_whitespace().next().unwrap();
         // BLAKE2b-512 of empty input is well-known
         assert_eq!(hash.len(), 128, "512-bit hash should be 128 hex chars");
