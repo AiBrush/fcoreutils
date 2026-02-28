@@ -225,6 +225,7 @@ mod tests {
         path.push("fstat");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_stat_basic() {
         let dir = tempfile::tempdir().unwrap();
@@ -237,6 +238,7 @@ mod tests {
         assert!(stdout.contains("Size:"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stat_format_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -251,6 +253,7 @@ mod tests {
         assert!(stdout.contains("test.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stat_format_size() {
         let dir = tempfile::tempdir().unwrap();
@@ -282,6 +285,7 @@ mod tests {
         assert!(trimmed.len() >= 3 && trimmed.chars().all(|c| c.is_ascii_digit()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stat_format_type() {
         let dir = tempfile::tempdir().unwrap();
@@ -296,6 +300,7 @@ mod tests {
         assert!(stdout.contains("regular file"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stat_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -309,12 +314,14 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stat_nonexistent() {
         let output = cmd().arg("/nonexistent_xyz_stat").output().unwrap();
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stat_multiple_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -338,6 +345,7 @@ mod tests {
         assert!(stdout.contains("File:") || stdout.contains("ID:"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stat_terse() {
         let dir = tempfile::tempdir().unwrap();
