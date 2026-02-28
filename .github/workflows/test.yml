@@ -33,7 +33,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  # Build + test on all platforms
+  # Rust build + test on all platforms (runs in parallel with assembly)
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -42,62 +42,32 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     env:
-      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
-      # when rust-cache provides artifacts from runners with different CPUs.
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared cache key — benchmarks reuse this cache to avoid a redundant build
           key: test-v2-${{ matrix.os }}
       - name: Install nasm and libssl-dev (Linux only)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
-      - name: Build binaries
-        run: cargo build --release
-      - name: Run tests
-        run: cargo test --release
-      - name: Build and test assembly fyes (Linux x86_64 only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build and test
         run: |
-          cd assembly/yes
-          python3 build.py --no-verify
-          python3 ../../tests/assembly/fyes_vs_yes_tests.py --test-only
+          cargo build --release
+          cargo test --release
 
-  test-assembly-arm64:
-    name: Test assembly fyes (Linux ARM64)
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v6
-      - name: Build ARM64 assembly fyes
-        run: |
-          as -o /tmp/fyes_arm64.o assembly/yes/fyes_arm64.s
-          ld -static -s -e _start -o /tmp/fyes_arm64 /tmp/fyes_arm64.o
-          chmod +x /tmp/fyes_arm64
-      - name: Smoke-test ARM64 assembly fyes
-        run: |
-          /tmp/fyes_arm64 | head -5
-          /tmp/fyes_arm64 hello | head -3
-          /tmp/fyes_arm64 --help
-          /tmp/fyes_arm64 --version
-          echo "All ARM64 assembly fyes smoke tests passed."
-
+  # Benchmarks run in parallel with tests (uses cached build from previous runs)
   benchmarks:
     name: Benchmarks
-    needs: [test]
     runs-on: ubuntu-latest
     env:
-      # Override .cargo/config.toml's target-cpu=native to avoid SIGILL
-      # when rust-cache provides artifacts from runners with different CPUs.
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # Reuse the same cache as the ubuntu test job — avoids a full rebuild
           key: test-v2-ubuntu-latest
       - name: Install nasm and libssl-dev
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
@@ -110,3 +80,112 @@ jobs:
           path: |
             bench_output.txt
             target/criterion
+
+  # Assembly: build all 20 tools once, upload as artifact
+  assembly-build:
+    name: Build assembly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install nasm
+        run: sudo apt-get install -y --no-install-recommends nasm
+      - name: Build all assembly tools
+        run: |
+          set -e
+          # fyes (Python build script)
+          cd assembly/yes && python3 build.py --no-verify && cd ../..
+          # NASM unified tools (flat binary)
+          for tool in true logname hostid tty whoami pwd sync sleep echo; do
+            nasm -f bin assembly/$tool/f${tool}_unified.asm -o assembly/$tool/f$tool
+            chmod +x assembly/$tool/f$tool
+          done
+          # NASM unified tools (unified/ subdirectory)
+          for tool in head tail tac rev cut tr base64 md5sum; do
+            nasm -f bin assembly/$tool/unified/f${tool}_unified.asm -o assembly/$tool/f$tool
+            chmod +x assembly/$tool/f$tool
+          done
+          # wc (modular ELF build)
+          mkdir -p assembly/wc/build/lib assembly/wc/build/tools
+          nasm -f elf64 -I assembly/wc/ assembly/wc/lib/io.asm -o assembly/wc/build/lib/io.o
+          nasm -f elf64 -I assembly/wc/ assembly/wc/lib/str.asm -o assembly/wc/build/lib/str.o
+          nasm -f elf64 -I assembly/wc/ assembly/wc/tools/fwc.asm -o assembly/wc/build/tools/fwc.o
+          ld --gc-sections -n -s assembly/wc/build/tools/fwc.o assembly/wc/build/lib/io.o assembly/wc/build/lib/str.o -o assembly/wc/fwc
+          chmod +x assembly/wc/fwc
+          # arch (GAS syntax)
+          as --64 assembly/arch/farch_unified.s -o /tmp/farch.o
+          ld -o assembly/arch/farch /tmp/farch.o
+          chmod +x assembly/arch/farch
+          rm -f /tmp/farch.o
+          echo "All 20 assembly tools built successfully"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: assembly-binaries
+          path: |
+            assembly/yes/fyes
+            assembly/true/ftrue
+            assembly/arch/farch
+            assembly/logname/flogname
+            assembly/hostid/fhostid
+            assembly/tty/ftty
+            assembly/whoami/fwhoami
+            assembly/pwd/fpwd
+            assembly/sync/fsync
+            assembly/sleep/fsleep
+            assembly/echo/fecho
+            assembly/head/fhead
+            assembly/tail/ftail
+            assembly/tac/ftac
+            assembly/rev/frev
+            assembly/wc/fwc
+            assembly/cut/fcut
+            assembly/tr/ftr
+            assembly/base64/fbase64
+            assembly/md5sum/fmd5sum
+
+  # Assembly: test each tool in parallel (20 parallel jobs)
+  assembly-test:
+    name: Test asm/${{ matrix.tool }}
+    needs: assembly-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v6
+        with:
+          name: assembly-binaries
+          path: assembly
+      - name: Setup
+        run: |
+          chmod +x assembly/${{ matrix.tool }}/f${{ matrix.tool }}
+          sudo apt-get install -y --no-install-recommends strace
+      - name: Functional tests
+        run: |
+          if [ "${{ matrix.tool }}" = "yes" ]; then
+            cd assembly/yes
+            python3 ../../tests/assembly/fyes_vs_yes_tests.py --test-only
+          else
+            bash assembly/${{ matrix.tool }}/tests/run_tests.sh ./assembly/${{ matrix.tool }}/f${{ matrix.tool }}
+          fi
+      - name: Security tests
+        if: matrix.tool != 'yes'
+        run: python3 assembly/${{ matrix.tool }}/tests/security_tests.py
+
+  # ARM64 assembly (runs in parallel with everything else)
+  test-assembly-arm64:
+    name: Test assembly fyes (Linux ARM64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build and test ARM64 assembly fyes
+        run: |
+          as -o /tmp/fyes_arm64.o assembly/yes/fyes_arm64.s
+          ld -static -s -e _start -o /tmp/fyes_arm64 /tmp/fyes_arm64.o
+          chmod +x /tmp/fyes_arm64
+          /tmp/fyes_arm64 | head -5
+          /tmp/fyes_arm64 hello | head -3
+          /tmp/fyes_arm64 --help
+          /tmp/fyes_arm64 --version
+          echo "All ARM64 assembly fyes smoke tests passed."
