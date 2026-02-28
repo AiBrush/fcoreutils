@@ -73,8 +73,11 @@ fn main() {
             if let Err(code) = remove_parents(dir, ignore_nonempty, verbose) {
                 exit_code = code;
             }
-        } else if let Err(code) = remove_one(dir, ignore_nonempty, verbose) {
-            exit_code = code;
+        } else {
+            match remove_one(dir, ignore_nonempty, verbose) {
+                Ok(_) => {}
+                Err(code) => exit_code = code,
+            }
         }
     }
 
@@ -83,20 +86,22 @@ fn main() {
     }
 }
 
-fn remove_one(dir: &str, ignore_nonempty: bool, verbose: bool) -> Result<(), i32> {
+/// Returns Ok(true) if directory was removed, Ok(false) if it was skipped
+/// due to --ignore-fail-on-non-empty, or Err(1) on real failure.
+fn remove_one(dir: &str, ignore_nonempty: bool, verbose: bool) -> Result<bool, i32> {
     match std::fs::remove_dir(dir) {
         Ok(()) => {
             if verbose {
                 println!("{}: removing directory, '{}'", TOOL_NAME, dir);
             }
-            Ok(())
+            Ok(true)
         }
         Err(e) => {
             if ignore_nonempty && is_nonempty_error(&e) {
-                return Ok(());
+                return Ok(false);
             }
             eprintln!(
-                "{}: failed to remove '{}': {}",
+                "{}: failed to remove directory '{}': {}",
                 TOOL_NAME,
                 dir,
                 coreutils_rs::common::io_error_msg(&e)
@@ -107,14 +112,20 @@ fn remove_one(dir: &str, ignore_nonempty: bool, verbose: bool) -> Result<(), i32
 }
 
 fn remove_parents(dir: &str, ignore_nonempty: bool, verbose: bool) -> Result<(), i32> {
-    let mut path = PathBuf::from(dir);
+    // Strip trailing slashes for the initial path (GNU compat)
+    let mut path = PathBuf::from(dir.trim_end_matches('/'));
     loop {
         let path_str = path.to_string_lossy().to_string();
         // Don't try to remove empty path or root
         if path_str.is_empty() || path_str == "/" || path_str == "." {
             break;
         }
-        remove_one(&path_str, ignore_nonempty, verbose)?;
+        let removed = remove_one(&path_str, ignore_nonempty, verbose)?;
+        if !removed {
+            // Directory was skipped (non-empty + --ignore-fail-on-non-empty)
+            // Stop walking up the tree — GNU behavior
+            break;
+        }
         if !path.pop() {
             break;
         }
@@ -311,5 +322,57 @@ mod tests {
         assert!(output.status.success());
         // Directory should still exist (not removed because non-empty)
         assert!(sub.exists());
+    }
+
+    #[test]
+    fn test_rmdir_p_trailing_slash() {
+        // rmdir -p dir/ with trailing slash should work
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("outer").join("inner");
+        std::fs::create_dir_all(&nested).unwrap();
+        let path_with_slash = format!("{}/", nested.to_str().unwrap());
+        let output = cmd().args(["-p", &path_with_slash]).output().unwrap();
+        // Will fail trying to remove tempdir parent, but outer/inner should be gone
+        assert!(
+            !dir.path().join("outer").exists(),
+            "outer should be removed by -p"
+        );
+    }
+
+    #[test]
+    fn test_rmdir_p_ignore_nonempty_stops() {
+        // rmdir -p --ignore-fail-on-non-empty should stop at non-empty dir, exit 0
+        let dir = tempfile::tempdir().unwrap();
+        let chain = dir.path().join("parent").join("child");
+        let sibling = dir.path().join("parent").join("sibling_file");
+        std::fs::create_dir_all(&chain).unwrap();
+        std::fs::write(&sibling, "x").unwrap();
+
+        let output = cmd()
+            .args(["-p", "--ignore-fail-on-non-empty", chain.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Should exit 0 when stopping at non-empty parent"
+        );
+        assert!(!chain.exists(), "child should be removed");
+        assert!(
+            dir.path().join("parent").exists(),
+            "parent should still exist (non-empty)"
+        );
+        assert!(sibling.exists(), "sibling_file should still exist");
+    }
+
+    #[test]
+    fn test_rmdir_error_message_says_directory() {
+        // GNU rmdir says "failed to remove directory 'X'"
+        let output = cmd().arg("/nonexistent_rmdir_99").output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("failed to remove directory"),
+            "error should say 'directory': {}",
+            stderr
+        );
     }
 }

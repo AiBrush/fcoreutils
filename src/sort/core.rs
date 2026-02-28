@@ -21,7 +21,7 @@ use super::compare::{
     compare_with_opts, human_numeric_to_sortable_u64, int_to_sortable_u64, parse_general_numeric,
     parse_numeric_value, select_comparator, skip_leading_blanks, try_parse_integer,
 };
-use super::key::{KeyDef, KeyOpts, extract_key};
+use super::key::{KeyDef, KeyOpts, extract_key_z};
 
 /// Buffer that holds file data, either memory-mapped or heap-allocated.
 enum FileData {
@@ -220,8 +220,20 @@ fn compare_lines_inner(
                 &config.global_opts
             };
 
-            let ka = extract_key(a, key, config.separator, opts.ignore_leading_blanks);
-            let kb = extract_key(b, key, config.separator, opts.ignore_leading_blanks);
+            let ka = extract_key_z(
+                a,
+                key,
+                config.separator,
+                opts.ignore_leading_blanks,
+                config.zero_terminated,
+            );
+            let kb = extract_key_z(
+                b,
+                key,
+                config.separator,
+                opts.ignore_leading_blanks,
+                config.zero_terminated,
+            );
 
             let result = compare_with_opts(ka, kb, opts, config.random_seed);
 
@@ -872,6 +884,7 @@ fn pre_extract_key_offsets(
     key: &KeyDef,
     separator: Option<u8>,
     ignore_leading_blanks: bool,
+    zero_terminated: bool,
 ) -> Vec<(usize, usize)> {
     // Fast path: separator-based single whole field extraction (e.g., -t, -k2 or -t, -k2,2)
     // No char offsets, and end_field is either 0 (to end of line) or same as start_field.
@@ -918,7 +931,7 @@ fn pre_extract_key_offsets(
 
     let extract = |&(s, e): &(usize, usize)| {
         let line = &data[s..e];
-        let extracted = extract_key(line, key, separator, ignore_leading_blanks);
+        let extracted = extract_key_z(line, key, separator, ignore_leading_blanks, zero_terminated);
         if extracted.is_empty() {
             (0, 0)
         } else {
@@ -966,8 +979,80 @@ fn float_to_sortable_u64(f: f64) -> u64 {
 /// Write sorted indices to output, with optional unique dedup.
 /// Zero-copy writev: writes directly from mmap data through BufWriter.
 /// Eliminates ~110MB intermediate buffer allocation for 100MB files.
+/// Check if a key value is a "no match" for the given sort type.
+/// Returns true if the key has no valid value for the sort comparison.
+fn is_debug_no_match(key: &[u8], key_opts: &KeyOpts, global_opts: &KeyOpts) -> bool {
+    if key.is_empty() {
+        return true;
+    }
+
+    let is_numeric = key_opts.numeric || global_opts.numeric;
+    let is_general_numeric = key_opts.general_numeric || global_opts.general_numeric;
+    let is_human_numeric = key_opts.human_numeric || global_opts.human_numeric;
+    let is_month = key_opts.month || global_opts.month;
+
+    if is_numeric || is_human_numeric {
+        // Numeric: skip leading blanks, then check for digit, sign, or decimal point
+        let trimmed = key.iter().position(|&b| b != b' ' && b != b'\t');
+        match trimmed {
+            None => true,
+            Some(pos) => {
+                let b = key[pos];
+                !(b.is_ascii_digit() || b == b'+' || b == b'-' || b == b'.')
+            }
+        }
+    } else if is_general_numeric {
+        // General numeric: skip blanks, check for digit, sign, decimal, NaN, Inf
+        let trimmed = key.iter().position(|&b| b != b' ' && b != b'\t');
+        match trimmed {
+            None => true,
+            Some(pos) => {
+                let b = key[pos];
+                !(b.is_ascii_digit()
+                    || b == b'+'
+                    || b == b'-'
+                    || b == b'.'
+                    || b == b'n'
+                    || b == b'N'
+                    || b == b'i'
+                    || b == b'I')
+            }
+        }
+    } else if is_month {
+        // Month: check if the trimmed key starts with a valid month abbreviation
+        let trimmed: Vec<u8> = key
+            .iter()
+            .skip_while(|&&b| b == b' ' || b == b'\t')
+            .take(3)
+            .map(|&b| b.to_ascii_uppercase())
+            .collect();
+        !matches!(
+            trimmed.as_slice(),
+            b"JAN"
+                | b"FEB"
+                | b"MAR"
+                | b"APR"
+                | b"MAY"
+                | b"JUN"
+                | b"JUL"
+                | b"AUG"
+                | b"SEP"
+                | b"OCT"
+                | b"NOV"
+                | b"DEC"
+        )
+    } else {
+        // Lexicographic, version, random, dictionary: no match only if empty
+        false
+    }
+}
+
 /// Write sorted output with debug annotations (--debug mode).
 /// Outputs each line followed by underscore annotations showing sort key spans.
+/// Matches GNU sort's debug output format:
+/// - Key spans shown with underscores
+/// - Empty/invalid keys shown as "^ no match for key"
+/// - Last-resort (whole-line) annotation only when sort is not stable (-s)
 fn write_debug_output(
     data: &[u8],
     offsets: &[(usize, usize)],
@@ -1003,16 +1088,18 @@ fn write_debug_output(
         writer.write_all(line)?;
         writer.write_all(&[term_byte])?;
 
-        // For each key, write an underscore annotation line (to stdout, interleaved)
+        // For each key, write an annotation line
         if !config.keys.is_empty() {
             for key_def in &config.keys {
-                let key = extract_key(
+                let key = extract_key_z(
                     line,
                     key_def,
                     config.separator,
                     key_def.opts.ignore_leading_blanks || config.global_opts.ignore_leading_blanks,
+                    config.zero_terminated,
                 );
-                // Use pointer arithmetic to find exact key offset within line
+
+                // Determine key start position in the line
                 let key_start = if !key.is_empty() {
                     let line_ptr = line.as_ptr() as usize;
                     let key_ptr = key.as_ptr() as usize;
@@ -1022,21 +1109,33 @@ fn write_debug_output(
                         0
                     }
                 } else {
-                    0
+                    // For empty key, position is at the end of the line (where the field would start)
+                    line.len()
                 };
-                let key_len = key.len().max(1);
-                let mut annotation = vec![b' '; key_start];
-                annotation.extend(std::iter::repeat_n(b'_', key_len));
-                writer.write_all(&annotation)?;
-                writer.write_all(&[term_byte])?;
+
+                // Check if this key is a "no match"
+                if is_debug_no_match(key, &key_def.opts, &config.global_opts) {
+                    let mut annotation = vec![b' '; key_start];
+                    annotation.extend_from_slice(b"^ no match for key");
+                    writer.write_all(&annotation)?;
+                    writer.write_all(&[term_byte])?;
+                } else {
+                    let key_len = key.len().max(1);
+                    let mut annotation = vec![b' '; key_start];
+                    annotation.extend(std::iter::repeat_n(b'_', key_len));
+                    writer.write_all(&annotation)?;
+                    writer.write_all(&[term_byte])?;
+                }
             }
         }
 
-        // Last-resort comparison annotation (entire line)
-        let line_len = line.len();
-        let annotation: Vec<u8> = std::iter::repeat_n(b'_', line_len).collect();
-        writer.write_all(&annotation)?;
-        writer.write_all(&[term_byte])?;
+        // Last-resort comparison annotation (entire line) — only when sort is NOT stable
+        if !config.stable {
+            let line_len = line.len().max(1);
+            let annotation: Vec<u8> = std::iter::repeat_n(b'_', line_len).collect();
+            writer.write_all(&annotation)?;
+            writer.write_all(&[term_byte])?;
+        }
     }
     writer.flush()?;
     Ok(())
@@ -2441,6 +2540,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             key,
             config.separator,
             opts.ignore_leading_blanks,
+            config.zero_terminated,
         );
         let is_key_numeric = opts.numeric || opts.general_numeric || opts.human_numeric;
 
@@ -3133,7 +3233,14 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 .enumerate()
                 .map(|(ki, key)| {
                     let (_, needs_blank, _) = comparators[ki];
-                    pre_extract_key_offsets(data, &offsets, key, config.separator, needs_blank)
+                    pre_extract_key_offsets(
+                        data,
+                        &offsets,
+                        key,
+                        config.separator,
+                        needs_blank,
+                        config.zero_terminated,
+                    )
                 })
                 .collect()
         } else {
@@ -3143,7 +3250,14 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
                 .enumerate()
                 .map(|(ki, key)| {
                     let (_, needs_blank, _) = comparators[ki];
-                    pre_extract_key_offsets(data, &offsets, key, config.separator, needs_blank)
+                    pre_extract_key_offsets(
+                        data,
+                        &offsets,
+                        key,
+                        config.separator,
+                        needs_blank,
+                        config.zero_terminated,
+                    )
                 })
                 .collect()
         };
@@ -3315,8 +3429,20 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             let lb = unsafe { std::slice::from_raw_parts(dp.add(sb), eb - sb) };
 
             for (ki, &(cmp_fn, needs_blank, needs_reverse)) in comparators.iter().enumerate() {
-                let ka = extract_key(la, &keys[ki], config.separator, needs_blank);
-                let kb = extract_key(lb, &keys[ki], config.separator, needs_blank);
+                let ka = extract_key_z(
+                    la,
+                    &keys[ki],
+                    config.separator,
+                    needs_blank,
+                    config.zero_terminated,
+                );
+                let kb = extract_key_z(
+                    lb,
+                    &keys[ki],
+                    config.separator,
+                    needs_blank,
+                    config.zero_terminated,
+                );
                 let ka = if needs_blank {
                     skip_leading_blanks(ka)
                 } else {

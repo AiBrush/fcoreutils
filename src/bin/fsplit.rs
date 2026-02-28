@@ -8,6 +8,67 @@ struct Cli {
     input: String,
 }
 
+/// Parse a CHUNKS spec for -n option.
+/// Supported formats: N, K/N, l/N, l/K/N, r/N, r/K/N
+fn parse_chunk_spec(val: &str) -> SplitMode {
+    if let Some(rest) = val.strip_prefix("l/") {
+        // l/N or l/K/N
+        if let Some(slash_pos) = rest.find('/') {
+            let k: u64 = rest[..slash_pos].parse().unwrap_or_else(|_| {
+                eprintln!("split: invalid number of chunks: '{}'", val);
+                process::exit(1);
+            });
+            let n: u64 = rest[slash_pos + 1..].parse().unwrap_or_else(|_| {
+                eprintln!("split: invalid number of chunks: '{}'", val);
+                process::exit(1);
+            });
+            SplitMode::LineChunkExtract(k, n)
+        } else {
+            let n: u64 = rest.parse().unwrap_or_else(|_| {
+                eprintln!("split: invalid number of chunks: '{}'", val);
+                process::exit(1);
+            });
+            SplitMode::LineChunks(n)
+        }
+    } else if let Some(rest) = val.strip_prefix("r/") {
+        // r/N or r/K/N
+        if let Some(slash_pos) = rest.find('/') {
+            let k: u64 = rest[..slash_pos].parse().unwrap_or_else(|_| {
+                eprintln!("split: invalid number of chunks: '{}'", val);
+                process::exit(1);
+            });
+            let n: u64 = rest[slash_pos + 1..].parse().unwrap_or_else(|_| {
+                eprintln!("split: invalid number of chunks: '{}'", val);
+                process::exit(1);
+            });
+            SplitMode::RoundRobinExtract(k, n)
+        } else {
+            let n: u64 = rest.parse().unwrap_or_else(|_| {
+                eprintln!("split: invalid number of chunks: '{}'", val);
+                process::exit(1);
+            });
+            SplitMode::RoundRobin(n)
+        }
+    } else if let Some(slash_pos) = val.find('/') {
+        // K/N
+        let k: u64 = val[..slash_pos].parse().unwrap_or_else(|_| {
+            eprintln!("split: invalid number of chunks: '{}'", val);
+            process::exit(1);
+        });
+        let n: u64 = val[slash_pos + 1..].parse().unwrap_or_else(|_| {
+            eprintln!("split: invalid number of chunks: '{}'", val);
+            process::exit(1);
+        });
+        SplitMode::NumberExtract(k, n)
+    } else {
+        let n: u64 = val.parse().unwrap_or_else(|_| {
+            eprintln!("split: invalid number of chunks: '{}'", val);
+            process::exit(1);
+        });
+        SplitMode::Number(n)
+    }
+}
+
 fn parse_args() -> Cli {
     let mut cli = Cli {
         config: SplitConfig::default(),
@@ -64,11 +125,7 @@ fn parse_args() -> Cli {
                 });
                 cli.config.mode = SplitMode::Lines(n);
             } else if let Some(val) = arg_ref.strip_prefix("--number=") {
-                let n: u64 = val.parse().unwrap_or_else(|_| {
-                    eprintln!("split: invalid number of chunks: '{}'", val);
-                    process::exit(1);
-                });
-                cli.config.mode = SplitMode::Number(n);
+                cli.config.mode = parse_chunk_spec(val);
             } else if let Some(val) = arg_ref.strip_prefix("--additional-suffix=") {
                 cli.config.additional_suffix = val.to_string();
             } else if let Some(val) = arg_ref.strip_prefix("--numeric-suffixes=") {
@@ -208,11 +265,7 @@ fn parse_args() -> Cli {
                                 .to_string_lossy()
                                 .into_owned()
                         };
-                        let n: u64 = val.parse().unwrap_or_else(|_| {
-                            eprintln!("split: invalid number of chunks: '{}'", val);
-                            process::exit(1);
-                        });
-                        cli.config.mode = SplitMode::Number(n);
+                        cli.config.mode = parse_chunk_spec(&val);
                         break;
                     }
                     't' => {
@@ -304,6 +357,57 @@ fn main() {
     reset_sigpipe();
 
     let cli = parse_args();
+
+    // Validate zero values (GNU split rejects them)
+    match &cli.config.mode {
+        SplitMode::Lines(0) => {
+            eprintln!("split: invalid number of lines: '0'");
+            process::exit(1);
+        }
+        SplitMode::Bytes(0) => {
+            eprintln!("split: invalid number of bytes: '0'");
+            process::exit(1);
+        }
+        SplitMode::LineBytes(0) => {
+            eprintln!("split: invalid number of bytes: '0'");
+            process::exit(1);
+        }
+        SplitMode::Number(0) | SplitMode::LineChunks(0) | SplitMode::RoundRobin(0) => {
+            eprintln!("split: invalid number of chunks: '0'");
+            process::exit(1);
+        }
+        SplitMode::NumberExtract(k, n) => {
+            if *n == 0 {
+                eprintln!("split: invalid number of chunks: '0'");
+                process::exit(1);
+            }
+            if *k == 0 || *k > *n {
+                eprintln!("split: invalid chunk number: '{}/{}'", k, n);
+                process::exit(1);
+            }
+        }
+        SplitMode::LineChunkExtract(k, n) => {
+            if *n == 0 {
+                eprintln!("split: invalid number of chunks: '0'");
+                process::exit(1);
+            }
+            if *k == 0 || *k > *n {
+                eprintln!("split: invalid chunk number: '{}/{}'", k, n);
+                process::exit(1);
+            }
+        }
+        SplitMode::RoundRobinExtract(k, n) => {
+            if *n == 0 {
+                eprintln!("split: invalid number of chunks: '0'");
+                process::exit(1);
+            }
+            if *k == 0 || *k > *n {
+                eprintln!("split: invalid chunk number: '{}/{}'", k, n);
+                process::exit(1);
+            }
+        }
+        _ => {}
+    }
 
     if let Err(e) = split::split_file(&cli.input, &cli.config) {
         eprintln!("split: {}", e);

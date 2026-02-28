@@ -117,17 +117,39 @@ fn main() {
 }
 
 fn resolve(path: &str, mode: CanonMode) -> Result<PathBuf, std::io::Error> {
-    match mode {
+    let result = match mode {
         CanonMode::None => {
             // Just read the symlink target
-            std::fs::read_link(path)
+            return std::fs::read_link(path);
         }
         CanonMode::CanonicalizeExisting => {
             // All components must exist
-            std::fs::canonicalize(path)
+            std::fs::canonicalize(path)?
         }
-        CanonMode::Canonicalize => canonicalize_f(Path::new(path)),
-        CanonMode::CanonicalizeMissing => canonicalize_missing(Path::new(path)),
+        CanonMode::Canonicalize => canonicalize_f(Path::new(path))?,
+        CanonMode::CanonicalizeMissing => canonicalize_missing(Path::new(path))?,
+    };
+
+    // If the original path had a trailing slash, the resolved target must be a directory.
+    // GNU readlink: "file/" fails with ENOTDIR even for -f and -m modes.
+    if path.ends_with('/') {
+        match std::fs::metadata(&result) {
+            Ok(meta) if meta.is_dir() => Ok(result),
+            Ok(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Not a directory",
+            )),
+            Err(e) => {
+                // For -m mode, if the target doesn't exist, trailing slash is OK
+                if mode == CanonMode::CanonicalizeMissing {
+                    Ok(result)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    } else {
+        Ok(result)
     }
 }
 
@@ -574,5 +596,37 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         // Should follow symlink to doesnotexist, then append "more"
         assert_eq!(stdout.trim(), target.join("more").to_str().unwrap());
+    }
+
+    #[test]
+    fn test_f_regfile_trailing_slash_fails() {
+        // readlink -f on regular file with trailing slash should fail (ENOTDIR)
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("regular.txt");
+        fs::write(&file, "content").unwrap();
+        let path = format!("{}/", file.to_str().unwrap());
+        let output = cmd().args(["-f", &path]).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "readlink -f regfile/ should fail"
+        );
+    }
+
+    #[test]
+    fn test_f_link_to_file_trailing_slash_fails() {
+        // readlink -f on symlink-to-file with trailing slash should fail
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&file, "content").unwrap();
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let path = format!("{}/", link.to_str().unwrap());
+        let output = cmd().args(["-f", &path]).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "readlink -f link-to-file/ should fail"
+        );
     }
 }

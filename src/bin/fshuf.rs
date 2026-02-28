@@ -180,12 +180,12 @@ fn main() {
     let mut echo_mode = false;
     let mut input_range: Option<(u64, u64)> = None;
     let mut input_range_count = 0u32;
-    let mut head_count: Option<usize> = None;
+    let mut head_counts: Vec<usize> = Vec::new();
     let mut output_file: Option<String> = None;
+    let mut output_file_count = 0u32;
     let mut repeat = false;
     let mut zero_terminated = false;
     let mut random_source: Option<String> = None;
-    let mut random_source_count = 0u32;
     let mut positional: Vec<String> = Vec::new();
     let mut echo_args: Vec<String> = Vec::new();
 
@@ -237,10 +237,10 @@ fn main() {
                     process::exit(1);
                 }
                 let val = parse_count(&args[i]);
-                head_count = Some(val);
+                head_counts.push(val);
             } else if let Some(rest) = arg.strip_prefix("--head-count=") {
                 let val = parse_count(rest);
-                head_count = Some(val);
+                head_counts.push(val);
             } else if arg == "--output" || match_long(arg, "--output") {
                 i += 1;
                 if i >= args.len() {
@@ -248,8 +248,10 @@ fn main() {
                     process::exit(1);
                 }
                 output_file = Some(args[i].clone());
+                output_file_count += 1;
             } else if let Some(rest) = arg.strip_prefix("--output=") {
                 output_file = Some(rest.to_string());
+                output_file_count += 1;
             } else if arg == "--random-source" || match_long(arg, "--random-source") {
                 i += 1;
                 if i >= args.len() {
@@ -260,10 +262,8 @@ fn main() {
                     process::exit(1);
                 }
                 random_source = Some(args[i].clone());
-                random_source_count += 1;
             } else if let Some(rest) = arg.strip_prefix("--random-source=") {
                 random_source = Some(rest.to_string());
-                random_source_count += 1;
             } else {
                 eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
                 eprintln!("Try '{} --help' for more information.", TOOL_NAME);
@@ -300,7 +300,7 @@ fn main() {
                         if j + 1 < bytes.len() {
                             let rest = &arg[j + 1..];
                             let val = parse_count(rest);
-                            head_count = Some(val);
+                            head_counts.push(val);
                         } else {
                             i += 1;
                             if i >= args.len() {
@@ -308,7 +308,7 @@ fn main() {
                                 process::exit(1);
                             }
                             let val = parse_count(&args[i]);
-                            head_count = Some(val);
+                            head_counts.push(val);
                         }
                         j = bytes.len();
                         continue;
@@ -325,6 +325,7 @@ fn main() {
                             }
                             output_file = Some(args[i].clone());
                         }
+                        output_file_count += 1;
                         j = bytes.len();
                         continue;
                     }
@@ -349,10 +350,16 @@ fn main() {
         eprintln!("{}: multiple -i options specified", TOOL_NAME);
         process::exit(1);
     }
-    if random_source_count > 1 {
-        eprintln!("{}: multiple random sources specified", TOOL_NAME);
+    if output_file_count > 1 {
+        eprintln!("{}: multiple output files specified", TOOL_NAME);
         process::exit(1);
     }
+    // GNU shuf: multiple -n uses the smallest value
+    let head_count: Option<usize> = if head_counts.is_empty() {
+        None
+    } else {
+        Some(*head_counts.iter().min().unwrap())
+    };
     if echo_mode && input_range.is_some() {
         eprintln!("{}: cannot combine -e and -i options", TOOL_NAME);
         process::exit(1);
@@ -786,8 +793,8 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_o_uses_last() {
-        // Like GNU shuf, multiple -o flags uses the last value
+    fn test_multiple_o_is_error() {
+        // GNU shuf rejects multiple -o (exit 1)
         let dir = tempfile::tempdir().unwrap();
         let p1 = dir.path().join("fshuf_multi_o_1.txt");
         let p2 = dir.path().join("fshuf_multi_o_2.txt");
@@ -802,25 +809,26 @@ mod tests {
             ])
             .output()
             .unwrap();
+        assert!(!output.status.success(), "multiple -o should error");
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            output.status.success(),
-            "multiple -o should succeed (uses last)"
+            stderr.contains("multiple output files"),
+            "stderr: {}",
+            stderr
         );
-        // The last -o file should be written
-        assert!(p2.exists(), "last -o file should be written");
     }
 
     #[test]
-    fn test_multiple_n_uses_last() {
-        // GNU shuf uses the last -n value when multiple are specified
+    fn test_multiple_n_uses_smallest() {
+        // GNU shuf uses the smallest -n value when multiple are specified
         let output = cmd()
-            .args(["-i", "1-100", "-n", "3", "-n", "10"])
+            .args(["-n", "10", "-i", "0-9", "-n", "3", "-n", "20"])
             .output()
             .unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = stdout.trim().lines().collect();
-        assert_eq!(lines.len(), 10, "multiple -n should use last value");
+        assert_eq!(lines.len(), 3, "multiple -n should use smallest value");
     }
 
     // --- GNU compatibility: --repeat feature ---

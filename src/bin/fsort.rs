@@ -537,22 +537,53 @@ fn main() {
         debug: cli.debug,
     };
 
-    // Debug mode: print locale info to stderr (matching GNU sort --debug)
+    // Debug mode: print locale info and key diagnostics to stderr (matching GNU sort --debug)
     if cli.debug {
         let locale_name = std::env::var("LC_ALL")
             .or_else(|_| std::env::var("LC_COLLATE"))
             .or_else(|_| std::env::var("LANG"))
             .unwrap_or_else(|_| "C".to_string());
-        // GNU sort says: text ordering performed using 'XX' sorting rules
-        // It uses the full locale name including encoding (e.g. 'en_US.UTF-8').
-        eprintln!(
-            "sort: text ordering performed using '{}' sorting rules",
-            if locale_name == "C" || locale_name == "POSIX" {
-                "simple byte comparison".to_string()
-            } else {
+        // GNU format differs by locale:
+        //   C/POSIX: "sort: text ordering performed using simple byte comparison"
+        //   Other:   "sort: text ordering performed using 'en_US.UTF-8' sorting rules"
+        if locale_name == "C" || locale_name == "POSIX" {
+            eprintln!("sort: text ordering performed using simple byte comparison");
+        } else {
+            eprintln!(
+                "sort: text ordering performed using \u{2018}{}\u{2019} sorting rules",
                 locale_name
+            );
+        }
+
+        // GNU --debug diagnostics: warn about keys that span multiple fields
+        // Note: GNU only warns for n, g, h — NOT for M (month sort)
+        for (i, key_def) in config.keys.iter().enumerate() {
+            let has_numeric_type = key_def.opts.numeric
+                || key_def.opts.general_numeric
+                || key_def.opts.human_numeric
+                || config.global_opts.numeric
+                || config.global_opts.general_numeric
+                || config.global_opts.human_numeric;
+            let spans_multiple = key_def.end_field == 0
+                || key_def.end_field > key_def.start_field
+                || (key_def.end_field == key_def.start_field && key_def.end_char == 0);
+            if has_numeric_type && spans_multiple {
+                eprintln!("sort: key {} is numeric and spans multiple fields", i + 1);
             }
-        );
+        }
+
+        // GNU --debug: warn about decimal point for numeric sorts
+        let has_numeric = config.keys.iter().any(|k| {
+            k.opts.numeric
+                || k.opts.general_numeric
+                || k.opts.human_numeric
+                || config.global_opts.numeric
+                || config.global_opts.general_numeric
+                || config.global_opts.human_numeric
+        });
+        if has_numeric {
+            eprintln!("sort: numbers use \u{2018}.\u{2019} as a decimal point in this locale");
+        }
     }
 
     let inputs = if cli.files.is_empty() {
