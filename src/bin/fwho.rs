@@ -157,6 +157,7 @@ mod tests {
         Command::new(path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_runs() {
         let output = cmd().output().unwrap();
@@ -168,6 +169,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_heading() {
         let output = cmd().arg("-H").output().unwrap();
@@ -179,6 +181,7 @@ mod tests {
         assert!(stdout.contains("TIME"), "Heading should contain TIME");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_count() {
         let output = cmd().arg("-q").output().unwrap();
@@ -192,6 +195,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_boot() {
         let output = cmd().arg("-b").output().unwrap();
@@ -208,6 +212,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_format_check() {
         // Verify that regular who output lines have reasonable formatting
@@ -229,6 +234,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_matches_gnu_format() {
         let gnu = Command::new("who").output();
@@ -252,12 +258,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_basic() {
         let output = cmd().output().unwrap();
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_count_exit_success() {
         let output = cmd().arg("-q").output().unwrap();
@@ -267,6 +275,7 @@ mod tests {
         assert!(stdout.contains('#') || stdout.contains("="));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_heading_long_flag() {
         let output = cmd().arg("--heading").output().unwrap();
@@ -276,12 +285,14 @@ mod tests {
         assert!(stdout.contains("NAME") || stdout.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_boot_exit_success() {
         let output = cmd().arg("-b").output().unwrap();
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_who_am_i() {
         let output = cmd().args(["am", "i"]).output().unwrap();

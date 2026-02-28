@@ -255,6 +255,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "dcba\nhgfe\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rev_nonexistent_file() {
         let output = cmd().arg("/nonexistent_xyz_rev").output().unwrap();

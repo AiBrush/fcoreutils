@@ -597,6 +597,7 @@ mod tests {
         path.push("fsort");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_sort_basic() {
         let mut child = cmd()
@@ -618,6 +619,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_reverse() {
         let mut child = cmd()
@@ -632,6 +634,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "c\nb\na\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_numeric() {
         let mut child = cmd()
@@ -651,6 +654,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n2\n10\n20\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_empty_input() {
         let mut child = cmd()
@@ -664,6 +668,7 @@ mod tests {
         assert_eq!(output.stdout, b"");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_unique() {
         let mut child = cmd()
@@ -686,6 +691,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_stable() {
         let mut child = cmd()
@@ -707,6 +713,7 @@ mod tests {
         assert_eq!(stdout, "a 2\na 1\nb 1\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_numeric_reverse() {
         let mut child = cmd()
@@ -726,6 +733,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "20\n10\n2\n1\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_check_sorted() {
         let mut child = cmd()
@@ -740,6 +748,7 @@ mod tests {
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_check_unsorted() {
         let mut child = cmd()
@@ -754,6 +763,7 @@ mod tests {
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_key_field() {
         let mut child = cmd()
@@ -773,6 +783,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "y a\nx b\nz c\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_case_insensitive() {
         let mut child = cmd()
@@ -794,6 +805,7 @@ mod tests {
         assert_eq!(lines[0], "apple");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -807,6 +819,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_output_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -822,6 +835,7 @@ mod tests {
         assert_eq!(result, "a\nb\nc\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_single_line() {
         let mut child = cmd()
@@ -835,6 +849,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_tab_separator() {
         let mut child = cmd()
@@ -857,6 +872,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sort_nonexistent_file() {
         let output = cmd().arg("/nonexistent_xyz_sort").output().unwrap();

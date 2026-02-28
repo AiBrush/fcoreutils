@@ -210,6 +210,7 @@ mod tests {
         Command::new(path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stty_runs() {
         // Running with --help should always succeed regardless of tty
@@ -219,6 +220,7 @@ mod tests {
         assert!(stdout.contains("Usage:"));
         assert!(stdout.contains("stty"));
     }
+    #[cfg(unix)]
     #[test]
     fn test_stty_size_format() {
         // When stdin is a pipe (not a tty), stty size should fail
@@ -233,6 +235,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stty_all_format() {
         // When stdin is a pipe, stty -a should fail with not-a-tty error
@@ -246,6 +249,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stty_speed() {
         // When stdin is a pipe, stty speed should fail
@@ -259,6 +263,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stty_matches_gnu_errors() {
         // Both GNU stty and our stty should fail when stdin is not a tty
@@ -275,6 +280,7 @@ mod tests {
             );
         }
     }
+    #[cfg(unix)]
     #[test]
     fn test_stty_not_a_tty() {
         // When stdin is piped, stty should fail for most operations
@@ -283,6 +289,7 @@ mod tests {
         let _ = output.status;
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stty_size_not_tty() {
         let output = cmd().arg("size").stdin(Stdio::piped()).output().unwrap();

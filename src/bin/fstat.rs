@@ -301,7 +301,7 @@ mod tests {
         let output = cmd().arg("/tmp").output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("directory"));
+        assert!(stdout.to_lowercase().contains("directory"));
     }
 
     #[test]

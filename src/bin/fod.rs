@@ -508,6 +508,7 @@ mod tests {
         path.push("fod");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_od_basic() {
         let mut child = cmd()
@@ -522,6 +523,7 @@ mod tests {
         assert!(stdout.contains("0000000"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_hex_format() {
         let mut child = cmd()
@@ -537,6 +539,7 @@ mod tests {
         assert!(stdout.contains("41") && stdout.contains("42"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_char_format() {
         let mut child = cmd()
@@ -552,6 +555,7 @@ mod tests {
         assert!(stdout.contains("H") && stdout.contains("i") && stdout.contains("\\n"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_empty_input() {
         let mut child = cmd()
@@ -566,6 +570,7 @@ mod tests {
         assert!(stdout.contains("0000000"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -577,6 +582,7 @@ mod tests {
         assert!(stdout.contains("0000000"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_byte_count() {
         let mut child = cmd()
@@ -593,6 +599,7 @@ mod tests {
         assert!(stdout.contains("0000002"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_skip_bytes() {
         let mut child = cmd()
@@ -609,6 +616,7 @@ mod tests {
         assert!(stdout.contains("43"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_octal_shorthand() {
         let mut child = cmd()
@@ -625,6 +633,7 @@ mod tests {
         assert!(stdout.contains("101"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_hex_shorthand() {
         let mut child = cmd()
@@ -638,12 +647,14 @@ mod tests {
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_nonexistent_file() {
         let output = cmd().arg("/nonexistent_xyz_od").output().unwrap();
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_binary_data() {
         let mut child = cmd()
@@ -664,6 +675,7 @@ mod tests {
         assert!(stdout.contains("00") && stdout.contains("ff"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_od_address_radix() {
         let mut child = cmd()

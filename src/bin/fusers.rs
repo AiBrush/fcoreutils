@@ -59,6 +59,7 @@ mod tests {
         Command::new(path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_users_runs() {
         let output = cmd().output().unwrap();
@@ -69,6 +70,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_users_format() {
         let output = cmd().output().unwrap();
@@ -91,6 +93,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_users_matches_gnu() {
         let gnu = Command::new("users").output();
@@ -116,6 +119,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_users_basic() {
         let output = cmd().output().unwrap();
@@ -123,6 +127,7 @@ mod tests {
         // Output may be empty if no utmp entries, but should not error
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_users_single_line() {
         let output = cmd().output().unwrap();

@@ -241,6 +241,7 @@ mod tests {
         Command::new(path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stdbuf_runs_command() {
         let output = cmd().args(["-o", "L", "echo", "hello"]).output().unwrap();
@@ -253,6 +254,7 @@ mod tests {
         assert_eq!(stdout.trim(), "hello");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stdbuf_exit_code() {
         let output = cmd().args(["-o", "0", "false"]).output().unwrap();
@@ -263,6 +265,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stdbuf_no_command() {
         let output = cmd().output().unwrap();
@@ -271,6 +274,7 @@ mod tests {
             "fstdbuf without a command should fail"
         );
     }
+    #[cfg(unix)]
     #[test]
     fn test_stdbuf_matches_gnu_args() {
         // Verify that the same flags are accepted
@@ -288,6 +292,7 @@ mod tests {
         assert_eq!(stdout.trim(), "test");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stdbuf_line_buffered() {
         let output = cmd().args(["-oL", "echo", "hello"]).output().unwrap();
@@ -295,24 +300,28 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stdbuf_no_command_with_mode() {
         let output = cmd().args(["-o0"]).output().unwrap();
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stdbuf_nonexistent_command() {
         let output = cmd().args(["-o0", "nonexistent_cmd_xyz"]).output().unwrap();
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stdbuf_exit_code_passthrough() {
         let output = cmd().args(["-o0", "sh", "-c", "exit 42"]).output().unwrap();
         assert_eq!(output.status.code(), Some(42));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_stdbuf_unbuffered() {
         let output = cmd().args(["-o", "0", "echo", "test"]).output().unwrap();

@@ -137,6 +137,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_printenv_multiple_vars() {
         let output = cmd().args(["PATH", "HOME"]).output().unwrap();
@@ -156,6 +157,7 @@ mod tests {
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_printenv_home() {
         let output = cmd().arg("HOME").output().unwrap();

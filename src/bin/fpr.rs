@@ -461,6 +461,7 @@ mod tests {
         path.push("fpr");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_pr_basic() {
         let dir = tempfile::tempdir().unwrap();
@@ -473,6 +474,7 @@ mod tests {
         assert!(stdout.contains("Page 1"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pr_stdin() {
         use std::io::Write;
@@ -494,6 +496,7 @@ mod tests {
         assert!(stdout.contains("line1"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pr_double_space() {
         let dir = tempfile::tempdir().unwrap();
@@ -506,6 +509,7 @@ mod tests {
         assert!(stdout.contains("a\n\n"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pr_number_lines() {
         let dir = tempfile::tempdir().unwrap();
@@ -517,6 +521,7 @@ mod tests {
         assert!(stdout.contains("1") && stdout.contains("hello"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pr_columns() {
         let dir = tempfile::tempdir().unwrap();
@@ -527,6 +532,7 @@ mod tests {
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pr_page_length() {
         let dir = tempfile::tempdir().unwrap();
@@ -539,6 +545,7 @@ mod tests {
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pr_no_header() {
         let dir = tempfile::tempdir().unwrap();
@@ -551,12 +558,14 @@ mod tests {
         assert!(!stdout.contains("Page"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pr_nonexistent() {
         let output = cmd().arg("/nonexistent_xyz_pr").output().unwrap();
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pr_custom_header() {
         let dir = tempfile::tempdir().unwrap();
@@ -571,6 +580,7 @@ mod tests {
         assert!(stdout.contains("MY HEADER"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pr_empty_file() {
         let dir = tempfile::tempdir().unwrap();

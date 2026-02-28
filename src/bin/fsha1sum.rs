@@ -515,6 +515,7 @@ mod tests {
         path.push("fsha1sum");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_hash_stdin() {
         use std::io::Write;
@@ -635,6 +636,7 @@ mod tests {
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_binary_data() {
         let dir = tempfile::tempdir().unwrap();

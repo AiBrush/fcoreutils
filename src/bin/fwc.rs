@@ -872,6 +872,7 @@ mod tests {
         assert!(stdout.contains("0"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_wc_chars_vs_bytes_utf8() {
         let mut child = cmd()

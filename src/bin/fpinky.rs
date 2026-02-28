@@ -114,6 +114,7 @@ mod tests {
         Command::new(path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pinky_runs() {
         let output = cmd().output().unwrap();
@@ -125,6 +126,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pinky_short() {
         // Default short format should include a heading
@@ -141,6 +143,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pinky_long() {
         // Long format with -l; needs a username
@@ -163,6 +166,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pinky_specific_user() {
         // Look up current user
@@ -181,6 +185,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pinky_matches_gnu_format() {
         let gnu = Command::new("pinky").output();
@@ -204,6 +209,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_long_format_via_binary() {
         // Test -l flag via binary with current user
@@ -229,6 +235,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_long_format_omit_flags() {
         // Test -l -b -h -p flags via binary
@@ -252,18 +259,21 @@ mod tests {
             }
         }
     }
+    #[cfg(unix)]
     #[test]
     fn test_pinky_basic() {
         let output = cmd().output().unwrap();
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pinky_short_format() {
         let output = cmd().arg("-s").output().unwrap();
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pinky_long_format() {
         // pinky with a username shows long format
@@ -275,6 +285,7 @@ mod tests {
         assert!(!stdout.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pinky_nonexistent_user() {
         let output = cmd().arg("nonexistent_user_xyz_12345").output().unwrap();

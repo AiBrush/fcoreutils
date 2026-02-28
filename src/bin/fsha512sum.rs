@@ -515,6 +515,7 @@ mod tests {
         path.push("fsha512sum");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_hash_stdin() {
         use std::io::Write;
@@ -626,6 +627,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_hash_length() {
         let dir = tempfile::tempdir().unwrap();

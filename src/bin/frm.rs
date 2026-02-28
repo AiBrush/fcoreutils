@@ -584,6 +584,7 @@ mod tests {
         path.push("frm");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_rm_single_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -595,6 +596,7 @@ mod tests {
         assert!(!file.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_multiple_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -611,12 +613,14 @@ mod tests {
         assert!(!f2.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_nonexistent_file() {
         let output = cmd().arg("/nonexistent_xyz_rm_test").output().unwrap();
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_force_nonexistent() {
         let output = cmd()
@@ -626,6 +630,7 @@ mod tests {
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_recursive() {
         let dir = tempfile::tempdir().unwrap();
@@ -641,6 +646,7 @@ mod tests {
         assert!(!subdir.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_dir_without_recursive() {
         let dir = tempfile::tempdir().unwrap();
@@ -650,12 +656,14 @@ mod tests {
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_no_args() {
         let output = cmd().output().unwrap();
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_verbose() {
         let dir = tempfile::tempdir().unwrap();
@@ -667,6 +675,7 @@ mod tests {
         assert!(stdout.contains("removed"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_force_recursive() {
         let dir = tempfile::tempdir().unwrap();
@@ -681,6 +690,7 @@ mod tests {
         assert!(!subdir.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_empty_dir_with_d() {
         let dir = tempfile::tempdir().unwrap();
@@ -694,6 +704,7 @@ mod tests {
         assert!(!subdir.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_rm_dashdash() {
         let dir = tempfile::tempdir().unwrap();

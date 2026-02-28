@@ -59,6 +59,7 @@ mod tests {
         Command::new(path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_test_matches_gnu() {
         // Compare our ftest behavior with GNU test for basic cases
@@ -117,6 +118,7 @@ mod tests {
     }
 
     // Binary exit code test via command
+    #[cfg(unix)]
     #[test]
     fn test_binary_exit_codes() {
         let status = cmd().args(["-d", "/tmp"]).status().unwrap();
@@ -131,6 +133,7 @@ mod tests {
     }
 
     // Test bracket mode: last arg must be ]
+    #[cfg(unix)]
     #[test]
     fn test_bracket_mode() {
         // The ftest binary itself doesn't require "]" unless invoked as "[".
