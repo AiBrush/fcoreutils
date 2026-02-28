@@ -943,4 +943,29 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("2") && stdout.contains("3"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wc_c_locale_default_cjk() {
+        // Matches independent test: LC_ALL=C wc cjk.txt
+        // CJK text: "Hello, 世界!\n你好世界\nこんにちは\n"
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cjk.txt");
+        // Use the exact same content as the independent test
+        std::fs::write(&file, "Hello, 世界!\n你好世界\nこんにちは\n").unwrap();
+        let output = cmd()
+            .env("LC_ALL", "C")
+            .arg(file.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Verify the default output (lines, words, bytes) is parseable
+        let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+        assert!(
+            parts.len() >= 3,
+            "Expected at least 3 fields (lines words bytes), got: {}",
+            stdout.trim()
+        );
+    }
 }

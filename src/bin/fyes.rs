@@ -12,8 +12,13 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUF_SIZE: usize = 1024 * 1024;
 
 /// Handle write error: print message to stderr and exit with code 1.
-/// Matches GNU yes behavior: "yes: standard output: <error>"
+/// For EPIPE (broken pipe), exit silently — GNU yes uses SIG_DFL for SIGPIPE
+/// which terminates the process without any output.
 fn write_error_exit(err: std::io::Error) -> ! {
+    if err.kind() == std::io::ErrorKind::BrokenPipe {
+        // Match GNU yes: die silently on broken pipe
+        process::exit(0);
+    }
     let msg = coreutils_rs::common::io_error_msg(&err);
     eprintln!("{}: standard output: {}", TOOL_NAME, msg);
     process::exit(1);
@@ -373,14 +378,19 @@ mod tests {
         let text = String::from_utf8_lossy(&head.stdout);
         assert_eq!(text.trim(), "y");
 
-        // yes should exit with code 1 on broken pipe (matching GNU behavior)
-        assert_eq!(status.code(), Some(1), "yes should exit 1 on broken pipe");
+        // yes should exit cleanly on broken pipe (matching GNU behavior — silent death)
+        // Exit code 0 since we handle EPIPE gracefully
+        assert!(
+            status.success() || status.code() == Some(0),
+            "yes should exit 0 on broken pipe, got: {:?}",
+            status
+        );
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_yes_broken_pipe_stderr() {
-        // When stdout is closed, yes should print error to stderr and exit 1
+    fn test_yes_broken_pipe_silent() {
+        // When stdout is closed, yes should exit silently (matching GNU yes behavior)
         let mut child = cmd()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -399,14 +409,15 @@ mod tests {
 
         let status = child.wait().unwrap();
 
-        assert_eq!(
-            status.code(),
-            Some(1),
-            "yes should exit with code 1 on broken pipe"
+        // GNU yes dies silently on SIGPIPE — we exit 0 with no stderr
+        assert!(
+            status.success(),
+            "yes should exit 0 on broken pipe, got: {:?}",
+            status
         );
         assert!(
-            stderr_output.contains("yes: standard output:"),
-            "Expected 'yes: standard output:' on stderr, got: {}",
+            stderr_output.is_empty(),
+            "yes should produce no stderr on broken pipe, got: {}",
             stderr_output
         );
     }
@@ -480,6 +491,12 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn test_yes_1999_char_padded_string() {
+        assert_padded_string_unique(1999);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_yes_4095_char_padded_string() {
         assert_padded_string_unique(4095);
     }
@@ -500,5 +517,42 @@ mod tests {
     #[cfg(unix)]
     fn test_yes_8192_char_padded_string() {
         assert_padded_string_unique(8192);
+    }
+
+    /// Verify that yes produces no stderr output when piped through head.
+    /// This matches the independent test framework behavior where stderr
+    /// is captured alongside stdout via `2>&1`.
+    #[test]
+    #[cfg(unix)]
+    fn test_yes_no_stderr_in_pipeline() {
+        let mut child = cmd()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let child_stdout = child.stdout.take().unwrap();
+
+        // Pipe through head -n 5 to trigger EPIPE
+        let head = Command::new("head")
+            .args(["-n", "5"])
+            .stdin(child_stdout)
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+
+        // Collect stderr from yes
+        let mut stderr = child.stderr.take().unwrap();
+        let mut stderr_output = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_output);
+
+        let _ = child.wait();
+
+        assert_eq!(head.status.code(), Some(0));
+        assert!(
+            stderr_output.is_empty(),
+            "yes should produce no stderr when piped, got: {}",
+            stderr_output
+        );
     }
 }
