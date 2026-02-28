@@ -131,18 +131,16 @@ fn resolve(path: &str, mode: CanonMode) -> Result<PathBuf, std::io::Error> {
     };
 
     // If the original path had a trailing slash, the resolved target must be a directory.
-    // GNU readlink: "file/" fails with ENOTDIR even for -f and -m modes.
+    // GNU readlink: "file/" fails with ENOTDIR for -e and -f modes.
+    // For -m mode, trailing slash is always OK (even for non-directories).
     if path.ends_with('/') {
-        match std::fs::metadata(&result) {
-            Ok(meta) if meta.is_dir() => Ok(result),
-            Ok(_) => Err(std::io::Error::other("Not a directory")),
-            Err(e) => {
-                // For -m mode, if the target doesn't exist, trailing slash is OK
-                if mode == CanonMode::CanonicalizeMissing {
-                    Ok(result)
-                } else {
-                    Err(e)
-                }
+        if mode == CanonMode::CanonicalizeMissing {
+            Ok(result)
+        } else {
+            match std::fs::metadata(&result) {
+                Ok(meta) if meta.is_dir() => Ok(result),
+                Ok(_) => Err(std::io::Error::other("Not a directory")),
+                Err(e) => Err(e),
             }
         }
     } else {
