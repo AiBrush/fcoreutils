@@ -336,4 +336,157 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_split_by_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "1\n2\n3\n4\n5\n6\n").unwrap();
+        let output = cmd()
+            .args(["-l", "2", input.to_str().unwrap()])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        // Should create xaa, xab, xac
+        assert!(dir.path().join("xaa").exists());
+        assert!(dir.path().join("xab").exists());
+        assert!(dir.path().join("xac").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("xaa")).unwrap(),
+            "1\n2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("xab")).unwrap(),
+            "3\n4\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("xac")).unwrap(),
+            "5\n6\n"
+        );
+    }
+
+    #[test]
+    fn test_split_by_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "abcdef").unwrap();
+        let output = cmd()
+            .args(["-b", "2", input.to_str().unwrap()])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("xaa")).unwrap(),
+            "ab"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("xab")).unwrap(),
+            "cd"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("xac")).unwrap(),
+            "ef"
+        );
+    }
+
+    #[test]
+    fn test_split_custom_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "1\n2\n3\n4\n").unwrap();
+        let prefix = dir.path().join("out_");
+        let output = cmd()
+            .args(["-l", "2", input.to_str().unwrap(), prefix.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(dir.path().join("out_aa").exists());
+        assert!(dir.path().join("out_ab").exists());
+    }
+
+    #[test]
+    fn test_split_numeric_suffixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "1\n2\n3\n4\n").unwrap();
+        let output = cmd()
+            .args(["-l", "2", "-d", input.to_str().unwrap()])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(dir.path().join("x00").exists());
+        assert!(dir.path().join("x01").exists());
+    }
+
+    #[test]
+    fn test_split_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("empty.txt");
+        std::fs::write(&input, "").unwrap();
+        let output = cmd()
+            .arg(input.to_str().unwrap())
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_split_single_line_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("single.txt");
+        std::fs::write(&input, "hello\n").unwrap();
+        let output = cmd()
+            .args(["-l", "1", input.to_str().unwrap()])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("xaa")).unwrap(),
+            "hello\n"
+        );
+    }
+
+    #[test]
+    fn test_split_stdin() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = cmd()
+            .args(["-l", "1", "-"])
+            .current_dir(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\nb\nc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(dir.path().join("xaa").exists());
+    }
+
+    #[test]
+    fn test_split_nonexistent() {
+        let output = cmd().arg("/nonexistent_xyz_split").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_split_verbose() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "1\n2\n").unwrap();
+        let output = cmd()
+            .args(["--verbose", "-l", "1", input.to_str().unwrap()])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("creating"));
+    }
 }

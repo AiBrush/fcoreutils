@@ -288,6 +288,81 @@ mod tests {
     }
 
     #[test]
+    fn test_basename_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage"));
+    }
+
+    #[test]
+    fn test_basename_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_basename_empty_string() {
+        let output = cmd().arg("").output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim_end_matches('\n'),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_basename_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("missing operand"));
+    }
+
+    #[test]
+    fn test_basename_extra_operand() {
+        let output = cmd().args(["a", "b", "c"]).output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("extra operand"));
+    }
+
+    #[test]
+    fn test_basename_suffix_same_as_name() {
+        // When suffix would consume the entire name, it's not stripped
+        let output = cmd().args([".txt", ".txt"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim_end_matches('\n'),
+            ".txt"
+        );
+    }
+
+    #[test]
+    fn test_basename_suffix_flag_combined() {
+        let output = cmd()
+            .args(["-as", ".c", "/foo/bar.c", "/baz/qux.c"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines, vec!["bar", "qux"]);
+    }
+
+    #[test]
+    fn test_basename_multiple_slashes() {
+        let output = cmd().arg("///usr///bin///").output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim_end_matches('\n'),
+            "bin"
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn test_basename_matches_gnu() {
         let test_cases = vec![

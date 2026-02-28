@@ -275,4 +275,271 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_cat_stdin() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello world\n");
+    }
+
+    #[test]
+    fn test_cat_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "line1\nline2\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"line1\nline2\n");
+    }
+
+    #[test]
+    fn test_cat_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "aaa\n").unwrap();
+        std::fs::write(&f2, "bbb\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"aaa\nbbb\n");
+    }
+
+    #[test]
+    fn test_cat_number_lines() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\nb\nc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1\ta") || stdout.contains("1\t"));
+        assert!(stdout.contains("2\t"));
+        assert!(stdout.contains("3\t"));
+    }
+
+    #[test]
+    fn test_cat_number_nonblank() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-b")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\n\nb\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        // Blank line should NOT be numbered
+        assert!(lines[1].trim().is_empty());
+    }
+
+    #[test]
+    fn test_cat_show_ends() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-E")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello\nworld\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("hello$"));
+    }
+
+    #[test]
+    fn test_cat_show_tabs() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-T")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\tb\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("^I"));
+    }
+
+    #[test]
+    fn test_cat_squeeze_blank() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-s")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a\n\n\n\nb\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        // Multiple blanks squeezed to single blank
+        assert_eq!(output.stdout, b"a\n\nb\n");
+    }
+
+    #[test]
+    fn test_cat_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty.txt");
+        std::fs::write(&file, "").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_cat_nonexistent_file() {
+        let output = cmd().arg("/nonexistent/file.txt").output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("No such file"));
+    }
+
+    #[test]
+    fn test_cat_binary_data() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let data: Vec<u8> = (0..=255).collect();
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&data).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, data);
+    }
+
+    #[test]
+    fn test_cat_show_nonprinting() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-v")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&[0x01, 0x7f, b'\n'])
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("^A"));
+        assert!(stdout.contains("^?"));
+    }
+
+    #[test]
+    fn test_cat_no_final_newline() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"no newline")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"no newline");
+    }
+
+    #[test]
+    fn test_cat_show_all() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-A")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\tb\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // -A = -vET: show tabs as ^I, ends as $
+        assert!(stdout.contains("^I"));
+        assert!(stdout.contains("$"));
+    }
+
+    #[test]
+    fn test_cat_invalid_option() {
+        let output = cmd().arg("--invalid").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_cat_dash_is_stdin() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"from stdin\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"from stdin\n");
+    }
 }

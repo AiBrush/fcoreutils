@@ -220,4 +220,50 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("sync"));
     }
+
+    #[test]
+    fn test_sync_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_sync_no_args_success() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_sync_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_sync_data_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        let output = cmd().args(["-d", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_sync_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        let output = cmd().args(["-f", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_sync_nonexistent_file_error() {
+        let output = cmd().arg("/nonexistent_xyz_sync").output().unwrap();
+        assert!(!output.status.success());
+    }
 }

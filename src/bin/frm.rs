@@ -598,4 +598,124 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_rm_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        assert!(file.exists());
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn test_rm_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "a").unwrap();
+        std::fs::write(&f2, "b").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!f1.exists());
+        assert!(!f2.exists());
+    }
+
+    #[test]
+    fn test_rm_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_rm_test").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_rm_force_nonexistent() {
+        let output = cmd()
+            .args(["-f", "/nonexistent_xyz_rm_test"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_rm_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir(&subdir).unwrap();
+        let file = subdir.join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let output = cmd()
+            .args(["-r", subdir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!subdir.exists());
+    }
+
+    #[test]
+    fn test_rm_dir_without_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir(&subdir).unwrap();
+        let output = cmd().arg(subdir.to_str().unwrap()).output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_rm_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_rm_verbose() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let output = cmd().args(["-v", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("removed"));
+    }
+
+    #[test]
+    fn test_rm_force_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir_all(subdir.join("nested")).unwrap();
+        std::fs::write(subdir.join("nested/file.txt"), "x").unwrap();
+        let output = cmd()
+            .args(["-rf", subdir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!subdir.exists());
+    }
+
+    #[test]
+    fn test_rm_empty_dir_with_d() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("empty");
+        std::fs::create_dir(&subdir).unwrap();
+        let output = cmd()
+            .args(["-d", subdir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!subdir.exists());
+    }
+
+    #[test]
+    fn test_rm_dashdash() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "x").unwrap();
+        let output = cmd().args(["--", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        assert!(!file.exists());
+    }
 }

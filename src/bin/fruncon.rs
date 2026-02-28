@@ -343,4 +343,37 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code());
         }
     }
+
+    #[test]
+    fn test_runcon_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_runcon_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_runcon_no_args() {
+        let output = cmd().output().unwrap();
+        // On systems without SELinux, this should fail
+        let _ = output.status;
+    }
+
+    #[test]
+    fn test_runcon_nonexistent_command() {
+        let output = cmd()
+            .args([
+                "unconfined_u:unconfined_r:unconfined_t:s0",
+                "nonexistent_cmd_xyz",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
 }

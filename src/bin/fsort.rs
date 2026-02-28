@@ -664,4 +664,216 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n2\n10\n20\n");
     }
+
+    #[test]
+    fn test_sort_empty_input() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"");
+    }
+
+    #[test]
+    fn test_sort_unique() {
+        let mut child = cmd()
+            .arg("-u")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"apple\nbanana\napple\ncherry\nbanana\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "apple\nbanana\ncherry\n"
+        );
+    }
+
+    #[test]
+    fn test_sort_stable() {
+        let mut child = cmd()
+            .args(["-s", "-k1,1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a 2\na 1\nb 1\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Stable sort preserves original order for equal keys
+        assert_eq!(stdout, "a 2\na 1\nb 1\n");
+    }
+
+    #[test]
+    fn test_sort_numeric_reverse() {
+        let mut child = cmd()
+            .args(["-n", "-r"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"1\n10\n2\n20\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "20\n10\n2\n1\n");
+    }
+
+    #[test]
+    fn test_sort_check_sorted() {
+        let mut child = cmd()
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\nb\nc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_sort_check_unsorted() {
+        let mut child = cmd()
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"b\na\nc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_sort_key_field() {
+        let mut child = cmd()
+            .args(["-k", "2"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"x b\ny a\nz c\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "y a\nx b\nz c\n");
+    }
+
+    #[test]
+    fn test_sort_case_insensitive() {
+        let mut child = cmd()
+            .arg("-f")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"Banana\napple\nCherry\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines[0], "apple");
+    }
+
+    #[test]
+    fn test_sort_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "cherry\napple\nbanana\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "apple\nbanana\ncherry\n"
+        );
+    }
+
+    #[test]
+    fn test_sort_output_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        let output_file = dir.path().join("output.txt");
+        std::fs::write(&input, "c\na\nb\n").unwrap();
+        let output = cmd()
+            .args(["-o", output_file.to_str().unwrap(), input.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let result = std::fs::read_to_string(&output_file).unwrap();
+        assert_eq!(result, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_sort_single_line() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+    }
+
+    #[test]
+    fn test_sort_tab_separator() {
+        let mut child = cmd()
+            .args(["-t", "\t", "-k", "2,2n"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"x\t10\ny\t2\nz\t1\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "z\t1\ny\t2\nx\t10\n"
+        );
+    }
+
+    #[test]
+    fn test_sort_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_sort").output().unwrap();
+        assert!(!output.status.success());
+    }
 }

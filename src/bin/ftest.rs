@@ -145,4 +145,215 @@ mod tests {
         let status = cmd().args([""]).status().unwrap();
         assert_eq!(status.code(), Some(1));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_string_equal() {
+        let s = cmd().args(["hello", "=", "hello"]).status().unwrap();
+        assert_eq!(s.code(), Some(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_string_not_equal() {
+        let s = cmd().args(["hello", "!=", "world"]).status().unwrap();
+        assert_eq!(s.code(), Some(0));
+        let s = cmd().args(["hello", "!=", "hello"]).status().unwrap();
+        assert_eq!(s.code(), Some(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_integer_comparisons() {
+        assert_eq!(
+            cmd().args(["5", "-eq", "5"]).status().unwrap().code(),
+            Some(0)
+        );
+        assert_eq!(
+            cmd().args(["5", "-ne", "3"]).status().unwrap().code(),
+            Some(0)
+        );
+        assert_eq!(
+            cmd().args(["3", "-lt", "5"]).status().unwrap().code(),
+            Some(0)
+        );
+        assert_eq!(
+            cmd().args(["5", "-gt", "3"]).status().unwrap().code(),
+            Some(0)
+        );
+        assert_eq!(
+            cmd().args(["5", "-le", "5"]).status().unwrap().code(),
+            Some(0)
+        );
+        assert_eq!(
+            cmd().args(["5", "-ge", "5"]).status().unwrap().code(),
+            Some(0)
+        );
+        assert_eq!(
+            cmd().args(["5", "-lt", "3"]).status().unwrap().code(),
+            Some(1)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_exists() {
+        assert_eq!(cmd().args(["-e", "/tmp"]).status().unwrap().code(), Some(0));
+        assert_eq!(
+            cmd()
+                .args(["-e", "/nonexistent_xyz_test_99"])
+                .status()
+                .unwrap()
+                .code(),
+            Some(1)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_type_checks() {
+        assert_eq!(cmd().args(["-d", "/tmp"]).status().unwrap().code(), Some(0));
+        assert_eq!(cmd().args(["-f", "/tmp"]).status().unwrap().code(), Some(1));
+        assert_eq!(
+            cmd().args(["-d", "/etc/passwd"]).status().unwrap().code(),
+            Some(1)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_string_zero_nonzero() {
+        assert_eq!(cmd().args(["-z", ""]).status().unwrap().code(), Some(0));
+        assert_eq!(
+            cmd().args(["-z", "hello"]).status().unwrap().code(),
+            Some(1)
+        );
+        assert_eq!(
+            cmd().args(["-n", "hello"]).status().unwrap().code(),
+            Some(0)
+        );
+        assert_eq!(cmd().args(["-n", ""]).status().unwrap().code(), Some(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_negation() {
+        assert_eq!(
+            cmd().args(["!", "-d", "/tmp"]).status().unwrap().code(),
+            Some(1)
+        );
+        assert_eq!(
+            cmd()
+                .args(["!", "-e", "/nonexistent_xyz"])
+                .status()
+                .unwrap()
+                .code(),
+            Some(0)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_and_or_operators() {
+        // -a (and)
+        assert_eq!(
+            cmd()
+                .args(["-d", "/tmp", "-a", "-e", "/tmp"])
+                .status()
+                .unwrap()
+                .code(),
+            Some(0)
+        );
+        // -o (or)
+        assert_eq!(
+            cmd()
+                .args(["-d", "/nonexistent", "-o", "-d", "/tmp"])
+                .status()
+                .unwrap()
+                .code(),
+            Some(0)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parentheses() {
+        assert_eq!(
+            cmd()
+                .args(["(", "-d", "/tmp", ")"])
+                .status()
+                .unwrap()
+                .code(),
+            Some(0)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_readable_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        assert_eq!(
+            cmd()
+                .args(["-r", file.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .code(),
+            Some(0)
+        );
+        assert_eq!(
+            cmd()
+                .args(["-w", file.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .code(),
+            Some(0)
+        );
+        assert_eq!(
+            cmd()
+                .args(["-s", file.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .code(),
+            Some(0)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_size_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty.txt");
+        std::fs::write(&file, "").unwrap();
+        // -s checks non-zero size
+        assert_eq!(
+            cmd()
+                .args(["-s", file.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .code(),
+            Some(1)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_same_file_ef() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let fp = file.to_str().unwrap();
+        assert_eq!(
+            cmd().args([fp, "-ef", fp]).status().unwrap().code(),
+            Some(0)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_too_many_args() {
+        let output = cmd().args(["a", "b", "c", "d", "e"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
 }

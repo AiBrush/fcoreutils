@@ -191,4 +191,39 @@ mod tests {
             assert_eq!(ours.stdout, gnu.stdout, "STDOUT mismatch");
         }
     }
+
+    #[test]
+    fn test_nohup_runs_command_exit_success() {
+        let output = cmd().args(["echo", "hello"]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_nohup_passes_exit_code() {
+        let output = cmd().args(["sh", "-c", "exit 42"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(42));
+    }
+
+    #[test]
+    fn test_nohup_with_args() {
+        let output = cmd()
+            .args(["sh", "-c", "echo hello world"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "hello world");
+    }
+
+    #[test]
+    fn test_nohup_nohup_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = cmd()
+            .args(["echo", "test_output"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        // nohup.out may or may not be created depending on whether stdout is a tty
+    }
 }

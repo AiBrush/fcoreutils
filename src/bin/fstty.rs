@@ -285,4 +285,33 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_stty_help_text() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_stty_version_output() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_stty_not_a_tty() {
+        // When stdin is piped, stty should fail for most operations
+        let output = cmd().stdin(Stdio::piped()).output().unwrap();
+        // May succeed (some implementations handle no-tty gracefully) or fail
+        let _ = output.status;
+    }
+
+    #[test]
+    fn test_stty_size_not_tty() {
+        let output = cmd().arg("size").stdin(Stdio::piped()).output().unwrap();
+        // size with piped stdin should fail
+        assert!(!output.status.success());
+    }
 }

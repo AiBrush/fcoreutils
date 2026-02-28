@@ -746,4 +746,211 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_tr_basic_translate() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["a", "b"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"apple\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "bpple\n");
+    }
+
+    #[test]
+    fn test_tr_lowercase_to_uppercase() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["[:lower:]", "[:upper:]"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "HELLO WORLD\n");
+    }
+
+    #[test]
+    fn test_tr_delete() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-d", "aeiou"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hll wrld\n");
+    }
+
+    #[test]
+    fn test_tr_squeeze() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-s", " "])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello   world   foo\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello world foo\n");
+    }
+
+    #[test]
+    fn test_tr_complement_delete() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-cd", "[:digit:]\n"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"abc123def456\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "123456\n");
+    }
+
+    #[test]
+    fn test_tr_range() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["a-z", "A-Z"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "HELLO\n");
+    }
+
+    #[test]
+    fn test_tr_empty_input() {
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["a", "b"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"");
+    }
+
+    #[test]
+    fn test_tr_delete_newlines() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-d", "\n"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello\nworld\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "helloworld");
+    }
+
+    #[test]
+    fn test_tr_squeeze_repeated() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-s", "aeiou"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"beeeeef\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "bef\n");
+    }
+
+    #[test]
+    fn test_tr_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_tr_translate_digits() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["0123456789", "abcdefghij"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"12345\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "bcdef\n");
+    }
+
+    #[test]
+    fn test_tr_truncate_set2() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-t", "abc", "xy"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"abcabc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        // -t truncates set1 to match set2 length; only a→x, b→y; c unchanged
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "xycxyc\n");
+    }
 }

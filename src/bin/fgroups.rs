@@ -226,4 +226,47 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_groups_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage"));
+    }
+
+    #[test]
+    fn test_groups_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_groups_single_line_output() {
+        let output = cmd().output().unwrap();
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(stdout.lines().count(), 1, "should output a single line");
+        }
+    }
+
+    #[test]
+    fn test_groups_multiple_users() {
+        let output = cmd().args(["root", "root"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Multiple users should produce multiple lines
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn test_groups_exit_code_nonexistent() {
+        let output = cmd().arg("nonexistent_user_xyz_99").output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.is_empty());
+    }
 }

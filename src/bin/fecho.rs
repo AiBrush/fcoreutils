@@ -127,4 +127,74 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_echo_backslash_n() {
+        let output = cmd().args(["-e", "a\\nb"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"a\nb\n");
+    }
+
+    #[test]
+    fn test_echo_backslash_t() {
+        let output = cmd().args(["-e", "a\\tb"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"a\tb\n");
+    }
+
+    #[test]
+    fn test_echo_backslash_backslash() {
+        let output = cmd().args(["-e", "a\\\\b"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"a\\b\n");
+    }
+
+    #[test]
+    fn test_echo_disable_escape() {
+        let output = cmd().args(["-E", "a\\nb"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"a\\nb\n");
+    }
+
+    #[test]
+    fn test_echo_n_and_e() {
+        let output = cmd().args(["-ne", "hello\\n"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello\n");
+    }
+
+    #[test]
+    fn test_echo_empty_string_arg() {
+        let output = cmd().arg("").output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"\n");
+    }
+
+    #[test]
+    fn test_echo_multiple_empty_args() {
+        let output = cmd().args(["", "", ""]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"  \n");
+    }
+
+    #[test]
+    fn test_echo_special_chars() {
+        let output = cmd().args(["hello!", "@#$%"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello! @#$%\n");
+    }
+
+    #[test]
+    fn test_echo_exit_code() {
+        let output = cmd().arg("test").output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+    }
+
+    #[test]
+    fn test_echo_dash_only() {
+        // A bare "-" should be printed as text
+        let output = cmd().arg("-").output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"-\n");
+    }
 }

@@ -1581,4 +1581,50 @@ mod tests {
         let stdout = norm(&String::from_utf8_lossy(&output.stdout));
         assert_eq!(stdout, "110000\n");
     }
+
+    #[test]
+    fn test_seq_negative_range() {
+        let output = cmd().args(["5", "-1", "1"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stdout, "5\n4\n3\n2\n1\n");
+    }
+
+    #[test]
+    fn test_seq_format_string() {
+        let output = cmd().args(["-f", "%03g", "1", "5"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
+        assert!(stdout.contains("001\n") && stdout.contains("005\n"));
+    }
+
+    #[test]
+    fn test_seq_single_arg() {
+        let output = cmd().arg("3").output().unwrap();
+        assert!(output.status.success());
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stdout, "1\n2\n3\n");
+    }
+
+    #[test]
+    fn test_seq_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_seq_float_step() {
+        let output = cmd().args(["0", "0.5", "2"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = norm(&String::from_utf8_lossy(&output.stdout));
+        assert!(stdout.contains("0") && stdout.contains("0.5") && stdout.contains("2"));
+    }
+
+    #[test]
+    fn test_seq_large_count() {
+        let output = cmd().args(["1", "1000"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 1000);
+    }
 }

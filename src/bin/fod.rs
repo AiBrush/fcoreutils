@@ -535,4 +535,162 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("0000000"));
     }
+
+    #[test]
+    fn test_od_hex_format() {
+        let mut child = cmd()
+            .args(["-t", "x1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"AB").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("41") && stdout.contains("42"));
+    }
+
+    #[test]
+    fn test_od_char_format() {
+        let mut child = cmd()
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"Hi\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("H") && stdout.contains("i") && stdout.contains("\\n"));
+    }
+
+    #[test]
+    fn test_od_empty_input() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("0000000"));
+    }
+
+    #[test]
+    fn test_od_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.bin");
+        std::fs::write(&file, &[0x41, 0x42, 0x43]).unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("0000000"));
+    }
+
+    #[test]
+    fn test_od_byte_count() {
+        let mut child = cmd()
+            .args(["-N", "2"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"ABCDEF").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Only 2 bytes read, so final offset should be 0000002
+        assert!(stdout.contains("0000002"));
+    }
+
+    #[test]
+    fn test_od_skip_bytes() {
+        let mut child = cmd()
+            .args(["-j", "2", "-t", "x1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"ABCDEF").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Skip 2 bytes, should start with C (0x43)
+        assert!(stdout.contains("43"));
+    }
+
+    #[test]
+    fn test_od_octal_shorthand() {
+        let mut child = cmd()
+            .arg("-b")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"A").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 'A' = 0101 in octal
+        assert!(stdout.contains("101"));
+    }
+
+    #[test]
+    fn test_od_hex_shorthand() {
+        let mut child = cmd()
+            .arg("-x")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"AB").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_od_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_od").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_od_binary_data() {
+        let mut child = cmd()
+            .args(["-t", "x1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&[0x00, 0xFF, 0x7F, 0x80])
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("00") && stdout.contains("ff"));
+    }
+
+    #[test]
+    fn test_od_address_radix() {
+        let mut child = cmd()
+            .args(["-A", "x"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"A").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Hex address radix
+        assert!(stdout.contains("000000"));
+    }
 }

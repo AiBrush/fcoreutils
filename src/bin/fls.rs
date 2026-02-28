@@ -599,4 +599,181 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_ls_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file1.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("file2.txt"), "b").unwrap();
+        let output = cmd().arg(dir.path().to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("file1.txt"));
+        assert!(stdout.contains("file2.txt"));
+    }
+
+    #[test]
+    fn test_ls_long_format() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "content").unwrap();
+        let output = cmd()
+            .args(["-l", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("test.txt"));
+        // Long format should have permissions, size, etc.
+    }
+
+    #[test]
+    fn test_ls_hidden_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".hidden"), "secret").unwrap();
+        std::fs::write(dir.path().join("visible"), "public").unwrap();
+
+        // Without -a, hidden files should not appear
+        let output = cmd().arg(dir.path().to_str().unwrap()).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains(".hidden"));
+        assert!(stdout.contains("visible"));
+
+        // With -a, hidden files should appear
+        let output = cmd()
+            .args(["-a", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(".hidden"));
+    }
+
+    #[test]
+    fn test_ls_one_per_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), "").unwrap();
+        std::fs::write(dir.path().join("b"), "").unwrap();
+        std::fs::write(dir.path().join("c"), "").unwrap();
+        let output = cmd()
+            .args(["-1", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn test_ls_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("top.txt"), "").unwrap();
+        std::fs::write(dir.path().join("sub").join("inner.txt"), "").unwrap();
+        let output = cmd()
+            .args(["-R", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("top.txt"));
+        assert!(stdout.contains("inner.txt"));
+    }
+
+    #[test]
+    fn test_ls_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = cmd().arg(dir.path().to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stdout.is_empty() || String::from_utf8_lossy(&output.stdout).trim().is_empty()
+        );
+    }
+
+    #[test]
+    fn test_ls_nonexistent() {
+        let output = cmd().arg("/nonexistent/path/xyz").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_ls_sort_by_size() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("small"), "x").unwrap();
+        std::fs::write(dir.path().join("large"), "x".repeat(1000)).unwrap();
+        let output = cmd()
+            .args(["-lS", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().filter(|l| !l.starts_with("total")).collect();
+        // First file should be the larger one
+        if lines.len() >= 2 {
+            assert!(
+                lines[0].contains("large"),
+                "larger file should come first with -S"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ls_reverse() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("aaa"), "").unwrap();
+        std::fs::write(dir.path().join("zzz"), "").unwrap();
+        let output = cmd()
+            .args(["-1r", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        if lines.len() >= 2 {
+            assert_eq!(lines[0], "zzz");
+            assert_eq!(lines[1], "aaa");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ls_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&file, "content").unwrap();
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let output = cmd()
+            .args(["-l", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("link.txt"));
+        assert!(stdout.contains("->"));
+    }
+
+    #[test]
+    fn test_ls_human_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), vec![0u8; 2048]).unwrap();
+        let output = cmd()
+            .args(["-lh", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_ls_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "data").unwrap();
+        let output = cmd()
+            .args(["-i", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // -i should show inode numbers (digits before filename)
+        assert!(stdout.chars().any(|c| c.is_ascii_digit()));
+    }
 }

@@ -704,4 +704,140 @@ mod tests {
         let hash = stdout.split_whitespace().next().unwrap();
         assert_eq!(hash.len(), 64, "256-bit hash should be 64 hex chars");
     }
+
+    #[test]
+    fn test_empty_file_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty.txt");
+        std::fs::write(&file, "").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let hash = stdout.split_whitespace().next().unwrap();
+        // BLAKE2b-512 of empty input is well-known
+        assert_eq!(hash.len(), 128, "512-bit hash should be 128 hex chars");
+    }
+
+    #[test]
+    fn test_empty_stdin_hash() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "aaa\n").unwrap();
+        std::fs::write(&f2, "bbb\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn test_nonexistent_file() {
+        let output = cmd().arg("/nonexistent/file.txt").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_check_tampered() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "original\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        let checksums = dir.path().join("checksums.txt");
+        std::fs::write(&checksums, String::from_utf8_lossy(&output.stdout).as_ref()).unwrap();
+        // Tamper with the file
+        std::fs::write(&file, "tampered\n").unwrap();
+        let check_output = cmd()
+            .args(["--check", checksums.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!check_output.status.success());
+        let stdout = String::from_utf8_lossy(&check_output.stdout);
+        assert!(stdout.contains("FAILED"));
+    }
+
+    #[test]
+    fn test_check_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let checksums = dir.path().join("checksums.txt");
+        std::fs::write(
+            &checksums,
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890  nonexistent.txt\n",
+        )
+        .unwrap();
+        let output = cmd()
+            .args(["--check", checksums.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_invalid_length_not_multiple_of_8() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd()
+            .args(["--length=7", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_tag_and_check_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("checksums.txt");
+        std::fs::write(&file, "dummy\n").unwrap();
+        let output = cmd()
+            .args(["--tag", "--check", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_zero_terminated() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd().args(["-z", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.ends_with(&[0u8]));
+    }
+
+    #[test]
+    fn test_binary_mode_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd().args(["-b", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(" *"), "binary mode should use * marker");
+    }
+
+    #[test]
+    fn test_invalid_option() {
+        let output = cmd().arg("--invalid-flag").output().unwrap();
+        assert!(!output.status.success());
+    }
 }

@@ -333,4 +333,81 @@ mod tests {
             .unwrap();
         assert_ne!(output.status.code(), Some(0));
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_verbose() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        // Get current group
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(&file).unwrap();
+        let gid = meta.gid();
+        // Use numeric GID to change to same group (always works without root)
+        let output = cmd()
+            .args(["-v", &gid.to_string(), file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let ref_file = dir.path().join("ref.txt");
+        let target = dir.path().join("target.txt");
+        std::fs::write(&ref_file, "ref").unwrap();
+        std::fs::write(&target, "target").unwrap();
+        let output = cmd()
+            .args([
+                &format!("--reference={}", ref_file.display()),
+                target.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("f.txt"), "data").unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let gid = std::fs::metadata(dir.path()).unwrap().gid();
+        let output = cmd()
+            .args(["-R", &gid.to_string(), dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_empty_group_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        let output = cmd().args(["", file.to_str().unwrap()]).output().unwrap();
+        // Empty group spec is treated as a no-op (no group change) — matching GNU behavior
+        // Just verify it exits cleanly (0 or 1)
+        let code = output.status.code().unwrap();
+        assert!(code == 0 || code == 1);
+    }
 }

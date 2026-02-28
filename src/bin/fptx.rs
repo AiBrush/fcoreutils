@@ -429,4 +429,84 @@ mod tests {
         assert!(stdout.contains("apple"));
         assert!(stdout.contains("banana"));
     }
+
+    #[test]
+    fn test_ptx_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("test.txt");
+        std::fs::write(&f, "hello world foo\n").unwrap();
+        let output = cmd().arg(f.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("hello"));
+    }
+
+    #[test]
+    fn test_ptx_empty_input() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_ptx_width() {
+        let mut child = cmd()
+            .args(["-w", "40"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"the quick brown fox\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_ptx_multiple_lines() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"line one\nline two\nline three\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("one") && stdout.contains("two") && stdout.contains("three"));
+    }
+
+    #[test]
+    fn test_ptx_nonexistent() {
+        let output = cmd().arg("/nonexistent_xyz_ptx").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_ptx_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "hello world\n").unwrap();
+        std::fs::write(&f2, "foo bar\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
 }

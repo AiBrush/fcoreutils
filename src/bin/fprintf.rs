@@ -148,4 +148,89 @@ mod tests {
         let output = cmd().output().unwrap();
         assert!(!output.status.success());
     }
+
+    #[test]
+    fn test_printf_hex() {
+        let output = cmd().args(["%x", "255"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "ff");
+    }
+
+    #[test]
+    fn test_printf_octal() {
+        let output = cmd().args(["%o", "8"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "10");
+    }
+
+    #[test]
+    fn test_printf_escape_sequences() {
+        let output = cmd().args(["hello\\tworld\\n"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\tworld\n");
+    }
+
+    #[test]
+    fn test_printf_width_padding() {
+        let output = cmd().args(["%10s", "hello"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "     hello");
+    }
+
+    #[test]
+    fn test_printf_zero_padding() {
+        let output = cmd().args(["%05d", "42"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "00042");
+    }
+
+    #[test]
+    fn test_printf_multiple_args() {
+        let output = cmd().args(["%s %s\n", "hello", "world"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello world\n");
+    }
+
+    #[test]
+    fn test_printf_float() {
+        let output = cmd().args(["%.2f", "3.14159"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "3.14");
+    }
+
+    #[test]
+    fn test_printf_char() {
+        let output = cmd().args(["%c", "A"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "A");
+    }
+
+    #[test]
+    fn test_printf_literal_percent() {
+        let output = cmd().args(["100%%"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "100%");
+    }
+
+    #[test]
+    fn test_printf_backslash_n() {
+        let output = cmd().args(["a\\nb"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nb");
+    }
+
+    #[test]
+    fn test_printf_reuse_format() {
+        // GNU printf re-uses format when extra args
+        let output = cmd().args(["%s\n", "a", "b", "c"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_printf_negative_int() {
+        let output = cmd().args(["%d", "-42"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "-42");
+    }
 }

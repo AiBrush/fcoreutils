@@ -718,4 +718,191 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hel");
     }
+
+    #[test]
+    fn test_cut_multiple_fields() {
+        let mut child = cmd()
+            .args(["-d:", "-f1,3"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a:b:c:d\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "a:c");
+    }
+
+    #[test]
+    fn test_cut_field_range() {
+        let mut child = cmd()
+            .args(["-d:", "-f2-4"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a:b:c:d:e\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "b:c:d");
+    }
+
+    #[test]
+    fn test_cut_complement() {
+        let dir = tempfile::tempdir().unwrap();
+        let infile = dir.path().join("in.txt");
+        let outfile = dir.path().join("out.txt");
+        std::fs::write(&infile, "a:b:c\n").unwrap();
+        let output = cmd()
+            .args(["-d:", "-f2", "--complement", infile.to_str().unwrap()])
+            .stdout(std::fs::File::create(&outfile).unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::fs::read_to_string(&outfile).unwrap().trim(), "a:c");
+    }
+
+    #[test]
+    fn test_cut_no_delimiter_in_line() {
+        let mut child = cmd()
+            .args(["-d:", "-f1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"no delimiter here\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        // When line has no delimiter, whole line is printed (unless -s)
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "no delimiter here"
+        );
+    }
+
+    #[test]
+    fn test_cut_only_delimited() {
+        let mut child = cmd()
+            .args(["-d:", "-f1", "-s"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"no delimiter\nhas:delimiter\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // -s suppresses lines without delimiter
+        assert_eq!(stdout.trim(), "has");
+    }
+
+    #[test]
+    fn test_cut_characters() {
+        let mut child = cmd()
+            .args(["-c1-5"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn test_cut_empty_input() {
+        let mut child = cmd()
+            .args(["-f1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_cut_output_delimiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let infile = dir.path().join("in.txt");
+        let outfile = dir.path().join("out.txt");
+        std::fs::write(&infile, "a:b:c:d\n").unwrap();
+        let output = cmd()
+            .args([
+                "-d:",
+                "-f1,3",
+                "--output-delimiter=|",
+                infile.to_str().unwrap(),
+            ])
+            .stdout(std::fs::File::create(&outfile).unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::fs::read_to_string(&outfile).unwrap().trim(), "a|c");
+    }
+
+    #[test]
+    fn test_cut_no_option() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_cut_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("data.txt");
+        let outfile = dir.path().join("out.txt");
+        std::fs::write(&file, "a:b:c\nx:y:z\n").unwrap();
+        let output = cmd()
+            .args(["-d:", "-f2", file.to_str().unwrap()])
+            .stdout(std::fs::File::create(&outfile).unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = std::fs::read_to_string(&outfile).unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines, vec!["b", "y"]);
+    }
+
+    #[test]
+    fn test_cut_tab_delimiter() {
+        let mut child = cmd()
+            .args(["-f2"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"first\tsecond\tthird\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "second");
+    }
 }

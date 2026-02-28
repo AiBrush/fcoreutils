@@ -576,4 +576,93 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("OK"));
     }
+
+    #[test]
+    fn test_known_empty_hash() {
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
+    }
+
+    #[test]
+    fn test_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "aaa\n").unwrap();
+        std::fs::write(&f2, "bbb\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_sha1").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_check_tampered() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "original\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        let checksums = dir.path().join("sums.txt");
+        std::fs::write(&checksums, String::from_utf8_lossy(&output.stdout).as_ref()).unwrap();
+        std::fs::write(&file, "tampered\n").unwrap();
+        let output = cmd()
+            .args(["--check", checksums.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("FAILED"));
+    }
+
+    #[test]
+    fn test_tag_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd()
+            .args(["--tag", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("SHA1"));
+    }
+
+    #[test]
+    fn test_invalid_option() {
+        let output = cmd().arg("--invalid-xyz").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_binary_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("binary.bin");
+        std::fs::write(&file, &[0u8, 1, 2, 3, 255, 254, 253]).unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 1);
+        // Hash should be 40 hex chars
+        let hash_part: &str = stdout.split_whitespace().next().unwrap();
+        assert_eq!(hash_part.len(), 40);
+    }
 }

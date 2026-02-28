@@ -136,4 +136,103 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
     }
+
+    #[test]
+    fn test_expr_subtraction() {
+        let output = cmd().args(["10", "-", "3"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "7");
+    }
+
+    #[test]
+    fn test_expr_division() {
+        let output = cmd().args(["15", "/", "3"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "5");
+    }
+
+    #[test]
+    fn test_expr_modulo() {
+        let output = cmd().args(["17", "%", "5"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2");
+    }
+
+    #[test]
+    fn test_expr_string_match() {
+        let output = cmd().args(["hello", ":", "hel"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "3");
+    }
+
+    #[test]
+    fn test_expr_equality() {
+        let output = cmd().args(["5", "=", "5"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
+    }
+
+    #[test]
+    fn test_expr_inequality() {
+        let output = cmd().args(["5", "!=", "3"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
+    }
+
+    #[test]
+    fn test_expr_less_than() {
+        let output = cmd().args(["3", "<", "5"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
+    }
+
+    #[test]
+    fn test_expr_false_result_exit_code() {
+        // expr returns exit code 1 when result is 0 or empty
+        let output = cmd().args(["5", "=", "3"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
+    }
+
+    #[test]
+    fn test_expr_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_expr_substr() {
+        let output = cmd().args(["substr", "hello", "2", "3"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ell");
+    }
+
+    #[test]
+    fn test_expr_index() {
+        let output = cmd().args(["index", "hello", "lo"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "3"); // 'l' is at position 3
+    }
+
+    #[test]
+    fn test_expr_or() {
+        let output = cmd().args(["", "|", "hello"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn test_expr_and() {
+        let output = cmd().args(["hello", "&", "world"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn test_expr_negative_numbers() {
+        let output = cmd().args(["-5", "+", "3"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "-2");
+    }
 }

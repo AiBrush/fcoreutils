@@ -723,4 +723,122 @@ mod tests {
         assert!(pos_b < pos_d);
         assert!(pos_c < pos_d);
     }
+
+    #[test]
+    fn test_tsort_empty_input() {
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"");
+    }
+
+    #[test]
+    fn test_tsort_single_pair() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a b\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "a\nb");
+    }
+
+    #[test]
+    fn test_tsort_self_loop() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a a\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        // Self-loop — should still produce output (with cycle warning)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("a"));
+    }
+
+    #[test]
+    fn test_tsort_cycle() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a b\nb a\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        // Cycle detected — should still produce output but with warning
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.is_empty());
+    }
+
+    #[test]
+    fn test_tsort_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("deps.txt");
+        std::fs::write(&f, "a b\nb c\n").unwrap();
+        let output = cmd().arg(f.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "a\nb\nc");
+    }
+
+    #[test]
+    fn test_tsort_independent_nodes() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a a\nb b\nc c\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn test_tsort_odd_tokens() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Odd number of tokens — should error
+        child.stdin.take().unwrap().write_all(b"a\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+    }
 }

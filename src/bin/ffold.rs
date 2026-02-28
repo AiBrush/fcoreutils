@@ -251,4 +251,171 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_fold_default_width() {
+        use std::io::Write;
+        use std::process::Stdio;
+        // Default fold width is 80
+        let line = "x".repeat(100);
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{}\n", line).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), 80);
+        assert_eq!(lines[1].len(), 20);
+    }
+
+    #[test]
+    fn test_fold_custom_width() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let line = "abcdefghij";
+        let mut child = cmd()
+            .args(["-w", "5"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{}\n", line).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines, vec!["abcde", "fghij"]);
+    }
+
+    #[test]
+    fn test_fold_short_line() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"short\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"short\n");
+    }
+
+    #[test]
+    fn test_fold_empty_input() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_fold_bytes_mode() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-b", "-w", "3"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"abcdef\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines[0], "abc");
+        assert_eq!(lines[1], "def");
+    }
+
+    #[test]
+    fn test_fold_spaces() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-s", "-w", "10"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world foo bar\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // With -s, fold should break at spaces
+        for line in stdout.lines() {
+            assert!(line.len() <= 10, "line too long: {}", line);
+        }
+    }
+
+    #[test]
+    fn test_fold_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "a".repeat(200) + "\n").unwrap();
+        let output = cmd()
+            .args(["-w", "50", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 4);
+    }
+
+    #[test]
+    fn test_fold_multiple_lines() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-w", "5"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"abcdefgh\n12345678\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn test_fold_nonexistent_file() {
+        let output = cmd().arg("/nonexistent/file.txt").output().unwrap();
+        assert!(!output.status.success());
+    }
 }

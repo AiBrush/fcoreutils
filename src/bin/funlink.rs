@@ -120,4 +120,43 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_unlink_removes_file_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        assert!(file.exists());
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn test_unlink_nonexistent_exit_failure() {
+        let output = cmd().arg("/nonexistent_xyz_unlink").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_unlink_directory_fails_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+        let output = cmd().arg(sub.to_str().unwrap()).output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_unlink_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_unlink_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
 }

@@ -307,4 +307,36 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(stdout.trim(), "test");
     }
+
+    #[test]
+    fn test_stdbuf_line_buffered() {
+        let output = cmd().args(["-oL", "echo", "hello"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn test_stdbuf_no_command_with_mode() {
+        let output = cmd().args(["-o0"]).output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_stdbuf_nonexistent_command() {
+        let output = cmd().args(["-o0", "nonexistent_cmd_xyz"]).output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_stdbuf_exit_code_passthrough() {
+        let output = cmd().args(["-o0", "sh", "-c", "exit 42"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(42));
+    }
+
+    #[test]
+    fn test_stdbuf_unbuffered() {
+        let output = cmd().args(["-o", "0", "echo", "test"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "test");
+    }
 }

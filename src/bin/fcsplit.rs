@@ -265,4 +265,112 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    #[test]
+    fn test_csplit_by_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "aaa\nbbb\n---\nccc\nddd\n").unwrap();
+        let output = cmd()
+            .args([input.to_str().unwrap(), "/---/"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Should create xx00 and xx01
+        assert!(dir.path().join("xx00").exists());
+        assert!(dir.path().join("xx01").exists());
+    }
+
+    #[test]
+    fn test_csplit_multiple_splits() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "a\nb\nc\nd\ne\nf\n").unwrap();
+        let output = cmd()
+            .args([input.to_str().unwrap(), "3", "5"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(dir.path().join("xx00").exists());
+        assert!(dir.path().join("xx01").exists());
+        assert!(dir.path().join("xx02").exists());
+    }
+
+    #[test]
+    fn test_csplit_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_csplit_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = cmd()
+            .args(["/nonexistent/file.txt", "3"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_csplit_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "a\nb\nc\nd\n").unwrap();
+        let output = cmd()
+            .args(["-f", "part", input.to_str().unwrap(), "3"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(dir.path().join("part00").exists());
+        assert!(dir.path().join("part01").exists());
+    }
+
+    #[test]
+    fn test_csplit_byte_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "line1\nline2\nline3\n").unwrap();
+        let output = cmd()
+            .args([input.to_str().unwrap(), "2"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // csplit outputs byte counts of each piece
+        assert!(!stdout.trim().is_empty());
+    }
+
+    #[test]
+    fn test_csplit_empty_first_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "a\nb\nc\n").unwrap();
+        let output = cmd()
+            .args([input.to_str().unwrap(), "1"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        // First section before line 1 should be empty
+        let content = std::fs::read_to_string(dir.path().join("xx00")).unwrap();
+        assert!(content.is_empty());
+    }
 }

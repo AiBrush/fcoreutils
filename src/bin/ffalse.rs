@@ -56,4 +56,32 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_false_no_stderr() {
+        let output = cmd().output().unwrap();
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn test_false_with_many_args() {
+        let output = cmd()
+            .args(["a", "b", "c", "d", "e", "f", "--flag", "-x"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_false_with_dash_dash() {
+        let output = cmd().args(["--", "arg"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+    }
+
+    #[test]
+    fn test_false_with_empty_string() {
+        let output = cmd().arg("").output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+    }
 }

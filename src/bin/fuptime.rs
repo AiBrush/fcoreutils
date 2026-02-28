@@ -330,4 +330,46 @@ mod tests {
             // The pretty format should be similar (may differ slightly in wording)
         }
     }
+
+    #[test]
+    fn test_uptime_basic() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should contain load averages or uptime information
+        assert!(
+            stdout.contains("load average") || stdout.contains("up") || stdout.contains("user")
+        );
+    }
+
+    #[test]
+    fn test_uptime_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_uptime_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_uptime_pretty_contains_up() {
+        let output = cmd().arg("-p").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("up"));
+    }
+
+    #[test]
+    fn test_uptime_since_datetime_format() {
+        let output = cmd().arg("-s").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should contain a date-time
+        assert!(stdout.contains("-") && stdout.contains(":"));
+    }
 }

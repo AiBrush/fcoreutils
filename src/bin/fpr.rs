@@ -486,4 +486,111 @@ mod tests {
         assert!(stdout.contains("hello"));
         assert!(stdout.contains("Page 1"));
     }
+
+    #[test]
+    fn test_pr_stdin() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"line1\nline2\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("line1"));
+    }
+
+    #[test]
+    fn test_pr_double_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("test.txt");
+        std::fs::write(&f, "a\nb\nc\n").unwrap();
+        let output = cmd().args(["-d", f.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Double-spaced output should have empty lines between content
+        assert!(stdout.contains("a\n\n"));
+    }
+
+    #[test]
+    fn test_pr_number_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("test.txt");
+        std::fs::write(&f, "hello\nworld\n").unwrap();
+        let output = cmd().args(["-n", f.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1") && stdout.contains("hello"));
+    }
+
+    #[test]
+    fn test_pr_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("test.txt");
+        let content: String = (1..=20).map(|i| format!("line{}\n", i)).collect();
+        std::fs::write(&f, &content).unwrap();
+        let output = cmd().args(["-2", f.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_pr_page_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("test.txt");
+        std::fs::write(&f, "a\nb\nc\n").unwrap();
+        let output = cmd()
+            .args(["-l", "20", f.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_pr_no_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("test.txt");
+        std::fs::write(&f, "hello\n").unwrap();
+        let output = cmd().args(["-t", f.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // -t suppresses headers/footers
+        assert!(!stdout.contains("Page"));
+    }
+
+    #[test]
+    fn test_pr_nonexistent() {
+        let output = cmd().arg("/nonexistent_xyz_pr").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_pr_custom_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("test.txt");
+        std::fs::write(&f, "hello\n").unwrap();
+        let output = cmd()
+            .args(["-h", "MY HEADER", f.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("MY HEADER"));
+    }
+
+    #[test]
+    fn test_pr_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("empty.txt");
+        std::fs::write(&f, "").unwrap();
+        let output = cmd().arg(f.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+    }
 }

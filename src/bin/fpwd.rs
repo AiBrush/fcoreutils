@@ -288,4 +288,52 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn test_pwd_basic() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim().starts_with('/'));
+    }
+
+    #[test]
+    fn test_pwd_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_pwd_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_pwd_physical_absolute_path() {
+        let output = cmd().arg("-P").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim().starts_with('/'));
+    }
+
+    #[test]
+    fn test_pwd_logical_absolute_path() {
+        let output = cmd().arg("-L").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim().starts_with('/'));
+    }
+
+    #[test]
+    fn test_pwd_current_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = cmd().current_dir(dir.path()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(stdout.trim(), canonical.to_str().unwrap());
+    }
 }

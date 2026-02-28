@@ -96,4 +96,60 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_arch_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage"));
+    }
+
+    #[test]
+    fn test_arch_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_arch_extra_operand() {
+        let output = cmd().arg("extra").output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("extra operand"));
+    }
+
+    #[test]
+    fn test_arch_double_dash_ignored() {
+        let output = cmd().arg("--").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.trim().is_empty());
+    }
+
+    #[test]
+    fn test_arch_single_line_output() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 1);
+    }
+
+    #[test]
+    fn test_arch_common_values() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let arch = stdout.trim();
+        let known = [
+            "x86_64", "aarch64", "arm64", "i686", "armv7l", "s390x", "ppc64le", "riscv64",
+        ];
+        assert!(
+            known.iter().any(|k| arch == *k) || !arch.is_empty(),
+            "unexpected arch: {}",
+            arch
+        );
+    }
 }

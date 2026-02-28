@@ -222,6 +222,57 @@ mod tests {
     }
 
     #[test]
+    fn test_dirname_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage"));
+    }
+
+    #[test]
+    fn test_dirname_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_dirname_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_dirname_empty_string() {
+        let output = cmd().arg("").output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_dirname_deep_path() {
+        let output = cmd().arg("/a/b/c/d/e/f").output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim_end_matches('\n'),
+            "/a/b/c/d/e"
+        );
+    }
+
+    #[test]
+    fn test_dirname_multiple_zero() {
+        let output = cmd().args(["-z", "/a/b", "/c/d"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = &output.stdout;
+        // With -z, output is NUL-terminated
+        let parts: Vec<&[u8]> = stdout
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(parts.len(), 2);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn test_dirname_matches_gnu() {
         let test_cases = vec![

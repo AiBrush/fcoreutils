@@ -519,4 +519,245 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_nl_basic_numbering() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello\nworld\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1") && stdout.contains("hello"));
+        assert!(stdout.contains("2") && stdout.contains("world"));
+    }
+
+    #[test]
+    fn test_nl_number_all_lines() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-b", "a"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello\n\nworld\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // With -b a, all lines including blank should be numbered
+        assert!(stdout.contains("1"));
+        assert!(stdout.contains("2"));
+        assert!(stdout.contains("3"));
+    }
+
+    #[test]
+    fn test_nl_no_numbering() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-b", "n"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello\nworld\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // -b n means no numbering; lines should have blank number fields
+        assert!(stdout.contains("hello"));
+        assert!(stdout.contains("world"));
+    }
+
+    #[test]
+    fn test_nl_empty_input() {
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"");
+    }
+
+    #[test]
+    fn test_nl_starting_line_number() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-v", "10"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\nb\nc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("10"));
+        assert!(stdout.contains("11"));
+        assert!(stdout.contains("12"));
+    }
+
+    #[test]
+    fn test_nl_line_increment() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-i", "5"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\nb\nc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1"));
+        assert!(stdout.contains("6"));
+        assert!(stdout.contains("11"));
+    }
+
+    #[test]
+    fn test_nl_number_width() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-w", "3"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Width 3 should produce "  1" prefix
+        assert!(stdout.contains("  1"));
+    }
+
+    #[test]
+    fn test_nl_left_justified() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-n", "ln"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // ln format: left-justified
+        assert!(stdout.starts_with("1"));
+    }
+
+    #[test]
+    fn test_nl_zero_filled() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-n", "rz"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // rz format: right-justified with leading zeros
+        assert!(stdout.contains("000001"));
+    }
+
+    #[test]
+    fn test_nl_custom_separator() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-s", ": "])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(": hello"));
+    }
+
+    #[test]
+    fn test_nl_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "line1\nline2\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1") && stdout.contains("line1"));
+        assert!(stdout.contains("2") && stdout.contains("line2"));
+    }
+
+    #[test]
+    fn test_nl_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_nl").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_nl_default_skips_blank() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello\n\nworld\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Default -b t: blank lines not numbered
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert!(lines.len() == 3);
+    }
+
+    #[test]
+    fn test_nl_invalid_numbering_style() {
+        let output = cmd().args(["-b", "invalid"]).output().unwrap();
+        assert!(!output.status.success());
+    }
 }

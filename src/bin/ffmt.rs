@@ -374,4 +374,153 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_fmt_basic() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello world\n");
+    }
+
+    #[test]
+    fn test_fmt_wrap_long_line() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let long_line = "word ".repeat(50);
+        let mut child = cmd()
+            .args(["-w", "40"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(long_line.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            assert!(
+                line.len() <= 42,
+                "line too long: {} chars: '{}'",
+                line.len(),
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_fmt_empty_input() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_fmt_preserve_paragraphs() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"paragraph one\n\nparagraph two\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("\n\n"),
+            "empty line between paragraphs should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_fmt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("text.txt");
+        std::fs::write(&file, "short line\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "short line");
+    }
+
+    #[test]
+    fn test_fmt_nonexistent_file() {
+        let output = cmd().arg("/nonexistent/file.txt").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_fmt_width_option() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("--width=20")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a b c d e f g h i j k l m n o p q r s\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.lines().count() > 1,
+            "should wrap into multiple lines"
+        );
+    }
+
+    #[test]
+    fn test_fmt_only_whitespace() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"   \n   \n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+    }
 }

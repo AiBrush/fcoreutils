@@ -115,4 +115,34 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_users_basic() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        // Output may be empty if no utmp entries, but should not error
+    }
+
+    #[test]
+    fn test_users_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_users_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_users_single_line() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should be at most one line
+        assert!(stdout.lines().count() <= 1);
+    }
 }

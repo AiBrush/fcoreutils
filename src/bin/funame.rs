@@ -295,4 +295,67 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_uname_sysname() {
+        let output = cmd().arg("-s").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim() == "Linux" || stdout.trim() == "Darwin");
+    }
+
+    #[test]
+    fn test_uname_all_field_count() {
+        let output = cmd().arg("-a").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // -a output should have multiple space-separated fields
+        assert!(stdout.split_whitespace().count() >= 3);
+    }
+
+    #[test]
+    fn test_uname_nodename() {
+        let output = cmd().arg("-n").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.trim().is_empty());
+    }
+
+    #[test]
+    fn test_uname_release() {
+        let output = cmd().arg("-r").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.trim().is_empty());
+    }
+
+    #[test]
+    fn test_uname_machine() {
+        let output = cmd().arg("-m").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let machine = stdout.trim();
+        assert!(
+            machine == "x86_64"
+                || machine == "aarch64"
+                || machine == "arm64"
+                || machine.starts_with("arm")
+                || machine.starts_with("i")
+        );
+    }
+
+    #[test]
+    fn test_uname_combined_flags() {
+        let output = cmd().args(["-s", "-n", "-r"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.split_whitespace().count() >= 3);
+    }
+
+    #[test]
+    fn test_uname_default_equals_s() {
+        let default = cmd().output().unwrap();
+        let s = cmd().arg("-s").output().unwrap();
+        assert_eq!(default.stdout, s.stdout);
+    }
 }

@@ -240,4 +240,126 @@ mod tests {
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_expand_basic_tab() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\tb\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Default tab stop is 8, so 'a' + 7 spaces + 'b'
+        assert!(!stdout.contains('\t'), "tabs should be expanded to spaces");
+        assert_eq!(stdout.trim_end(), "a       b");
+    }
+
+    #[test]
+    fn test_expand_custom_tabstop() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-t", "4"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"\thello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout, "    hello\n");
+    }
+
+    #[test]
+    fn test_expand_no_tabs() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"no tabs here\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"no tabs here\n");
+    }
+
+    #[test]
+    fn test_expand_empty_input() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_expand_multiple_tabs() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-t", "4"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"\t\t\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"        \n");
+    }
+
+    #[test]
+    fn test_expand_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tabs.txt");
+        std::fs::write(&file, "a\tb\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains('\t'));
+    }
+
+    #[test]
+    fn test_expand_initial_only() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-i")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"\ta\tb\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // First tab should be expanded, but the one between a and b should remain
+        assert!(stdout.contains('\t'), "non-initial tab should remain");
+        assert!(stdout.starts_with("        ") || stdout.starts_with("    "));
+    }
+
+    #[test]
+    fn test_expand_nonexistent_file() {
+        let output = cmd().arg("/nonexistent/file.txt").output().unwrap();
+        assert!(!output.status.success());
+    }
 }

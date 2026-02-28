@@ -576,4 +576,82 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("OK"));
     }
+
+    #[test]
+    fn test_known_empty_hash() {
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"));
+    }
+
+    #[test]
+    fn test_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_sha384").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_check_tampered() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "original\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        let checksums = dir.path().join("sums.txt");
+        std::fs::write(&checksums, String::from_utf8_lossy(&output.stdout).as_ref()).unwrap();
+        std::fs::write(&file, "tampered\n").unwrap();
+        let output = cmd()
+            .args(["--check", checksums.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_tag_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "x").unwrap();
+        let output = cmd()
+            .args(["--tag", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("SHA384"));
+    }
+
+    #[test]
+    fn test_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "aaa\n").unwrap();
+        std::fs::write(&f2, "bbb\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 2);
+    }
+
+    #[test]
+    fn test_hash_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "test").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let hash_part: &str = stdout.split_whitespace().next().unwrap();
+        assert_eq!(hash_part.len(), 96); // SHA384 = 96 hex chars
+    }
 }

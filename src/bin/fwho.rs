@@ -251,4 +251,54 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_who_basic() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_who_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_who_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_who_count_exit_success() {
+        let output = cmd().arg("-q").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // -q output should contain a count
+        assert!(stdout.contains('#') || stdout.contains("="));
+    }
+
+    #[test]
+    fn test_who_heading_long_flag() {
+        let output = cmd().arg("--heading").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Heading should contain column names like NAME
+        assert!(stdout.contains("NAME") || stdout.is_empty());
+    }
+
+    #[test]
+    fn test_who_boot_exit_success() {
+        let output = cmd().arg("-b").output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_who_am_i() {
+        let output = cmd().args(["am", "i"]).output().unwrap();
+        assert!(output.status.success());
+    }
 }

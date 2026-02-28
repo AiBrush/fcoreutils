@@ -459,4 +459,102 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("UTC") || stdout.contains("GMT"));
     }
+
+    #[test]
+    fn test_date_epoch() {
+        let output = cmd().arg("+%s").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let epoch: u64 = stdout.trim().parse().expect("should be a unix timestamp");
+        // Should be a reasonable modern timestamp (after 2020)
+        assert!(epoch > 1_577_836_800);
+    }
+
+    #[test]
+    fn test_date_day_of_week() {
+        let output = cmd().arg("+%A").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let days = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ];
+        assert!(
+            days.iter().any(|d| stdout.trim() == *d),
+            "unexpected day: {}",
+            stdout.trim()
+        );
+    }
+
+    #[test]
+    fn test_date_iso() {
+        let output = cmd().arg("+%Y-%m-%d").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = stdout.trim().split('-').collect();
+        assert_eq!(parts.len(), 3);
+        assert!(parts[0].len() == 4); // YYYY
+        assert!(parts[1].len() == 2); // MM
+        assert!(parts[2].len() == 2); // DD
+    }
+
+    #[test]
+    fn test_date_multiple_format_specifiers() {
+        let output = cmd().arg("+%H:%M:%S").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = stdout.trim().split(':').collect();
+        assert_eq!(parts.len(), 3);
+    }
+
+    #[test]
+    fn test_date_literal_percent() {
+        let output = cmd().arg("+100%%").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "100%");
+    }
+
+    #[test]
+    fn test_date_date_flag() {
+        let output = cmd()
+            .args(["-d", "2024-01-15", "+%Y-%m-%d"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "2024-01-15");
+    }
+
+    #[test]
+    fn test_date_epoch_zero() {
+        let output = cmd()
+            .args(["-u", "-d", "@0", "+%Y-%m-%d %H:%M:%S"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn test_date_invalid_format() {
+        // Invalid date string should fail
+        let output = cmd().args(["-d", "not a date"]).output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_date_rfc3339() {
+        let output = cmd().arg("--rfc-3339=seconds").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should contain date-time with timezone offset
+        assert!(stdout.contains("-") && stdout.contains(":"));
+    }
 }

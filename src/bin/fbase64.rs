@@ -382,4 +382,200 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout, b"Hello");
     }
+
+    #[test]
+    fn test_base64_empty_input() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_base64_roundtrip() {
+        let input = b"The quick brown fox jumps over the lazy dog\n";
+        let mut enc = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        enc.stdin.take().unwrap().write_all(input).unwrap();
+        let encoded = enc.wait_with_output().unwrap();
+        assert!(encoded.status.success());
+
+        let mut dec = cmd()
+            .arg("-d")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        dec.stdin
+            .take()
+            .unwrap()
+            .write_all(&encoded.stdout)
+            .unwrap();
+        let decoded = dec.wait_with_output().unwrap();
+        assert!(decoded.status.success());
+        assert_eq!(decoded.stdout, input);
+    }
+
+    #[test]
+    fn test_base64_wrap_zero() {
+        let mut child = cmd()
+            .args(["-w", "0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"Hello, World! This is a longer test input.")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 1, "no wrapping with -w 0");
+    }
+
+    #[test]
+    fn test_base64_wrap_custom() {
+        let mut child = cmd()
+            .args(["-w", "20"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"Hello, World! This is a longer test input.")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            assert!(line.len() <= 20, "line too long: {}", line);
+        }
+    }
+
+    #[test]
+    fn test_base64_decode_invalid() {
+        let mut child = cmd()
+            .arg("-d")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"!!!invalid!!!\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_base64_ignore_garbage() {
+        let mut child = cmd()
+            .args(["-d", "-i"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"SGVs!!bG8=\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"Hello");
+    }
+
+    #[test]
+    fn test_base64_binary_data() {
+        let data: Vec<u8> = (0..=255).collect();
+        let mut enc = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        enc.stdin.take().unwrap().write_all(&data).unwrap();
+        let encoded = enc.wait_with_output().unwrap();
+        assert!(encoded.status.success());
+
+        let mut dec = cmd()
+            .arg("-d")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        dec.stdin
+            .take()
+            .unwrap()
+            .write_all(&encoded.stdout)
+            .unwrap();
+        let decoded = dec.wait_with_output().unwrap();
+        assert!(decoded.status.success());
+        assert_eq!(decoded.stdout, data);
+    }
+
+    #[test]
+    fn test_base64_file_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "Hello").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim().contains("SGVsbG8="));
+    }
+
+    #[test]
+    fn test_base64_invalid_option() {
+        let output = cmd().arg("--invalid").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_base64_known_vectors() {
+        // RFC 4648 test vectors
+        let test_cases: &[(&[u8], &str)] = &[
+            (b"", ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+        ];
+        for (input, expected) in test_cases {
+            let mut child = cmd()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                *expected,
+                "mismatch for input {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
 }

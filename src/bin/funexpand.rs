@@ -227,7 +227,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
 
     fn cmd() -> Command {
         let mut path = std::env::current_exe().unwrap();
@@ -255,8 +256,6 @@ mod tests {
 
     #[test]
     fn test_unexpand_basic() {
-        use std::io::Write;
-        use std::process::Stdio;
         let mut child = cmd()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -275,8 +274,6 @@ mod tests {
 
     #[test]
     fn test_unexpand_all() {
-        use std::io::Write;
-        use std::process::Stdio;
         let mut child = cmd()
             .arg("-a")
             .stdin(Stdio::piped())
@@ -303,5 +300,97 @@ mod tests {
         let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), "\thello\n");
+    }
+
+    #[test]
+    fn test_unexpand_empty_input() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"");
+    }
+
+    #[test]
+    fn test_unexpand_no_spaces() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+    }
+
+    #[test]
+    fn test_unexpand_custom_tabstop() {
+        let mut child = cmd()
+            .args(["-t", "4"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"    hello\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "\thello\n");
+    }
+
+    #[test]
+    fn test_unexpand_mixed_spaces() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // 8 spaces (tab stop) + 4 spaces (not a full tab)
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"            hello\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains('\t'));
+    }
+
+    #[test]
+    fn test_unexpand_first_only() {
+        // Default: only convert leading spaces
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"        hello        world\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Leading spaces converted, internal spaces preserved
+        assert!(stdout.starts_with('\t'));
+    }
+
+    #[test]
+    fn test_unexpand_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_unexpand").output().unwrap();
+        assert!(!output.status.success());
     }
 }

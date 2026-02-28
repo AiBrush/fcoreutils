@@ -241,4 +241,75 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_rmdir_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("empty_dir");
+        std::fs::create_dir(&sub).unwrap();
+        let output = cmd().arg(sub.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert!(!sub.exists());
+    }
+
+    #[test]
+    fn test_rmdir_non_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("notempty");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("file.txt"), "data").unwrap();
+        let output = cmd().arg(sub.to_str().unwrap()).output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_rmdir_parents_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        // Use current_dir so -p removes a/b/c relative to tempdir
+        let output = cmd()
+            .args(["-p", "a/b/c"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!dir.path().join("a").exists());
+    }
+
+    #[test]
+    fn test_rmdir_multiple() {
+        let dir = tempfile::tempdir().unwrap();
+        let d1 = dir.path().join("d1");
+        let d2 = dir.path().join("d2");
+        std::fs::create_dir(&d1).unwrap();
+        std::fs::create_dir(&d2).unwrap();
+        let output = cmd()
+            .args([d1.to_str().unwrap(), d2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!d1.exists() && !d2.exists());
+    }
+
+    #[test]
+    fn test_rmdir_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_rmdir_ignore_non_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("notempty2");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("file.txt"), "data").unwrap();
+        let output = cmd()
+            .args(["--ignore-fail-on-non-empty", sub.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        // Directory should still exist (not removed because non-empty)
+        assert!(sub.exists());
+    }
 }

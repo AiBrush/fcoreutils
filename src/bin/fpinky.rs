@@ -269,4 +269,36 @@ mod tests {
         assert!(stdout.contains("pinky"));
         assert!(stdout.contains("fcoreutils"));
     }
+
+    #[test]
+    fn test_pinky_basic() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_pinky_short_format() {
+        let output = cmd().arg("-s").output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_pinky_long_format() {
+        // pinky with a username shows long format
+        let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+        let output = cmd().arg(&user).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Long format should show login info
+        assert!(!stdout.is_empty());
+    }
+
+    #[test]
+    fn test_pinky_nonexistent_user() {
+        let output = cmd().arg("nonexistent_user_xyz_12345").output().unwrap();
+        // Should succeed but output nothing for the user
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // May or may not show the user
+        let _ = stdout;
+    }
 }

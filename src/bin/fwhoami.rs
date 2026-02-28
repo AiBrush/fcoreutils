@@ -95,4 +95,46 @@ mod tests {
         let output = cmd().arg("extra").output().unwrap();
         assert_eq!(output.status.code(), Some(1));
     }
+
+    #[test]
+    fn test_whoami_basic() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.trim().is_empty());
+    }
+
+    #[test]
+    fn test_whoami_matches_id() {
+        let id_out = Command::new("id").arg("-un").output();
+        if let Ok(id_out) = id_out {
+            let ours = cmd().output().unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&ours.stdout).trim(),
+                String::from_utf8_lossy(&id_out.stdout).trim()
+            );
+        }
+    }
+
+    #[test]
+    fn test_whoami_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_whoami_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_whoami_single_line() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 1);
+    }
 }
