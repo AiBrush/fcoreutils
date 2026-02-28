@@ -49,7 +49,8 @@ jobs:
       - name: Build and compile tests
         run: cargo test --no-run
 
-  test-linux:
+  # Module tests: src/{cmd}/tests.rs → cargo test "{cmd}::"
+  test-linux-mod:
     name: Test ubuntu/${{ matrix.cmd }}
     needs: build-linux
     runs-on: ubuntu-latest
@@ -69,6 +70,27 @@ jobs:
       - name: Run tests
         run: cargo test "${{ matrix.cmd }}::"
 
+  # Binary tests: src/bin/f{cmd}.rs → cargo test --bin f{cmd}
+  test-linux-bin:
+    name: Test ubuntu/${{ matrix.cmd }}
+    needs: build-linux
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cmd: [arch, base32, basename, basenc, chcon, chroot, cksum, dircolors, dirname, env, false, groups, hostid, id, kill, link, ln, logname, mkdir, mkfifo, mknod, mktemp, nice, nohup, nproc, pathchk, printenv, pwd, readlink, realpath, rmdir, runcon, seq, shuf, sleep, sum, sync, tee, timeout, touch, true, truncate, tsort, tty, uname, unlink, uptime, whoami, yes]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v2-ubuntu-latest
+          save-if: false
+      - name: Install nasm and libssl-dev
+        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
+      - name: Run tests
+        run: cargo test --bin "f${{ matrix.cmd }}"
+
   # ── macOS: build once, test each command in parallel ──────────────
   build-macos:
     name: Build (macos-latest)
@@ -82,7 +104,7 @@ jobs:
       - name: Build and compile tests
         run: cargo test --no-run
 
-  test-macos:
+  test-macos-mod:
     name: Test macos/${{ matrix.cmd }}
     needs: build-macos
     runs-on: macos-latest
@@ -100,6 +122,24 @@ jobs:
       - name: Run tests
         run: cargo test "${{ matrix.cmd }}::"
 
+  test-macos-bin:
+    name: Test macos/${{ matrix.cmd }}
+    needs: build-macos
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cmd: [arch, base32, basename, basenc, chcon, chroot, cksum, dircolors, dirname, env, false, groups, hostid, id, kill, link, ln, logname, mkdir, mkfifo, mknod, mktemp, nice, nohup, nproc, pathchk, printenv, pwd, readlink, realpath, rmdir, runcon, seq, shuf, sleep, sum, sync, tee, timeout, touch, true, truncate, tsort, tty, uname, unlink, uptime, whoami, yes]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v2-macos-latest
+          save-if: false
+      - name: Run tests
+        run: cargo test --bin "f${{ matrix.cmd }}"
+
   # ── Windows: build once, test each command in parallel ────────────
   build-windows:
     name: Build (windows-latest)
@@ -113,7 +153,7 @@ jobs:
       - name: Build and compile tests
         run: cargo test --no-run
 
-  test-windows:
+  test-windows-mod:
     name: Test windows/${{ matrix.cmd }}
     needs: build-windows
     runs-on: windows-latest
@@ -131,22 +171,43 @@ jobs:
       - name: Run tests
         run: cargo test "${{ matrix.cmd }}::"
 
+  test-windows-bin:
+    name: Test windows/${{ matrix.cmd }}
+    needs: build-windows
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cmd: [arch, base32, basename, basenc, chcon, chroot, cksum, dircolors, dirname, env, false, groups, hostid, id, kill, link, ln, logname, mkdir, mkfifo, mknod, mktemp, nice, nohup, nproc, pathchk, printenv, pwd, readlink, realpath, rmdir, runcon, seq, shuf, sleep, sum, sync, tee, timeout, touch, true, truncate, tsort, tty, uname, unlink, uptime, whoami, yes]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v2-windows-latest
+          save-if: false
+      - name: Run tests
+        run: cargo test --bin "f${{ matrix.cmd }}"
+
   # ── Gate: all platform tests must pass (use as required check) ────
   test-passed:
     name: Tests passed
     if: always()
-    needs: [test-linux, test-macos, test-windows]
+    needs: [test-linux-mod, test-linux-bin, test-macos-mod, test-macos-bin, test-windows-mod, test-windows-bin]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          if [[ "${{ needs.test-linux.result }}" != "success" ]] || \
-             [[ "${{ needs.test-macos.result }}" != "success" ]] || \
-             [[ "${{ needs.test-windows.result }}" != "success" ]]; then
-            echo "Some tests failed"
-            exit 1
-          fi
-          echo "All tests passed"
+          results=("${{ needs.test-linux-mod.result }}" "${{ needs.test-linux-bin.result }}" \
+                   "${{ needs.test-macos-mod.result }}" "${{ needs.test-macos-bin.result }}" \
+                   "${{ needs.test-windows-mod.result }}" "${{ needs.test-windows-bin.result }}")
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" ]]; then
+              echo "Some tests failed: $r"
+              exit 1
+            fi
+          done
+          echo "All 98 command tests passed on all platforms"
 
   # ── Assembly: build all 20 tools once, upload as artifact ─────────
   assembly-build:
