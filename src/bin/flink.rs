@@ -172,4 +172,32 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_link_content_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        fs::write(&src, "important content").unwrap();
+        let output = cmd()
+            .args([src.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "important content");
+    }
+
+    #[test]
+    fn test_link_modifying_one_affects_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        fs::write(&src, "original").unwrap();
+        cmd()
+            .args([src.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .unwrap();
+        fs::write(&src, "modified").unwrap();
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "modified");
+    }
 }

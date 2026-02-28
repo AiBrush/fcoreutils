@@ -275,3 +275,154 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fnumfmt");
+        Command::new(path)
+    }
+    #[test]
+    fn test_numfmt_from_si() {
+        let mut child = cmd()
+            .arg("--from=si")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"1K\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1000");
+    }
+
+    #[test]
+    fn test_numfmt_to_si() {
+        let mut child = cmd()
+            .arg("--to=si")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"1000\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.0K");
+    }
+
+    #[test]
+    fn test_numfmt_from_iec() {
+        let mut child = cmd()
+            .arg("--from=iec")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"1K\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1024");
+    }
+
+    #[test]
+    fn test_numfmt_to_iec() {
+        let mut child = cmd()
+            .arg("--to=iec")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"1048576\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim() == "1.0M" || stdout.trim() == "1M");
+    }
+
+    #[test]
+    fn test_numfmt_padding() {
+        let mut child = cmd()
+            .args(["--to=si", "--padding=10"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"1000\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.len() >= 10);
+    }
+
+    #[test]
+    fn test_numfmt_passthrough() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"42\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "42");
+    }
+
+    #[test]
+    fn test_numfmt_arg_mode() {
+        let output = cmd().args(["--to=si", "1000"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.0K");
+    }
+
+    #[test]
+    fn test_numfmt_multiple_args() {
+        let output = cmd()
+            .args(["--to=si", "1000", "2000", "3000"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn test_numfmt_large_number() {
+        let output = cmd().args(["--to=iec", "1073741824"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("G"));
+    }
+
+    #[test]
+    fn test_numfmt_invalid_number() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"abc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_numfmt_empty_input() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+    }
+}

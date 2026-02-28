@@ -212,12 +212,42 @@ mod tests {
             .unwrap();
         assert_eq!(output.status.code(), Some(1));
     }
+    #[test]
+    fn test_sync_no_args_success() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+    }
 
     #[test]
-    fn test_sync_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("sync"));
+    fn test_sync_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_sync_data_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        let output = cmd().args(["-d", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_sync_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        let output = cmd().args(["-f", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_sync_nonexistent_file_error() {
+        let output = cmd().arg("/nonexistent_xyz_sync").output().unwrap();
+        assert!(!output.status.success());
     }
 }

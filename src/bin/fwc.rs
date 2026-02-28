@@ -685,3 +685,233 @@ fn read_files0_from(path: &str) -> Vec<String> {
         .map(|s| String::from_utf8_lossy(s).into_owned())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fwc");
+        Command::new(path)
+    }
+    #[test]
+    fn test_wc_basic() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should contain line count, word count, byte count
+        assert!(stdout.contains("1") && stdout.contains("2") && stdout.contains("12"));
+    }
+
+    #[test]
+    fn test_wc_lines() {
+        let mut child = cmd()
+            .arg("-l")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\nb\nc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("3"));
+    }
+
+    #[test]
+    fn test_wc_words() {
+        let mut child = cmd()
+            .arg("-w")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world foo\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("3"));
+    }
+
+    #[test]
+    fn test_wc_empty_input() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("0"));
+    }
+
+    #[test]
+    fn test_wc_bytes() {
+        let mut child = cmd()
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim().starts_with("6") || stdout.contains(" 6"));
+    }
+
+    #[test]
+    fn test_wc_max_line_length() {
+        let mut child = cmd()
+            .arg("-L")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"abc\nabcdef\nab\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("6"));
+    }
+
+    #[test]
+    fn test_wc_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "one two\nthree\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 2 lines, 3 words, 14 bytes
+        assert!(stdout.contains("2"));
+        assert!(stdout.contains("3"));
+        assert!(stdout.contains("14"));
+    }
+
+    #[test]
+    fn test_wc_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "hello\n").unwrap();
+        std::fs::write(&f2, "world\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should have "total" line for multiple files
+        assert!(stdout.contains("total"));
+    }
+
+    #[test]
+    fn test_wc_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_wc").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_wc_no_newline() {
+        let mut child = cmd()
+            .arg("-l")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // No newline = 0 lines
+        assert!(stdout.trim().starts_with("0") || stdout.contains(" 0"));
+    }
+
+    #[test]
+    fn test_wc_only_newlines() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"\n\n\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 3 lines, 0 words
+        assert!(stdout.contains("3"));
+        assert!(stdout.contains("0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wc_chars_vs_bytes_utf8() {
+        let mut child = cmd()
+            .arg("-m")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // "é" is 2 bytes in UTF-8, 1 char
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all("é\n".as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should be 2 chars (é + \n)
+        assert!(stdout.contains("2"));
+    }
+
+    #[test]
+    fn test_wc_combined_flags() {
+        let mut child = cmd()
+            .args(["-l", "-w"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"one two\nthree\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("2") && stdout.contains("3"));
+    }
+}

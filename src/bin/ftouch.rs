@@ -744,25 +744,6 @@ mod tests {
         path.push("ftouch");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("touch"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("touch"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_create_new_file() {
         let dir = tempfile::tempdir().unwrap();

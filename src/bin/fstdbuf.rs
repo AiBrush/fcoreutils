@@ -228,3 +228,104 @@ fn parse_mode_or_exit(s: &str) -> coreutils_rs::stdbuf::BufferMode {
         process::exit(125);
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fstdbuf");
+        Command::new(path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stdbuf_runs_command() {
+        let output = cmd().args(["-o", "L", "echo", "hello"]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "fstdbuf should exit with code 0, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stdbuf_exit_code() {
+        let output = cmd().args(["-o", "0", "false"]).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "fstdbuf should propagate child exit code"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stdbuf_no_command() {
+        let output = cmd().output().unwrap();
+        assert!(
+            !output.status.success(),
+            "fstdbuf without a command should fail"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn test_stdbuf_matches_gnu_args() {
+        // Verify that the same flags are accepted
+        // Note: -i L (line buffering stdin) is meaningless and rejected by GNU stdbuf too
+        let output = cmd()
+            .args(["-i", "0", "-o", "0", "-e", "4096", "echo", "test"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fstdbuf should accept -i, -o, -e flags, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stdbuf_line_buffered() {
+        let output = cmd().args(["-oL", "echo", "hello"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stdbuf_no_command_with_mode() {
+        let output = cmd().args(["-o0"]).output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stdbuf_nonexistent_command() {
+        let output = cmd().args(["-o0", "nonexistent_cmd_xyz"]).output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stdbuf_exit_code_passthrough() {
+        let output = cmd().args(["-o0", "sh", "-c", "exit 42"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(42));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stdbuf_unbuffered() {
+        let output = cmd().args(["-o", "0", "echo", "test"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "test");
+    }
+}

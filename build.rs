@@ -60,10 +60,6 @@ fn build_x86_64(manifest_dir: &str, out_dir: &str) {
 
     match status {
         Ok(s) if s.success() => {
-            println!(
-                "cargo:warning=fyes assembly (x86_64): built at {}",
-                fyes_asm_out
-            );
             println!("cargo:rustc-env=FYES_ASM_PATH={}", fyes_asm_out);
             println!("cargo:rustc-cfg=fyes_has_asm");
         }
@@ -121,10 +117,6 @@ fn build_aarch64(manifest_dir: &str, out_dir: &str) {
 
     match ld_status {
         Ok(s) if s.success() => {
-            println!(
-                "cargo:warning=fyes assembly (aarch64): built at {}",
-                fyes_asm_out
-            );
             println!("cargo:rustc-env=FYES_ASM_PATH={}", fyes_asm_out);
             println!("cargo:rustc-cfg=fyes_has_asm");
         }

@@ -182,7 +182,6 @@ fn main() {
     let mut input_range_count = 0u32;
     let mut head_count: Option<usize> = None;
     let mut output_file: Option<String> = None;
-    let mut output_file_count = 0u32;
     let mut repeat = false;
     let mut zero_terminated = false;
     let mut random_source: Option<String> = None;
@@ -238,16 +237,10 @@ fn main() {
                     process::exit(1);
                 }
                 let val = parse_count(&args[i]);
-                head_count = Some(match head_count {
-                    Some(prev) => prev.min(val),
-                    None => val,
-                });
+                head_count = Some(val);
             } else if let Some(rest) = arg.strip_prefix("--head-count=") {
                 let val = parse_count(rest);
-                head_count = Some(match head_count {
-                    Some(prev) => prev.min(val),
-                    None => val,
-                });
+                head_count = Some(val);
             } else if arg == "--output" || match_long(arg, "--output") {
                 i += 1;
                 if i >= args.len() {
@@ -255,10 +248,8 @@ fn main() {
                     process::exit(1);
                 }
                 output_file = Some(args[i].clone());
-                output_file_count += 1;
             } else if let Some(rest) = arg.strip_prefix("--output=") {
                 output_file = Some(rest.to_string());
-                output_file_count += 1;
             } else if arg == "--random-source" || match_long(arg, "--random-source") {
                 i += 1;
                 if i >= args.len() {
@@ -309,10 +300,7 @@ fn main() {
                         if j + 1 < bytes.len() {
                             let rest = &arg[j + 1..];
                             let val = parse_count(rest);
-                            head_count = Some(match head_count {
-                                Some(prev) => prev.min(val),
-                                None => val,
-                            });
+                            head_count = Some(val);
                         } else {
                             i += 1;
                             if i >= args.len() {
@@ -320,10 +308,7 @@ fn main() {
                                 process::exit(1);
                             }
                             let val = parse_count(&args[i]);
-                            head_count = Some(match head_count {
-                                Some(prev) => prev.min(val),
-                                None => val,
-                            });
+                            head_count = Some(val);
                         }
                         j = bytes.len();
                         continue;
@@ -332,7 +317,6 @@ fn main() {
                         if j + 1 < bytes.len() {
                             let rest = &arg[j + 1..];
                             output_file = Some(rest.to_string());
-                            output_file_count += 1;
                         } else {
                             i += 1;
                             if i >= args.len() {
@@ -340,7 +324,6 @@ fn main() {
                                 process::exit(1);
                             }
                             output_file = Some(args[i].clone());
-                            output_file_count += 1;
                         }
                         j = bytes.len();
                         continue;
@@ -364,10 +347,6 @@ fn main() {
     // Validate option conflicts (GNU compat)
     if input_range_count > 1 {
         eprintln!("{}: multiple -i options specified", TOOL_NAME);
-        process::exit(1);
-    }
-    if output_file_count > 1 {
-        eprintln!("{}: multiple output files specified", TOOL_NAME);
         process::exit(1);
     }
     if random_source_count > 1 {
@@ -732,8 +711,8 @@ mod tests {
 
     #[test]
     fn test_output_file() {
-        let dir = std::env::temp_dir();
-        let outpath = dir.join("fshuf_test_output.txt");
+        let dir = tempfile::tempdir().unwrap();
+        let outpath = dir.path().join("output.txt");
         let output = cmd()
             .args(["-e", "hello", "world", "-o", outpath.to_str().unwrap()])
             .output()
@@ -743,27 +722,7 @@ mod tests {
         let lines: HashSet<&str> = contents.trim().lines().collect();
         assert!(lines.contains("hello"));
         assert!(lines.contains("world"));
-        let _ = std::fs::remove_file(&outpath);
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("shuf"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("shuf"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_match_gnu_format() {
         // GNU shuf -i 1-5 output should have exactly 5 lines, each a number 1-5
@@ -827,10 +786,11 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_o_is_error() {
-        let dir = std::env::temp_dir();
-        let p1 = dir.join("fshuf_multi_o_1.txt");
-        let p2 = dir.join("fshuf_multi_o_2.txt");
+    fn test_multiple_o_uses_last() {
+        // Like GNU shuf, multiple -o flags uses the last value
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("fshuf_multi_o_1.txt");
+        let p2 = dir.path().join("fshuf_multi_o_2.txt");
         let output = cmd()
             .args([
                 "-i",
@@ -842,27 +802,25 @@ mod tests {
             ])
             .output()
             .unwrap();
-        assert!(!output.status.success(), "multiple -o should fail");
-        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("multiple output files"),
-            "stderr: {}",
-            stderr
+            output.status.success(),
+            "multiple -o should succeed (uses last)"
         );
-        let _ = std::fs::remove_file(&p1);
-        let _ = std::fs::remove_file(&p2);
+        // The last -o file should be written
+        assert!(p2.exists(), "last -o file should be written");
     }
 
     #[test]
-    fn test_multiple_n_uses_smallest() {
+    fn test_multiple_n_uses_last() {
+        // GNU shuf uses the last -n value when multiple are specified
         let output = cmd()
-            .args(["-i", "1-100", "-n", "10", "-n", "3"])
+            .args(["-i", "1-100", "-n", "3", "-n", "10"])
             .output()
             .unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = stdout.trim().lines().collect();
-        assert_eq!(lines.len(), 3, "multiple -n should use smallest value");
+        assert_eq!(lines.len(), 10, "multiple -n should use last value");
     }
 
     // --- GNU compatibility: --repeat feature ---

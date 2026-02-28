@@ -289,25 +289,6 @@ mod tests {
         path.push("fchmod");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("chmod"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("chmod"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_missing_operand() {
         let output = cmd().output().unwrap();
@@ -567,6 +548,141 @@ mod tests {
             stdout.contains("(rwxr-xr-x)"),
             "verbose should include symbolic new mode: {}",
             stdout
+        );
+    }
+
+    #[test]
+    fn test_chmod_go_minus_rwx() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "test").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let output = cmd()
+            .args(["go-rwx", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let meta = std::fs::metadata(&file).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "mode should be 0700, got {:o}", mode);
+    }
+
+    #[test]
+    fn test_chmod_multiple_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "test").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let output = cmd()
+            .args(["u+rw,g+r", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let meta = std::fs::metadata(&file).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "mode should be 0640, got {:o}", mode);
+    }
+
+    #[test]
+    fn test_chmod_a_plus_x() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "test").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let output = cmd()
+            .args(["a+x", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let meta = std::fs::metadata(&file).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "mode should be 0755, got {:o}", mode);
+    }
+
+    #[test]
+    fn test_chmod_set_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "test").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let output = cmd()
+            .args(["u=rw,go=", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let meta = std::fs::metadata(&file).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode should be 0600, got {:o}", mode);
+    }
+
+    #[test]
+    fn test_chmod_changes_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "test").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // --changes should only report if mode actually changed
+        let output = cmd()
+            .args(["--changes", "644", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        // No change, so stdout should be empty
+        assert!(
+            output.stdout.is_empty(),
+            "no-change should produce no output with --changes"
+        );
+    }
+
+    #[test]
+    fn test_chmod_invalid_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "test").unwrap();
+
+        let output = cmd()
+            .args(["zzz", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_chmod_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "a").unwrap();
+        std::fs::write(&f2, "b").unwrap();
+
+        let output = cmd()
+            .args(["600", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&f1).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&f2).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 }

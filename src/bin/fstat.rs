@@ -213,3 +213,148 @@ fn print_help() {
     println!("  %t   file system type in hex");
     println!("  %T   file system type in human readable form");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fstat");
+        Command::new(path)
+    }
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("File:"));
+        assert!(stdout.contains("Size:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_format_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let output = cmd()
+            .args(["-c", "%n", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("test.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_format_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let output = cmd()
+            .args(["-c", "%s", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "5");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_format_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let output = cmd()
+            .args(["-c", "%a", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should be an octal number like 644
+        let trimmed = stdout.trim();
+        assert!(trimmed.len() >= 3 && trimmed.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_format_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let output = cmd()
+            .args(["-c", "%F", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = cmd().arg(dir.path().to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("directory"),
+            "stat output should contain 'directory', got: {}",
+            stdout
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_nonexistent() {
+        let output = cmd().arg("/nonexistent_xyz_stat").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "a").unwrap();
+        std::fs::write(&f2, "b").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_filesystem() {
+        let output = cmd().args(["-f", "/tmp"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("File:") || stdout.contains("ID:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stat_terse() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let output = cmd().args(["-t", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        // Terse output should be a single line
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 1);
+    }
+}

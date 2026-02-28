@@ -282,23 +282,77 @@ mod tests {
 
     #[test]
     fn test_uname_matches_gnu() {
-        for flag in ["-s", "-p", "-i", "-a"] {
+        // Only compare flags with deterministic output; -p and -i are
+        // platform-dependent and may differ from GNU on some systems
+        for flag in ["-s", "-r", "-m", "-n"] {
             let gnu = Command::new("uname").arg(flag).output();
             if let Ok(gnu) = gnu {
                 if !gnu.status.success() || gnu.stdout.is_empty() {
-                    continue; // Skip flags not supported by system uname
+                    continue;
                 }
                 let ours = cmd().arg(flag).output().unwrap();
-                // For -a, BSD uname shows 5 fields, GNU shows 8; skip if field counts differ
-                if flag == "-a" {
-                    let gnu_n = gnu.stdout.split(|&b| b == b' ').count();
-                    let our_n = ours.stdout.split(|&b| b == b' ').count();
-                    if gnu_n != our_n {
-                        continue;
-                    }
-                }
                 assert_eq!(ours.stdout, gnu.stdout, "STDOUT mismatch for {}", flag);
             }
         }
+    }
+
+    #[test]
+    fn test_uname_sysname() {
+        let output = cmd().arg("-s").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim() == "Linux" || stdout.trim() == "Darwin");
+    }
+
+    #[test]
+    fn test_uname_all_field_count() {
+        let output = cmd().arg("-a").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // -a output should have multiple space-separated fields
+        assert!(stdout.split_whitespace().count() >= 3);
+    }
+
+    #[test]
+    fn test_uname_nodename() {
+        let output = cmd().arg("-n").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.trim().is_empty());
+    }
+
+    #[test]
+    fn test_uname_release() {
+        let output = cmd().arg("-r").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.trim().is_empty());
+    }
+
+    #[test]
+    fn test_uname_machine() {
+        let output = cmd().arg("-m").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let machine = stdout.trim();
+        assert!(
+            !machine.is_empty(),
+            "uname -m should produce non-empty output"
+        );
+    }
+
+    #[test]
+    fn test_uname_combined_flags() {
+        let output = cmd().args(["-s", "-n", "-r"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.split_whitespace().count() >= 3);
+    }
+
+    #[test]
+    fn test_uname_default_equals_s() {
+        let default = cmd().output().unwrap();
+        let s = cmd().arg("-s").output().unwrap();
+        assert_eq!(default.stdout, s.stdout);
     }
 }

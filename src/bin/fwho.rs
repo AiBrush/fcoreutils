@@ -144,3 +144,158 @@ fn main() {
 
     process::exit(0);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fwho");
+        Command::new(path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_runs() {
+        let output = cmd().output().unwrap();
+        // who should succeed even with no logged-in users
+        assert!(
+            output.status.success(),
+            "fwho should exit with code 0, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_heading() {
+        let output = cmd().arg("-H").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Heading line should contain NAME and LINE
+        assert!(stdout.contains("NAME"), "Heading should contain NAME");
+        assert!(stdout.contains("LINE"), "Heading should contain LINE");
+        assert!(stdout.contains("TIME"), "Heading should contain TIME");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_count() {
+        let output = cmd().arg("-q").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Count mode should show "# users=N"
+        assert!(
+            stdout.contains("# users="),
+            "Count mode should show '# users=N', got: {}",
+            stdout
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_boot() {
+        let output = cmd().arg("-b").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Boot output may or may not have "system boot" depending on utmpx data
+        // On systems with boot record, verify it contains "system boot"
+        if !stdout.trim().is_empty() {
+            assert!(
+                stdout.contains("system boot"),
+                "Boot output should contain 'system boot', got: {}",
+                stdout
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_format_check() {
+        // Verify that regular who output lines have reasonable formatting
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            // Each line should have at least a name and a timestamp portion
+            // Timestamps match YYYY-MM-DD HH:MM
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            assert!(
+                parts.len() >= 3,
+                "Output line should have at least 3 fields: '{}'",
+                line
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_matches_gnu_format() {
+        let gnu = Command::new("who").output();
+        if let Ok(gnu) = gnu {
+            let ours = cmd().output().unwrap();
+            assert_eq!(
+                ours.status.code(),
+                gnu.status.code(),
+                "Exit code mismatch: ours={:?} gnu={:?}",
+                ours.status.code(),
+                gnu.status.code()
+            );
+            // Both should have the same number of output lines (same logged-in users)
+            let gnu_lines = String::from_utf8_lossy(&gnu.stdout).lines().count();
+            let our_lines = String::from_utf8_lossy(&ours.stdout).lines().count();
+            assert_eq!(
+                our_lines, gnu_lines,
+                "Line count mismatch: ours={} gnu={}",
+                our_lines, gnu_lines
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_basic() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_count_exit_success() {
+        let output = cmd().arg("-q").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // -q output should contain a count
+        assert!(stdout.contains('#') || stdout.contains("="));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_heading_long_flag() {
+        let output = cmd().arg("--heading").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Heading should contain column names like NAME
+        assert!(stdout.contains("NAME") || stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_boot_exit_success() {
+        let output = cmd().arg("-b").output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_am_i() {
+        let output = cmd().args(["am", "i"]).output().unwrap();
+        assert!(output.status.success());
+    }
+}

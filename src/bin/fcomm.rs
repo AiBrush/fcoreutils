@@ -177,3 +177,180 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fcomm");
+        Command::new(path)
+    }
+    #[test]
+    fn test_comm_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "a\nb\nc\n").unwrap();
+        std::fs::write(&f2, "b\nc\nd\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // "a" only in file1, "b" and "c" in both, "d" only in file2
+        assert!(stdout.contains("a\n"));
+        assert!(stdout.contains("\t\tb")); // common lines are col 3
+        assert!(stdout.contains("\t\tc"));
+    }
+
+    #[test]
+    fn test_comm_suppress_col1() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "a\nb\nc\n").unwrap();
+        std::fs::write(&f2, "b\nc\nd\n").unwrap();
+        let output = cmd()
+            .args(["-1", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // "a" should be suppressed (it's in column 1 only)
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            assert_ne!(trimmed, "a", "column 1 should be suppressed");
+        }
+    }
+
+    #[test]
+    fn test_comm_suppress_col2() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "a\nb\nc\n").unwrap();
+        std::fs::write(&f2, "b\nc\nd\n").unwrap();
+        let output = cmd()
+            .args(["-2", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            assert_ne!(trimmed, "d", "column 2 should be suppressed");
+        }
+    }
+
+    #[test]
+    fn test_comm_suppress_col3() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "a\nb\nc\n").unwrap();
+        std::fs::write(&f2, "b\nc\nd\n").unwrap();
+        let output = cmd()
+            .args(["-3", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Common lines (b, c) should be suppressed
+        assert!(
+            !stdout
+                .lines()
+                .any(|l| l.trim() == "b" && l.starts_with("\t"))
+        );
+    }
+
+    #[test]
+    fn test_comm_identical_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        std::fs::write(&f1, "x\ny\nz\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f1.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // All lines should be in column 3 (common)
+        for line in stdout.lines() {
+            assert!(line.starts_with("\t\t"), "all lines should be in column 3");
+        }
+    }
+
+    #[test]
+    fn test_comm_empty_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "").unwrap();
+        std::fs::write(&f2, "").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_comm_one_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "a\nb\n").unwrap();
+        std::fs::write(&f2, "").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // All lines from file1 should be in column 1
+        assert!(stdout.contains("a\n"));
+        assert!(stdout.contains("b\n"));
+    }
+
+    #[test]
+    fn test_comm_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_comm_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        std::fs::write(&f1, "a\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), "/nonexistent/file"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_comm_suppress_12() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "a\nb\nc\n").unwrap();
+        std::fs::write(&f2, "b\nc\nd\n").unwrap();
+        let output = cmd()
+            .args(["-12", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Only common lines (column 3) remain
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines, vec!["b", "c"]);
+    }
+}

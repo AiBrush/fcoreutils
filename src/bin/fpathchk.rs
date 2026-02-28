@@ -323,4 +323,53 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_pathchk_valid_path_tmp() {
+        let output = cmd().arg("/tmp/valid_path").output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_pathchk_posix_valid() {
+        let output = cmd().args(["-p", "valid_name"]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_pathchk_empty_path() {
+        let output = cmd().arg("").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_pathchk_simple_name() {
+        let output = cmd().arg("simple_file.txt").output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_pathchk_nested_path() {
+        let output = cmd().arg("/a/b/c/d/e/f").output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_pathchk_multiple_paths() {
+        let output = cmd().args(["valid1", "valid2", "valid3"]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_pathchk_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_pathchk_posix_leading_dash() {
+        let output = cmd().args(["-P", "--", "-test"]).output().unwrap();
+        // -P flag: leading dash is invalid
+        assert!(!output.status.success());
+    }
 }

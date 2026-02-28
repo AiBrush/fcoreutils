@@ -161,4 +161,45 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_sleep_fractional() {
+        let start = std::time::Instant::now();
+        let output = cmd().arg("0.1").output().unwrap();
+        assert!(output.status.success());
+        let elapsed = start.elapsed().as_millis();
+        assert!(elapsed >= 50 && elapsed < 2000);
+    }
+
+    #[test]
+    fn test_sleep_multiple_args_summed() {
+        let start = std::time::Instant::now();
+        let output = cmd().args(["0.05", "0.05"]).output().unwrap();
+        assert!(output.status.success());
+        let elapsed = start.elapsed().as_millis();
+        // Multiple args should be summed
+        assert!(elapsed >= 50);
+    }
+
+    #[test]
+    fn test_sleep_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_sleep_negative() {
+        let output = cmd().arg("-1").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_sleep_suffix_s() {
+        let start = std::time::Instant::now();
+        let output = cmd().arg("0.01s").output().unwrap();
+        // GNU sleep supports suffixes
+        if output.status.success() {
+            assert!(start.elapsed().as_millis() < 2000);
+        }
+    }
 }

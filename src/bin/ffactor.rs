@@ -630,3 +630,122 @@ fn main() {
         process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("ffactor");
+        Command::new(path)
+    }
+    #[test]
+    fn test_factor_one() {
+        let output = cmd().arg("1").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "1:");
+    }
+
+    #[test]
+    fn test_factor_prime() {
+        let output = cmd().arg("7").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "7: 7");
+    }
+
+    #[test]
+    fn test_factor_composite() {
+        let output = cmd().arg("12").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "12: 2 2 3");
+    }
+
+    #[test]
+    fn test_factor_large_prime() {
+        let output = cmd().arg("999999937").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "999999937: 999999937");
+    }
+
+    #[test]
+    fn test_factor_perfect_square() {
+        let output = cmd().arg("144").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "144: 2 2 2 2 3 3");
+    }
+
+    #[test]
+    fn test_factor_power_of_two() {
+        let output = cmd().arg("1024").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "1024: 2 2 2 2 2 2 2 2 2 2");
+    }
+
+    #[test]
+    fn test_factor_multiple_args() {
+        let output = cmd().args(["6", "15", "28"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "6: 2 3");
+        assert_eq!(lines[1], "15: 3 5");
+        assert_eq!(lines[2], "28: 2 2 7");
+    }
+
+    #[test]
+    fn test_factor_stdin() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"42\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "42: 2 3 7");
+    }
+
+    #[test]
+    fn test_factor_zero() {
+        let output = cmd().arg("0").output().unwrap();
+        // GNU factor prints "0:" for 0
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("0:"));
+    }
+
+    #[test]
+    fn test_factor_two() {
+        let output = cmd().arg("2").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "2: 2");
+    }
+
+    #[test]
+    fn test_factor_invalid_input() {
+        let output = cmd().arg("abc").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_factor_large_number() {
+        // 2^31 - 1 = Mersenne prime
+        let output = cmd().arg("2147483647").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "2147483647: 2147483647");
+    }
+}

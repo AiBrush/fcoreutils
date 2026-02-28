@@ -207,4 +207,44 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_nproc_basic() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let n: usize = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(n >= 1);
+    }
+
+    #[test]
+    fn test_nproc_all_at_least_one() {
+        let output = cmd().arg("--all").output().unwrap();
+        assert!(output.status.success());
+        let n: usize = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(n >= 1);
+    }
+
+    #[test]
+    fn test_nproc_ignore_zero() {
+        let normal = cmd().output().unwrap();
+        let ignored = cmd().arg("--ignore=0").output().unwrap();
+        assert_eq!(normal.stdout, ignored.stdout);
+    }
+
+    #[test]
+    fn test_nproc_omp_num_threads() {
+        let output = cmd().env("OMP_NUM_THREADS", "4").output().unwrap();
+        assert!(output.status.success());
+        let n: usize = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(n, 4);
+    }
 }

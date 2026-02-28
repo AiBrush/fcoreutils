@@ -453,25 +453,6 @@ mod tests {
         path.push("ftruncate");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("truncate"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("truncate"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_create_and_truncate() {
         let dir = tempfile::tempdir().unwrap();

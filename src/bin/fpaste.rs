@@ -277,3 +277,166 @@ fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
     out.write_all(data)?;
     out.flush()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fpaste");
+        Command::new(path)
+    }
+    #[test]
+    fn test_paste_two_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1\n2\n3\n").unwrap();
+        std::fs::write(&f2, "a\nb\nc\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "1\ta\n2\tb\n3\tc\n"
+        );
+    }
+
+    #[test]
+    fn test_paste_serial() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        std::fs::write(&f1, "1\n2\n3\n").unwrap();
+        let output = cmd().args(["-s", f1.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "1\t2\t3\n");
+    }
+
+    #[test]
+    fn test_paste_custom_delimiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1\n2\n").unwrap();
+        std::fs::write(&f2, "a\nb\n").unwrap();
+        let output = cmd()
+            .args(["-d", ":", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "1:a\n2:b\n");
+    }
+
+    #[test]
+    fn test_paste_stdin() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        std::fs::write(&f1, "1\n2\n").unwrap();
+        let mut child = cmd()
+            .args([f1.to_str().unwrap(), "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\nb\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "1\ta\n2\tb\n");
+    }
+
+    #[test]
+    fn test_paste_unequal_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1\n2\n3\n").unwrap();
+        std::fs::write(&f2, "a\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout, "1\ta\n2\t\n3\t\n");
+    }
+
+    #[test]
+    fn test_paste_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("empty.txt");
+        std::fs::write(&f1, "").unwrap();
+        let output = cmd().arg(f1.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"");
+    }
+
+    #[test]
+    fn test_paste_serial_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("empty.txt");
+        std::fs::write(&f1, "").unwrap();
+        let output = cmd().args(["-s", f1.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_paste_multi_char_delimiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        let f3 = dir.path().join("c.txt");
+        std::fs::write(&f1, "1\n").unwrap();
+        std::fs::write(&f2, "2\n").unwrap();
+        std::fs::write(&f3, "3\n").unwrap();
+        let output = cmd()
+            .args([
+                "-d",
+                ":,",
+                f1.to_str().unwrap(),
+                f2.to_str().unwrap(),
+                f3.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "1:2,3\n");
+    }
+
+    #[test]
+    fn test_paste_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_paste").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_paste_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        std::fs::write(&f1, "hello\nworld\n").unwrap();
+        let output = cmd().arg(f1.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\nworld\n");
+    }
+
+    #[test]
+    fn test_paste_serial_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1\n2\n").unwrap();
+        std::fs::write(&f2, "a\nb\n").unwrap();
+        let output = cmd()
+            .args(["-s", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "1\t2\na\tb\n");
+    }
+}

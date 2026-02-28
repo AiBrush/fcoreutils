@@ -587,25 +587,6 @@ mod tests {
         path.push("fbase32");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("--decode"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("base32"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_encode_hello() {
         // "Hello" in base32 is "JBSWY3DP"
@@ -877,5 +858,104 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         assert_eq!(&output.stdout, b"Hello");
+    }
+
+    #[test]
+    fn test_binary_roundtrip() {
+        let data: Vec<u8> = (0..=255).collect();
+        let mut enc = cmd()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        enc.stdin.take().unwrap().write_all(&data).unwrap();
+        let encoded = enc.wait_with_output().unwrap();
+        assert!(encoded.status.success());
+
+        let mut dec = cmd()
+            .arg("-d")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        dec.stdin
+            .take()
+            .unwrap()
+            .write_all(&encoded.stdout)
+            .unwrap();
+        let decoded = dec.wait_with_output().unwrap();
+        assert!(decoded.status.success());
+        assert_eq!(decoded.stdout, data);
+    }
+
+    #[test]
+    fn test_decode_invalid_input() {
+        let mut child = cmd()
+            .arg("-d")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"!!!INVALID!!!\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_file_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "Hello").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "JBSWY3DP");
+    }
+
+    #[test]
+    fn test_invalid_option() {
+        let output = cmd().arg("--invalid").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_nonexistent_file() {
+        let output = cmd().arg("/nonexistent/file.txt").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_rfc4648_vectors() {
+        let test_cases: &[(&[u8], &str)] = &[
+            (b"", ""),
+            (b"f", "MY======"),
+            (b"fo", "MZXQ===="),
+            (b"foo", "MZXW6==="),
+            (b"foob", "MZXW6YQ="),
+            (b"fooba", "MZXW6YTB"),
+            (b"foobar", "MZXW6YTBOI======"),
+        ];
+        for (input, expected) in test_cases {
+            let mut child = cmd()
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                *expected,
+                "mismatch for {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
     }
 }

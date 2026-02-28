@@ -229,3 +229,165 @@ fn print_help() {
     println!("      --help     display this help and exit");
     println!("      --version  output version information and exit");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fchgrp");
+        Command::new(path)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_matches_gnu_errors_missing_operand() {
+        let output = cmd().output().unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("missing operand"));
+
+        let gnu = Command::new("chgrp").output();
+        if let Ok(gnu) = gnu {
+            assert_ne!(gnu.status.code(), Some(0));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_matches_gnu_errors_missing_file() {
+        #[cfg(target_os = "macos")]
+        let group = "wheel";
+        #[cfg(not(target_os = "macos"))]
+        let group = "root";
+        let output = cmd().arg(group).output().unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("missing operand"), "stderr was: {}", stderr);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_matches_gnu_errors_invalid_group() {
+        let output = cmd()
+            .args(["nonexistent_group_xyz_99999", "/tmp/nofile"])
+            .output()
+            .unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid group"), "stderr was: {}", stderr);
+    }
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_preserve_root() {
+        #[cfg(target_os = "macos")]
+        let group = "wheel";
+        #[cfg(not(target_os = "macos"))]
+        let group = "root";
+        let output = cmd()
+            .args(["--preserve-root", "-R", group, "/"])
+            .output()
+            .unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dangerous to operate recursively on '/'"),
+            "stderr was: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_nonexistent_file() {
+        #[cfg(target_os = "macos")]
+        let group = "wheel";
+        #[cfg(not(target_os = "macos"))]
+        let group = "root";
+        let output = cmd()
+            .args([group, "/nonexistent_file_xyz_99999"])
+            .output()
+            .unwrap();
+        assert_ne!(output.status.code(), Some(0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_verbose() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        // Get current group
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(&file).unwrap();
+        let gid = meta.gid();
+        // Use numeric GID to change to same group (always works without root)
+        let output = cmd()
+            .args(["-v", &gid.to_string(), file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let ref_file = dir.path().join("ref.txt");
+        let target = dir.path().join("target.txt");
+        std::fs::write(&ref_file, "ref").unwrap();
+        std::fs::write(&target, "target").unwrap();
+        let output = cmd()
+            .args([
+                &format!("--reference={}", ref_file.display()),
+                target.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("f.txt"), "data").unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let gid = std::fs::metadata(dir.path()).unwrap().gid();
+        let output = cmd()
+            .args(["-R", &gid.to_string(), dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_empty_group_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        let output = cmd().args(["", file.to_str().unwrap()]).output().unwrap();
+        // Empty group spec is treated as a no-op (no group change) — matching GNU behavior
+        // Just verify it exits cleanly (0 or 1)
+        let code = output.status.code().unwrap();
+        assert!(code == 0 || code == 1);
+    }
+}

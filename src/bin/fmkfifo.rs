@@ -235,4 +235,80 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_mkfifo_creates_fifo_filetype() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("test_fifo");
+        let output = cmd().arg(fifo.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        // Check it's a FIFO
+        use std::os::unix::fs::FileTypeExt;
+        let meta = std::fs::symlink_metadata(&fifo).unwrap();
+        assert!(meta.file_type().is_fifo());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_mkfifo_with_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("mode_fifo");
+        let output = cmd()
+            .args(["-m", "0644", fifo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        use std::os::unix::fs::FileTypeExt;
+        let meta = std::fs::symlink_metadata(&fifo).unwrap();
+        assert!(meta.file_type().is_fifo());
+    }
+
+    #[test]
+    fn test_mkfifo_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_mkfifo_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("existing_fifo");
+        std::fs::write(&fifo, "x").unwrap();
+        let output = cmd().arg(fifo.to_str().unwrap()).output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_mkfifo_multiple_verified_fifo() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("fifo1");
+        let f2 = dir.path().join("fifo2");
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            std::fs::symlink_metadata(&f1)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        assert!(
+            std::fs::symlink_metadata(&f2)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+    }
+
+    #[test]
+    fn test_mkfifo_in_nonexistent_dir() {
+        let output = cmd().arg("/nonexistent_dir_xyz/fifo").output().unwrap();
+        assert!(!output.status.success());
+    }
 }

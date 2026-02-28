@@ -89,4 +89,26 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_hostid_extra_operand() {
+        let output = cmd().arg("extra").output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+    }
+
+    #[test]
+    fn test_hostid_consistent() {
+        // Running twice should give the same result
+        let out1 = cmd().output().unwrap();
+        let out2 = cmd().output().unwrap();
+        assert_eq!(out1.stdout, out2.stdout);
+    }
+
+    #[test]
+    fn test_hostid_single_line() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 1);
+    }
 }

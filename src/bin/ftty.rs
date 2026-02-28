@@ -123,4 +123,20 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_tty_not_a_tty() {
+        // When stdin is piped, exit code should be 1
+        let output = cmd().stdin(Stdio::piped()).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("not a tty"));
+    }
+
+    #[test]
+    fn test_tty_silent_not_a_tty() {
+        let output = cmd().arg("-s").stdin(Stdio::piped()).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+    }
 }

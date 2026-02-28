@@ -370,3 +370,259 @@ fn run_uniq(cli: &Cli, config: &UniqConfig, output: impl Write) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("funiq");
+        Command::new(path)
+    }
+    #[test]
+    fn test_uniq_basic() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a\na\nb\nc\nc\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_uniq_count() {
+        let mut child = cmd()
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\na\nb\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("2 a"));
+        assert!(stdout.contains("1 b"));
+    }
+
+    #[test]
+    fn test_uniq_repeated() {
+        let mut child = cmd()
+            .arg("-d")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a\na\nb\nc\nc\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nc\n");
+    }
+
+    #[test]
+    fn test_uniq_unique_only() {
+        let mut child = cmd()
+            .arg("-u")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a\na\nb\nc\nc\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "b\n");
+    }
+
+    #[test]
+    fn test_uniq_empty_input() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"");
+    }
+
+    #[test]
+    fn test_uniq_single_line() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+    }
+
+    #[test]
+    fn test_uniq_all_same() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a\na\na\na\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a\n");
+    }
+
+    #[test]
+    fn test_uniq_case_insensitive() {
+        let mut child = cmd()
+            .arg("-i")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"Hello\nhello\nHELLO\nworld\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "Hello\nworld\n");
+    }
+
+    #[test]
+    fn test_uniq_skip_fields() {
+        let mut child = cmd()
+            .args(["-f", "1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"1 apple\n2 apple\n3 banana\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "1 apple\n3 banana\n"
+        );
+    }
+
+    #[test]
+    fn test_uniq_skip_chars() {
+        let mut child = cmd()
+            .args(["-s", "2"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"aaXYZ\nbbXYZ\nccABC\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "aaXYZ\nccABC\n");
+    }
+
+    #[test]
+    fn test_uniq_count_format() {
+        let mut child = cmd()
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a\na\na\nb\nb\nc\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("3 a"));
+        assert!(stdout.contains("2 b"));
+        assert!(stdout.contains("1 c"));
+    }
+
+    #[test]
+    fn test_uniq_file_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "a\na\nb\nb\nc\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_uniq_output_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        let output_file = dir.path().join("output.txt");
+        std::fs::write(&input, "a\na\nb\n").unwrap();
+        let output = cmd()
+            .args([input.to_str().unwrap(), output_file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let result = std::fs::read_to_string(&output_file).unwrap();
+        assert_eq!(result, "a\nb\n");
+    }
+
+    #[test]
+    fn test_uniq_check_chars() {
+        let mut child = cmd()
+            .args(["-w", "3"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"abcXXX\nabcYYY\ndefZZZ\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "abcXXX\ndefZZZ\n");
+    }
+}

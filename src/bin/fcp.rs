@@ -280,3 +280,224 @@ fn main() {
         process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fcp");
+        Command::new(path)
+    }
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_basic_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        std::fs::write(&src, "hello world\n").unwrap();
+        let output = cmd()
+            .args([src.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "hello world\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_to_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("file.txt");
+        let target_dir = dir.path().join("target");
+        std::fs::write(&src, "content\n").unwrap();
+        std::fs::create_dir(&target_dir).unwrap();
+        let output = cmd()
+            .args([src.to_str().unwrap(), target_dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(target_dir.join("file.txt")).unwrap(),
+            "content\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("a.txt"), "aaa\n").unwrap();
+        std::fs::create_dir(src_dir.join("sub")).unwrap();
+        std::fs::write(src_dir.join("sub").join("b.txt"), "bbb\n").unwrap();
+        let dst_dir = dir.path().join("dst");
+        let output = cmd()
+            .args(["-r", src_dir.to_str().unwrap(), dst_dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst_dir.join("a.txt")).unwrap(),
+            "aaa\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst_dir.join("sub").join("b.txt")).unwrap(),
+            "bbb\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_nonexistent_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = cmd()
+            .args([
+                "/nonexistent/file.txt",
+                dir.path().join("dst").to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_preserve_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("binary.dat");
+        let dst = dir.path().join("copy.dat");
+        let data: Vec<u8> = (0..=255).cycle().take(4096).collect();
+        std::fs::write(&src, &data).unwrap();
+        let output = cmd()
+            .args([src.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::fs::read(&dst).unwrap(), data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("empty.txt");
+        let dst = dir.path().join("copy.txt");
+        std::fs::write(&src, "").unwrap();
+        let output = cmd()
+            .args([src.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        std::fs::write(&src, "new content\n").unwrap();
+        std::fs::write(&dst, "old content\n").unwrap();
+        let output = cmd()
+            .args([src.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "new content\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_multiple_files_to_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        let target = dir.path().join("target");
+        std::fs::write(&f1, "aaa\n").unwrap();
+        std::fs::write(&f2, "bbb\n").unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let output = cmd()
+            .args([
+                f1.to_str().unwrap(),
+                f2.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(target.join("a.txt").exists());
+        assert!(target.join("b.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let link = dir.path().join("link.txt");
+        let dst = dir.path().join("dst.txt");
+        std::fs::write(&src, "content\n").unwrap();
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        let output = cmd()
+            .args([link.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        // By default, cp follows symlinks
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "content\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_no_clobber() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        std::fs::write(&src, "new\n").unwrap();
+        std::fs::write(&dst, "old\n").unwrap();
+        let output = cmd()
+            .args(["-n", src.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        // File should NOT be overwritten
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "old\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cp_large_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("large.dat");
+        let dst = dir.path().join("copy.dat");
+        let data = vec![0x42u8; 2 * 1024 * 1024]; // 2MB
+        std::fs::write(&src, &data).unwrap();
+        let output = cmd()
+            .args([src.to_str().unwrap(), dst.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::fs::metadata(&dst).unwrap().len(), 2 * 1024 * 1024);
+    }
+}

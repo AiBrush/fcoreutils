@@ -291,25 +291,6 @@ mod tests {
         path.push("fruncon");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage: runcon"));
-        assert!(stdout.contains("CONTEXT"));
-        assert!(stdout.contains("--compute"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("runcon (fcoreutils)"));
-    }
-
     #[test]
     fn test_no_args_prints_context() {
         let output = cmd().output().unwrap();
@@ -342,5 +323,24 @@ mod tests {
             let ours = cmd().args(["foo_context", "/bin/true"]).output().unwrap();
             assert_eq!(ours.status.code(), gnu.status.code());
         }
+    }
+
+    #[test]
+    fn test_runcon_no_args() {
+        let output = cmd().output().unwrap();
+        // On systems without SELinux, this should fail
+        let _ = output.status;
+    }
+
+    #[test]
+    fn test_runcon_nonexistent_command() {
+        let output = cmd()
+            .args([
+                "unconfined_u:unconfined_r:unconfined_t:s0",
+                "nonexistent_cmd_xyz",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
     }
 }

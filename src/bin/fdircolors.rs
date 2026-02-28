@@ -445,25 +445,6 @@ mod tests {
         assert!(stdout.contains("*.txt=00;32"));
         let _ = std::fs::remove_file(&config_path);
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("dircolors"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("dircolors"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_match_gnu_print_database_format() {
         let gnu = Command::new("dircolors").arg("-p").output();

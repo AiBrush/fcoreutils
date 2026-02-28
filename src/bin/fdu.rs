@@ -371,3 +371,134 @@ fn format_io_error(e: &io::Error) -> String {
         format!("{}", e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fdu");
+        Command::new(path)
+    }
+    #[cfg(unix)]
+    #[test]
+    fn test_du_current_dir() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_du_specific_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "some content here\n").unwrap();
+        let output = cmd().arg(dir.path().to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(dir.path().to_str().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_du_summarize() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("f.txt"), "data\n").unwrap();
+        let output = cmd()
+            .args(["-s", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 1, "summarize should produce only one line");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_du_human_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "content\n").unwrap();
+        let output = cmd()
+            .args(["-h", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Human readable should have a suffix like K, M, G or be a small number
+        assert!(!stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_du_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "data").unwrap();
+        let output = cmd()
+            .args(["-b", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_du_nonexistent() {
+        let output = cmd().arg("/nonexistent/path/xyz").output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("cannot") || stderr.contains("No such"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_du_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = cmd()
+            .args(["-s", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_du_max_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a").join("b").join("c")).unwrap();
+        std::fs::write(dir.path().join("a").join("b").join("c").join("f.txt"), "x").unwrap();
+        let output = cmd()
+            .args(["--max-depth=1", dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        // max-depth=1 should show the dir and immediate subdirs only
+        assert!(lines.len() <= 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_du_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let d1 = dir.path().join("a");
+        let d2 = dir.path().join("b");
+        std::fs::create_dir(&d1).unwrap();
+        std::fs::create_dir(&d2).unwrap();
+        std::fs::write(d1.join("f.txt"), "aaa").unwrap();
+        std::fs::write(d2.join("f.txt"), "bbb").unwrap();
+        let output = cmd()
+            .args(["-c", d1.to_str().unwrap(), d2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("total"));
+    }
+}

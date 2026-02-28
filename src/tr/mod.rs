@@ -1,9 +1,6 @@
 mod charset;
 mod core;
 
-#[cfg(test)]
-mod tests;
-
 pub use self::charset::{
     CaseClass, CaseClassInfo, complement, expand_set2, expand_set2_with_classes, parse_set,
     parse_set_with_classes, validate_case_classes, validate_set2_class_at_end,

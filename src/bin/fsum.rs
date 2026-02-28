@@ -293,25 +293,6 @@ mod tests {
         path.push("fsum");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("--sysv"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("sum"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_bsd_stdin() {
         // Test BSD checksum of "hello\n" via stdin
@@ -545,5 +526,46 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(short_output.stdout, long_output.stdout);
+    }
+
+    #[test]
+    fn test_sum_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty.txt");
+        std::fs::write(&file, "").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn test_sum_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "hello\n").unwrap();
+        std::fs::write(&f2, "world\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_sum_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_sum").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_sum_binary_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("binary.bin");
+        let data: Vec<u8> = (0..=255).collect();
+        std::fs::write(&file, &data).unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
     }
 }

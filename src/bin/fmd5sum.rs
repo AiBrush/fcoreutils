@@ -496,3 +496,282 @@ fn write_output(out: &mut impl Write, cli: &Cli, algo: HashAlgorithm, hash: &str
         let _ = hash::write_hash_line(out, hash, filename, binary, cli.zero, false);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fmd5sum");
+        Command::new(path)
+    }
+    #[cfg(unix)]
+    #[test]
+    fn test_hash_stdin() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
+        assert!(stdout.contains("  -"), "Should contain filename marker");
+    }
+
+    #[test]
+    fn test_hash_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("test.txt"));
+    }
+
+    #[test]
+    fn test_check_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        let checksum_line = String::from_utf8_lossy(&output.stdout);
+        let checksums = dir.path().join("checksums.txt");
+        std::fs::write(&checksums, checksum_line.as_ref()).unwrap();
+        let output = cmd()
+            .args(["--check", checksums.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("OK"));
+    }
+
+    #[test]
+    fn test_known_empty_hash() {
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Write empty input
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("d41d8cd98f00b204e9800998ecf8427e"),
+            "MD5 of empty input should be d41d8cd98f00b204e9800998ecf8427e"
+        );
+    }
+
+    #[test]
+    fn test_tag_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd()
+            .args(["--tag", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("MD5"));
+    }
+
+    #[test]
+    fn test_known_hello_hash() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // MD5("hello\n") = b1946ac92492d2347c6235b4d2611184
+        assert!(stdout.contains("b1946ac92492d2347c6235b4d2611184"));
+    }
+
+    #[test]
+    fn test_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "aaa\n").unwrap();
+        std::fs::write(&f2, "bbb\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("a.txt"));
+        assert!(stdout.contains("b.txt"));
+        // Two lines of output
+        assert_eq!(stdout.lines().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_nonexistent_file() {
+        let output = cmd().arg("/nonexistent_xyz_md5").output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("No such file"));
+    }
+
+    #[test]
+    fn test_check_tampered() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "original\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        let checksum_line = String::from_utf8_lossy(&output.stdout);
+        let checksums = dir.path().join("checksums.txt");
+        std::fs::write(&checksums, checksum_line.as_ref()).unwrap();
+        // Now tamper with the file
+        std::fs::write(&file, "tampered\n").unwrap();
+        let output = cmd()
+            .args(["--check", checksums.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("FAILED"));
+    }
+
+    #[test]
+    fn test_check_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let checksums = dir.path().join("sums.txt");
+        std::fs::write(
+            &checksums,
+            "d41d8cd98f00b204e9800998ecf8427e  nonexistent_file\n",
+        )
+        .unwrap();
+        let output = cmd()
+            .args(["--check", checksums.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_check_malformed_line() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["--check", "--warn"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"this is not a valid checksum line\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("improperly formatted") || stderr.contains("no properly formatted")
+        );
+    }
+
+    #[test]
+    fn test_binary_mode_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "test\n").unwrap();
+        let output = cmd().args(["-b", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Binary mode uses * before filename in GNU md5sum
+        assert!(
+            stdout.contains(" *"),
+            "binary mode should use * prefix, got: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_invalid_option() {
+        let output = cmd().arg("--invalid-xyz").output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("unrecognized option"));
+    }
+
+    #[test]
+    fn test_tag_and_check_conflict() {
+        let output = cmd().args(["--tag", "--check", "-"]).output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("tag"));
+    }
+
+    #[test]
+    fn test_zero_terminated() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "x").unwrap();
+        let output = cmd().args(["-z", file.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success());
+        // Output should end with NUL instead of newline
+        assert!(output.stdout.ends_with(b"\0"));
+        assert!(!output.stdout.ends_with(b"\n"));
+    }
+
+    #[test]
+    fn test_check_status_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        let checksum_line = String::from_utf8_lossy(&output.stdout);
+        let checksums = dir.path().join("sums.txt");
+        std::fs::write(&checksums, checksum_line.as_ref()).unwrap();
+        let output = cmd()
+            .args(["--check", "--status", checksums.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        // --status: no output on stdout
+        assert!(output.stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dash_as_stdin() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"test\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
+        assert!(stdout.contains("  -"));
+    }
+}

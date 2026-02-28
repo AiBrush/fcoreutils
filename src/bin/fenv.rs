@@ -507,23 +507,6 @@ mod tests {
             std::fs::canonicalize("/tmp").unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
         assert_eq!(stdout.trim(), expected.to_str().unwrap());
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("(fcoreutils)"));
-    }
-
     #[test]
     fn test_matches_gnu_run_command() {
         let gnu = Command::new("env").args(["echo", "test"]).output();

@@ -389,3 +389,148 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fjoin");
+        Command::new(path)
+    }
+    #[test]
+    fn test_join_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1 alice\n2 bob\n3 carol\n").unwrap();
+        std::fs::write(&f2, "1 apples\n2 bananas\n3 cherries\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("alice") && lines[0].contains("apples"));
+    }
+
+    #[test]
+    fn test_join_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1 alice\n").unwrap();
+        std::fs::write(&f2, "2 bananas\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim().is_empty());
+    }
+
+    #[test]
+    fn test_join_custom_delimiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1:alice\n2:bob\n").unwrap();
+        std::fs::write(&f2, "1:apples\n2:bananas\n").unwrap();
+        let output = cmd()
+            .args(["-t", ":", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1:alice:apples"));
+    }
+
+    #[test]
+    fn test_join_empty_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "").unwrap();
+        std::fs::write(&f2, "").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_join_one_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1 alice\n").unwrap();
+        std::fs::write(&f2, "").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stdout.is_empty() || String::from_utf8_lossy(&output.stdout).trim().is_empty()
+        );
+    }
+
+    #[test]
+    fn test_join_field_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "alice 1\nbob 2\n").unwrap();
+        std::fs::write(&f2, "apples 1\nbananas 2\n").unwrap();
+        let output = cmd()
+            .args(["-j", "2", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("alice") && stdout.contains("apples"));
+    }
+
+    #[test]
+    fn test_join_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_join_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        std::fs::write(&f1, "1 alice\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), "/nonexistent/file"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_join_partial_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1 alice\n2 bob\n3 carol\n").unwrap();
+        std::fs::write(&f2, "2 bananas\n3 cherries\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2); // Only keys 2 and 3 match
+    }
+}

@@ -136,4 +136,54 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_printenv_multiple_vars() {
+        let output = cmd()
+            .args(["PATH", "MY_MULTI_TEST_VAR"])
+            .env("MY_MULTI_TEST_VAR", "value2")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn test_printenv_mixed_exist_nonexist() {
+        let output = cmd()
+            .args(["PATH", "DEFINITELY_NOT_A_VAR_XYZ"])
+            .output()
+            .unwrap();
+        // Should fail because one variable doesn't exist
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_printenv_path_var() {
+        let output = cmd().arg("PATH").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.trim().is_empty(), "PATH should not be empty");
+    }
+
+    #[test]
+    fn test_printenv_null_all() {
+        let output = cmd().arg("-0").output().unwrap();
+        assert!(output.status.success());
+        // Output should contain NUL bytes
+        assert!(output.stdout.contains(&0u8));
+    }
+
+    #[test]
+    fn test_printenv_custom_var() {
+        let output = cmd()
+            .arg("MY_TEST_VAR_123")
+            .env("MY_TEST_VAR_123", "test_value")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "test_value");
+    }
 }

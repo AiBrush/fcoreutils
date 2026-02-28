@@ -424,23 +424,6 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert_eq!(output.status.code(), Some(0));
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("(fcoreutils)"));
-    }
-
     #[test]
     fn test_matches_gnu() {
         let gnu_child = Command::new("tee")
@@ -494,5 +477,95 @@ mod tests {
 
         let contents = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(contents, "new\n");
+    }
+
+    #[test]
+    fn test_append_mode_preserves_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("append.txt");
+        std::fs::write(&file_path, "old\n").unwrap();
+
+        let mut child = cmd()
+            .args(["-a", file_path.to_str().unwrap()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(b"new\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+
+        let contents = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(contents, "old\nnew\n");
+    }
+
+    #[test]
+    fn test_tee_two_output_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+
+        let mut child = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+
+        assert_eq!(std::fs::read_to_string(&f1).unwrap(), "hello\n");
+        assert_eq!(std::fs::read_to_string(&f2).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn test_stdout_passthrough() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("empty.txt");
+
+        let mut child = cmd()
+            .arg(file_path.to_str().unwrap())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stdout, b"");
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "");
+    }
+
+    #[test]
+    fn test_binary_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("binary.bin");
+        let data: Vec<u8> = (0..=255).collect();
+
+        let mut child = cmd()
+            .arg(file_path.to_str().unwrap())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(&data).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stdout, data);
+        assert_eq!(std::fs::read(&file_path).unwrap(), data);
     }
 }

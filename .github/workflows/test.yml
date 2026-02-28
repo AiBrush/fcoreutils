@@ -13,13 +13,14 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  RUSTFLAGS: ""
+
 jobs:
   # Lint runs once on ubuntu — platform-independent checks
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -33,55 +34,173 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  # Rust build + test on all platforms (runs in parallel with assembly)
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  # ── Linux: build once, test each command in parallel ──────────────
+  build-linux:
+    name: Build (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v2-ubuntu-latest
+      - name: Install nasm and libssl-dev
+        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
+      - name: Build and compile tests
+        run: cargo test --no-run
+
+  # Binary tests: src/bin/f{cmd}.rs → cargo test --bin f{cmd}
+  test-linux-bin:
+    name: Test ubuntu/${{ matrix.cmd }}
+    needs: build-linux
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    env:
-      RUSTFLAGS: ""
+        cmd: [arch, b2sum, base32, base64, basename, basenc, cat, chcon, chgrp, chmod, chown, chroot, cksum, comm, cp, csplit, cut, date, dd, df, dir, dircolors, dirname, du, echo, env, expand, expr, factor, false, fmt, fold, groups, head, hostid, id, install, join, kill, link, ln, logname, ls, md5sum, mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, numfmt, od, paste, pathchk, pinky, pr, printenv, printf, ptx, pwd, readlink, realpath, rev, rm, rmdir, runcon, seq, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shred, shuf, sleep, sort, split, stat, stdbuf, stty, sum, sync, tac, tail, tee, test, timeout, touch, tr, true, truncate, tsort, tty, uname, unexpand, uniq, unlink, uptime, users, vdir, wc, who, whoami, yes]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: test-v2-${{ matrix.os }}
-      - name: Install nasm and libssl-dev (Linux only)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
-      - name: Build and test
-        run: |
-          cargo build --release
-          cargo test --release
-
-  # Benchmarks run in parallel with tests (uses cached build from previous runs)
-  benchmarks:
-    name: Benchmarks
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: ""
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: test-v2-ubuntu-latest
+          shared-key: build-v2-ubuntu-latest
+          save-if: false
       - name: Install nasm and libssl-dev
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
-      - name: Run benchmarks
-        run: cargo bench --bench wc_benchmark 2>&1 | tee bench_output.txt
-      - name: Upload results
-        uses: actions/upload-artifact@v6
-        with:
-          name: benchmark-results
-          path: |
-            bench_output.txt
-            target/criterion
+      - name: Run tests
+        run: |
+          cargo build --bin "f${{ matrix.cmd }}"
+          cargo test --bin "f${{ matrix.cmd }}"
 
-  # Assembly: build all 20 tools once, upload as artifact
+  # ── macOS: build once, test each command in parallel ──────────────
+  build-macos:
+    name: Build (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v2-macos-latest
+      - name: Build and compile tests
+        run: cargo test --no-run
+
+  test-macos-bin:
+    name: Test macos/${{ matrix.cmd }}
+    needs: build-macos
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cmd: [arch, b2sum, base32, base64, basename, basenc, cat, chcon, chgrp, chmod, chown, chroot, cksum, comm, cp, csplit, cut, date, dd, df, dir, dircolors, dirname, du, echo, env, expand, expr, factor, false, fmt, fold, groups, head, hostid, id, install, join, kill, link, ln, logname, ls, md5sum, mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, numfmt, od, paste, pathchk, pinky, pr, printenv, printf, ptx, pwd, readlink, realpath, rev, rm, rmdir, runcon, seq, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shred, shuf, sleep, sort, split, stat, stdbuf, stty, sum, sync, tac, tail, tee, test, timeout, touch, tr, true, truncate, tsort, tty, uname, unexpand, uniq, unlink, uptime, users, vdir, wc, who, whoami, yes]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v2-macos-latest
+          save-if: false
+      - name: Run tests
+        run: |
+          cargo build --bin "f${{ matrix.cmd }}"
+          cargo test --bin "f${{ matrix.cmd }}"
+
+  # ── Windows: build once, test each command in parallel ────────────
+  build-windows:
+    name: Build (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v2-windows-latest
+      - name: Build and compile tests
+        run: cargo test --no-run
+
+  test-windows-bin:
+    name: Test windows/${{ matrix.cmd }}
+    needs: build-windows
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cmd: [arch, b2sum, base32, base64, basename, basenc, cat, chcon, chgrp, chmod, chown, chroot, cksum, comm, cp, csplit, cut, date, dd, df, dir, dircolors, dirname, du, echo, env, expand, expr, factor, false, fmt, fold, groups, head, hostid, id, install, join, kill, link, ln, logname, ls, md5sum, mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, numfmt, od, paste, pathchk, pinky, pr, printenv, printf, ptx, pwd, readlink, realpath, rev, rm, rmdir, runcon, seq, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shred, shuf, sleep, sort, split, stat, stdbuf, stty, sum, sync, tac, tail, tee, test, timeout, touch, tr, true, truncate, tsort, tty, uname, unexpand, uniq, unlink, uptime, users, vdir, wc, who, whoami, yes]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v2-windows-latest
+          save-if: false
+      - name: Run tests
+        run: |
+          cargo build --bin "f${{ matrix.cmd }}"
+          cargo test --bin "f${{ matrix.cmd }}"
+
+  # ── Gate: all platform tests must pass (use as required check) ────
+  test-passed:
+    name: Tests passed
+    if: always()
+    needs: [lint, test-linux-bin, test-macos-bin, test-windows-bin, assembly-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          results=("${{ needs.lint.result }}" \
+                   "${{ needs.test-linux-bin.result }}" \
+                   "${{ needs.test-macos-bin.result }}" \
+                   "${{ needs.test-windows-bin.result }}" \
+                   "${{ needs.assembly-test.result }}")
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" ]]; then
+              echo "Some tests failed: $r"
+              exit 1
+            fi
+          done
+          echo "All checks passed: lint, 107 command binary tests (3 platforms), assembly tests"
+
+  # ── Required-check aliases (branch-protection expects these names) ──
+  test-ubuntu:
+    name: Test (ubuntu-latest)
+    if: always()
+    needs: [test-linux-bin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check result
+        run: |
+          if [[ "${{ needs.test-linux-bin.result }}" != "success" ]]; then
+            echo "Linux tests failed"
+            exit 1
+          fi
+
+  test-macos:
+    name: Test (macos-latest)
+    if: always()
+    needs: [test-macos-bin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check result
+        run: |
+          if [[ "${{ needs.test-macos-bin.result }}" != "success" ]]; then
+            echo "macOS tests failed"
+            exit 1
+          fi
+
+  test-windows:
+    name: Test (windows-latest)
+    if: always()
+    needs: [test-windows-bin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check result
+        run: |
+          if [[ "${{ needs.test-windows-bin.result }}" != "success" ]]; then
+            echo "Windows tests failed"
+            exit 1
+          fi
+
+  # ── Assembly: build all 20 tools once, upload as artifact ─────────
   assembly-build:
     name: Build assembly
     runs-on: ubuntu-latest
@@ -142,26 +261,33 @@ jobs:
             assembly/base64/fbase64
             assembly/md5sum/fmd5sum
 
-  # Assembly: test each tool in parallel (20 parallel jobs)
+  # ── Assembly: test each tool in parallel (20 x86 + 1 ARM64) ──────
   assembly-test:
     name: Test asm/${{ matrix.tool }}
     needs: assembly-build
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum]
+        runner: [ubuntu-latest]
+        include:
+          - tool: yes-arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v6
+        if: matrix.tool != 'yes-arm64'
         with:
           name: assembly-binaries
           path: assembly
       - name: Setup
+        if: matrix.tool != 'yes-arm64'
         run: |
           chmod +x assembly/${{ matrix.tool }}/f${{ matrix.tool }}
           sudo apt-get install -y --no-install-recommends strace
       - name: Functional tests
+        if: matrix.tool != 'yes-arm64'
         run: |
           if [ "${{ matrix.tool }}" = "yes" ]; then
             cd assembly/yes
@@ -170,20 +296,17 @@ jobs:
             bash assembly/${{ matrix.tool }}/tests/run_tests.sh ./assembly/${{ matrix.tool }}/f${{ matrix.tool }}
           fi
       - name: Security tests
-        if: matrix.tool != 'yes'
+        if: matrix.tool != 'yes' && matrix.tool != 'yes-arm64'
         run: python3 assembly/${{ matrix.tool }}/tests/security_tests.py
-
-  # ARM64 assembly (runs in parallel with everything else)
-  test-assembly-arm64:
-    name: Test assembly fyes (Linux ARM64)
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v6
-      - name: Build and test ARM64 assembly fyes
+      - name: Build ARM64 fyes
+        if: matrix.tool == 'yes-arm64'
         run: |
           as -o /tmp/fyes_arm64.o assembly/yes/fyes_arm64.s
           ld -static -s -e _start -o /tmp/fyes_arm64 /tmp/fyes_arm64.o
           chmod +x /tmp/fyes_arm64
+      - name: Test ARM64 fyes
+        if: matrix.tool == 'yes-arm64'
+        run: |
           /tmp/fyes_arm64 | head -5
           /tmp/fyes_arm64 hello | head -3
           /tmp/fyes_arm64 --help

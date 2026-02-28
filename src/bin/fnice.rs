@@ -246,4 +246,41 @@ mod tests {
             assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
         }
     }
+
+    #[test]
+    fn test_nice_adjustment() {
+        let output = cmd().args(["-n", "5", "echo", "hello"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn test_nice_default_prints_niceness() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should print the current niceness value
+        let _: i32 = stdout.trim().parse().expect("Should output a number");
+    }
+
+    #[test]
+    fn test_nice_nonexistent_command() {
+        let output = cmd().arg("nonexistent_command_xyz").output().unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_nice_negative_adjustment() {
+        // Negative adjustment usually requires root, but should still accept the flag
+        let output = cmd().args(["-n", "-1", "echo", "test"]).output().unwrap();
+        // May succeed or fail depending on privileges - just check it doesn't crash
+        let _ = output.status;
+    }
+
+    #[test]
+    fn test_nice_zero_adjustment() {
+        let output = cmd().args(["-n", "0", "echo", "ok"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+    }
 }
