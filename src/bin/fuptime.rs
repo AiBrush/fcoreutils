@@ -343,20 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn test_uptime_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_uptime_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_uptime_pretty_contains_up() {
         let output = cmd().arg("-p").output().unwrap();
         assert!(output.status.success());

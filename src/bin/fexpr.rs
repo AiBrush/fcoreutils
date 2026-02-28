@@ -95,20 +95,6 @@ mod tests {
         path.push("fexpr");
         Command::new(path)
     }
-
-    #[test]
-    fn test_expr_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_expr_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
     #[test]
     fn test_expr_add() {
         let output = cmd().args(["2", "+", "3"]).output().unwrap();

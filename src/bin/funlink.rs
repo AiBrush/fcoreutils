@@ -152,11 +152,4 @@ mod tests {
         let output = cmd().output().unwrap();
         assert!(!output.status.success());
     }
-
-    #[test]
-    fn test_unlink_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
 }

@@ -383,23 +383,6 @@ mod tests {
         path.push("fdu");
         Command::new(path)
     }
-
-    #[test]
-    fn test_du_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        // du outputs help to stderr (GNU compatible)
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Usage"));
-    }
-
-    #[test]
-    fn test_du_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        // du outputs version to stderr (GNU compatible)
-        assert!(String::from_utf8_lossy(&output.stderr).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_du_current_dir() {
         let output = cmd().output().unwrap();

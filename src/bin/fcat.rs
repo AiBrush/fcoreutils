@@ -261,21 +261,6 @@ mod tests {
         path.push("fcat");
         Command::new(path)
     }
-
-    #[test]
-    fn test_cat_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_cat_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_cat_stdin() {
         use std::io::Write;

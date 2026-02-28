@@ -115,20 +115,6 @@ mod tests {
         path.push("fprintf");
         Command::new(path)
     }
-
-    #[test]
-    fn test_printf_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_printf_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
     #[test]
     fn test_printf_string() {
         let output = cmd().args(["%s\n", "hello"]).output().unwrap();

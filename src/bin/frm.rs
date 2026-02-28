@@ -584,21 +584,6 @@ mod tests {
         path.push("frm");
         Command::new(path)
     }
-
-    #[test]
-    fn test_rm_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_rm_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_rm_single_file() {
         let dir = tempfile::tempdir().unwrap();

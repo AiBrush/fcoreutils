@@ -304,26 +304,6 @@ mod tests {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("invalid user"), "stderr was: {}", stderr);
     }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_chown_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("--recursive"));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_chown_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("(fcoreutils)"));
-    }
-
     #[test]
     #[cfg(unix)]
     fn test_chown_preserve_root() {

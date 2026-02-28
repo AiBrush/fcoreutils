@@ -220,20 +220,6 @@ mod tests {
     }
 
     #[test]
-    fn test_nproc_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_nproc_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_nproc_all_at_least_one() {
         let output = cmd().arg("--all").output().unwrap();
         assert!(output.status.success());

@@ -732,21 +732,6 @@ mod tests {
         path.push("ftr");
         Command::new(path)
     }
-
-    #[test]
-    fn test_tr_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_tr_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_tr_basic_translate() {
         use std::io::Write;

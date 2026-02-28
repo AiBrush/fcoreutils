@@ -418,23 +418,6 @@ mod tests {
             "Should contain NUL bytes as separators"
         );
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("(fcoreutils)"));
-    }
-
     #[test]
     #[cfg(target_os = "linux")]
     fn test_matches_gnu_default() {

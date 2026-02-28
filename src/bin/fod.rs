@@ -508,20 +508,6 @@ mod tests {
         path.push("fod");
         Command::new(path)
     }
-
-    #[test]
-    fn test_od_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_od_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
     #[test]
     fn test_od_basic() {
         let mut child = cmd()

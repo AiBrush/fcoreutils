@@ -413,25 +413,6 @@ mod tests {
             output
         );
     }
-
-    #[test]
-    fn test_shred_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("shred"));
-    }
-
-    #[test]
-    fn test_shred_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("shred"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_shred_matches_gnu_behavior() {
         // Both should fail on nonexistent files

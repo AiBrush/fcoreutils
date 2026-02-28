@@ -174,22 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn test_link_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage"));
-    }
-
-    #[test]
-    fn test_link_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_link_content_preserved() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.txt");

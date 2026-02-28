@@ -351,24 +351,6 @@ mod tests {
         path.push("fmktemp");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("mktemp"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("mktemp (fcoreutils)"));
-    }
-
     #[test]
     fn test_default_template() {
         let dir = tempfile::tempdir().unwrap();

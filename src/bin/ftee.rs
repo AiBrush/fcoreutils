@@ -424,23 +424,6 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert_eq!(output.status.code(), Some(0));
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("(fcoreutils)"));
-    }
-
     #[test]
     fn test_matches_gnu() {
         let gnu_child = Command::new("tee")

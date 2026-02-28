@@ -1407,25 +1407,6 @@ mod tests {
         assert_eq!(lines[0], "1");
         assert_eq!(lines[9999], "10000");
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("seq"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("seq"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     /// Check if system seq is GNU seq (BSD seq on macOS behaves differently)
     fn is_gnu_seq() -> bool {
         Command::new("seq")

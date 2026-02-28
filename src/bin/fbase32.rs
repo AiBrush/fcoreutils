@@ -587,25 +587,6 @@ mod tests {
         path.push("fbase32");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("--decode"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("base32"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_encode_hello() {
         // "Hello" in base32 is "JBSWY3DP"

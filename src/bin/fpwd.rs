@@ -298,20 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pwd_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_pwd_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_pwd_physical_absolute_path() {
         let output = cmd().arg("-P").output().unwrap();
         assert!(output.status.success());

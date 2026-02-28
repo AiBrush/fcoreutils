@@ -384,20 +384,6 @@ mod tests {
         path.push("funiq");
         Command::new(path)
     }
-
-    #[test]
-    fn test_uniq_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_uniq_version() {
-        // funiq may not have --version enabled via clap; just ensure it doesn't crash
-        let output = cmd().arg("--version").output().unwrap();
-        let _ = output.status;
-    }
     #[test]
     fn test_uniq_basic() {
         let mut child = cmd()

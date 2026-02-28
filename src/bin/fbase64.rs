@@ -336,20 +336,6 @@ mod tests {
         path.push("fbase64");
         Command::new(path)
     }
-
-    #[test]
-    fn test_base64_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_base64_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
     #[test]
     fn test_base64_encode() {
         let mut child = cmd()

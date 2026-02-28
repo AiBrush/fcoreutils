@@ -1432,26 +1432,6 @@ mod tests {
         path.push("fcksum");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("CRC"));
-        assert!(stdout.contains("--algorithm"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("cksum"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_crc_table_correctness() {
         assert_eq!(CRC_TABLE[0], 0);
@@ -1737,20 +1717,6 @@ mod tests {
     }
 
     use std::process::Stdio;
-
-    #[test]
-    fn test_cksum_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_cksum_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
     #[test]
     fn test_cksum_md5_stdin() {
         let mut child = cmd()

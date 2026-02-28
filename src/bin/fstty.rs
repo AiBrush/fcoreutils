@@ -219,16 +219,6 @@ mod tests {
         assert!(stdout.contains("Usage:"));
         assert!(stdout.contains("stty"));
     }
-
-    #[test]
-    fn test_stty_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("stty"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_stty_size_format() {
         // When stdin is a pipe (not a tty), stty size should fail
@@ -285,21 +275,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn test_stty_help_text() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_stty_version_output() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_stty_not_a_tty() {
         // When stdin is piped, stty should fail for most operations

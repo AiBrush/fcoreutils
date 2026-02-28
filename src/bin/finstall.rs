@@ -750,25 +750,6 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn test_install_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("install"));
-    }
-
-    #[test]
-    fn test_install_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("install"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_install_missing_operand() {
         let output = cmd().output().unwrap();

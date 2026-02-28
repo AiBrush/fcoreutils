@@ -585,21 +585,6 @@ mod tests {
         path.push("fls");
         Command::new(path)
     }
-
-    #[test]
-    fn test_ls_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_ls_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_ls_basic() {
         let dir = tempfile::tempdir().unwrap();

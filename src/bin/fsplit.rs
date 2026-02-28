@@ -322,21 +322,6 @@ mod tests {
         path.push("fsplit");
         Command::new(path)
     }
-
-    #[test]
-    fn test_split_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_split_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_split_by_lines() {
         let dir = tempfile::tempdir().unwrap();

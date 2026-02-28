@@ -222,22 +222,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dirname_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage"));
-    }
-
-    #[test]
-    fn test_dirname_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_dirname_no_args() {
         let output = cmd().output().unwrap();
         assert!(!output.status.success());

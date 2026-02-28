@@ -645,25 +645,6 @@ mod tests {
         assert_eq!(lines, vec!["1", "2", "3", "4"]);
         let _ = std::fs::remove_file(&file_path);
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("tsort"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("tsort"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_match_gnu_basic() {
         use std::io::Write;

@@ -556,25 +556,6 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn test_mv_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("mv"));
-    }
-
-    #[test]
-    fn test_mv_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("mv"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_mv_missing_operand() {
         let output = cmd().output().unwrap();

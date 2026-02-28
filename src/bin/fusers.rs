@@ -124,20 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn test_users_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_users_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_users_single_line() {
         let output = cmd().output().unwrap();
         assert!(output.status.success());

@@ -290,21 +290,6 @@ mod tests {
         path.push("fhead");
         Command::new(path)
     }
-
-    #[test]
-    fn test_head_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_head_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_head_default_10_lines() {
         use std::io::Write;

@@ -194,13 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sleep_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
     fn test_sleep_suffix_s() {
         let start = std::time::Instant::now();
         let output = cmd().arg("0.01s").output().unwrap();

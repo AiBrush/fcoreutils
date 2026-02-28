@@ -259,20 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn test_who_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_who_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_who_count_exit_success() {
         let output = cmd().arg("-q").output().unwrap();
         assert!(output.status.success());

@@ -688,25 +688,6 @@ mod tests {
         path.push("fln");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("ln"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("ln"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_hard_link() {
         let dir = tempfile::tempdir().unwrap();

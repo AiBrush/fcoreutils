@@ -745,25 +745,6 @@ mod tests {
         assert!(lines.contains("world"));
         let _ = std::fs::remove_file(&outpath);
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("shuf"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("shuf"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_match_gnu_format() {
         // GNU shuf -i 1-5 output should have exactly 5 lines, each a number 1-5

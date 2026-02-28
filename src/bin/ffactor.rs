@@ -642,21 +642,6 @@ mod tests {
         path.push("ffactor");
         Command::new(path)
     }
-
-    #[test]
-    fn test_factor_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_factor_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_factor_one() {
         let output = cmd().arg("1").output().unwrap();

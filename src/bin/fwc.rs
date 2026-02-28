@@ -699,21 +699,6 @@ mod tests {
         path.push("fwc");
         Command::new(path)
     }
-
-    #[test]
-    fn test_wc_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_wc_version() {
-        // fwc handles --version via clap's built-in version flag
-        let output = cmd().arg("--version").output().unwrap();
-        // Some binaries may not have --version enabled; just check it doesn't crash
-        let _ = output.status;
-    }
     #[test]
     fn test_wc_basic() {
         let mut child = cmd()

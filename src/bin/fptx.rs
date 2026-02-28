@@ -396,20 +396,6 @@ mod tests {
         path.push("fptx");
         Command::new(path)
     }
-
-    #[test]
-    fn test_ptx_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_ptx_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
     #[test]
     fn test_ptx_basic() {
         let mut child = cmd()

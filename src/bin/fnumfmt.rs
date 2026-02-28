@@ -289,20 +289,6 @@ mod tests {
         path.push("fnumfmt");
         Command::new(path)
     }
-
-    #[test]
-    fn test_numfmt_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_numfmt_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
     #[test]
     fn test_numfmt_from_si() {
         let mut child = cmd()

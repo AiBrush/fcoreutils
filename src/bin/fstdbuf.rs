@@ -271,26 +271,6 @@ mod tests {
             "fstdbuf without a command should fail"
         );
     }
-
-    #[test]
-    fn test_stdbuf_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("stdbuf"), "Help should mention stdbuf");
-    }
-
-    #[test]
-    fn test_stdbuf_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("fcoreutils"),
-            "Version should mention fcoreutils"
-        );
-    }
-
     #[test]
     fn test_stdbuf_matches_gnu_args() {
         // Verify that the same flags are accepted

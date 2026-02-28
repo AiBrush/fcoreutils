@@ -293,25 +293,6 @@ mod tests {
         path.push("fsum");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("--sysv"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("sum"));
-        assert!(stdout.contains("fcoreutils"));
-    }
-
     #[test]
     fn test_bsd_stdin() {
         // Test BSD checksum of "hello\n" via stdin

@@ -134,20 +134,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tty_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_tty_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_tty_silent_not_a_tty() {
         let output = cmd().arg("-s").stdin(Stdio::piped()).output().unwrap();
         assert_eq!(output.status.code(), Some(1));

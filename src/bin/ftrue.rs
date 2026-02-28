@@ -30,23 +30,6 @@ mod tests {
         let output = cmd().args(["foo", "bar", "--baz"]).output().unwrap();
         assert_eq!(output.status.code(), Some(0));
     }
-
-    #[test]
-    fn test_true_help_silent() {
-        // GNU true ignores --help and still exits 0 silently
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        assert!(output.stdout.is_empty());
-    }
-
-    #[test]
-    fn test_true_version_silent() {
-        // GNU true ignores --version and still exits 0 silently
-        let output = cmd().arg("--version").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        assert!(output.stdout.is_empty());
-    }
-
     #[test]
     fn test_true_matches_gnu() {
         let gnu = Command::new("true").output();

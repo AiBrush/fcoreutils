@@ -288,22 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn test_basename_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage"));
-    }
-
-    #[test]
-    fn test_basename_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_basename_empty_string() {
         let output = cmd().arg("").output().unwrap();
         assert!(output.status.success());

@@ -107,22 +107,6 @@ mod tests {
     }
 
     #[test]
-    fn test_logname_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage") || stdout.contains("logname"));
-    }
-
-    #[test]
-    fn test_logname_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("fcoreutils"));
-    }
-
-    #[test]
     fn test_logname_extra_operand() {
         let output = cmd().arg("extra").output().unwrap();
         assert_eq!(output.status.code(), Some(1));

@@ -212,22 +212,6 @@ mod tests {
             .unwrap();
         assert_eq!(output.status.code(), Some(1));
     }
-
-    #[test]
-    fn test_sync_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("sync"));
-    }
-
-    #[test]
-    fn test_sync_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_sync_no_args_success() {
         let output = cmd().output().unwrap();

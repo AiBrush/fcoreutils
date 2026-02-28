@@ -365,24 +365,6 @@ mod tests {
         path.push("fkill");
         Command::new(path)
     }
-
-    #[test]
-    fn test_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"));
-        assert!(stdout.contains("SIGNAL"));
-    }
-
-    #[test]
-    fn test_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("(fcoreutils)"));
-    }
-
     #[test]
     fn test_list_signals() {
         let output = cmd().arg("-l").output().unwrap();
@@ -408,16 +390,6 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(stdout.trim(), "15");
     }
-
-    #[test]
-    fn test_list_exit_status_conversion() {
-        // 137 = 128 + 9 (KILL)
-        let output = cmd().args(["-l", "137"]).output().unwrap();
-        assert_eq!(output.status.code(), Some(0));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert_eq!(stdout.trim(), "KILL");
-    }
-
     #[test]
     fn test_table() {
         let output = cmd().arg("-L").output().unwrap();

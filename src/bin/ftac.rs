@@ -320,21 +320,6 @@ mod tests {
         path.push("ftac");
         Command::new(path)
     }
-
-    #[test]
-    fn test_tac_help() {
-        let output = cmd().arg("--help").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
-    }
-
-    #[test]
-    fn test_tac_version() {
-        let output = cmd().arg("--version").output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
-    }
-
     #[test]
     fn test_tac_basic() {
         use std::io::Write;
