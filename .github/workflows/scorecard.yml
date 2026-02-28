@@ -12,15 +12,17 @@ on:
 concurrency:
   group: scorecard-${{ github.ref }}
 
-permissions:
-  security-events: write
-  contents: read
-  id-token: write       # needed for Scorecard publishing
+permissions: read-all
 
 jobs:
   scorecard:
     name: OSSF Scorecard
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      id-token: write       # needed for Scorecard publishing
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
