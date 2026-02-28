@@ -13,11 +13,8 @@ concurrency:
 permissions:
   contents: read
 
-# CI overrides: disable LTO and use parallel codegen for faster builds
 env:
   RUSTFLAGS: ""
-  CARGO_PROFILE_RELEASE_LTO: "false"
-  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
 jobs:
   # Lint runs once on ubuntu — platform-independent checks
@@ -46,11 +43,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build-v1-ubuntu-latest
+          shared-key: build-v2-ubuntu-latest
       - name: Install nasm and libssl-dev
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Build
-        run: cargo build --release
+        run: cargo build
 
   test-linux:
     name: Test (ubuntu-latest)
@@ -61,12 +58,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build-v1-ubuntu-latest
+          shared-key: build-v2-ubuntu-latest
           save-if: false
       - name: Install nasm and libssl-dev
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Run tests
-        run: cargo test --release
+        run: cargo test
 
   # ── macOS: build once, then test ──────────────────────────────────
   build-macos:
@@ -77,9 +74,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build-v1-macos-latest
+          shared-key: build-v2-macos-latest
       - name: Build
-        run: cargo build --release
+        run: cargo build
 
   test-macos:
     name: Test (macos-latest)
@@ -90,10 +87,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build-v1-macos-latest
+          shared-key: build-v2-macos-latest
           save-if: false
       - name: Run tests
-        run: cargo test --release
+        run: cargo test
 
   # ── Windows: build once, then test ────────────────────────────────
   build-windows:
@@ -104,9 +101,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build-v1-windows-latest
+          shared-key: build-v2-windows-latest
       - name: Build
-        run: cargo build --release
+        run: cargo build
 
   test-windows:
     name: Test (windows-latest)
@@ -117,10 +114,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build-v1-windows-latest
+          shared-key: build-v2-windows-latest
           save-if: false
       - name: Run tests
-        run: cargo test --release
+        run: cargo test
 
   # ── Assembly: build all 20 tools once, upload as artifact ─────────
   assembly-build:
