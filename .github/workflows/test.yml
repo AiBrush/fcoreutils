@@ -13,13 +13,17 @@ concurrency:
 permissions:
   contents: read
 
+# CI overrides: disable LTO and use parallel codegen for faster builds
+env:
+  RUSTFLAGS: ""
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
 jobs:
   # Lint runs once on ubuntu — platform-independent checks
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -33,34 +37,98 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  # Build and test per platform (all 3 run in parallel, no cross-platform blocking)
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    env:
-      RUSTFLAGS: ""
+  # ── Linux: build once, then test ──────────────────────────────────
+  build-linux:
+    name: Build (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: test-v2-${{ matrix.os }}
-      - name: Install nasm and libssl-dev (Linux only)
-        if: matrix.os == 'ubuntu-latest'
+          shared-key: build-v1-ubuntu-latest
+      - name: Install nasm and libssl-dev
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
-      - name: Build and test
-        env:
-          CARGO_PROFILE_RELEASE_LTO: "false"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-        run: |
-          cargo build --release
-          cargo test --release
+      - name: Build
+        run: cargo build --release
+      - name: Compile test binaries
+        run: cargo test --release --no-run
 
-  # Assembly: build all 20 tools once, upload as artifact
+  test-linux:
+    name: Test (ubuntu-latest)
+    needs: build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v1-ubuntu-latest
+          save-if: false
+      - name: Install nasm and libssl-dev
+        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
+      - name: Run tests
+        run: cargo test --release
+
+  # ── macOS: build once, then test ──────────────────────────────────
+  build-macos:
+    name: Build (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v1-macos-latest
+      - name: Build
+        run: cargo build --release
+      - name: Compile test binaries
+        run: cargo test --release --no-run
+
+  test-macos:
+    name: Test (macos-latest)
+    needs: build-macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v1-macos-latest
+          save-if: false
+      - name: Run tests
+        run: cargo test --release
+
+  # ── Windows: build once, then test ────────────────────────────────
+  build-windows:
+    name: Build (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v1-windows-latest
+      - name: Build
+        run: cargo build --release
+      - name: Compile test binaries
+        run: cargo test --release --no-run
+
+  test-windows:
+    name: Test (windows-latest)
+    needs: build-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-v1-windows-latest
+          save-if: false
+      - name: Run tests
+        run: cargo test --release
+
+  # ── Assembly: build all 20 tools once, upload as artifact ─────────
   assembly-build:
     name: Build assembly
     runs-on: ubuntu-latest
@@ -121,7 +189,7 @@ jobs:
             assembly/base64/fbase64
             assembly/md5sum/fmd5sum
 
-  # Assembly: test each tool in parallel (20 x86 + 1 ARM64 = 21 parallel jobs)
+  # ── Assembly: test each tool in parallel (20 x86 + 1 ARM64) ──────
   assembly-test:
     name: Test asm/${{ matrix.tool }}
     needs: assembly-build
