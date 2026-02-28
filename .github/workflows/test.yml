@@ -51,8 +51,6 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Build
         run: cargo build --release
-      - name: Compile test binaries
-        run: cargo test --release --no-run
 
   test-linux:
     name: Test (ubuntu-latest)
@@ -82,8 +80,6 @@ jobs:
           shared-key: build-v1-macos-latest
       - name: Build
         run: cargo build --release
-      - name: Compile test binaries
-        run: cargo test --release --no-run
 
   test-macos:
     name: Test (macos-latest)
@@ -111,8 +107,6 @@ jobs:
           shared-key: build-v1-windows-latest
       - name: Build
         run: cargo build --release
-      - name: Compile test binaries
-        run: cargo test --release --no-run
 
   test-windows:
     name: Test (windows-latest)
