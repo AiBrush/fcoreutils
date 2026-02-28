@@ -160,6 +160,46 @@ jobs:
           done
           echo "All checks passed: lint, 107 command binary tests (3 platforms), assembly tests"
 
+  # ── Required-check aliases (branch-protection expects these names) ──
+  test-ubuntu:
+    name: Test (ubuntu-latest)
+    if: always()
+    needs: [test-linux-bin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check result
+        run: |
+          if [[ "${{ needs.test-linux-bin.result }}" != "success" ]]; then
+            echo "Linux tests failed"
+            exit 1
+          fi
+
+  test-macos:
+    name: Test (macos-latest)
+    if: always()
+    needs: [test-macos-bin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check result
+        run: |
+          if [[ "${{ needs.test-macos-bin.result }}" != "success" ]]; then
+            echo "macOS tests failed"
+            exit 1
+          fi
+
+  test-windows:
+    name: Test (windows-latest)
+    if: always()
+    needs: [test-windows-bin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check result
+        run: |
+          if [[ "${{ needs.test-windows-bin.result }}" != "success" ]]; then
+            echo "Windows tests failed"
+            exit 1
+          fi
+
   # ── Assembly: build all 20 tools once, upload as artifact ─────────
   assembly-build:
     name: Build assembly
