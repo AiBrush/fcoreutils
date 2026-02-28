@@ -583,3 +583,85 @@ fn main() {
         process::exit(2);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fsort");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_sort_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_sort_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_sort_basic() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"banana\napple\ncherry\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "apple\nbanana\ncherry\n"
+        );
+    }
+
+    #[test]
+    fn test_sort_reverse() {
+        let mut child = cmd()
+            .arg("-r")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\nb\nc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "c\nb\na\n");
+    }
+
+    #[test]
+    fn test_sort_numeric() {
+        let mut child = cmd()
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"10\n2\n1\n20\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n2\n10\n20\n");
+    }
+}

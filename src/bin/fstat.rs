@@ -213,3 +213,30 @@ fn print_help() {
     println!("  %t   file system type in hex");
     println!("  %T   file system type in human readable form");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fstat");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_stat_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_stat_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+}

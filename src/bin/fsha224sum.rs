@@ -503,3 +503,77 @@ fn check_one(
         ignored_missing,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fsha224sum");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage"));
+    }
+
+    #[test]
+    fn test_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_hash_stdin() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("  -"), "Should contain filename marker");
+    }
+
+    #[test]
+    fn test_hash_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("test.txt"));
+    }
+
+    #[test]
+    fn test_check_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        let checksum_line = String::from_utf8_lossy(&output.stdout);
+        let checksums = dir.path().join("checksums.txt");
+        std::fs::write(&checksums, checksum_line.as_ref()).unwrap();
+        let output = cmd()
+            .args(["--check", checksums.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("OK"));
+    }
+}

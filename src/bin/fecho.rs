@@ -48,3 +48,83 @@ fn main() {
         process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fecho");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_cmd_echo_simple() {
+        let output = cmd().args(["hello", "world"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello world\n");
+    }
+
+    #[test]
+    fn test_cmd_echo_no_newline() {
+        let output = cmd().args(["-n", "hello"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello");
+    }
+
+    #[test]
+    fn test_cmd_echo_escape_tab_newline() {
+        let output = cmd().args(["-e", "a\\tb\\n"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"a\tb\n\n");
+    }
+
+    #[test]
+    fn test_cmd_echo_escape_c() {
+        let output = cmd().args(["-e", "hello\\cworld"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello");
+    }
+
+    #[test]
+    fn test_cmd_echo_octal() {
+        let output = cmd().args(["-ne", "\\0101"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"A");
+    }
+
+    #[test]
+    fn test_cmd_echo_hex() {
+        let output = cmd().args(["-ne", "\\x41"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"A");
+    }
+
+    #[test]
+    fn test_cmd_echo_no_args() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"\n");
+    }
+
+    #[test]
+    fn test_cmd_invalid_flag_is_text() {
+        let output = cmd().args(["-z", "hello"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"-z hello\n");
+    }
+
+    #[test]
+    fn test_echo_matches_gnu() {
+        // Compare basic output with GNU echo
+        let gnu = Command::new("echo").args(["hello", "world"]).output();
+        if let Ok(gnu) = gnu {
+            let ours = cmd().args(["hello", "world"]).output().unwrap();
+            assert_eq!(ours.stdout, gnu.stdout, "Output mismatch with GNU echo");
+            assert_eq!(ours.status.code(), gnu.status.code(), "Exit code mismatch");
+        }
+    }
+}

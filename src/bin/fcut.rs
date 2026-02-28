@@ -663,3 +663,59 @@ fn main() {
         process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fcut");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_cut_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_cut_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_cut_fields() {
+        let mut child = cmd()
+            .args(["-d:", "-f1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a:b:c\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "a");
+    }
+
+    #[test]
+    fn test_cut_bytes() {
+        let mut child = cmd()
+            .args(["-b1-3"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hel");
+    }
+}

@@ -410,3 +410,53 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fdate");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_date_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_date_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_date_basic() {
+        let output = cmd().output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.is_empty());
+    }
+
+    #[test]
+    fn test_date_format() {
+        let output = cmd().arg("+%Y").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.trim().parse::<u32>().is_ok());
+    }
+
+    #[test]
+    fn test_date_utc() {
+        let output = cmd().args(["-u", "+%Z"]).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("UTC") || stdout.contains("GMT"));
+    }
+}

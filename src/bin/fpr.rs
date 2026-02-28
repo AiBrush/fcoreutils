@@ -449,3 +449,41 @@ fn main() {
         process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fpr");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_pr_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_pr_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_pr_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("test.txt");
+        std::fs::write(&f, "hello\nworld\n").unwrap();
+        let output = cmd().arg(f.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("hello"));
+        assert!(stdout.contains("Page 1"));
+    }
+}

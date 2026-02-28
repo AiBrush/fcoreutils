@@ -252,3 +252,110 @@ fn print_help() {
     println!("      --help     display this help and exit");
     println!("      --version  output version information and exit");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fchown");
+        Command::new(path)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chown_matches_gnu_errors_missing_operand() {
+        let output = cmd().output().unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("missing operand"));
+
+        // Compare with GNU
+        let gnu = Command::new("chown").output();
+        if let Ok(gnu) = gnu {
+            assert_ne!(gnu.status.code(), Some(0));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chown_matches_gnu_errors_missing_file() {
+        #[cfg(target_os = "macos")]
+        let owner = "root";
+        #[cfg(not(target_os = "macos"))]
+        let owner = "root";
+        let output = cmd().arg(owner).output().unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("missing operand"), "stderr was: {}", stderr);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chown_matches_gnu_errors_invalid_user() {
+        let output = cmd()
+            .args(["nonexistent_user_xyz_99999", "/tmp/nofile"])
+            .output()
+            .unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid user"), "stderr was: {}", stderr);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chown_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage:"));
+        assert!(stdout.contains("--recursive"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chown_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("(fcoreutils)"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chown_preserve_root() {
+        // --preserve-root -R / should error
+        #[cfg(target_os = "macos")]
+        let owner_group = "root:wheel";
+        #[cfg(not(target_os = "macos"))]
+        let owner_group = "root:root";
+        let output = cmd()
+            .args(["--preserve-root", "-R", owner_group, "/"])
+            .output()
+            .unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dangerous to operate recursively on '/'"),
+            "stderr was: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chown_nonexistent_file() {
+        #[cfg(target_os = "macos")]
+        let owner = "root";
+        #[cfg(not(target_os = "macos"))]
+        let owner = "root";
+        let output = cmd()
+            .args([owner, "/nonexistent_file_xyz_99999"])
+            .output()
+            .unwrap();
+        assert_ne!(output.status.code(), Some(0));
+    }
+}

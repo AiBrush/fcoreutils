@@ -83,3 +83,57 @@ fn print_help() {
 fn print_version() {
     println!("expr (fcoreutils) {}", env!("CARGO_PKG_VERSION"));
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fexpr");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_expr_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_expr_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_expr_add() {
+        let output = cmd().args(["2", "+", "3"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "5");
+    }
+
+    #[test]
+    fn test_expr_multiply() {
+        let output = cmd().args(["3", "*", "4"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "12");
+    }
+
+    #[test]
+    fn test_expr_length() {
+        let output = cmd().args(["length", "hello"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "5");
+    }
+
+    #[test]
+    fn test_expr_comparison() {
+        let output = cmd().args(["5", ">", "3"]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
+    }
+}

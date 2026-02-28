@@ -275,3 +275,59 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fnumfmt");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_numfmt_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_numfmt_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_numfmt_from_si() {
+        let mut child = cmd()
+            .arg("--from=si")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"1K\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1000");
+    }
+
+    #[test]
+    fn test_numfmt_to_si() {
+        let mut child = cmd()
+            .arg("--to=si")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"1000\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.0K");
+    }
+}

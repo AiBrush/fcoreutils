@@ -494,3 +494,45 @@ fn print_help() {
     println!("  -s   same as -t d2");
     println!("  -x   same as -t x2");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fod");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_od_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_od_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_od_basic() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"AB").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("0000000"));
+    }
+}

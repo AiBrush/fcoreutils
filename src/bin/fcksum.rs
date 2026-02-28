@@ -1735,4 +1735,34 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
     }
+
+    use std::process::Stdio;
+
+    #[test]
+    fn test_cksum_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_cksum_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_cksum_md5_stdin() {
+        let mut child = cmd()
+            .arg("--algorithm=md5")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("b1946ac92492d2347c6235b4d2611184"));
+    }
 }

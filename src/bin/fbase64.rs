@@ -322,3 +322,64 @@ fn process_file(filename: &str, cli: &Cli, out: &mut impl Write) -> io::Result<(
         b64::encode_to_writer(&data, cli.wrap, out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fbase64");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_base64_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_base64_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_base64_encode() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"Hello").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("SGVsbG8="));
+    }
+
+    #[test]
+    fn test_base64_decode() {
+        let mut child = cmd()
+            .arg("-d")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"SGVsbG8=\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"Hello");
+    }
+}

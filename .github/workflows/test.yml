@@ -49,27 +49,6 @@ jobs:
       - name: Build and compile tests
         run: cargo test --no-run
 
-  # Module tests: src/{cmd}/tests.rs → cargo test "{cmd}::"
-  test-linux-mod:
-    name: Test ubuntu/${{ matrix.cmd }}
-    needs: build-linux
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        cmd: [base64, cat, chgrp, chmod, chown, comm, cp, csplit, cut, date, dd, df, du, echo, expand, expr, factor, fmt, fold, hash, head, install, join, ls, mv, nl, numfmt, od, paste, pinky, pr, printf, ptx, rev, rm, shred, sort, split, stat, stdbuf, stty, tac, tail, test_cmd, tr, uniq, users, wc, who]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: build-v2-ubuntu-latest
-          save-if: false
-      - name: Install nasm and libssl-dev
-        run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
-      - name: Run tests
-        run: cargo test "${{ matrix.cmd }}::"
-
   # Binary tests: src/bin/f{cmd}.rs → cargo test --bin f{cmd}
   test-linux-bin:
     name: Test ubuntu/${{ matrix.cmd }}
@@ -78,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cmd: [arch, base32, basename, basenc, chcon, chroot, cksum, dircolors, dirname, env, false, groups, hostid, id, kill, link, ln, logname, mkdir, mkfifo, mknod, mktemp, nice, nohup, nproc, pathchk, printenv, pwd, readlink, realpath, rmdir, runcon, seq, shuf, sleep, sum, sync, tee, timeout, touch, true, truncate, tsort, tty, uname, unlink, uptime, whoami, yes]
+        cmd: [arch, b2sum, base32, base64, basename, basenc, cat, chcon, chgrp, chmod, chown, chroot, cksum, comm, cp, csplit, cut, date, dd, df, dir, dircolors, dirname, du, echo, env, expand, expr, factor, false, fmt, fold, groups, head, hostid, id, install, join, kill, link, ln, logname, ls, md5sum, mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, numfmt, od, paste, pathchk, pinky, pr, printenv, printf, ptx, pwd, readlink, realpath, rev, rm, rmdir, runcon, seq, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shred, shuf, sleep, sort, split, stat, stdbuf, stty, sum, sync, tac, tail, tee, test, timeout, touch, tr, true, truncate, tsort, tty, uname, unexpand, uniq, unlink, uptime, users, vdir, wc, who, whoami, yes]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -104,24 +83,6 @@ jobs:
       - name: Build and compile tests
         run: cargo test --no-run
 
-  test-macos-mod:
-    name: Test macos/${{ matrix.cmd }}
-    needs: build-macos
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        cmd: [base64, cat, chgrp, chmod, chown, comm, cp, csplit, cut, date, dd, df, du, echo, expand, expr, factor, fmt, fold, hash, head, install, join, ls, mv, nl, numfmt, od, paste, pinky, pr, printf, ptx, rev, rm, shred, sort, split, stat, stdbuf, stty, tac, tail, test_cmd, tr, uniq, users, wc, who]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: build-v2-macos-latest
-          save-if: false
-      - name: Run tests
-        run: cargo test "${{ matrix.cmd }}::"
-
   test-macos-bin:
     name: Test macos/${{ matrix.cmd }}
     needs: build-macos
@@ -129,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cmd: [arch, base32, basename, basenc, chcon, chroot, cksum, dircolors, dirname, env, false, groups, hostid, id, kill, link, ln, logname, mkdir, mkfifo, mknod, mktemp, nice, nohup, nproc, pathchk, printenv, pwd, readlink, realpath, rmdir, runcon, seq, shuf, sleep, sum, sync, tee, timeout, touch, true, truncate, tsort, tty, uname, unlink, uptime, whoami, yes]
+        cmd: [arch, b2sum, base32, base64, basename, basenc, cat, chcon, chgrp, chmod, chown, chroot, cksum, comm, cp, csplit, cut, date, dd, df, dir, dircolors, dirname, du, echo, env, expand, expr, factor, false, fmt, fold, groups, head, hostid, id, install, join, kill, link, ln, logname, ls, md5sum, mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, numfmt, od, paste, pathchk, pinky, pr, printenv, printf, ptx, pwd, readlink, realpath, rev, rm, rmdir, runcon, seq, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shred, shuf, sleep, sort, split, stat, stdbuf, stty, sum, sync, tac, tail, tee, test, timeout, touch, tr, true, truncate, tsort, tty, uname, unexpand, uniq, unlink, uptime, users, vdir, wc, who, whoami, yes]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -153,24 +114,6 @@ jobs:
       - name: Build and compile tests
         run: cargo test --no-run
 
-  test-windows-mod:
-    name: Test windows/${{ matrix.cmd }}
-    needs: build-windows
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        cmd: [base64, cat, chgrp, chmod, chown, comm, cp, csplit, cut, date, dd, df, du, echo, expand, expr, factor, fmt, fold, hash, head, install, join, ls, mv, nl, numfmt, od, paste, pinky, pr, printf, ptx, rev, rm, shred, sort, split, stat, stdbuf, stty, tac, tail, test_cmd, tr, uniq, users, wc, who]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: build-v2-windows-latest
-          save-if: false
-      - name: Run tests
-        run: cargo test "${{ matrix.cmd }}::"
-
   test-windows-bin:
     name: Test windows/${{ matrix.cmd }}
     needs: build-windows
@@ -178,7 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cmd: [arch, base32, basename, basenc, chcon, chroot, cksum, dircolors, dirname, env, false, groups, hostid, id, kill, link, ln, logname, mkdir, mkfifo, mknod, mktemp, nice, nohup, nproc, pathchk, printenv, pwd, readlink, realpath, rmdir, runcon, seq, shuf, sleep, sum, sync, tee, timeout, touch, true, truncate, tsort, tty, uname, unlink, uptime, whoami, yes]
+        cmd: [arch, b2sum, base32, base64, basename, basenc, cat, chcon, chgrp, chmod, chown, chroot, cksum, comm, cp, csplit, cut, date, dd, df, dir, dircolors, dirname, du, echo, env, expand, expr, factor, false, fmt, fold, groups, head, hostid, id, install, join, kill, link, ln, logname, ls, md5sum, mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, numfmt, od, paste, pathchk, pinky, pr, printenv, printf, ptx, pwd, readlink, realpath, rev, rm, rmdir, runcon, seq, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shred, shuf, sleep, sort, split, stat, stdbuf, stty, sum, sync, tac, tail, tee, test, timeout, touch, tr, true, truncate, tsort, tty, uname, unexpand, uniq, unlink, uptime, users, vdir, wc, who, whoami, yes]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -193,21 +136,21 @@ jobs:
   test-passed:
     name: Tests passed
     if: always()
-    needs: [test-linux-mod, test-linux-bin, test-macos-mod, test-macos-bin, test-windows-mod, test-windows-bin]
+    needs: [test-linux-bin, test-macos-bin, test-windows-bin]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          results=("${{ needs.test-linux-mod.result }}" "${{ needs.test-linux-bin.result }}" \
-                   "${{ needs.test-macos-mod.result }}" "${{ needs.test-macos-bin.result }}" \
-                   "${{ needs.test-windows-mod.result }}" "${{ needs.test-windows-bin.result }}")
+          results=("${{ needs.test-linux-bin.result }}" \
+                   "${{ needs.test-macos-bin.result }}" \
+                   "${{ needs.test-windows-bin.result }}")
           for r in "${results[@]}"; do
             if [[ "$r" != "success" ]]; then
               echo "Some tests failed: $r"
               exit 1
             fi
           done
-          echo "All 98 command tests passed on all platforms"
+          echo "All 107 command binary tests passed on all platforms"
 
   # ── Assembly: build all 20 tools once, upload as artifact ─────────
   assembly-build:

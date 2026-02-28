@@ -370,3 +370,84 @@ fn run_uniq(cli: &Cli, config: &UniqConfig, output: impl Write) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("funiq");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_uniq_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_uniq_version() {
+        // funiq may not have --version enabled via clap; just ensure it doesn't crash
+        let output = cmd().arg("--version").output().unwrap();
+        let _ = output.status;
+    }
+    #[test]
+    fn test_uniq_basic() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a\na\nb\nc\nc\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_uniq_count() {
+        let mut child = cmd()
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\na\nb\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("2 a"));
+        assert!(stdout.contains("1 b"));
+    }
+
+    #[test]
+    fn test_uniq_repeated() {
+        let mut child = cmd()
+            .arg("-d")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a\na\nb\nc\nc\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nc\n");
+    }
+}

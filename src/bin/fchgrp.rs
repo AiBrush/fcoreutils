@@ -229,3 +229,108 @@ fn print_help() {
     println!("      --help     display this help and exit");
     println!("      --version  output version information and exit");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fchgrp");
+        Command::new(path)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_matches_gnu_errors_missing_operand() {
+        let output = cmd().output().unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("missing operand"));
+
+        let gnu = Command::new("chgrp").output();
+        if let Ok(gnu) = gnu {
+            assert_ne!(gnu.status.code(), Some(0));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_matches_gnu_errors_missing_file() {
+        #[cfg(target_os = "macos")]
+        let group = "wheel";
+        #[cfg(not(target_os = "macos"))]
+        let group = "root";
+        let output = cmd().arg(group).output().unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("missing operand"), "stderr was: {}", stderr);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_matches_gnu_errors_invalid_group() {
+        let output = cmd()
+            .args(["nonexistent_group_xyz_99999", "/tmp/nofile"])
+            .output()
+            .unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid group"), "stderr was: {}", stderr);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage:"));
+        assert!(stdout.contains("--recursive"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("(fcoreutils)"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_preserve_root() {
+        #[cfg(target_os = "macos")]
+        let group = "wheel";
+        #[cfg(not(target_os = "macos"))]
+        let group = "root";
+        let output = cmd()
+            .args(["--preserve-root", "-R", group, "/"])
+            .output()
+            .unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dangerous to operate recursively on '/'"),
+            "stderr was: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chgrp_nonexistent_file() {
+        #[cfg(target_os = "macos")]
+        let group = "wheel";
+        #[cfg(not(target_os = "macos"))]
+        let group = "root";
+        let output = cmd()
+            .args([group, "/nonexistent_file_xyz_99999"])
+            .output()
+            .unwrap();
+        assert_ne!(output.status.code(), Some(0));
+    }
+}

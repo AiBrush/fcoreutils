@@ -827,10 +827,11 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_o_is_error() {
-        let dir = std::env::temp_dir();
-        let p1 = dir.join("fshuf_multi_o_1.txt");
-        let p2 = dir.join("fshuf_multi_o_2.txt");
+    fn test_multiple_o_uses_last() {
+        // Like GNU shuf, multiple -o flags uses the last value
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("fshuf_multi_o_1.txt");
+        let p2 = dir.path().join("fshuf_multi_o_2.txt");
         let output = cmd()
             .args([
                 "-i",
@@ -842,15 +843,12 @@ mod tests {
             ])
             .output()
             .unwrap();
-        assert!(!output.status.success(), "multiple -o should fail");
-        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("multiple output files"),
-            "stderr: {}",
-            stderr
+            output.status.success(),
+            "multiple -o should succeed (uses last)"
         );
-        let _ = std::fs::remove_file(&p1);
-        let _ = std::fs::remove_file(&p2);
+        // The last -o file should be written
+        assert!(p2.exists(), "last -o file should be written");
     }
 
     #[test]

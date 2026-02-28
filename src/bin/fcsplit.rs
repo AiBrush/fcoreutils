@@ -223,3 +223,46 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fcsplit");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_csplit_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_csplit_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fcoreutils"));
+    }
+    #[test]
+    fn test_csplit_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.txt");
+        std::fs::write(&input, "line1\nline2\nline3\nline4\n").unwrap();
+        let output = cmd()
+            .args([input.to_str().unwrap(), "3"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

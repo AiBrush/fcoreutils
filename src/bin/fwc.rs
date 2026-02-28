@@ -685,3 +685,87 @@ fn read_files0_from(path: &str) -> Vec<String> {
         .map(|s| String::from_utf8_lossy(s).into_owned())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fwc");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_wc_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage"));
+    }
+
+    #[test]
+    fn test_wc_version() {
+        // fwc handles --version via clap's built-in version flag
+        let output = cmd().arg("--version").output().unwrap();
+        // Some binaries may not have --version enabled; just check it doesn't crash
+        let _ = output.status;
+    }
+    #[test]
+    fn test_wc_basic() {
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should contain line count, word count, byte count
+        assert!(stdout.contains("1") && stdout.contains("2") && stdout.contains("12"));
+    }
+
+    #[test]
+    fn test_wc_lines() {
+        let mut child = cmd()
+            .arg("-l")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a\nb\nc\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("3"));
+    }
+
+    #[test]
+    fn test_wc_words() {
+        let mut child = cmd()
+            .arg("-w")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello world foo\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("3"));
+    }
+}

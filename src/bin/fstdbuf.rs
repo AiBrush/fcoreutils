@@ -228,3 +228,83 @@ fn parse_mode_or_exit(s: &str) -> coreutils_rs::stdbuf::BufferMode {
         process::exit(125);
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fstdbuf");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_stdbuf_runs_command() {
+        let output = cmd().args(["-o", "L", "echo", "hello"]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "fstdbuf should exit with code 0, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "hello");
+    }
+
+    #[test]
+    fn test_stdbuf_exit_code() {
+        let output = cmd().args(["-o", "0", "false"]).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "fstdbuf should propagate child exit code"
+        );
+    }
+
+    #[test]
+    fn test_stdbuf_no_command() {
+        let output = cmd().output().unwrap();
+        assert!(
+            !output.status.success(),
+            "fstdbuf without a command should fail"
+        );
+    }
+
+    #[test]
+    fn test_stdbuf_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("stdbuf"), "Help should mention stdbuf");
+    }
+
+    #[test]
+    fn test_stdbuf_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("fcoreutils"),
+            "Version should mention fcoreutils"
+        );
+    }
+
+    #[test]
+    fn test_stdbuf_matches_gnu_args() {
+        // Verify that the same flags are accepted
+        // Note: -i L (line buffering stdin) is meaningless and rejected by GNU stdbuf too
+        let output = cmd()
+            .args(["-i", "0", "-o", "0", "-e", "4096", "echo", "test"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fstdbuf should accept -i, -o, -e flags, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "test");
+    }
+}

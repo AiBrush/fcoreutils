@@ -224,3 +224,84 @@ fn main() {
         process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("funexpand");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_help() {
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage"));
+    }
+
+    #[test]
+    fn test_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_unexpand_basic() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"        hello\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "\thello\n");
+    }
+
+    #[test]
+    fn test_unexpand_all() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .arg("-a")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello           world\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains('\t'), "Should contain tabs with -a");
+    }
+
+    #[test]
+    fn test_unexpand_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "        hello\n").unwrap();
+        let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "\thello\n");
+    }
+}

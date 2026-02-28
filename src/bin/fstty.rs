@@ -196,3 +196,93 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use std::process::Stdio;
+
+    fn cmd() -> Command {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fstty");
+        Command::new(path)
+    }
+
+    #[test]
+    fn test_stty_runs() {
+        // Running with --help should always succeed regardless of tty
+        let output = cmd().arg("--help").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage:"));
+        assert!(stdout.contains("stty"));
+    }
+
+    #[test]
+    fn test_stty_version() {
+        let output = cmd().arg("--version").output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("stty"));
+        assert!(stdout.contains("fcoreutils"));
+    }
+
+    #[test]
+    fn test_stty_size_format() {
+        // When stdin is a pipe (not a tty), stty size should fail
+        let output = cmd().arg("size").stdin(Stdio::piped()).output().unwrap();
+        // Should exit with non-zero when not a tty
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("not a tty") || stderr.contains("Inappropriate ioctl"),
+            "Expected tty error, got: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_stty_all_format() {
+        // When stdin is a pipe, stty -a should fail with not-a-tty error
+        let output = cmd().arg("-a").stdin(Stdio::piped()).output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("not a tty") || stderr.contains("Inappropriate ioctl"),
+            "Expected tty error, got: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_stty_speed() {
+        // When stdin is a pipe, stty speed should fail
+        let output = cmd().arg("speed").stdin(Stdio::piped()).output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("not a tty") || stderr.contains("Inappropriate ioctl"),
+            "Expected tty error, got: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_stty_matches_gnu_errors() {
+        // Both GNU stty and our stty should fail when stdin is not a tty
+        let gnu = Command::new("stty")
+            .arg("size")
+            .stdin(Stdio::piped())
+            .output();
+        if let Ok(gnu) = gnu {
+            let ours = cmd().arg("size").stdin(Stdio::piped()).output().unwrap();
+            assert_eq!(
+                ours.status.success(),
+                gnu.status.success(),
+                "Exit status mismatch with GNU stty"
+            );
+        }
+    }
+}
