@@ -415,6 +415,7 @@ mod tests {
         assert!(output.stdout.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cat_nonexistent_file() {
         let output = cmd().arg("/nonexistent/file.txt").output().unwrap();

@@ -508,6 +508,7 @@ mod tests {
         path.push("fmd5sum");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_hash_stdin() {
         use std::io::Write;
@@ -622,6 +623,7 @@ mod tests {
         assert_eq!(stdout.lines().count(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_nonexistent_file() {
         let output = cmd().arg("/nonexistent_xyz_md5").output().unwrap();
@@ -749,6 +751,7 @@ mod tests {
         assert!(output.stdout.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_dash_as_stdin() {
         use std::io::Write;

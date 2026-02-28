@@ -292,6 +292,7 @@ mod tests {
         path.push("fcp");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_cp_basic_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -310,6 +311,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "hello world\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_to_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -328,6 +330,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_recursive() {
         let dir = tempfile::tempdir().unwrap();
@@ -356,6 +359,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_nonexistent_source() {
         let dir = tempfile::tempdir().unwrap();
@@ -369,12 +373,14 @@ mod tests {
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_no_args() {
         let output = cmd().output().unwrap();
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_preserve_content() {
         let dir = tempfile::tempdir().unwrap();
@@ -390,6 +396,7 @@ mod tests {
         assert_eq!(std::fs::read(&dst).unwrap(), data);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_empty_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -404,6 +411,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_overwrite() {
         let dir = tempfile::tempdir().unwrap();
@@ -419,6 +427,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "new content\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_multiple_files_to_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -459,6 +468,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "content\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_no_clobber() {
         let dir = tempfile::tempdir().unwrap();
@@ -475,6 +485,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "old\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cp_large_file() {
         let dir = tempfile::tempdir().unwrap();

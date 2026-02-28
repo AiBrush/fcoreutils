@@ -422,6 +422,7 @@ mod tests {
         path.push("fdate");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_date_basic() {
         let output = cmd().output().unwrap();
@@ -430,6 +431,7 @@ mod tests {
         assert!(!stdout.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_format() {
         let output = cmd().arg("+%Y").output().unwrap();
@@ -438,6 +440,7 @@ mod tests {
         assert!(stdout.trim().parse::<u32>().is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_utc() {
         let output = cmd().args(["-u", "+%Z"]).output().unwrap();
@@ -446,6 +449,7 @@ mod tests {
         assert!(stdout.contains("UTC") || stdout.contains("GMT"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_epoch() {
         let output = cmd().arg("+%s").output().unwrap();
@@ -456,6 +460,7 @@ mod tests {
         assert!(epoch > 1_577_836_800);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_day_of_week() {
         let output = cmd().arg("+%A").output().unwrap();
@@ -477,6 +482,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_iso() {
         let output = cmd().arg("+%Y-%m-%d").output().unwrap();
@@ -489,6 +495,7 @@ mod tests {
         assert!(parts[2].len() == 2); // DD
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_multiple_format_specifiers() {
         let output = cmd().arg("+%H:%M:%S").output().unwrap();
@@ -498,6 +505,7 @@ mod tests {
         assert_eq!(parts.len(), 3);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_literal_percent() {
         let output = cmd().arg("+100%%").output().unwrap();
@@ -506,6 +514,7 @@ mod tests {
         assert_eq!(stdout.trim(), "100%");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_date_flag() {
         let output = cmd()
@@ -517,6 +526,7 @@ mod tests {
         assert_eq!(stdout.trim(), "2024-01-15");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_epoch_zero() {
         let output = cmd()
@@ -528,6 +538,7 @@ mod tests {
         assert_eq!(stdout.trim(), "1970-01-01 00:00:00");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_invalid_format() {
         // Invalid date string should fail
@@ -535,6 +546,7 @@ mod tests {
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_date_rfc3339() {
         let output = cmd().arg("--rfc-3339=seconds").output().unwrap();

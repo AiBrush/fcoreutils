@@ -525,6 +525,7 @@ mod tests {
         Command::new(path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -557,6 +558,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_mode() {
         let dir = tempfile::tempdir().unwrap();
@@ -582,6 +584,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -599,6 +602,7 @@ mod tests {
         assert!(new_dir.is_dir(), "directory should be created");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_d_creates_parents() {
         let dir = tempfile::tempdir().unwrap();
@@ -619,6 +623,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&dst).unwrap(), "deep");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_compare() {
         let dir = tempfile::tempdir().unwrap();
@@ -659,6 +664,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_compare_different() {
         let dir = tempfile::tempdir().unwrap();
@@ -681,6 +687,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&dst).unwrap(), "new content");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_verbose() {
         let dir = tempfile::tempdir().unwrap();
@@ -701,6 +708,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_matches_gnu() {
         // Compare with GNU install on basic file copy
@@ -750,6 +758,7 @@ mod tests {
             }
         }
     }
+    #[cfg(unix)]
     #[test]
     fn test_install_missing_operand() {
         let output = cmd().output().unwrap();
@@ -758,6 +767,7 @@ mod tests {
         assert!(stderr.contains("missing file operand"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_target_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -774,6 +784,7 @@ mod tests {
         assert!(dest_dir.join("td_src.txt").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_preserve_timestamps() {
         let dir = tempfile::tempdir().unwrap();
@@ -802,6 +813,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_multiple_to_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -825,6 +837,7 @@ mod tests {
         assert!(dest.join("b.txt").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_backup() {
         let dir = tempfile::tempdir().unwrap();
@@ -845,6 +858,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&dst).unwrap(), "new");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_install_directory_nested() {
         let dir = tempfile::tempdir().unwrap();

@@ -383,6 +383,7 @@ mod tests {
         path.push("fdu");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_du_current_dir() {
         let output = cmd().output().unwrap();
@@ -391,6 +392,7 @@ mod tests {
         assert!(!stdout.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_du_specific_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -401,6 +403,7 @@ mod tests {
         assert!(stdout.contains(dir.path().to_str().unwrap()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_du_summarize() {
         let dir = tempfile::tempdir().unwrap();
@@ -416,6 +419,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "summarize should produce only one line");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_du_human_readable() {
         let dir = tempfile::tempdir().unwrap();
@@ -430,6 +434,7 @@ mod tests {
         assert!(!stdout.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_du_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -441,6 +446,7 @@ mod tests {
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_du_nonexistent() {
         let output = cmd().arg("/nonexistent/path/xyz").output().unwrap();
@@ -449,6 +455,7 @@ mod tests {
         assert!(stderr.contains("cannot") || stderr.contains("No such"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_du_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -459,6 +466,7 @@ mod tests {
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_du_max_depth() {
         let dir = tempfile::tempdir().unwrap();
@@ -475,6 +483,7 @@ mod tests {
         assert!(lines.len() <= 3);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_du_total() {
         let dir = tempfile::tempdir().unwrap();

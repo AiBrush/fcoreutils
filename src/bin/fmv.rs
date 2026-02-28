@@ -394,6 +394,7 @@ mod tests {
         Command::new(path)
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_rename() {
         let dir = tempfile::tempdir().unwrap();
@@ -411,6 +412,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&dst).unwrap(), "hello");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_to_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -435,6 +437,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_force() {
         let dir = tempfile::tempdir().unwrap();
@@ -454,6 +457,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&dst).unwrap(), "new content");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_no_clobber() {
         let dir = tempfile::tempdir().unwrap();
@@ -476,6 +480,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_verbose() {
         let dir = tempfile::tempdir().unwrap();
@@ -496,6 +501,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_backup() {
         let dir = tempfile::tempdir().unwrap();
@@ -518,6 +524,7 @@ mod tests {
         assert!(!src.exists(), "source should be removed");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_matches_gnu() {
         // Compare our mv behavior with GNU mv on basic rename
@@ -556,6 +563,7 @@ mod tests {
             }
         }
     }
+    #[cfg(unix)]
     #[test]
     fn test_mv_missing_operand() {
         let output = cmd().output().unwrap();
@@ -564,6 +572,7 @@ mod tests {
         assert!(stderr.contains("missing file operand"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_missing_dest() {
         let dir = tempfile::tempdir().unwrap();
@@ -576,6 +585,7 @@ mod tests {
         assert!(stderr.contains("missing destination"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_target_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -593,6 +603,7 @@ mod tests {
         assert!(!src.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_no_target_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -610,6 +621,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&dst).unwrap(), "data");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_update_newer() {
         let dir = tempfile::tempdir().unwrap();
@@ -633,6 +645,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&dst).unwrap(), "new");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_update_older() {
         let dir = tempfile::tempdir().unwrap();
@@ -656,6 +669,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&dst).unwrap(), "new");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_multiple_to_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -681,6 +695,7 @@ mod tests {
         assert!(dest.join("b.txt").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_nonexistent_source() {
         let dir = tempfile::tempdir().unwrap();
@@ -695,6 +710,7 @@ mod tests {
         assert!(stderr.contains("cannot stat") || stderr.contains("No such file"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_backup_suffix() {
         let dir = tempfile::tempdir().unwrap();
@@ -718,6 +734,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&backup).unwrap(), "old");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_mv_directory() {
         let dir = tempfile::tempdir().unwrap();

@@ -585,6 +585,7 @@ mod tests {
         path.push("fls");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_ls_basic() {
         let dir = tempfile::tempdir().unwrap();
@@ -597,6 +598,7 @@ mod tests {
         assert!(stdout.contains("file2.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_long_format() {
         let dir = tempfile::tempdir().unwrap();
@@ -611,6 +613,7 @@ mod tests {
         // Long format should have permissions, size, etc.
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_hidden_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -632,6 +635,7 @@ mod tests {
         assert!(stdout.contains(".hidden"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_one_per_line() {
         let dir = tempfile::tempdir().unwrap();
@@ -648,6 +652,7 @@ mod tests {
         assert_eq!(lines.len(), 3);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_recursive() {
         let dir = tempfile::tempdir().unwrap();
@@ -664,6 +669,7 @@ mod tests {
         assert!(stdout.contains("inner.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -674,12 +680,14 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_nonexistent() {
         let output = cmd().arg("/nonexistent/path/xyz").output().unwrap();
         assert!(!output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_sort_by_size() {
         let dir = tempfile::tempdir().unwrap();
@@ -701,6 +709,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_reverse() {
         let dir = tempfile::tempdir().unwrap();
@@ -737,6 +746,7 @@ mod tests {
         assert!(stdout.contains("->"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_human_readable() {
         let dir = tempfile::tempdir().unwrap();
@@ -748,6 +758,7 @@ mod tests {
         assert!(output.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ls_inode() {
         let dir = tempfile::tempdir().unwrap();
