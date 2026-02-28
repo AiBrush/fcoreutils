@@ -33,7 +33,10 @@ impl VmspliceWriter {
         // but cut creates temporary Vec<u8> buffers that are freed after write_all
         // returns. The pipe reader may then read from freed/reused memory, causing
         // data corruption. Always use regular write for correctness.
-        Self { raw, is_pipe: false }
+        Self {
+            raw,
+            is_pipe: false,
+        }
     }
 }
 

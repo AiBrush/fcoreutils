@@ -251,15 +251,24 @@ fn main() {
     // GNU df: --output conflicts with -i, -P, -T
     if config.output_fields.is_some() {
         if config.inodes {
-            eprintln!("{}: options --output and --inodes (-i) are mutually exclusive", TOOL_NAME);
+            eprintln!(
+                "{}: options --output and --inodes (-i) are mutually exclusive",
+                TOOL_NAME
+            );
             process::exit(1);
         }
         if config.portability {
-            eprintln!("{}: options --output and --portability (-P) are mutually exclusive", TOOL_NAME);
+            eprintln!(
+                "{}: options --output and --portability (-P) are mutually exclusive",
+                TOOL_NAME
+            );
             process::exit(1);
         }
         if config.print_type {
-            eprintln!("{}: options --output and --print-type (-T) are mutually exclusive", TOOL_NAME);
+            eprintln!(
+                "{}: options --output and --print-type (-T) are mutually exclusive",
+                TOOL_NAME
+            );
             process::exit(1);
         }
     }

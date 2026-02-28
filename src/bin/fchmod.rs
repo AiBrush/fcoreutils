@@ -243,7 +243,9 @@ fn main() {
             // "0755" (4 digits) -> preserves, "00755" (5 digits) -> clears.
             if metadata.is_dir()
                 && !effective_mode_str.is_empty()
-                && effective_mode_str.bytes().all(|b| b.is_ascii_digit() && b < b'8')
+                && effective_mode_str
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() && b < b'8')
                 && effective_mode_str.len() <= 4
             {
                 let existing_special = current_mode & 0o7000;
