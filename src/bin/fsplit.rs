@@ -435,13 +435,14 @@ fn main() {
             split::generate_suffix(0, &cli.config.suffix_type, cli.config.suffix_length),
             cli.config.additional_suffix
         );
-        if let Ok(input_meta) = std::fs::metadata(&cli.input) {
-            if let Ok(output_meta) = std::fs::metadata(&first_output) {
-                if input_meta.dev() == output_meta.dev() && input_meta.ino() == output_meta.ino() {
-                    eprintln!("split: '{}' would overwrite input; aborting", first_output);
-                    process::exit(1);
-                }
-            }
+        if let (Ok(input_meta), Ok(output_meta)) = (
+            std::fs::metadata(&cli.input),
+            std::fs::metadata(&first_output),
+        ) && input_meta.dev() == output_meta.dev()
+            && input_meta.ino() == output_meta.ino()
+        {
+            eprintln!("split: '{}' would overwrite input; aborting", first_output);
+            process::exit(1);
         }
     }
 
