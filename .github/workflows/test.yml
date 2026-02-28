@@ -53,9 +53,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Build and test
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
         run: |
-          cargo build --profile ci
-          cargo test --profile ci
+          cargo build --release
+          cargo test --release
 
   # Assembly: build all 20 tools once, upload as artifact
   assembly-build:

@@ -515,14 +515,6 @@ harness = false
 name = "hash_benchmark"
 harness = false
 
-# CI profile: fast compilation for correctness testing (no LTO, parallel codegen)
-[profile.ci]
-inherits = "release"
-lto = false
-codegen-units = 16
-strip = false
-
-# Release profile: maximum optimization for distribution
 [profile.release]
 lto = "fat"
 codegen-units = 1
