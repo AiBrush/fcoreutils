@@ -874,6 +874,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_wc_c_locale_0xa0_is_whitespace() {
+        // GNU wc in C locale treats byte 0xA0 (NO-BREAK SPACE) as whitespace
+        // Input: 0xe4 0xbd [0xa0] 0xe5 0xa5 0xbd = "你好" in UTF-8
+        // In C locale, 0xa0 is a word break, so this should be 2 words
+        let mut child = cmd()
+            .arg("-w")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"\xe4\xbd\xa0\xe5\xa5\xbd\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.trim().starts_with("2") || stdout.contains(" 2"),
+            "C locale should count 0xA0 as whitespace (2 words), got: {}",
+            stdout.trim()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_wc_chars_vs_bytes_utf8() {
         let mut child = cmd()
             .arg("-m")
