@@ -141,7 +141,13 @@ pub fn head_lines_from_end(
 
     // Scan backward: skip N delimiters (= N lines), then the next delimiter
     // marks the end of the last line to keep.
-    let mut count = 0u64;
+    // If the data does not end with a delimiter, the unterminated last "line"
+    // counts as one line to skip.
+    let mut count = if !data.is_empty() && *data.last().unwrap() != delimiter {
+        1u64
+    } else {
+        0u64
+    };
     for pos in memrchr_iter(delimiter, data) {
         count += 1;
         if count > n {
@@ -149,7 +155,7 @@ pub fn head_lines_from_end(
         }
     }
 
-    // Fewer than N+1 delimiters → N >= total lines → output nothing
+    // Fewer than N+1 lines → N >= total lines → output nothing
     Ok(())
 }
 

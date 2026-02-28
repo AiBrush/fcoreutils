@@ -192,38 +192,78 @@ fn apply_symbolic_clause(clause: &str, current_mode: u32, umask: u32) -> Result<
         // Parse permission bits
         let mut perm_bits: u32 = 0;
         let mut has_x_cap = false;
+        // Track whether we've seen regular perm chars (rwxXst) vs copy-from (ugo).
+        // GNU chmod does not allow mixing these in the same clause after the operator.
+        let mut has_perm_chars = false;
+        let mut has_copy_from = false;
 
         while pos < len && bytes[pos] != b'+' && bytes[pos] != b'-' && bytes[pos] != b'=' {
             match bytes[pos] {
                 b'r' => {
+                    if has_copy_from {
+                        return Err(format!("invalid mode: '{}'", clause));
+                    }
+                    has_perm_chars = true;
                     perm_bits |= S_IRUSR | S_IRGRP | S_IROTH;
                 }
                 b'w' => {
+                    if has_copy_from {
+                        return Err(format!("invalid mode: '{}'", clause));
+                    }
+                    has_perm_chars = true;
                     perm_bits |= S_IWUSR | S_IWGRP | S_IWOTH;
                 }
                 b'x' => {
+                    if has_copy_from {
+                        return Err(format!("invalid mode: '{}'", clause));
+                    }
+                    has_perm_chars = true;
                     perm_bits |= S_IXUSR | S_IXGRP | S_IXOTH;
                 }
                 b'X' => {
+                    if has_copy_from {
+                        return Err(format!("invalid mode: '{}'", clause));
+                    }
+                    has_perm_chars = true;
                     has_x_cap = true;
                 }
                 b's' => {
+                    if has_copy_from {
+                        return Err(format!("invalid mode: '{}'", clause));
+                    }
+                    has_perm_chars = true;
                     perm_bits |= S_ISUID | S_ISGID;
                 }
                 b't' => {
+                    if has_copy_from {
+                        return Err(format!("invalid mode: '{}'", clause));
+                    }
+                    has_perm_chars = true;
                     perm_bits |= S_ISVTX;
                 }
                 b'u' => {
+                    if has_perm_chars {
+                        return Err(format!("invalid mode: '{}'", clause));
+                    }
+                    has_copy_from = true;
                     // Copy user bits
                     let u = current_mode & USER_BITS;
                     perm_bits |= u | (u >> 3) | (u >> 6);
                 }
                 b'g' => {
+                    if has_perm_chars {
+                        return Err(format!("invalid mode: '{}'", clause));
+                    }
+                    has_copy_from = true;
                     // Copy group bits
                     let g = current_mode & GROUP_BITS;
                     perm_bits |= (g << 3) | g | (g >> 3);
                 }
                 b'o' => {
+                    if has_perm_chars {
+                        return Err(format!("invalid mode: '{}'", clause));
+                    }
+                    has_copy_from = true;
                     // Copy other bits
                     let o = current_mode & OTHER_BITS;
                     perm_bits |= (o << 6) | (o << 3) | o;
@@ -456,7 +496,19 @@ fn process_entry(path: &Path, mode_str: &str, config: &ChmodConfig) -> Result<()
     }
 
     let current_mode = metadata.mode();
-    let new_mode = parse_mode(mode_str, current_mode).map_err(|e| io::Error::other(e))?;
+    let mut new_mode = parse_mode(mode_str, current_mode).map_err(|e| io::Error::other(e))?;
+
+    // GNU chmod: for directories, preserve setuid/setgid bits when the octal
+    // mode doesn't explicitly specify them (i.e., <= 4 octal digits).
+    if metadata.is_dir()
+        && !mode_str.is_empty()
+        && mode_str.bytes().all(|b| b.is_ascii_digit() && b < b'8')
+        && mode_str.len() <= 4
+    {
+        let existing_special = current_mode & 0o7000;
+        new_mode |= existing_special;
+    }
+
     chmod_file(path, new_mode, config)?;
     Ok(())
 }
