@@ -54,8 +54,8 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Build and test
         run: |
-          cargo build --release
-          cargo test --release
+          cargo build --profile ci
+          cargo test --profile ci
 
   # Assembly: build all 20 tools once, upload as artifact
   assembly-build:
