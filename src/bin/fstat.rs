@@ -298,10 +298,15 @@ mod tests {
 
     #[test]
     fn test_stat_directory() {
-        let output = cmd().arg("/tmp").output().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let output = cmd().arg(dir.path().to_str().unwrap()).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.to_lowercase().contains("directory"));
+        assert!(
+            stdout.contains("directory"),
+            "stat output should contain 'directory', got: {}",
+            stdout
+        );
     }
 
     #[test]
