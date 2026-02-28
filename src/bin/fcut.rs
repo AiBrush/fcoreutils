@@ -29,11 +29,14 @@ struct VmspliceWriter {
 impl VmspliceWriter {
     fn new() -> Self {
         let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        let is_pipe = unsafe {
-            let mut stat: libc::stat = std::mem::zeroed();
-            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
-        };
-        Self { raw, is_pipe }
+        // Disable vmsplice: it passes user-space pages by reference to the pipe,
+        // but cut creates temporary Vec<u8> buffers that are freed after write_all
+        // returns. The pipe reader may then read from freed/reused memory, causing
+        // data corruption. Always use regular write for correctness.
+        Self {
+            raw,
+            is_pipe: false,
+        }
     }
 }
 

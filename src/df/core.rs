@@ -60,6 +60,8 @@ pub struct FsInfo {
     pub source: String,
     pub fstype: String,
     pub target: String,
+    /// The command-line argument that matched this filesystem (for --output=file).
+    pub file: String,
     pub total: u64,
     pub used: u64,
     pub available: u64,
@@ -218,6 +220,7 @@ fn statvfs_info(mount: &MountEntry) -> Option<FsInfo> {
         source: mount.source.clone(),
         fstype: mount.fstype.clone(),
         target: mount.target.clone(),
+        file: mount.target.clone(),
         total,
         used,
         available,
@@ -288,7 +291,8 @@ pub fn get_filesystems(config: &DfConfig) -> (Vec<FsInfo>, bool) {
         for file in &config.files {
             match find_mount_for_file(file, &mounts) {
                 Some(mount) => {
-                    if let Some(info) = statvfs_info(mount) {
+                    if let Some(mut info) = statvfs_info(mount) {
+                        info.file = file.clone();
                         result.push(info);
                     }
                 }
@@ -485,9 +489,16 @@ pub const VALID_OUTPUT_FIELDS: &[&str] = &[
 /// Parse the --output field list.
 pub fn parse_output_fields(s: &str) -> Result<Vec<String>, String> {
     let fields: Vec<String> = s.split(',').map(|f| f.trim().to_lowercase()).collect();
+    let mut seen = std::collections::HashSet::new();
     for field in &fields {
         if !VALID_OUTPUT_FIELDS.contains(&field.as_str()) {
             return Err(format!("df: '{}': not a valid field for --output", field));
+        }
+        if !seen.insert(field.as_str()) {
+            return Err(format!(
+                "option --output: field '{}' used more than once",
+                field
+            ));
         }
     }
     Ok(fields)
@@ -528,7 +539,7 @@ pub(crate) fn build_row(info: &FsInfo, config: &DfConfig) -> Vec<String> {
                 "used" => format_size(info.used, config),
                 "avail" => format_size(info.available, config),
                 "pcent" => format_percent(info.use_percent),
-                "file" => info.target.clone(),
+                "file" => info.file.clone(),
                 "target" => info.target.clone(),
                 _ => String::new(),
             })

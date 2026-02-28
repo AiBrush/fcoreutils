@@ -313,18 +313,20 @@ fn parse_date_string_with_base(
         .parse()
         .map_err(|_| format!("invalid date '{}'", s))?;
 
-    let (hour, minute, second, nsec) = if parts.len() > 1 {
+    let (hour, minute, second, nsec, tz_offset_secs) = if parts.len() > 1 {
         let time_part = parts[1].trim();
+        // Extract timezone offset if present (e.g., "+0000", "-0500", "+05:30", "Z")
+        let (time_no_tz, tz_secs) = extract_tz_offset(time_part);
         // Check for fractional seconds
-        let (time_str, frac_nsec) = if let Some(dot_pos) = time_part.find('.') {
-            let frac_str = &time_part[dot_pos + 1..];
+        let (time_str, frac_nsec) = if let Some(dot_pos) = time_no_tz.find('.') {
+            let frac_str = &time_no_tz[dot_pos + 1..];
             let padded = format!("{:0<9}", frac_str);
             let ns: i64 = padded[..9]
                 .parse()
                 .map_err(|_| format!("invalid date '{}'", s))?;
-            (&time_part[..dot_pos], ns)
+            (&time_no_tz[..dot_pos], ns)
         } else {
-            (time_part, 0i64)
+            (time_no_tz.as_str(), 0i64)
         };
         let time_fields: Vec<&str> = time_str.split(':').collect();
         if time_fields.len() < 2 || time_fields.len() > 3 {
@@ -343,9 +345,9 @@ fn parse_date_string_with_base(
         } else {
             0
         };
-        (h, m, sec, frac_nsec)
+        (h, m, sec, frac_nsec, tz_secs)
     } else {
-        (0, 0, 0, 0)
+        (0, 0, 0, 0, None)
     };
 
     if !(1..=12).contains(&month)
@@ -357,8 +359,84 @@ fn parse_date_string_with_base(
         return Err(format!("invalid date '{}'", s));
     }
 
-    let epoch = mktime_local(year, month, day, hour, minute, second)?;
-    Ok((epoch, nsec))
+    if let Some(tz_secs) = tz_offset_secs {
+        // Compute UTC epoch directly using mktime_utc approach
+        let epoch_utc = mktime_utc(year, month, day, hour, minute, second)?;
+        Ok((epoch_utc - tz_secs as i64, nsec))
+    } else {
+        let epoch = mktime_local(year, month, day, hour, minute, second)?;
+        Ok((epoch, nsec))
+    }
+}
+
+/// Extract timezone offset from a time string.
+/// Returns (time_without_tz, offset_in_seconds).
+/// Supports: Z, +0000, -0500, +05:30
+#[cfg(unix)]
+fn extract_tz_offset(time_str: &str) -> (String, Option<i32>) {
+    let trimmed = time_str.trim();
+    if let Some(stripped) = trimmed.strip_suffix('Z') {
+        return (stripped.trim().to_string(), Some(0));
+    }
+    // Look for +HHMM or -HHMM or +HH:MM or -HH:MM at the end
+    // Could be after a space: "12:00 +0000"
+    if let Some(space_pos) = trimmed.rfind(' ') {
+        let suffix = &trimmed[space_pos + 1..];
+        if (suffix.starts_with('+') || suffix.starts_with('-')) && suffix.len() >= 5 {
+            let sign: i32 = if suffix.starts_with('+') { 1 } else { -1 };
+            let digits = &suffix[1..];
+            let (hh, mm) = if digits.contains(':') {
+                let parts: Vec<&str> = digits.split(':').collect();
+                if parts.len() == 2 {
+                    if let (Ok(h), Ok(m)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
+                        (h, m)
+                    } else {
+                        return (trimmed.to_string(), None);
+                    }
+                } else {
+                    return (trimmed.to_string(), None);
+                }
+            } else if digits.len() == 4 {
+                if let (Ok(h), Ok(m)) = (digits[..2].parse::<i32>(), digits[2..].parse::<i32>()) {
+                    (h, m)
+                } else {
+                    return (trimmed.to_string(), None);
+                }
+            } else {
+                return (trimmed.to_string(), None);
+            };
+            let offset = sign * (hh * 3600 + mm * 60);
+            return (trimmed[..space_pos].trim().to_string(), Some(offset));
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
+/// Compute UTC epoch from date/time components (without local timezone conversion).
+#[cfg(unix)]
+fn mktime_utc(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Result<i64, String> {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month as i32 - 1;
+    tm.tm_mday = day as i32;
+    tm.tm_hour = hour as i32;
+    tm.tm_min = minute as i32;
+    tm.tm_sec = second as i32;
+    tm.tm_isdst = 0;
+
+    // Use timegm for UTC conversion
+    let t = unsafe { libc::timegm(&mut tm) };
+    if t == -1 {
+        return Err("invalid time value".to_string());
+    }
+    Ok(t)
 }
 
 /// Apply timestamps to a file using utimensat for nanosecond precision.
@@ -606,15 +684,41 @@ fn main() {
         // Trailing slash on a non-directory should fail with ENOTDIR (GNU compat)
         if file.ends_with('/') {
             let base = file.trim_end_matches('/');
-            if !base.is_empty()
-                && let Ok(meta) = fs::symlink_metadata(base)
-                && !meta.is_dir()
-            {
-                eprintln!(
-                    "{}: setting times of '{}': Not a directory",
-                    TOOL_NAME, file
-                );
-                exit_code = 1;
+            if !base.is_empty() {
+                match fs::symlink_metadata(base) {
+                    Ok(meta) if !meta.is_dir() => {
+                        // -c silences the error for nonexistent/non-directory paths
+                        if !no_create {
+                            eprintln!(
+                                "{}: setting times of '{}': Not a directory",
+                                TOOL_NAME, file
+                            );
+                            exit_code = 1;
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        // Path doesn't exist at all
+                        if !no_create {
+                            eprintln!(
+                                "{}: cannot touch '{}': No such file or directory",
+                                TOOL_NAME, file
+                            );
+                            exit_code = 1;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            } else {
+                // Trailing slash on empty base - nonexistent
+                if !no_create {
+                    eprintln!(
+                        "{}: cannot touch '{}': No such file or directory",
+                        TOOL_NAME, file
+                    );
+                    exit_code = 1;
+                }
                 continue;
             }
         }
@@ -659,6 +763,17 @@ fn main() {
                 }
             }
         } else if !path_exists(file) {
+            // With -h (no-dereference), never create files — just fail or skip
+            if no_deref {
+                if !no_create {
+                    eprintln!(
+                        "{}: setting times of '{}': No such file or directory",
+                        TOOL_NAME, file
+                    );
+                    exit_code = 1;
+                }
+                continue;
+            }
             // Create file if it doesn't exist and -c not specified
             if no_create {
                 continue;

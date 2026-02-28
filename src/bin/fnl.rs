@@ -53,7 +53,11 @@ fn parse_args() -> Cli {
                     }
                 }
             } else if let Some(val) = s.strip_prefix("--section-delimiter=") {
-                cli.config.section_delimiter = val.as_bytes().to_vec();
+                let mut bytes = val.as_bytes().to_vec();
+                if bytes.len() == 1 {
+                    bytes.push(b':');
+                }
+                cli.config.section_delimiter = bytes;
             } else if let Some(val) = s.strip_prefix("--line-increment=") {
                 match val.parse::<i64>() {
                     Ok(n) => cli.config.line_increment = n,
@@ -130,7 +134,11 @@ fn parse_args() -> Cli {
                     }
                     b"--section-delimiter" => {
                         let val = require_arg(&mut args, "--section-delimiter");
-                        cli.config.section_delimiter = val.into_bytes();
+                        let mut bytes = val.into_bytes();
+                        if bytes.len() == 1 {
+                            bytes.push(b':');
+                        }
+                        cli.config.section_delimiter = bytes;
                     }
                     b"--line-increment" => {
                         let val = require_arg(&mut args, "--line-increment");
@@ -244,7 +252,12 @@ fn parse_args() -> Cli {
                     }
                     'd' => {
                         let val = short_opt_value(&s, &chars, i, &mut args, 'd');
-                        cli.config.section_delimiter = val.into_bytes();
+                        let mut bytes = val.into_bytes();
+                        // POSIX: single char delimiter implies colon as second char
+                        if bytes.len() == 1 {
+                            bytes.push(b':');
+                        }
+                        cli.config.section_delimiter = bytes;
                         break;
                     }
                     'i' => {
@@ -418,6 +431,7 @@ fn main() {
     };
 
     let mut had_error = false;
+    let mut line_number = cli.config.starting_line_number;
 
     for filename in &files {
         let data = if filename == "-" {
@@ -440,7 +454,7 @@ fn main() {
             }
         };
 
-        let output = nl::nl_to_vec(&data, &cli.config);
+        let output = nl::nl_to_vec_with_state(&data, &cli.config, &mut line_number);
         if let Err(e) = write_all_raw(&output) {
             if e.kind() == std::io::ErrorKind::BrokenPipe {
                 process::exit(0);
@@ -744,5 +758,73 @@ mod tests {
     fn test_nl_invalid_numbering_style() {
         let output = cmd().args(["-b", "invalid"]).output().unwrap();
         assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_nl_single_char_delimiter_implies_colon() {
+        // GNU nl: -d with single char 'x' implies delimiter is 'x:'
+        // So section delimiter lines are "x:x:x:" (header), "x:x:" (body), "x:" (footer)
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-d", "x"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Input: "a\nx:x:\nc\n" — "x:x:" is body delimiter when delim is "x:"
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"a\nx:x:\nc\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // "x:x:" should be treated as body section delimiter (replaced with blank line)
+        // "a" should be numbered as 1, then after section reset, "c" should be numbered as 1
+        assert!(
+            stdout.contains("1") && stdout.contains("a"),
+            "stdout: {}",
+            stdout
+        );
+        // The section delimiter line should appear as a blank line
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "Should have 3 output lines, got: {:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_nl_multiple_files_continue_numbering() {
+        // GNU nl: line numbering continues across multiple files
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("f1.txt");
+        let f2 = dir.path().join("f2.txt");
+        std::fs::write(&f1, "a\n").unwrap();
+        std::fs::write(&f2, "b\n").unwrap();
+        let output = cmd()
+            .args([f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // First file: line 1 = "a", second file: line 2 = "b"
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2, "Should have 2 lines: {:?}", lines);
+        assert!(
+            lines[0].contains("1"),
+            "First line should be numbered 1: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("2"),
+            "Second line should be numbered 2: {}",
+            lines[1]
+        );
     }
 }

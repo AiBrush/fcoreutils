@@ -25,6 +25,16 @@ pub enum SplitMode {
     LineBytes(u64),
     /// Split into exactly N output files (by byte count).
     Number(u64),
+    /// Extract Kth chunk of N total (K/N format, 1-indexed).
+    NumberExtract(u64, u64),
+    /// Split into N output files by line boundaries (l/N format).
+    LineChunks(u64),
+    /// Extract Kth line-based chunk of N total (l/K/N format).
+    LineChunkExtract(u64, u64),
+    /// Round-robin distribute lines across N output files (r/N format).
+    RoundRobin(u64),
+    /// Extract Kth round-robin chunk of N total (r/K/N format).
+    RoundRobinExtract(u64, u64),
 }
 
 /// Configuration for the split command.
@@ -542,6 +552,193 @@ fn split_by_number(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io:
     Ok(())
 }
 
+/// Extract Kth chunk of N from input (K/N format). Output goes to stdout.
+fn split_by_number_extract(input_path: &str, k: u64, n: u64) -> io::Result<()> {
+    let data: crate::common::io::FileData = if input_path == "-" {
+        let mut buf = Vec::new();
+        io::stdin().lock().read_to_end(&mut buf)?;
+        crate::common::io::FileData::Owned(buf)
+    } else {
+        crate::common::io::read_file(Path::new(input_path))?
+    };
+
+    let total = data.len() as u64;
+    let base_chunk_size = total / n;
+    let remainder = total % n;
+
+    let mut offset: u64 = 0;
+    for i in 0..n {
+        let chunk_size = base_chunk_size + if i < remainder { 1 } else { 0 };
+        if i + 1 == k {
+            if chunk_size > 0 {
+                let start = offset as usize;
+                let end = start + chunk_size as usize;
+                let stdout = io::stdout();
+                let mut out = stdout.lock();
+                out.write_all(&data[start..end])?;
+            }
+            return Ok(());
+        }
+        offset += chunk_size;
+    }
+    Ok(())
+}
+
+/// Read all input data into a buffer.
+fn read_input_data(input_path: &str) -> io::Result<Vec<u8>> {
+    if input_path == "-" {
+        let mut buf = Vec::new();
+        io::stdin().lock().read_to_end(&mut buf)?;
+        Ok(buf)
+    } else {
+        let data = crate::common::io::read_file(Path::new(input_path))?;
+        Ok(data.to_vec())
+    }
+}
+
+/// Split into N output files by line count (l/N format).
+fn split_by_line_chunks(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io::Result<()> {
+    let data = read_input_data(input_path)?;
+    let total = data.len() as u64;
+    let base_chunk_size = total / n_chunks;
+    let remainder = total % n_chunks;
+    let sep = config.separator;
+
+    let mut offset: u64 = 0;
+    for i in 0..n_chunks {
+        let target_end = offset + base_chunk_size + if i < remainder { 1 } else { 0 };
+        // Extend to next line boundary
+        let end = if target_end >= total {
+            total
+        } else {
+            match memchr::memchr(sep, &data[target_end as usize..]) {
+                Some(pos) => target_end + pos as u64 + 1,
+                None => total,
+            }
+        };
+        let chunk_size = end - offset;
+
+        if config.elide_empty && chunk_size == 0 {
+            continue;
+        }
+
+        let mut writer = create_writer(config, i)?;
+        if chunk_size > 0 {
+            writer.write_all(&data[offset as usize..end as usize])?;
+        }
+        writer.finish()?;
+        offset = end;
+    }
+    Ok(())
+}
+
+/// Extract Kth line-based chunk of N (l/K/N format). Output goes to stdout.
+fn split_by_line_chunk_extract(
+    input_path: &str,
+    config: &SplitConfig,
+    k: u64,
+    n_chunks: u64,
+) -> io::Result<()> {
+    let data = read_input_data(input_path)?;
+    let total = data.len() as u64;
+    let base_chunk_size = total / n_chunks;
+    let remainder = total % n_chunks;
+    let sep = config.separator;
+
+    let mut offset: u64 = 0;
+    for i in 0..n_chunks {
+        let target_end = offset + base_chunk_size + if i < remainder { 1 } else { 0 };
+        let end = if target_end >= total {
+            total
+        } else {
+            match memchr::memchr(sep, &data[target_end as usize..]) {
+                Some(pos) => target_end + pos as u64 + 1,
+                None => total,
+            }
+        };
+        if i + 1 == k {
+            let chunk_size = end - offset;
+            if chunk_size > 0 {
+                let stdout = io::stdout();
+                let mut out = stdout.lock();
+                out.write_all(&data[offset as usize..end as usize])?;
+            }
+            return Ok(());
+        }
+        offset = end;
+    }
+    Ok(())
+}
+
+/// Round-robin distribute lines across N output files (r/N format).
+fn split_by_round_robin(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io::Result<()> {
+    let data = read_input_data(input_path)?;
+    let sep = config.separator;
+
+    // Collect lines
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut start = 0;
+    for pos in memchr::memchr_iter(sep, &data) {
+        lines.push(&data[start..=pos]);
+        start = pos + 1;
+    }
+    if start < data.len() {
+        lines.push(&data[start..]);
+    }
+
+    // Create writers for each chunk
+    let mut writers: Vec<Option<Box<dyn ChunkWriter>>> = (0..n_chunks)
+        .map(|i| {
+            if config.elide_empty && lines.len() as u64 <= i {
+                None
+            } else {
+                Some(create_writer(config, i).unwrap())
+            }
+        })
+        .collect();
+
+    // Distribute lines round-robin
+    for (idx, line) in lines.iter().enumerate() {
+        let chunk_idx = (idx as u64) % n_chunks;
+        if let Some(ref mut writer) = writers[chunk_idx as usize] {
+            writer.write_all(line)?;
+        }
+    }
+
+    // Finish all writers
+    for writer in &mut writers {
+        if let Some(mut w) = writer.take() {
+            w.finish()?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract Kth round-robin chunk of N (r/K/N format). Output goes to stdout.
+fn split_by_round_robin_extract(input_path: &str, k: u64, n: u64) -> io::Result<()> {
+    let data = read_input_data(input_path)?;
+    let sep = b'\n';
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    let mut start = 0;
+    let mut line_idx: u64 = 0;
+    for pos in memchr::memchr_iter(sep, &data) {
+        if line_idx % n == k - 1 {
+            out.write_all(&data[start..=pos])?;
+        }
+        start = pos + 1;
+        line_idx += 1;
+    }
+    if start < data.len() && line_idx % n == k - 1 {
+        out.write_all(&data[start..])?;
+    }
+
+    Ok(())
+}
+
 /// Fast pre-loaded line splitting: reads the entire file into a heap buffer and
 /// splits by scanning for separator positions in one pass. Each output chunk is
 /// written with a single write_all() call (no BufWriter needed).
@@ -598,6 +795,21 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
     // For number-based splitting, we need to read the whole file to know size.
     if let SplitMode::Number(n) = config.mode {
         return split_by_number(input_path, config, n);
+    }
+    if let SplitMode::NumberExtract(k, n) = config.mode {
+        return split_by_number_extract(input_path, k, n);
+    }
+    if let SplitMode::LineChunks(n) = config.mode {
+        return split_by_line_chunks(input_path, config, n);
+    }
+    if let SplitMode::LineChunkExtract(k, n) = config.mode {
+        return split_by_line_chunk_extract(input_path, config, k, n);
+    }
+    if let SplitMode::RoundRobin(n) = config.mode {
+        return split_by_round_robin(input_path, config, n);
+    }
+    if let SplitMode::RoundRobinExtract(k, n) = config.mode {
+        return split_by_round_robin_extract(input_path, k, n);
     }
 
     // Fast path: read+memchr line splitting for regular files (no filter).
@@ -678,7 +890,12 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
             let mut buf_reader = BufReader::with_capacity(1024 * 1024, reader);
             split_by_line_bytes(&mut buf_reader, config, n)
         }
-        SplitMode::Number(_) => unreachable!(),
+        SplitMode::Number(_)
+        | SplitMode::NumberExtract(_, _)
+        | SplitMode::LineChunks(_)
+        | SplitMode::LineChunkExtract(_, _)
+        | SplitMode::RoundRobin(_)
+        | SplitMode::RoundRobinExtract(_, _) => unreachable!(),
     }
 }
 

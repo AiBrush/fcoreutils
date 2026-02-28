@@ -431,8 +431,14 @@ fn make_link(
     // Check if link_name already exists (as symlink or regular file)
     let link_exists = link_path.symlink_metadata().is_ok();
 
-    // For -sf: detect same source and destination before removing
-    if link_exists && (force || backup != BackupMode::None) && same_file(target, link_name) {
+    // For symbolic links or backup mode: detect same source and destination.
+    // For hard links with -f (no backup), same-file is allowed: GNU ln removes
+    // the old hard link and creates a new one (effectively a no-op but succeeds).
+    if link_exists
+        && (force || backup != BackupMode::None)
+        && same_file(target, link_name)
+        && (symbolic || backup != BackupMode::None)
+    {
         // GNU ln: "X and Y are the same file"
         eprintln!(
             "{}: '{}' and '{}' are the same file",

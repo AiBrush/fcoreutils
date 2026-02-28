@@ -452,16 +452,22 @@ pub fn cat_with_options(
                 } else {
                     line.len()
                 };
-                // GNU cat -E: CR immediately before LF is shown as ^M
-                if has_newline && content_end > 0 && line[content_end - 1] == b'\r' {
-                    buf.extend_from_slice(&line[..content_end - 1]);
-                    buf.extend_from_slice(b"^M$\n");
-                } else {
-                    buf.extend_from_slice(&line[..content_end]);
-                    if has_newline {
-                        buf.push(b'$');
-                        buf.push(b'\n');
+                // GNU cat -E: ALL \r are shown as ^M (not just \r before \n)
+                let content = &line[..content_end];
+                if memchr::memchr(b'\r', content).is_some() {
+                    for &b in content {
+                        if b == b'\r' {
+                            buf.extend_from_slice(b"^M");
+                        } else {
+                            buf.push(b);
+                        }
                     }
+                } else {
+                    buf.extend_from_slice(content);
+                }
+                if has_newline {
+                    buf.push(b'$');
+                    buf.push(b'\n');
                 }
             } else {
                 buf.extend_from_slice(line);
@@ -533,6 +539,22 @@ pub fn cat_file(
                 return Ok(false);
             }
             _ => {}
+        }
+
+        // GNU cat: detect when input file is the same as stdout (e.g. cat file >> file)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(file_meta) = std::fs::metadata(path) {
+                let mut stdout_stat: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstat(1, &mut stdout_stat) } == 0
+                    && file_meta.dev() == stdout_stat.st_dev as u64
+                    && file_meta.ino() == stdout_stat.st_ino as u64
+                {
+                    eprintln!("{}: {}: input file is output file", tool_name, filename);
+                    return Ok(false);
+                }
+            }
         }
 
         if config.is_plain() {

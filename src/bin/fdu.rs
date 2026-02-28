@@ -27,7 +27,7 @@ Summarize device usage of the set of FILEs, recursively for directories.
 
   -0, --null            end each output line with NUL, not newline
   -a, --all             write counts for all files, not just directories
-  -A, --apparent-size   print apparent sizes rather than device usage
+      --apparent-size   print apparent sizes rather than device usage
   -B, --block-size=SIZE scale sizes by SIZE before printing them
   -b, --bytes           equivalent to --apparent-size --block-size=1
   -c, --total           produce a grand total
@@ -189,7 +189,7 @@ fn parse_args() -> (DuConfig, Vec<String>) {
                     'L' => config.dereference = true,
                     'P' => config.dereference = false,
                     'S' => config.separate_dirs = true,
-                    'A' => config.apparent_size = true,
+                    // Note: GNU du does not have -A as short for --apparent-size
                     's' => config.summarize = true,
                     'x' => config.one_file_system = true,
                     'd' => {

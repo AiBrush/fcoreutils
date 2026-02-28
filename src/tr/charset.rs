@@ -248,38 +248,47 @@ pub fn expand_set2_with_classes(set2_str: &str, set1_len: usize) -> (Vec<u8>, Ve
 }
 
 /// Validate that [:upper:] and [:lower:] classes are properly paired between SET1 and SET2.
-/// GNU tr requires that when [:upper:] appears in one set, [:lower:] must appear at the
-/// same position in the other set (and vice versa). Returns an error message if misaligned.
+///
+/// GNU tr rules:
+/// - Every case class in SET2 MUST have a matching case class (same or opposite) at the
+///   same expanded position in SET1. If not, error.
+/// - Case classes in SET1 that don't have a corresponding class in SET2 are fine —
+///   they're just treated as expanded character sets (26 chars) with normal SET2 extension.
+///
+/// This means:
+/// - `tr '[:lower:]' 'xyz'` is fine (SET1 has class, SET2 doesn't → normal mapping)
+/// - `tr 'abc' '[:upper:]'` is an error (SET2 has class, SET1 doesn't)
+/// - `tr '[:lower:][:upper:]' '[:upper:]xyz'` is fine (SET1 upper at pos 26 maps to xyz)
+/// - `tr 'A-Z[:lower:]' 'a-y[:upper:]'` is an error (SET2 upper at pos 25, SET1 lower at pos 26)
 pub fn validate_case_classes(
     set1_classes: &[CaseClassInfo],
     set2_classes: &[CaseClassInfo],
 ) -> Result<(), String> {
-    // Check each class in SET1 has a matching partner in SET2 at the same position
-    for c1 in set1_classes {
-        let expected_partner = match c1.class {
-            CaseClass::Upper => CaseClass::Lower,
-            CaseClass::Lower => CaseClass::Upper,
-        };
-        let found = set2_classes
-            .iter()
-            .any(|c2| c2.class == expected_partner && c2.position == c1.position);
+    // Every case class in SET2 must have a case class in SET1 at the same position
+    for c2 in set2_classes {
+        let found = set1_classes.iter().any(|c1| c1.position == c2.position);
         if !found {
             return Err("misaligned [:upper:] and/or [:lower:] construct".to_string());
         }
     }
 
-    // Check each class in SET2 has a matching partner in SET1 at the same position
-    for c2 in set2_classes {
-        let expected_partner = match c2.class {
-            CaseClass::Upper => CaseClass::Lower,
-            CaseClass::Lower => CaseClass::Upper,
-        };
-        let found = set1_classes
-            .iter()
-            .any(|c1| c1.class == expected_partner && c1.position == c2.position);
-        if !found {
-            return Err("misaligned [:upper:] and/or [:lower:] construct".to_string());
+    // If SET2 has no case classes, SET1 classes are fine (treated as expanded sets)
+    if set2_classes.is_empty() {
+        return Ok(());
+    }
+
+    // For each case class in SET1, if SET2 has a class at the same position,
+    // they must match (same or opposite). If SET2 has no class at that position, that's fine.
+    for c1 in set1_classes {
+        let matching_c2 = set2_classes.iter().find(|c2| c2.position == c1.position);
+        if let Some(c2) = matching_c2 {
+            // Both have a class at this position — they must be same or opposite
+            // (upper-upper, lower-lower, upper-lower, lower-upper are all valid)
+            // This is always true since CaseClass only has Upper and Lower,
+            // so any pair is either same or opposite. No additional check needed.
+            let _ = c2;
         }
+        // If no matching c2, that's fine — SET1 class maps to normal SET2 chars
     }
 
     Ok(())

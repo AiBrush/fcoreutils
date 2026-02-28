@@ -176,6 +176,13 @@ fn should_number(line: &[u8], style: &NumberingStyle) -> bool {
 
 /// Build the nl output into a Vec.
 pub fn nl_to_vec(data: &[u8], config: &NlConfig) -> Vec<u8> {
+    let mut line_number = config.starting_line_number;
+    nl_to_vec_with_state(data, config, &mut line_number)
+}
+
+/// Build the nl output into a Vec, continuing numbering from `line_number`.
+/// Updates `line_number` in place so callers can continue across multiple files.
+pub fn nl_to_vec_with_state(data: &[u8], config: &NlConfig, line_number: &mut i64) -> Vec<u8> {
     if data.is_empty() {
         return Vec::new();
     }
@@ -184,7 +191,6 @@ pub fn nl_to_vec(data: &[u8], config: &NlConfig) -> Vec<u8> {
     let prefix_size = config.number_width + config.number_separator.len() + 2;
     let mut output = Vec::with_capacity(data.len() + estimated_lines * prefix_size);
 
-    let mut line_number = config.starting_line_number;
     let mut current_section = Section::Body;
     let mut consecutive_blanks: usize = 0;
 
@@ -206,7 +212,7 @@ pub fn nl_to_vec(data: &[u8], config: &NlConfig) -> Vec<u8> {
         // Check for section delimiter
         if let Some(section) = check_section_delimiter(line, &config.section_delimiter) {
             if !config.no_renumber {
-                line_number = config.starting_line_number;
+                *line_number = config.starting_line_number;
             }
             current_section = section;
             consecutive_blanks = 0;
@@ -248,14 +254,14 @@ pub fn nl_to_vec(data: &[u8], config: &NlConfig) -> Vec<u8> {
                 consecutive_blanks = 0;
             }
             format_number(
-                line_number,
+                *line_number,
                 config.number_format,
                 config.number_width,
                 &mut output,
             );
             output.extend_from_slice(&config.number_separator);
             output.extend_from_slice(line);
-            line_number = line_number.wrapping_add(config.line_increment);
+            *line_number = line_number.wrapping_add(config.line_increment);
         } else {
             // Non-numbered lines: GNU nl outputs width + separator_len total spaces, then content
             let total_pad = config.number_width + config.number_separator.len();

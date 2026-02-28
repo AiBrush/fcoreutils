@@ -201,13 +201,33 @@ fn main() {
                 }
             };
 
-            // Skip symlinks
+            // Handle symlinks: GNU chmod tries to follow symlinks by default.
+            // For dangling symlinks, stat() fails, so chmod errors out.
             if metadata.file_type().is_symlink() {
-                continue;
+                // Try to follow the symlink
+                match std::fs::metadata(path) {
+                    Ok(_) => {
+                        // Symlink target exists - use target metadata instead
+                        // (fall through to normal processing)
+                    }
+                    Err(e) => {
+                        // Dangling symlink - error like GNU chmod
+                        if !config.quiet {
+                            eprintln!(
+                                "{}: cannot operate on dangling symlink '{}': {}",
+                                TOOL_NAME,
+                                file,
+                                coreutils_rs::common::io_error_msg(&e)
+                            );
+                        }
+                        exit_code = 1;
+                        continue;
+                    }
+                }
             }
 
             let current_mode = metadata.mode();
-            let (new_mode, umask_blocked) = match coreutils_rs::chmod::parse_mode_check_umask(
+            let (mut new_mode, umask_blocked) = match coreutils_rs::chmod::parse_mode_check_umask(
                 &effective_mode_str,
                 current_mode,
             ) {
@@ -217,6 +237,20 @@ fn main() {
                     process::exit(1);
                 }
             };
+
+            // GNU chmod: for directories, preserve setuid/setgid bits when the octal
+            // mode doesn't explicitly specify them (i.e., <= 4 octal digits).
+            // "0755" (4 digits) -> preserves, "00755" (5 digits) -> clears.
+            if metadata.is_dir()
+                && !effective_mode_str.is_empty()
+                && effective_mode_str
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() && b < b'8')
+                && effective_mode_str.len() <= 4
+            {
+                let existing_special = current_mode & 0o7000;
+                new_mode |= existing_special;
+            }
 
             if let Err(e) = coreutils_rs::chmod::chmod_file(path, new_mode, &config) {
                 if !config.quiet {

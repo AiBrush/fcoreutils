@@ -126,21 +126,10 @@ fn main() {
             }
             s if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
                 let rest = &s[1..];
-                // Handle -sVALUE (signal spec) and -nVALUE (signal number)
-                if let Some(val) = rest.strip_prefix('s') {
-                    if val.is_empty() {
-                        // This case is handled by the "-s" match arm above,
-                        // but just in case:
-                        i += 1;
-                        if i >= args.len() {
-                            eprintln!("{}: option requires an argument -- 's'", TOOL_NAME);
-                            process::exit(1);
-                        }
-                        signal = parse_signal_or_die(&args[i]);
-                    } else {
-                        signal = parse_signal_or_die(val);
-                    }
-                } else if let Some(val) = rest.strip_prefix('n') {
+                // Handle -nVALUE (signal number) and -SIGNAME/-SIGNUM
+                // Note: -sVALUE (combined) is NOT supported; -s requires a space
+                // before its argument, matching GNU coreutils/procps behavior.
+                if let Some(val) = rest.strip_prefix('n') {
                     if val.is_empty() {
                         i += 1;
                         if i >= args.len() {
@@ -193,6 +182,7 @@ fn main() {
         if positional.is_empty() {
             print_signals();
         } else {
+            let mut had_error = false;
             for spec in &positional {
                 if let Ok(num) = spec.parse::<i32>() {
                     // Number -> name (handle exit status: num > 128 -> num - 128)
@@ -201,6 +191,7 @@ fn main() {
                         println!("{}", SIGNALS[signum as usize]);
                     } else {
                         eprintln!("{}: unknown signal: {}", TOOL_NAME, spec);
+                        had_error = true;
                     }
                 } else {
                     // Name -> number
@@ -210,9 +201,13 @@ fn main() {
                         Some(n) => println!("{}", n),
                         None => {
                             eprintln!("{}: unknown signal: {}", TOOL_NAME, spec);
+                            had_error = true;
                         }
                     }
                 }
+            }
+            if had_error {
+                process::exit(1);
             }
         }
         return;
