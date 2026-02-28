@@ -135,10 +135,7 @@ fn resolve(path: &str, mode: CanonMode) -> Result<PathBuf, std::io::Error> {
     if path.ends_with('/') {
         match std::fs::metadata(&result) {
             Ok(meta) if meta.is_dir() => Ok(result),
-            Ok(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Not a directory",
-            )),
+            Ok(_) => Err(std::io::Error::other("Not a directory")),
             Err(e) => {
                 // For -m mode, if the target doesn't exist, trailing slash is OK
                 if mode == CanonMode::CanonicalizeMissing {

@@ -434,16 +434,17 @@ fn make_link(
     // For symbolic links or backup mode: detect same source and destination.
     // For hard links with -f (no backup), same-file is allowed: GNU ln removes
     // the old hard link and creates a new one (effectively a no-op but succeeds).
-    if link_exists && (force || backup != BackupMode::None) && same_file(target, link_name) {
-        if symbolic || backup != BackupMode::None {
-            // GNU ln: "X and Y are the same file"
-            eprintln!(
-                "{}: '{}' and '{}' are the same file",
-                TOOL_NAME, target, link_name
-            );
-            return Err(1);
-        }
-        // For hard link with -f: fall through to the force-removal code below
+    if link_exists
+        && (force || backup != BackupMode::None)
+        && same_file(target, link_name)
+        && (symbolic || backup != BackupMode::None)
+    {
+        // GNU ln: "X and Y are the same file"
+        eprintln!(
+            "{}: '{}' and '{}' are the same file",
+            TOOL_NAME, target, link_name
+        );
+        return Err(1);
     }
 
     if link_exists {

@@ -375,8 +375,8 @@ fn parse_date_string_with_base(
 #[cfg(unix)]
 fn extract_tz_offset(time_str: &str) -> (String, Option<i32>) {
     let trimmed = time_str.trim();
-    if trimmed.ends_with('Z') {
-        return (trimmed[..trimmed.len() - 1].trim().to_string(), Some(0));
+    if let Some(stripped) = trimmed.strip_suffix('Z') {
+        return (stripped.trim().to_string(), Some(0));
     }
     // Look for +HHMM or -HHMM or +HH:MM or -HH:MM at the end
     // Could be after a space: "12:00 +0000"
