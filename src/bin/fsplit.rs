@@ -426,21 +426,31 @@ fn main() {
     // Guard: detect if an output file would overwrite the input file.
     // GNU split checks if the first output file path resolves to the same inode
     // as the input file and refuses to proceed if so.
-    #[cfg(unix)]
     if cli.input != "-" {
-        use std::os::unix::fs::MetadataExt;
         let first_output = format!(
             "{}{}{}",
             cli.config.prefix,
             split::generate_suffix(0, &cli.config.suffix_type, cli.config.suffix_length),
             cli.config.additional_suffix
         );
-        if let (Ok(input_meta), Ok(output_meta)) = (
-            std::fs::metadata(&cli.input),
-            std::fs::metadata(&first_output),
-        ) && input_meta.dev() == output_meta.dev()
-            && input_meta.ino() == output_meta.ino()
-        {
+        let would_overwrite = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                matches!(
+                    (std::fs::metadata(&cli.input), std::fs::metadata(&first_output)),
+                    (Ok(im), Ok(om)) if im.dev() == om.dev() && im.ino() == om.ino()
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                matches!(
+                    (std::fs::canonicalize(&cli.input), std::fs::canonicalize(&first_output)),
+                    (Ok(ip), Ok(op)) if ip == op
+                )
+            }
+        };
+        if would_overwrite {
             eprintln!("split: '{}' would overwrite input; aborting", first_output);
             process::exit(1);
         }
