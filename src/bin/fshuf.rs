@@ -711,8 +711,8 @@ mod tests {
 
     #[test]
     fn test_output_file() {
-        let dir = std::env::temp_dir();
-        let outpath = dir.join("fshuf_test_output.txt");
+        let dir = tempfile::tempdir().unwrap();
+        let outpath = dir.path().join("output.txt");
         let output = cmd()
             .args(["-e", "hello", "world", "-o", outpath.to_str().unwrap()])
             .output()
@@ -722,7 +722,6 @@ mod tests {
         let lines: HashSet<&str> = contents.trim().lines().collect();
         assert!(lines.contains("hello"));
         assert!(lines.contains("world"));
-        let _ = std::fs::remove_file(&outpath);
     }
     #[test]
     fn test_match_gnu_format() {

@@ -702,8 +702,12 @@ mod tests {
         let output = cmd().args(["-b", file.to_str().unwrap()]).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // Binary mode uses * before filename
-        assert!(stdout.contains(" *") || stdout.contains("  "));
+        // Binary mode uses * before filename in GNU md5sum
+        assert!(
+            stdout.contains(" *"),
+            "binary mode should use * prefix, got: {}",
+            stdout
+        );
     }
 
     #[test]

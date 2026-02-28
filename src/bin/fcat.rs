@@ -320,9 +320,14 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("1\ta") || stdout.contains("1\t"));
-        assert!(stdout.contains("2\t"));
-        assert!(stdout.contains("3\t"));
+        // GNU cat -n uses format: "     1\tline_content"
+        assert!(
+            stdout.contains("1\ta"),
+            "expected numbered line '1\\ta', got: {}",
+            stdout
+        );
+        assert!(stdout.contains("2\tb"));
+        assert!(stdout.contains("3\tc"));
     }
 
     #[test]

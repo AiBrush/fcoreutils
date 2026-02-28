@@ -631,7 +631,7 @@ mod tests {
         // Create dst first (older)
         fs::write(&dst, "old").unwrap();
         // Small delay to ensure different timestamps
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
         // Create src after (newer)
         fs::write(&src, "new").unwrap();
 
@@ -655,7 +655,7 @@ mod tests {
         // Create src first (older)
         fs::write(&src, "old").unwrap();
         // Small delay to ensure different timestamps
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
         // Create dst after (newer)
         fs::write(&dst, "new").unwrap();
 
