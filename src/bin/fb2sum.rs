@@ -613,6 +613,7 @@ mod tests {
         path.push("fb2sum");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_hash_stdin() {
         use std::io::Write;
@@ -673,6 +674,7 @@ mod tests {
         assert!(stdout.contains("BLAKE2b"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_length_option() {
         let dir = tempfile::tempdir().unwrap();
@@ -690,6 +692,7 @@ mod tests {
         assert_eq!(hash.len(), 64, "256-bit hash should be 64 hex chars");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_empty_file_hash() {
         let dir = tempfile::tempdir().unwrap();

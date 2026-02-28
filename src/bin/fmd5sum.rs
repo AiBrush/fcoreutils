@@ -508,6 +508,7 @@ mod tests {
         path.push("fmd5sum");
         Command::new(path)
     }
+    #[cfg(unix)]
     #[test]
     fn test_hash_stdin() {
         use std::io::Write;
@@ -751,6 +752,7 @@ mod tests {
         assert!(output.stdout.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_dash_as_stdin() {
         use std::io::Write;
