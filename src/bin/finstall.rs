@@ -546,16 +546,13 @@ mod tests {
         assert_eq!(fs::read_to_string(&dst).unwrap(), "hello install");
 
         // Default mode should be 0755
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
-            assert_eq!(
-                mode, 0o755,
-                "default install mode should be 0755, got {:o}",
-                mode
-            );
-        }
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "default install mode should be 0755, got {:o}",
+            mode
+        );
     }
 
     #[cfg(unix)]
@@ -576,12 +573,9 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o644, "mode should be 0644, got {:o}", mode);
-        }
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "mode should be 0644, got {:o}", mode);
     }
 
     #[cfg(unix)]
@@ -633,11 +627,8 @@ mod tests {
         fs::write(&dst, "same content").unwrap();
 
         // Set a specific mtime on dst
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).unwrap();
 
         let old_meta = fs::metadata(&dst).unwrap();
         let old_mtime = old_meta.modified().unwrap();
@@ -744,17 +735,14 @@ mod tests {
                 );
 
                 // Check that both set 0755
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let gnu_mode = fs::metadata(&gnu_dst).unwrap().permissions().mode() & 0o777;
-                    let our_mode = fs::metadata(&our_dst).unwrap().permissions().mode() & 0o777;
-                    assert_eq!(
-                        gnu_mode, our_mode,
-                        "Modes should match: gnu={:o} ours={:o}",
-                        gnu_mode, our_mode
-                    );
-                }
+                use std::os::unix::fs::PermissionsExt;
+                let gnu_mode = fs::metadata(&gnu_dst).unwrap().permissions().mode() & 0o777;
+                let our_mode = fs::metadata(&our_dst).unwrap().permissions().mode() & 0o777;
+                assert_eq!(
+                    gnu_mode, our_mode,
+                    "Modes should match: gnu={:o} ours={:o}",
+                    gnu_mode, our_mode
+                );
             }
         }
     }

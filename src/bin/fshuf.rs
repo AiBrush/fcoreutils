@@ -237,16 +237,10 @@ fn main() {
                     process::exit(1);
                 }
                 let val = parse_count(&args[i]);
-                head_count = Some(match head_count {
-                    Some(prev) => prev.min(val),
-                    None => val,
-                });
+                head_count = Some(val);
             } else if let Some(rest) = arg.strip_prefix("--head-count=") {
                 let val = parse_count(rest);
-                head_count = Some(match head_count {
-                    Some(prev) => prev.min(val),
-                    None => val,
-                });
+                head_count = Some(val);
             } else if arg == "--output" || match_long(arg, "--output") {
                 i += 1;
                 if i >= args.len() {
@@ -306,10 +300,7 @@ fn main() {
                         if j + 1 < bytes.len() {
                             let rest = &arg[j + 1..];
                             let val = parse_count(rest);
-                            head_count = Some(match head_count {
-                                Some(prev) => prev.min(val),
-                                None => val,
-                            });
+                            head_count = Some(val);
                         } else {
                             i += 1;
                             if i >= args.len() {
@@ -317,10 +308,7 @@ fn main() {
                                 process::exit(1);
                             }
                             let val = parse_count(&args[i]);
-                            head_count = Some(match head_count {
-                                Some(prev) => prev.min(val),
-                                None => val,
-                            });
+                            head_count = Some(val);
                         }
                         j = bytes.len();
                         continue;
@@ -824,15 +812,16 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_n_uses_smallest() {
+    fn test_multiple_n_uses_last() {
+        // GNU shuf uses the last -n value when multiple are specified
         let output = cmd()
-            .args(["-i", "1-100", "-n", "10", "-n", "3"])
+            .args(["-i", "1-100", "-n", "3", "-n", "10"])
             .output()
             .unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = stdout.trim().lines().collect();
-        assert_eq!(lines.len(), 3, "multiple -n should use smallest value");
+        assert_eq!(lines.len(), 10, "multiple -n should use last value");
     }
 
     // --- GNU compatibility: --repeat feature ---
