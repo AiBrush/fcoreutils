@@ -142,21 +142,23 @@ jobs:
   test-passed:
     name: Tests passed
     if: always()
-    needs: [test-linux-bin, test-macos-bin, test-windows-bin]
+    needs: [lint, test-linux-bin, test-macos-bin, test-windows-bin, assembly-test]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          results=("${{ needs.test-linux-bin.result }}" \
+          results=("${{ needs.lint.result }}" \
+                   "${{ needs.test-linux-bin.result }}" \
                    "${{ needs.test-macos-bin.result }}" \
-                   "${{ needs.test-windows-bin.result }}")
+                   "${{ needs.test-windows-bin.result }}" \
+                   "${{ needs.assembly-test.result }}")
           for r in "${results[@]}"; do
             if [[ "$r" != "success" ]]; then
               echo "Some tests failed: $r"
               exit 1
             fi
           done
-          echo "All 107 command binary tests passed on all platforms"
+          echo "All checks passed: lint, 107 command binary tests (3 platforms), assembly tests"
 
   # ── Assembly: build all 20 tools once, upload as artifact ─────────
   assembly-build:
