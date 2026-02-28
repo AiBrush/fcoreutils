@@ -1917,14 +1917,14 @@ mod tests {
         assert!(r.error.is_none());
         assert_eq!(r.data, b"foobar");
 
-        // Auto-pad: 2 chars - GNU auto-pads without error
+        // Unpadded: 2 chars - GNU basenc 9.4 rejects unpadded input with error
         let r = base64_decode(b"QQ", &BASE64_DECODE, false);
-        assert!(r.error.is_none());
+        assert!(r.error.is_some());
         assert_eq!(r.data, b"A");
 
-        // 3 chars: GNU auto-pads (only 1 padding char missing), so no error
+        // 3 chars: GNU basenc 9.4 rejects unpadded input with error
         let r = base64_decode(b"QWI", &BASE64_DECODE, false);
-        assert!(r.error.is_none());
+        assert!(r.error.is_some());
         assert_eq!(r.data, b"Ab");
 
         // 1 char: invalid (not enough data), should error
@@ -1958,10 +1958,9 @@ mod tests {
         assert!(r.error.is_none());
         assert_eq!(r.data, b"Hello");
 
-        // GNU basenc --base16 -d accepts lowercase hex
+        // GNU basenc --base16 -d rejects lowercase hex (uppercase only)
         let r = base16_decode(b"ff", false);
-        assert!(r.error.is_none());
-        assert_eq!(r.data, b"\xff");
+        assert!(r.error.is_some());
     }
 
     #[test]
