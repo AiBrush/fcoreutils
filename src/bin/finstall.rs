@@ -177,6 +177,7 @@ fn main() {
                 while j < chars.len() {
                     match chars[j] {
                         'b' => config.backup = Some(BackupMode::Simple),
+                        'c' => {} // ignored (backward compat, copy is the default)
                         'C' => config.compare = true,
                         'd' => config.directory_mode = true,
                         'D' => config.create_leading = true,

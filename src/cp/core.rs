@@ -791,11 +791,59 @@ fn do_copy(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
     }
 
     // Same-file detection: must come before force removal to prevent data loss.
-    // GNU cp always errors on same file, even with -b.
+    // When backup is enabled, self-copy is allowed: GNU cp renames the destination
+    // to the backup path first, then copies from the (still-open) source.
     #[cfg(unix)]
     if !src_meta.is_dir() && dst.exists() {
         if let Ok(dst_meta) = std::fs::metadata(dst) {
             if src_meta.dev() == dst_meta.dev() && src_meta.ino() == dst_meta.ino() {
+                let has_backup = matches!(
+                    config.backup,
+                    Some(BackupMode::Simple | BackupMode::Numbered | BackupMode::Existing)
+                );
+                if has_backup {
+                    // Make the backup (rename dst to backup path), then copy from backup
+                    make_backup(dst, config)?;
+                    // Build backup path to use as source
+                    let backup_src = match config.backup.unwrap() {
+                        BackupMode::Simple | BackupMode::None => {
+                            let mut p = dst.as_os_str().to_os_string();
+                            p.push(&config.suffix);
+                            std::path::PathBuf::from(p)
+                        }
+                        BackupMode::Numbered => {
+                            // Find highest numbered backup
+                            let mut n: u64 = 1;
+                            loop {
+                                let candidate = numbered_backup_candidate(dst, n);
+                                let next = numbered_backup_candidate(dst, n + 1);
+                                if !next.exists() {
+                                    break candidate;
+                                }
+                                n += 1;
+                            }
+                        }
+                        BackupMode::Existing => {
+                            let numbered = numbered_backup_candidate(dst, 1);
+                            if numbered.exists() {
+                                let mut n: u64 = 1;
+                                loop {
+                                    let candidate = numbered_backup_candidate(dst, n);
+                                    let next = numbered_backup_candidate(dst, n + 1);
+                                    if !next.exists() {
+                                        break candidate;
+                                    }
+                                    n += 1;
+                                }
+                            } else {
+                                let mut p = dst.as_os_str().to_os_string();
+                                p.push(&config.suffix);
+                                std::path::PathBuf::from(p)
+                            }
+                        }
+                    };
+                    return copy_file(&backup_src, dst, config);
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     format!(
@@ -825,8 +873,10 @@ fn do_copy(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
         }
     }
 
-    // Make backup if requested.
-    make_backup(dst, config)?;
+    // Make backup if requested. GNU cp does not back up directories.
+    if !src_meta.is_dir() {
+        make_backup(dst, config)?;
+    }
 
     if src_meta.is_dir() {
         #[cfg(unix)]

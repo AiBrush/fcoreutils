@@ -278,11 +278,8 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         }
     }
 
-    // Incomplete final group: GNU auto-pads when there are enough chars to
-    // produce output bytes.  For base64:
-    // 1 char → invalid (can't produce a full byte)
-    // 2 chars → 1 byte (auto-padded, no error)
-    // 3 chars → 2 bytes (auto-padded, no error)
+    // Incomplete final group: GNU basenc 9.4 rejects unpadded input.
+    // Output partial decoded bytes but report error.
     if n > 0 {
         if n >= 2 {
             result.push((vals[0] << 2) | (vals[1] >> 4));
@@ -290,13 +287,10 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         if n >= 3 {
             result.push((vals[1] << 4) | (vals[2] >> 2));
         }
-        // Only 1 char is truly invalid (can't produce any output byte)
-        if n == 1 {
-            return DecodeOutput {
-                data: result,
-                error: Some(format!("{}: invalid input", TOOL_NAME)),
-            };
-        }
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
     DecodeOutput {
@@ -412,8 +406,8 @@ fn base32_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         }
     }
 
-    // Incomplete final group: GNU auto-pads when there are enough chars to
-    // produce output bytes.  For base32, 2+ chars can produce partial output.
+    // Incomplete final group: GNU basenc 9.4 rejects unpadded input.
+    // Output partial decoded bytes but report error.
     if n > 0 {
         if n >= 2 {
             result.push((vals[0] << 3) | (vals[1] >> 2));
@@ -427,14 +421,10 @@ fn base32_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         if n >= 7 {
             result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
         }
-        // Only error if we have exactly 1, 3, or 6 chars (invalid partial groups)
-        // Valid partial groups: 2 (1 byte), 4 (2 bytes), 5 (3 bytes), 7 (4 bytes)
-        if n == 1 || n == 3 || n == 6 {
-            return DecodeOutput {
-                data: result,
-                error: Some(format!("{}: invalid input", TOOL_NAME)),
-            };
-        }
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
     DecodeOutput {
@@ -490,12 +480,11 @@ fn base16_decode(input: &[u8], ignore_garbage: bool) -> DecodeOutput {
     }
 }
 
-/// Hex decode for base16 (GNU basenc accepts both upper and lowercase in --base16 decode).
+/// Hex decode for base16 (GNU basenc --base16 accepts UPPERCASE hex only).
 fn hex_val(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
         b'A'..=b'F' => b - b'A' + 10,
-        b'a'..=b'f' => b - b'a' + 10,
         _ => 0xFF,
     }
 }
@@ -1353,16 +1342,19 @@ fn main() {
         }
     } else if let Err(e) = encode_streaming(&data, encoding, cli.wrap, &mut out) {
         if e.kind() == io::ErrorKind::BrokenPipe {
-            process::exit(0);
+            eprintln!("{}: write error: Broken pipe", TOOL_NAME);
+            process::exit(1);
         }
         let msg = e.to_string();
         eprintln!("{}: {}", TOOL_NAME, msg);
         process::exit(1);
     }
 
-    if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe
-    {
+    if let Err(e) = out.flush() {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            eprintln!("{}: write error: Broken pipe", TOOL_NAME);
+            process::exit(1);
+        }
         eprintln!("{}: write error: {}", TOOL_NAME, e);
         process::exit(1);
     }
