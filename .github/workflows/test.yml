@@ -68,7 +68,9 @@ jobs:
       - name: Install nasm and libssl-dev
         run: sudo apt-get install -y --no-install-recommends nasm libssl-dev
       - name: Run tests
-        run: cargo test --bin "f${{ matrix.cmd }}"
+        run: |
+          cargo build --bin "f${{ matrix.cmd }}"
+          cargo test --bin "f${{ matrix.cmd }}"
 
   # ── macOS: build once, test each command in parallel ──────────────
   build-macos:
@@ -99,7 +101,9 @@ jobs:
           shared-key: build-v2-macos-latest
           save-if: false
       - name: Run tests
-        run: cargo test --bin "f${{ matrix.cmd }}"
+        run: |
+          cargo build --bin "f${{ matrix.cmd }}"
+          cargo test --bin "f${{ matrix.cmd }}"
 
   # ── Windows: build once, test each command in parallel ────────────
   build-windows:
@@ -130,7 +134,9 @@ jobs:
           shared-key: build-v2-windows-latest
           save-if: false
       - name: Run tests
-        run: cargo test --bin "f${{ matrix.cmd }}"
+        run: |
+          cargo build --bin "f${{ matrix.cmd }}"
+          cargo test --bin "f${{ matrix.cmd }}"
 
   # ── Gate: all platform tests must pass (use as required check) ────
   test-passed:

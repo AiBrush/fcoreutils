@@ -182,7 +182,6 @@ fn main() {
     let mut input_range_count = 0u32;
     let mut head_count: Option<usize> = None;
     let mut output_file: Option<String> = None;
-    let mut output_file_count = 0u32;
     let mut repeat = false;
     let mut zero_terminated = false;
     let mut random_source: Option<String> = None;
@@ -255,10 +254,8 @@ fn main() {
                     process::exit(1);
                 }
                 output_file = Some(args[i].clone());
-                output_file_count += 1;
             } else if let Some(rest) = arg.strip_prefix("--output=") {
                 output_file = Some(rest.to_string());
-                output_file_count += 1;
             } else if arg == "--random-source" || match_long(arg, "--random-source") {
                 i += 1;
                 if i >= args.len() {
@@ -332,7 +329,6 @@ fn main() {
                         if j + 1 < bytes.len() {
                             let rest = &arg[j + 1..];
                             output_file = Some(rest.to_string());
-                            output_file_count += 1;
                         } else {
                             i += 1;
                             if i >= args.len() {
@@ -340,7 +336,6 @@ fn main() {
                                 process::exit(1);
                             }
                             output_file = Some(args[i].clone());
-                            output_file_count += 1;
                         }
                         j = bytes.len();
                         continue;
@@ -364,10 +359,6 @@ fn main() {
     // Validate option conflicts (GNU compat)
     if input_range_count > 1 {
         eprintln!("{}: multiple -i options specified", TOOL_NAME);
-        process::exit(1);
-    }
-    if output_file_count > 1 {
-        eprintln!("{}: multiple output files specified", TOOL_NAME);
         process::exit(1);
     }
     if random_source_count > 1 {
