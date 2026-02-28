@@ -558,6 +558,28 @@ fn parse_month(s: &[u8]) -> u8 {
     }
 }
 
+/// Compute the length of the prefix before file suffixes.
+/// Matches GNU gnulib `file_prefixlen` from `filevercmp.c`.
+/// Strips trailing suffix groups matching `(\.[A-Za-z~][A-Za-z0-9~]*)*` from the end.
+fn file_prefixlen(s: &[u8]) -> usize {
+    let n = s.len();
+    let mut prefixlen = 0;
+    let mut i = 0;
+    loop {
+        if i == n {
+            return prefixlen;
+        }
+        i += 1;
+        prefixlen = i;
+        while i + 1 < n && s[i] == b'.' && (s[i + 1].is_ascii_alphabetic() || s[i + 1] == b'~') {
+            i += 2;
+            while i < n && (s[i].is_ascii_alphanumeric() || s[i] == b'~') {
+                i += 1;
+            }
+        }
+    }
+}
+
 /// Version sort (-V): GNU filevercmp-compatible version comparison.
 /// Implements the exact same algorithm as GNU coreutils' filevercmp.
 pub fn compare_version(a: &[u8], b: &[u8]) -> Ordering {
@@ -566,12 +588,25 @@ pub fn compare_version(a: &[u8], b: &[u8]) -> Ordering {
     let a_prefix = if a.first() == Some(&b'.') { 1 } else { 0 };
     let b_prefix = if b.first() == Some(&b'.') { 1 } else { 0 };
 
-    // First compare without the hidden-dot prefix
-    let result = verrevcmp(&a[a_prefix..], &b[b_prefix..]);
+    // Strip file suffixes (e.g., .tar.gz) before comparing, as GNU does.
+    let a_body = &a[a_prefix..];
+    let b_body = &b[b_prefix..];
+    let a_plen = file_prefixlen(a_body);
+    let b_plen = file_prefixlen(b_body);
+
+    // First compare the prefix parts (without suffixes)
+    let result = verrevcmp(&a_body[..a_plen], &b_body[..b_plen]);
     if result != Ordering::Equal {
         return result;
     }
-    // Tie-break: compare the full strings (including dot prefix)
+
+    // Tie-break: compare full body (with suffixes)
+    let result = verrevcmp(a_body, b_body);
+    if result != Ordering::Equal {
+        return result;
+    }
+
+    // Final tie-break: compare the full strings (including dot prefix)
     verrevcmp(a, b)
 }
 

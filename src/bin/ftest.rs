@@ -359,4 +359,50 @@ mod tests {
         let output = cmd().args(["a", "b", "c", "d", "e"]).output().unwrap();
         assert_eq!(output.status.code(), Some(2));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_less_than_operator_is_error() {
+        // GNU test does NOT support < as a string comparison operator.
+        // It returns exit code 2 (error) for < and >.
+        let status = cmd().args(["a", "<", "b"]).status().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(2),
+            "test 'a' '<' 'b' should return exit 2 (error)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_greater_than_operator_is_error() {
+        let status = cmd().args(["b", ">", "a"]).status().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(2),
+            "test 'b' '>' 'a' should return exit 2 (error)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_less_than_equal_is_error() {
+        let status = cmd().args(["a", "<", "a"]).status().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(2),
+            "test 'a' '<' 'a' should return exit 2 (error)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_greater_than_equal_is_error() {
+        let status = cmd().args(["a", ">", "b"]).status().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(2),
+            "test 'a' '>' 'b' should return exit 2 (error)"
+        );
+    }
 }

@@ -576,4 +576,39 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout, b"");
     }
+
+    #[test]
+    fn test_tail_c_huge_number_empty_input() {
+        // GNU compat: tail -c with number > u64::MAX on empty input should succeed
+        use std::process::Stdio;
+        let mut child = cmd()
+            .args(["-c", "99999999999999999999"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take().unwrap());
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "tail -c huge on empty should succeed, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"");
+    }
+
+    #[test]
+    fn test_tail_c_huge_number_small_file() {
+        // tail -c with huge number on small file should output entire file
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let output = cmd()
+            .args(["-c", "99999999999999999999", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+    }
 }

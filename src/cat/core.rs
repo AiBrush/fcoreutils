@@ -452,16 +452,13 @@ pub fn cat_with_options(
                 } else {
                     line.len()
                 };
-                // GNU cat -E: ALL \r are shown as ^M (not just \r before \n)
+                // GNU cat -E: only \r immediately before \n is shown as ^M.
+                // Other \r bytes are passed through as literal CR (0x0d).
                 let content = &line[..content_end];
-                if memchr::memchr(b'\r', content).is_some() {
-                    for &b in content {
-                        if b == b'\r' {
-                            buf.extend_from_slice(b"^M");
-                        } else {
-                            buf.push(b);
-                        }
-                    }
+                if has_newline && !content.is_empty() && content[content.len() - 1] == b'\r' {
+                    // Content ends with \r (which is right before \n) → show as ^M$
+                    buf.extend_from_slice(&content[..content.len() - 1]);
+                    buf.extend_from_slice(b"^M");
                 } else {
                     buf.extend_from_slice(content);
                 }

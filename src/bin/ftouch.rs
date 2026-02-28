@@ -496,6 +496,24 @@ fn set_file_times(
     Ok(())
 }
 
+/// Check if `arg` is a prefix of `long_opt` (with optional `=value`).
+/// E.g., `--ref` is a prefix of `--reference`, `--ref=foo` is too.
+/// Minimum prefix is 3 chars of the option name (e.g., `--da` for `--date`).
+#[cfg(unix)]
+fn is_long_opt_prefix(arg: &str, long_opt: &str) -> bool {
+    if let Some(eq_pos) = arg.find('=') {
+        long_opt.starts_with(&arg[..eq_pos]) && eq_pos >= 4 // at least "--" + 2 chars
+    } else {
+        long_opt.starts_with(arg) && arg.len() >= 4 && arg.starts_with("--")
+    }
+}
+
+/// Extract the value from `--opt=value` form, returning None for `--opt` (no =).
+#[cfg(unix)]
+fn long_opt_value(arg: &str, _long_opt: &str) -> Option<String> {
+    arg.find('=').map(|pos| arg[pos + 1..].to_string())
+}
+
 #[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
@@ -559,15 +577,45 @@ fn main() {
                 stamp = Some(args[i].clone());
             }
             "--" => saw_dashdash = true,
-            _ if arg.starts_with("--date=") => {
-                date_str = Some(arg["--date=".len()..].to_string());
+            _ if is_long_opt_prefix(arg, "--date") => {
+                if let Some(val) = long_opt_value(arg, "--date") {
+                    date_str = Some(val);
+                } else {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("{}: option requires an argument -- 'date'", TOOL_NAME);
+                        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                        process::exit(1);
+                    }
+                    date_str = Some(args[i].clone());
+                }
             }
-            _ if arg.starts_with("--reference=") => {
-                reference = Some(arg["--reference=".len()..].to_string());
+            _ if is_long_opt_prefix(arg, "--reference") => {
+                if let Some(val) = long_opt_value(arg, "--reference") {
+                    reference = Some(val);
+                } else {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("{}: option requires an argument -- 'reference'", TOOL_NAME);
+                        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                        process::exit(1);
+                    }
+                    reference = Some(args[i].clone());
+                }
             }
-            _ if arg.starts_with("--time=") => {
-                let val = &arg["--time=".len()..];
-                match val {
+            _ if is_long_opt_prefix(arg, "--time") => {
+                let val = if let Some(v) = long_opt_value(arg, "--time") {
+                    v
+                } else {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("{}: option requires an argument -- 'time'", TOOL_NAME);
+                        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                        process::exit(1);
+                    }
+                    args[i].clone()
+                };
+                match val.as_str() {
                     "access" | "atime" | "use" => target = TimeTarget::AccessOnly,
                     "modify" | "mtime" => target = TimeTarget::ModifyOnly,
                     _ => {

@@ -345,37 +345,6 @@ fn split_by_lines(
     Ok(())
 }
 
-/// Read bytes from reader until the separator byte (inclusive), appending to buf.
-/// Returns number of bytes read (0 at EOF).
-fn read_until_sep(reader: &mut dyn BufRead, sep: u8, buf: &mut Vec<u8>) -> io::Result<usize> {
-    if sep == b'\n' {
-        // Use the built-in BufRead::read_until for newline, it's optimized
-        let n = reader.read_until(b'\n', buf)?;
-        return Ok(n);
-    }
-    // Custom separator
-    let start_len = buf.len();
-    loop {
-        let available = match reader.fill_buf() {
-            Ok(b) => b,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        if available.is_empty() {
-            return Ok(buf.len() - start_len);
-        }
-        if let Some(pos) = memchr::memchr(sep, available) {
-            buf.extend_from_slice(&available[..=pos]);
-            let consume = pos + 1;
-            reader.consume(consume);
-            return Ok(buf.len() - start_len);
-        }
-        buf.extend_from_slice(available);
-        let len = available.len();
-        reader.consume(len);
-    }
-}
-
 /// Split input by byte count.
 fn split_by_bytes(
     reader: &mut dyn Read,
@@ -440,64 +409,62 @@ fn split_by_bytes(
 }
 
 /// Split input by line-bytes: at most N bytes per file, breaking at line boundaries.
+/// GNU split uses a buffer-based approach: for each chunk-sized window, it finds
+/// the last newline using memrchr and breaks there. When no newline exists within
+/// the window (line longer than max_bytes), it breaks at the byte boundary.
 fn split_by_line_bytes(
-    reader: &mut dyn BufRead,
+    reader: &mut dyn Read,
     config: &SplitConfig,
     max_bytes: u64,
 ) -> io::Result<()> {
     let limit = max_chunks(&config.suffix_type, config.suffix_length);
-    let mut chunk_index: u64 = 0;
-    let mut bytes_in_chunk: u64 = 0;
-    let mut writer: Option<Box<dyn ChunkWriter>> = None;
+    let max = max_bytes as usize;
     let sep = config.separator;
 
-    let mut buf = Vec::with_capacity(8192);
-    loop {
-        buf.clear();
-        let bytes_read = read_until_sep(reader, sep, &mut buf)?;
-        if bytes_read == 0 {
-            break;
-        }
+    // Read all input data for simplicity (matches other modes)
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data)?;
 
-        let line_len = buf.len() as u64;
-
-        // If this line alone exceeds the max, we must write it (possibly to its own chunk).
-        // If adding this line would exceed the max and we've already written something,
-        // start a new chunk.
-        if bytes_in_chunk > 0 && bytes_in_chunk + line_len > max_bytes {
-            if let Some(ref mut w) = writer {
-                w.finish()?;
-            }
-            writer = None;
-            chunk_index += 1;
-            bytes_in_chunk = 0;
-        }
-
-        if writer.is_none() {
-            if chunk_index >= limit {
-                return Err(io::Error::other("output file suffixes exhausted"));
-            }
-            writer = Some(create_writer(config, chunk_index)?);
-            bytes_in_chunk = 0;
-        }
-
-        // If the line itself is longer than max_bytes, we still write the whole line
-        // to this chunk (GNU split behavior: -C never splits a line).
-        writer.as_mut().unwrap().write_all(&buf)?;
-        bytes_in_chunk += line_len;
-
-        if bytes_in_chunk >= max_bytes {
-            if let Some(ref mut w) = writer {
-                w.finish()?;
-            }
-            writer = None;
-            chunk_index += 1;
-            bytes_in_chunk = 0;
-        }
+    if data.is_empty() {
+        return Ok(());
     }
 
-    if let Some(ref mut w) = writer {
-        w.finish()?;
+    let total = data.len();
+    let mut chunk_index: u64 = 0;
+    let mut offset = 0;
+
+    while offset < total {
+        if chunk_index >= limit {
+            return Err(io::Error::other("output file suffixes exhausted"));
+        }
+
+        let remaining = total - offset;
+        let window = remaining.min(max);
+        let slice = &data[offset..offset + window];
+
+        // Find the last separator in this window.
+        // GNU split uses memrchr to find the last newline within the window,
+        // breaking there. If no separator exists, write the full window.
+        // When remaining data is strictly smaller than max_bytes, take everything
+        // as the final chunk (matches GNU behavior).
+        let end = if remaining < max {
+            offset + window
+        } else if let Some(pos) = memchr::memrchr(sep, slice) {
+            // Break at the last separator within the window
+            offset + pos + 1
+        } else {
+            // No separator found: write the full window (line > max_bytes)
+            offset + window
+        };
+
+        let chunk_data = &data[offset..end];
+
+        let mut writer = create_writer(config, chunk_index)?;
+        writer.write_all(chunk_data)?;
+        writer.finish()?;
+
+        offset = end;
+        chunk_index += 1;
     }
 
     Ok(())
@@ -596,26 +563,66 @@ fn read_input_data(input_path: &str) -> io::Result<Vec<u8>> {
     }
 }
 
-/// Split into N output files by line count (l/N format).
-fn split_by_line_chunks(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io::Result<()> {
-    let data = read_input_data(input_path)?;
+/// Compute chunk boundary offsets for line-based N-way splitting.
+/// GNU split distributes lines to chunks by reading sequentially:
+/// each line goes to the current chunk until accumulated bytes reach
+/// or exceed the chunk's target end boundary, then the chunk is closed.
+fn compute_line_chunk_boundaries(data: &[u8], n_chunks: u64, sep: u8) -> Vec<u64> {
     let total = data.len() as u64;
     let base_chunk_size = total / n_chunks;
     let remainder = total % n_chunks;
+
+    // Precompute target end boundaries for each chunk
+    let mut boundaries = Vec::with_capacity(n_chunks as usize);
+    let mut target_end: u64 = 0;
+    for i in 0..n_chunks {
+        target_end += base_chunk_size + if i < remainder { 1 } else { 0 };
+        boundaries.push(target_end);
+    }
+
+    // Now read lines and assign to chunks
+    let mut chunk_ends = Vec::with_capacity(n_chunks as usize);
+    let mut pos: u64 = 0;
+    let mut chunk_idx: u64 = 0;
+
+    for sep_pos in memchr::memchr_iter(sep, data) {
+        let line_end = sep_pos as u64 + 1; // inclusive of separator
+        pos = line_end;
+
+        // If we've reached or passed this chunk's target boundary, close it
+        while chunk_idx < n_chunks && pos >= boundaries[chunk_idx as usize] {
+            chunk_ends.push(pos);
+            chunk_idx += 1;
+        }
+    }
+
+    // Handle trailing data without separator
+    if pos < total {
+        pos = total;
+        while chunk_idx < n_chunks && pos >= boundaries[chunk_idx as usize] {
+            chunk_ends.push(pos);
+            chunk_idx += 1;
+        }
+    }
+
+    // Any remaining chunks get the same end position (at end of data or last line)
+    while (chunk_ends.len() as u64) < n_chunks {
+        chunk_ends.push(pos);
+    }
+
+    chunk_ends
+}
+
+/// Split into N output files by line count (l/N format).
+fn split_by_line_chunks(input_path: &str, config: &SplitConfig, n_chunks: u64) -> io::Result<()> {
+    let data = read_input_data(input_path)?;
     let sep = config.separator;
+
+    let chunk_ends = compute_line_chunk_boundaries(&data, n_chunks, sep);
 
     let mut offset: u64 = 0;
     for i in 0..n_chunks {
-        let target_end = offset + base_chunk_size + if i < remainder { 1 } else { 0 };
-        // Extend to next line boundary
-        let end = if target_end >= total {
-            total
-        } else {
-            match memchr::memchr(sep, &data[target_end as usize..]) {
-                Some(pos) => target_end + pos as u64 + 1,
-                None => total,
-            }
-        };
+        let end = chunk_ends[i as usize];
         let chunk_size = end - offset;
 
         if config.elide_empty && chunk_size == 0 {
@@ -640,22 +647,13 @@ fn split_by_line_chunk_extract(
     n_chunks: u64,
 ) -> io::Result<()> {
     let data = read_input_data(input_path)?;
-    let total = data.len() as u64;
-    let base_chunk_size = total / n_chunks;
-    let remainder = total % n_chunks;
     let sep = config.separator;
+
+    let chunk_ends = compute_line_chunk_boundaries(&data, n_chunks, sep);
 
     let mut offset: u64 = 0;
     for i in 0..n_chunks {
-        let target_end = offset + base_chunk_size + if i < remainder { 1 } else { 0 };
-        let end = if target_end >= total {
-            total
-        } else {
-            match memchr::memchr(sep, &data[target_end as usize..]) {
-                Some(pos) => target_end + pos as u64 + 1,
-                None => total,
-            }
-        };
+        let end = chunk_ends[i as usize];
         if i + 1 == k {
             let chunk_size = end - offset;
             if chunk_size > 0 {
@@ -887,8 +885,8 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
             split_by_bytes(&mut reader, config, n)
         }
         SplitMode::LineBytes(n) => {
-            let mut buf_reader = BufReader::with_capacity(1024 * 1024, reader);
-            split_by_line_bytes(&mut buf_reader, config, n)
+            let mut reader = reader;
+            split_by_line_bytes(&mut reader, config, n)
         }
         SplitMode::Number(_)
         | SplitMode::NumberExtract(_, _)
