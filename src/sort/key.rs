@@ -307,15 +307,52 @@ fn is_blank(b: u8) -> bool {
     b == b' ' || b == b'\t'
 }
 
-/// Skip leading blanks (space and tab) starting from position `from` within `line`.
-/// Returns the byte offset of the first non-blank character at or after `from`.
+/// In -z (zero-terminated) mode, newlines are treated as blanks for field splitting.
 #[inline]
-fn skip_blanks_from(line: &[u8], from: usize, end: usize) -> usize {
+fn is_blank_z(b: u8) -> bool {
+    b == b' ' || b == b'\t' || b == b'\n'
+}
+
+/// Skip leading blanks with a custom blank predicate.
+#[inline]
+fn skip_blanks_from_fn(line: &[u8], from: usize, end: usize, blank_fn: fn(u8) -> bool) -> usize {
     let mut i = from;
-    while i < end && is_blank(line[i]) {
+    while i < end && blank_fn(line[i]) {
         i += 1;
     }
     i
+}
+
+/// Find the Nth field with zero-terminated mode support.
+#[inline]
+fn find_nth_field_z(
+    line: &[u8],
+    n: usize,
+    separator: Option<u8>,
+    zero_terminated: bool,
+) -> (usize, usize) {
+    if !zero_terminated || separator.is_some() {
+        return find_nth_field(line, n, separator);
+    }
+    // In -z mode without explicit separator, use is_blank_z (includes \n)
+    let mut field = 0;
+    let mut i = 0;
+    let len = line.len();
+
+    while i < len {
+        let field_start = i;
+        while i < len && is_blank_z(line[i]) {
+            i += 1;
+        }
+        while i < len && !is_blank_z(line[i]) {
+            i += 1;
+        }
+        if field == n {
+            return (field_start, i);
+        }
+        field += 1;
+    }
+    (line.len(), line.len())
 }
 
 /// Extract the key portion of a line based on a KeyDef.
@@ -331,17 +368,35 @@ pub fn extract_key<'a>(
     separator: Option<u8>,
     ignore_leading_blanks: bool,
 ) -> &'a [u8] {
+    extract_key_z(line, key, separator, ignore_leading_blanks, false)
+}
+
+/// Extract key with zero-terminated mode support.
+/// When `zero_terminated` is true and separator is None (default blank splitting),
+/// newlines are treated as blanks, matching GNU sort -z behavior.
+pub fn extract_key_z<'a>(
+    line: &'a [u8],
+    key: &KeyDef,
+    separator: Option<u8>,
+    ignore_leading_blanks: bool,
+    zero_terminated: bool,
+) -> &'a [u8] {
     let sf = key.start_field.saturating_sub(1);
-    let (sf_start, sf_end) = find_nth_field(line, sf, separator);
+    let (sf_start, sf_end) = find_nth_field_z(line, sf, separator, zero_terminated);
 
     if sf_start >= line.len() {
         return b"";
     }
 
+    let blank_fn: fn(u8) -> bool = if zero_terminated && separator.is_none() {
+        is_blank_z
+    } else {
+        is_blank
+    };
+
     let start_byte = if key.start_char > 0 {
-        // When -b is active, skip leading blanks in the field before counting chars
         let effective_start = if ignore_leading_blanks {
-            skip_blanks_from(line, sf_start, sf_end)
+            skip_blanks_from_fn(line, sf_start, sf_end, blank_fn)
         } else {
             sf_start
         };
@@ -354,11 +409,10 @@ pub fn extract_key<'a>(
 
     let end_byte = if key.end_field > 0 {
         let ef = key.end_field.saturating_sub(1);
-        let (ef_start, ef_end) = find_nth_field(line, ef, separator);
+        let (ef_start, ef_end) = find_nth_field_z(line, ef, separator, zero_terminated);
         if key.end_char > 0 {
-            // When -b is active, skip leading blanks in the end field too
             let effective_start = if ignore_leading_blanks {
-                skip_blanks_from(line, ef_start, ef_end)
+                skip_blanks_from_fn(line, ef_start, ef_end, blank_fn)
             } else {
                 ef_start
             };
