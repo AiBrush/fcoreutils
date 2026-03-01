@@ -159,13 +159,19 @@ fn main() {
             if ret > 0 {
                 written += ret as usize;
             } else if ret == 0 {
-                break;
+                // write(2) returned 0 for a nonzero-length buffer — treat as
+                // an unrecoverable I/O error to avoid spinning forever.
+                write_error_exit_raw(libc::EIO);
             } else {
                 // Read errno directly to minimize latency to error write.
                 // For EPIPE, every microsecond matters: we must write our
                 // diagnostic to stderr before downstream processes (wc, uniq)
                 // write their output when stdout and stderr are merged.
-                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                // last_os_error() always captures errno, so raw_os_error()
+                // is always Some; use EIO as a defensive fallback.
+                let errno = std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO);
                 if errno == libc::EINTR {
                     continue;
                 }
