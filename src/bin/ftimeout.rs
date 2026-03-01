@@ -355,8 +355,8 @@ fn main() {
             break;
         }
         if ret < 0 {
-            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            if errno == libc::EINTR {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
                 // Interrupted — check if child already exited
                 let ret2 = unsafe { libc::waitpid(child_pid, &mut status, libc::WNOHANG) };
                 if ret2 == child_pid {

@@ -152,6 +152,8 @@ fn main() {
                 // GNU yes never prints errors — it is killed by SIGPIPE.
                 // If SIGPIPE delivery fails (blocked by parent/runtime),
                 // write() returns -1 with EPIPE. Exit silently in that case.
+                // Capture errno immediately — must precede any further syscall or
+                // Rust I/O that could overwrite it.
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
