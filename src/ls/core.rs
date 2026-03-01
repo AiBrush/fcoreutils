@@ -153,6 +153,11 @@ pub struct LsConfig {
     pub literal: bool,
     /// --zero: use NUL as line terminator instead of newline.
     pub zero: bool,
+    /// --block-size=SIZE: scale sizes by SIZE before printing.
+    /// None means not set (use default behavior).
+    pub block_size: Option<u64>,
+    /// Suffix to append after block-size-scaled values (e.g. "K", "M", "kB").
+    pub block_size_suffix: String,
 }
 
 impl Default for LsConfig {
@@ -191,6 +196,8 @@ impl Default for LsConfig {
             context: false,
             literal: false,
             zero: false,
+            block_size: None,
+            block_size_suffix: String::new(),
         }
     }
 }
@@ -385,7 +392,29 @@ impl FileEntry {
         let path = de.path();
 
         let meta = if config.dereference {
-            fs::metadata(&path).or_else(|_| fs::symlink_metadata(&path))?
+            match fs::metadata(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    // Check if it's a broken symlink when dereferencing
+                    if let Ok(lmeta) = fs::symlink_metadata(&path) {
+                        if lmeta.file_type().is_symlink() {
+                            // For long format, show placeholder with error.
+                            // For non-long formats, just show the name from lstat.
+                            if config.long_format {
+                                eprintln!(
+                                    "ls: cannot access '{}': {}",
+                                    name,
+                                    crate::common::io_error_msg(&e)
+                                );
+                                return Ok(Self::broken_deref(name, path));
+                            }
+                            // Non-long format: use lstat data, no error
+                            return Self::from_metadata(name, path, &lmeta, config);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
         } else {
             fs::symlink_metadata(&path)?
         };
@@ -520,6 +549,40 @@ impl FileEntry {
                 }
             },
         }
+    }
+
+    /// Create a placeholder entry for a broken symlink when -L (dereference) is used.
+    /// GNU ls shows `l????????? ? ? ? ? ? name` for such entries with proper column padding.
+    pub fn broken_deref(name: String, path: PathBuf) -> Self {
+        let sort_key = CString::new(name.as_str()).unwrap_or_default();
+        FileEntry {
+            name,
+            path,
+            sort_key,
+            ino: 0,
+            nlink: 0, // marker: normal entries have nlink >= 1
+            mode: libc::S_IFLNK as u32,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            blocks: 0,
+            mtime: 0,
+            mtime_nsec: 0,
+            atime: 0,
+            atime_nsec: 0,
+            ctime: 0,
+            ctime_nsec: 0,
+            rdev_major: 0,
+            rdev_minor: 0,
+            is_dir: false,
+            link_target: None,
+            link_target_ok: false,
+        }
+    }
+
+    /// Whether this is a broken dereference placeholder.
+    pub fn is_broken_deref(&self) -> bool {
+        self.nlink == 0 && (self.mode & libc::S_IFMT as u32) == libc::S_IFLNK as u32
     }
 
     /// Display width of the name (accounting for quoting, indicator).
@@ -913,13 +976,95 @@ pub fn format_permissions(mode: u32) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Block size parsing (--block-size=SIZE)
+// ---------------------------------------------------------------------------
+
+/// Parse a GNU coreutils --block-size=SIZE value.
+///
+/// Supported formats:
+///   - Plain number: `1024` → (1024, "")
+///   - Suffix only: `K` → (1024, "K"), `M` → (1048576, "M")
+///   - Number + suffix: `1K` → (1024, ""), `2M` → (2097152, "")
+///   - SI suffix (trailing B): `KB` → (1000, "kB"), `MB` → (1000000, "MB")
+///
+/// Returns `(block_size_bytes, suffix_string)`.
+pub fn parse_block_size(s: &str) -> Result<(u64, String), String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty block size".to_string());
+    }
+
+    // Try to find where the numeric prefix ends and the suffix begins.
+    // GNU: the SIZE may be an optional integer followed by one of:
+    //   K, M, G, T, P, E, Z, Y (powers of 1024)
+    //   KB, MB, GB, TB, PB, EB, ZB, YB (powers of 1000)
+    let digit_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+
+    let (num_str, suffix_str) = s.split_at(digit_end);
+
+    let suffix_upper = suffix_str.to_uppercase();
+
+    // Determine base and multiplier from suffix
+    let (multiplier, display_suffix) = match suffix_upper.as_str() {
+        "" => (1u64, String::new()),
+        "K" => (1024, "K".to_string()),
+        "M" => (1024 * 1024, "M".to_string()),
+        "G" => (1024 * 1024 * 1024, "G".to_string()),
+        "T" => (1024u64 * 1024 * 1024 * 1024, "T".to_string()),
+        "P" => (1024u64 * 1024 * 1024 * 1024 * 1024, "P".to_string()),
+        "E" => (1024u64 * 1024 * 1024 * 1024 * 1024 * 1024, "E".to_string()),
+        "KB" => (1000, "kB".to_string()),
+        "MB" => (1000 * 1000, "MB".to_string()),
+        "GB" => (1000 * 1000 * 1000, "GB".to_string()),
+        "TB" => (1000u64 * 1000 * 1000 * 1000, "TB".to_string()),
+        "PB" => (1000u64 * 1000 * 1000 * 1000 * 1000, "PB".to_string()),
+        "EB" => (1000u64 * 1000 * 1000 * 1000 * 1000 * 1000, "EB".to_string()),
+        _ => {
+            return Err(format!("invalid suffix in block size '{}'", s));
+        }
+    };
+
+    let numeric = if num_str.is_empty() {
+        1u64
+    } else {
+        num_str
+            .parse::<u64>()
+            .map_err(|_| format!("invalid block size '{}'", s))?
+    };
+
+    let block_size = numeric
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("block size '{}' is too large", s))?;
+
+    if block_size == 0 {
+        return Err(format!("invalid block size '{}'", s));
+    }
+
+    // GNU behavior for suffix display:
+    // - If a numeric prefix was given (e.g. "1K", "2M"), no suffix is shown.
+    // - If no numeric prefix (e.g. "K", "M", "KB"), suffix is shown.
+    let suffix = if num_str.is_empty() {
+        display_suffix
+    } else {
+        String::new()
+    };
+
+    Ok((block_size, suffix))
+}
+
+// ---------------------------------------------------------------------------
 // Size formatting
 // ---------------------------------------------------------------------------
 
 /// Format a file size for display.
-pub fn format_size(size: u64, human: bool, si: bool, kibibytes: bool) -> String {
-    if human || si {
-        let base: f64 = if si { 1000.0 } else { 1024.0 };
+pub fn format_size(size: u64, config: &LsConfig) -> String {
+    // --block-size takes precedence over -h / --si / -k
+    if let Some(bs) = config.block_size {
+        let scaled = if bs == 0 { size } else { (size + bs - 1) / bs };
+        return format!("{}{}", scaled, config.block_size_suffix);
+    }
+    if config.human_readable || config.si {
+        let base: f64 = if config.si { 1000.0 } else { 1024.0 };
         let suffixes = ["", "K", "M", "G", "T", "P", "E"];
 
         if size == 0 {
@@ -940,7 +1085,7 @@ pub fn format_size(size: u64, human: bool, si: bool, kibibytes: bool) -> String 
         } else {
             format!("{:.1}{}", val, suffixes[idx])
         }
-    } else if kibibytes {
+    } else if config.kibibytes {
         // Show blocks in 1K units
         let blocks_k = (size + 1023) / 1024;
         format!("{}", blocks_k)
@@ -950,11 +1095,19 @@ pub fn format_size(size: u64, human: bool, si: bool, kibibytes: bool) -> String 
 }
 
 /// Format blocks for the -s option (in 1K units by default, or --si / -h).
-pub fn format_blocks(blocks_512: u64, human: bool, si: bool, kibibytes: bool) -> String {
+pub fn format_blocks(blocks_512: u64, config: &LsConfig) -> String {
     let bytes = blocks_512 * 512;
-    if human || si {
-        format_size(bytes, human, si, false)
-    } else if kibibytes {
+    if let Some(bs) = config.block_size {
+        let scaled = if bs == 0 {
+            bytes
+        } else {
+            (bytes + bs - 1) / bs
+        };
+        return format!("{}{}", scaled, config.block_size_suffix);
+    }
+    if config.human_readable || config.si {
+        format_size(bytes, config)
+    } else if config.kibibytes {
         let k = (bytes + 1023) / 1024;
         format!("{}", k)
     } else {
@@ -1305,7 +1458,7 @@ fn print_long(
                 if ft == libc::S_IFBLK as u32 || ft == libc::S_IFCHR as u32 {
                     format!("{}, {}", e.rdev_major, e.rdev_minor).len()
                 } else {
-                    format_size(e.size, config.human_readable, config.si, config.kibibytes).len()
+                    format_size(e.size, config).len()
                 }
             })
             .max()
@@ -1313,7 +1466,7 @@ fn print_long(
     } else {
         entries
             .iter()
-            .map(|e| format_size(e.size, config.human_readable, config.si, config.kibibytes).len())
+            .map(|e| format_size(e.size, config).len())
             .max()
             .unwrap_or(1)
     };
@@ -1331,9 +1484,7 @@ fn print_long(
     let max_blocks = if config.show_size {
         entries
             .iter()
-            .map(|e| {
-                format_blocks(e.blocks, config.human_readable, config.si, config.kibibytes).len()
-            })
+            .map(|e| format_blocks(e.blocks, config).len())
             .max()
             .unwrap_or(1)
     } else {
@@ -1341,6 +1492,29 @@ fn print_long(
     };
 
     for entry in entries {
+        // Broken dereference placeholder: show l????????? ? ?<pad> ?<pad> ?<pad> ? name
+        if entry.is_broken_deref() {
+            let quoted = quote_name(&entry.name, config);
+            if config.show_inode {
+                write!(out, "{:>width$} ", "?", width = max_inode)?;
+            }
+            if config.show_size {
+                write!(out, "{:>width$} ", "?", width = max_blocks)?;
+            }
+            write!(out, "l????????? ")?;
+            write!(out, "{:>width$} ", "?", width = max_nlink)?;
+            if config.show_owner {
+                write!(out, "{:<width$} ", "?", width = max_owner)?;
+            }
+            if config.show_group {
+                write!(out, "{:<width$} ", "?", width = max_group)?;
+            }
+            write!(out, "{:>width$} ", "?", width = max_size)?;
+            write!(out, "{:>12} ", "?")?;
+            writeln!(out, "{}", quoted)?;
+            continue;
+        }
+
         // Inode
         if config.show_inode {
             write!(out, "{:>width$} ", entry.ino, width = max_inode)?;
@@ -1348,12 +1522,7 @@ fn print_long(
 
         // Block size
         if config.show_size {
-            let bs = format_blocks(
-                entry.blocks,
-                config.human_readable,
-                config.si,
-                config.kibibytes,
-            );
+            let bs = format_blocks(entry.blocks, config);
             write!(out, "{:>width$} ", bs, width = max_blocks)?;
         }
 
@@ -1389,12 +1558,7 @@ fn print_long(
             let dev = format!("{}, {}", entry.rdev_major, entry.rdev_minor);
             write!(out, "{:>width$} ", dev, width = max_size)?;
         } else {
-            let sz = format_size(
-                entry.size,
-                config.human_readable,
-                config.si,
-                config.kibibytes,
-            );
+            let sz = format_size(entry.size, config);
             write!(out, "{:>width$} ", sz, width = max_size)?;
         }
 
@@ -1485,12 +1649,7 @@ fn write_entry_prefix(
         write!(out, "{:>width$} ", entry.ino, width = max_inode_w)?;
     }
     if config.show_size {
-        let bs = format_blocks(
-            entry.blocks,
-            config.human_readable,
-            config.si,
-            config.kibibytes,
-        );
+        let bs = format_blocks(entry.blocks, config);
         write!(out, "{:>width$} ", bs, width = max_blocks_w)?;
     }
     Ok(())
@@ -1544,9 +1703,7 @@ fn print_with_separator(
     let max_blocks_w = if config.show_size {
         entries
             .iter()
-            .map(|e| {
-                format_blocks(e.blocks, config.human_readable, config.si, config.kibibytes).len()
-            })
+            .map(|e| format_blocks(e.blocks, config).len())
             .max()
             .unwrap_or(1)
     } else {
@@ -1644,9 +1801,7 @@ fn print_columns(
     let max_blocks_w = if config.show_size {
         entries
             .iter()
-            .map(|e| {
-                format_blocks(e.blocks, config.human_readable, config.si, config.kibibytes).len()
-            })
+            .map(|e| format_blocks(e.blocks, config).len())
             .max()
             .unwrap_or(1)
     } else {
@@ -1822,9 +1977,7 @@ fn print_single_column(
     let max_blocks_w = if config.show_size {
         entries
             .iter()
-            .map(|e| {
-                format_blocks(e.blocks, config.human_readable, config.si, config.kibibytes).len()
-            })
+            .map(|e| format_blocks(e.blocks, config).len())
             .max()
             .unwrap_or(1)
     } else {
@@ -1836,12 +1989,7 @@ fn print_single_column(
             write!(out, "{:>width$} ", entry.ino, width = max_inode_w)?;
         }
         if config.show_size {
-            let bs = format_blocks(
-                entry.blocks,
-                config.human_readable,
-                config.si,
-                config.kibibytes,
-            );
+            let bs = format_blocks(entry.blocks, config);
             write!(out, "{:>width$} ", bs, width = max_blocks_w)?;
         }
 
@@ -1933,12 +2081,7 @@ pub fn print_comma(
 
 fn print_total(out: &mut impl Write, entries: &[FileEntry], config: &LsConfig) -> io::Result<()> {
     let total_blocks: u64 = entries.iter().map(|e| e.blocks).sum();
-    let formatted = format_blocks(
-        total_blocks,
-        config.human_readable,
-        config.si,
-        config.kibibytes,
-    );
+    let formatted = format_blocks(total_blocks, config);
     write!(out, "total {}", formatted)?;
     if config.zero {
         out.write_all(&[0u8])
@@ -1965,6 +2108,9 @@ pub fn ls_dir(
 
     let mut entries = read_entries(path, config)?;
     sort_entries(&mut entries, config);
+
+    // Track if any entries have errors (e.g., broken symlink with -L)
+    let has_broken_deref = entries.iter().any(|e| e.is_broken_deref());
 
     // Print total in long / show_size modes
     if config.long_format || config.show_size {
@@ -1999,7 +2145,7 @@ pub fn ls_dir(
         }
     }
 
-    Ok(true)
+    Ok(!has_broken_deref)
 }
 
 /// Top-level entry: list the given paths.
@@ -2042,7 +2188,26 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
     for p in paths {
         let path = PathBuf::from(p);
         let meta_result = if config.dereference {
-            fs::metadata(&path).or_else(|_| fs::symlink_metadata(&path))
+            match fs::metadata(&path) {
+                Ok(m) => Ok(m),
+                Err(e) => {
+                    // When -L and metadata fails, check if it's a broken symlink
+                    if let Ok(lmeta) = fs::symlink_metadata(&path) {
+                        if lmeta.file_type().is_symlink() {
+                            // Broken symlink with -L: show error + placeholder entry
+                            eprintln!(
+                                "ls: cannot access '{}': {}",
+                                p,
+                                crate::common::io_error_msg(&e)
+                            );
+                            had_error = true;
+                            file_args.push(FileEntry::broken_deref(p.to_string(), path));
+                            continue;
+                        }
+                    }
+                    Err(e)
+                }
+            }
         } else {
             fs::symlink_metadata(&path)
         };
@@ -2105,7 +2270,10 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
             writeln!(out)?;
         }
         match ls_dir(&mut out, dir, config, color_db.as_ref(), show_header) {
-            Ok(_) => {}
+            Ok(true) => {}
+            Ok(false) => {
+                had_error = true;
+            }
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Err(e),
             Err(e) => {
                 eprintln!(

@@ -407,19 +407,15 @@ fn base32_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         }
     }
 
-    // Incomplete final group: GNU basenc 9.5+ auto-pads unpadded input.
-    // Decode partial bytes without error.
-    if n >= 2 {
-        result.push((vals[0] << 3) | (vals[1] >> 2));
-    }
-    if n >= 4 {
-        result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
-    }
-    if n >= 5 {
-        result.push((vals[3] << 4) | (vals[4] >> 1));
-    }
-    if n >= 7 {
-        result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
+    // Incomplete final group without proper padding is invalid (GNU compat).
+    // GNU basenc rejects incomplete blocks without writing partial output,
+    // so we do NOT push partial decoded bytes — only return the error
+    // along with whatever complete blocks were already decoded.
+    if n > 0 {
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
     DecodeOutput {
@@ -1295,7 +1291,9 @@ fn enlarge_pipes() {
 }
 
 fn main() {
-    coreutils_rs::common::reset_sigpipe();
+    // Do NOT reset SIGPIPE to SIG_DFL here — keep Rust's default SIG_IGN so that
+    // writes to a broken pipe return BrokenPipe error instead of killing the process.
+    // This lets us print "basenc: write error: Broken pipe" to stderr (GNU compat).
 
     #[cfg(target_os = "linux")]
     enlarge_pipes();
@@ -1322,9 +1320,6 @@ fn main() {
         let result = decode_data(&data, encoding, cli.ignore_garbage);
         if !result.data.is_empty() {
             if let Err(e) = out.write_all(&result.data) {
-                if e.kind() == io::ErrorKind::BrokenPipe {
-                    process::exit(0);
-                }
                 eprintln!("{}: write error: {}", TOOL_NAME, e);
                 process::exit(1);
             }
@@ -1346,10 +1341,6 @@ fn main() {
     }
 
     if let Err(e) = out.flush() {
-        if e.kind() == io::ErrorKind::BrokenPipe {
-            eprintln!("{}: write error: Broken pipe", TOOL_NAME);
-            process::exit(1);
-        }
         eprintln!("{}: write error: {}", TOOL_NAME, e);
         process::exit(1);
     }
