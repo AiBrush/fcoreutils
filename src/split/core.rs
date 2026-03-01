@@ -821,28 +821,30 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
             const FAST_PATH_LIMIT: u64 = 512 * 1024 * 1024;
             if let Ok(file) = File::open(input_path) {
                 if let Ok(meta) = file.metadata() {
-                    if meta.file_type().is_file() && meta.len() <= FAST_PATH_LIMIT {
+                    if meta.file_type().is_file() && meta.len() <= FAST_PATH_LIMIT && meta.len() > 0
+                    {
+                        // Use mmap for zero-copy access — avoids heap allocation + read copy.
+                        if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&file) } {
+                            let _ = mmap.advise(memmap2::Advice::Sequential);
+                            return split_lines_preloaded(&mmap, config, n);
+                        }
+                        // Fallback: read into Vec
                         let len = meta.len() as usize;
-                        let data = if len > 0 {
-                            let mut buf = vec![0u8; len];
-                            let mut total = 0;
-                            let mut f = &file;
-                            while total < buf.len() {
-                                match f.read(&mut buf[total..]) {
-                                    Ok(0) => break,
-                                    Ok(n) => total += n,
-                                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
-                                        continue;
-                                    }
-                                    Err(e) => return Err(e),
+                        let mut buf = vec![0u8; len];
+                        let mut total = 0;
+                        let mut f = &file;
+                        while total < buf.len() {
+                            match f.read(&mut buf[total..]) {
+                                Ok(0) => break,
+                                Ok(n) => total += n,
+                                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+                                    continue;
                                 }
+                                Err(e) => return Err(e),
                             }
-                            buf.truncate(total);
-                            buf
-                        } else {
-                            Vec::new()
-                        };
-                        return split_lines_preloaded(&data, config, n);
+                        }
+                        buf.truncate(total);
+                        return split_lines_preloaded(&buf, config, n);
                     }
                 }
             }

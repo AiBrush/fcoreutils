@@ -479,13 +479,6 @@ const FADVISE_MIN_SIZE: u64 = 1024 * 1024;
 /// 16MB covers typical benchmark files (10MB) while keeping memory usage bounded.
 const SMALL_FILE_LIMIT: u64 = 16 * 1024 * 1024;
 
-/// Threshold above which streaming (fadvise + 128KB chunks) outperforms a
-/// single large read() for the medium-file path on Linux.
-/// Linux page-cache read throughput drops significantly for large single reads:
-/// 128KB chunks on a 10MB file = 2.2ms system time vs single 10MB read = 6.8ms.
-/// fadvise(SEQUENTIAL) + chunked reads matches GNU coreutils' approach.
-const STREAM_MEDIUM_THRESHOLD: u64 = 1024 * 1024;
-
 /// Threshold for tiny files that can be read into a stack buffer.
 /// Below this size, we use a stack-allocated buffer + single read() syscall,
 /// completely avoiding any heap allocation for the data path.
@@ -667,16 +660,23 @@ fn hash_regular_file(algo: HashAlgorithm, file: File, file_size: u64) -> io::Res
             return hash_reader(algo, file);
         }
     }
-    // Medium files (1MB-16MB on Linux): streaming in 128KB chunks with fadvise
-    // is faster than a single large read because Linux page-cache read throughput
-    // drops for large single reads (6.8ms vs 2.2ms for 10MB). fadvise(SEQUENTIAL)
-    // lets the kernel pipeline I/O with the CPU, matching GNU coreutils' approach.
+    // Small/medium files (8KB-16MB): single read into thread-local buffer.
+    // One read() + one single-shot hash call. The thread-local buffer grows
+    // lazily and persists across files, so allocation cost is amortized.
+    // This outperforms streaming (128KB chunks × N syscalls × N trait dispatches)
+    // for files that fit comfortably in the page cache.
     #[cfg(target_os = "linux")]
-    if file_size >= STREAM_MEDIUM_THRESHOLD {
-        return hash_file_streaming(algo, file, file_size);
+    {
+        use std::os::unix::io::AsRawFd;
+        let _ = unsafe {
+            libc::posix_fadvise(
+                file.as_raw_fd(),
+                0,
+                file_size as i64,
+                libc::POSIX_FADV_SEQUENTIAL,
+            )
+        };
     }
-    // Small files (8KB-1MB, or non-Linux): single read into thread-local buffer.
-    // One read() + one single-shot hash call, minimal overhead for tiny files.
     hash_file_small(algo, file, file_size as usize)
 }
 
