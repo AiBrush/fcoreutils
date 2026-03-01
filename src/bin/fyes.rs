@@ -150,7 +150,9 @@ fn main() {
             if ret > 0 {
                 written += ret as usize;
             } else if ret == 0 {
-                break;
+                // write(2) returned 0 for a nonzero-length buffer — treat as
+                // an unrecoverable I/O error to avoid spinning forever.
+                write_error_exit(std::io::Error::from_raw_os_error(libc::EIO));
             } else {
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::Interrupted {

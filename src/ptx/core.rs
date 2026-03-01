@@ -187,6 +187,11 @@ fn generate_entries(
                 continue;
             }
 
+            debug_assert!(
+                wlen <= u16::MAX as usize,
+                "word length {} exceeds u16::MAX",
+                wlen
+            );
             entries.push(KwicEntry {
                 line_idx: line_idx as u32,
                 word_start: word_start as u32,
@@ -195,9 +200,11 @@ fn generate_entries(
         }
     }
 
-    // Sort by keyword (case-insensitive if requested), then by reference
+    // Sort by keyword (case-insensitive if requested), then by reference.
+    // Must use stable sort: glibc's qsort is merge-sort (stable), so GNU ptx
+    // preserves input order for entries with equal keywords and references.
     if config.ignore_case {
-        entries.sort_unstable_by(|a, b| {
+        entries.sort_by(|a, b| {
             let a_line = &lines[a.line_idx as usize].1;
             let b_line = &lines[b.line_idx as usize].1;
             let a_kw = &a_line[a.word_start as usize..a.word_start as usize + a.word_len as usize];
@@ -212,7 +219,7 @@ fn generate_entries(
                 })
         });
     } else {
-        entries.sort_unstable_by(|a, b| {
+        entries.sort_by(|a, b| {
             let a_line = &lines[a.line_idx as usize].1;
             let b_line = &lines[b.line_idx as usize].1;
             let a_kw = &a_line[a.word_start as usize..a.word_start as usize + a.word_len as usize];
@@ -597,8 +604,8 @@ fn write_roff<W: Write>(
     ref_str: &str,
     config: &PtxConfig,
     layout: &LayoutFields<'_>,
+    escaped_trunc: &str,
 ) -> io::Result<()> {
-    let trunc_flag = config.flag_truncation.as_deref().unwrap_or("/");
     let macro_name = config.macro_name.as_deref().unwrap_or("xx");
 
     out.write_all(b".")?;
@@ -608,13 +615,13 @@ fn write_roff<W: Write>(
     out.write_all(b" \"")?;
     out.write_all(escape_roff(layout.tail).as_bytes())?;
     if layout.tail_truncated {
-        out.write_all(escape_roff(trunc_flag).as_bytes())?;
+        out.write_all(escaped_trunc.as_bytes())?;
     }
 
     // before
     out.write_all(b"\" \"")?;
     if layout.before_truncated {
-        out.write_all(escape_roff(trunc_flag).as_bytes())?;
+        out.write_all(escaped_trunc.as_bytes())?;
     }
     out.write_all(escape_roff(layout.before).as_bytes())?;
 
@@ -622,13 +629,13 @@ fn write_roff<W: Write>(
     out.write_all(b"\" \"")?;
     out.write_all(escape_roff(layout.keyafter).as_bytes())?;
     if layout.keyafter_truncated {
-        out.write_all(escape_roff(trunc_flag).as_bytes())?;
+        out.write_all(escaped_trunc.as_bytes())?;
     }
 
     // head
     out.write_all(b"\" \"")?;
     if layout.head_truncated {
-        out.write_all(escape_roff(trunc_flag).as_bytes())?;
+        out.write_all(escaped_trunc.as_bytes())?;
     }
     out.write_all(escape_roff(layout.head).as_bytes())?;
     out.write_all(b"\"")?;
@@ -767,6 +774,13 @@ fn format_and_write<W: Write>(
         0
     };
 
+    // Pre-compute escaped truncation flag for roff mode (avoids per-entry allocation)
+    let escaped_trunc = if config.format == OutputFormat::Roff {
+        escape_roff(config.flag_truncation.as_deref().unwrap_or("/"))
+    } else {
+        String::new()
+    };
+
     for entry in &entries {
         let line_data = &lines[entry.line_idx as usize];
         let ref_str = if config.auto_reference || config.references {
@@ -790,7 +804,9 @@ fn format_and_write<W: Write>(
 
         match config.format {
             OutputFormat::Plain => write_plain(output, ref_str, config, &layout, ref_max_width)?,
-            OutputFormat::Roff => write_roff(output, ref_str, config, &layout)?,
+            OutputFormat::Roff => {
+                write_roff(output, ref_str, config, &layout, &escaped_trunc)?;
+            }
             OutputFormat::Tex => write_tex(output, ref_str, config, &layout)?,
         }
     }
