@@ -874,13 +874,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_wc_c_locale_3state_transparent() {
-        // GNU wc 9.4 C locale uses 3-state model:
-        //   space (0x09-0x0D, 0x20) = word break
-        //   printable (0x21-0x7E) = word content
-        //   transparent (everything else) = no state change
+    fn test_wc_c_locale_nbsp_word_break() {
+        // GNU wc 9.7 C locale: 0xA0 (NO-BREAK SPACE in Latin-1) is a word separator.
         // Input: 0xe4 0xbd 0xa0 0xe5 0xa5 0xbd = "你好" in UTF-8
-        // All bytes are 0x80+ (transparent in C locale) → 0 words.
+        // Byte 0xA0 (third byte of 你) acts as word separator in C locale,
+        // splitting the sequence into 2 words: (0xe4 0xbd) and (0xe5 0xa5 0xbd).
         let mut child = cmd()
             .arg("-w")
             .env("LC_ALL", "C")
@@ -898,8 +896,8 @@ mod tests {
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout.trim().starts_with("0") || stdout.contains(" 0"),
-            "C locale 3-state: high bytes are transparent, expected 0 words, got: {}",
+            stdout.trim().starts_with("2") || stdout.contains(" 2"),
+            "C locale: 0xA0 is word separator (GNU wc 9.7), expected 2 words, got: {}",
             stdout.trim()
         );
     }
@@ -952,9 +950,10 @@ mod tests {
     fn test_wc_c_locale_default_cjk() {
         // Matches independent test: LC_ALL=C wc cjk.txt
         // CJK text: "Hello, 世界!\n你好世界\nこんにちは\n"
+        // GNU wc 9.7 C locale: 0xA0 bytes act as word separators.
+        // Expected: 3 lines, 5 words, 44 bytes
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("cjk.txt");
-        // Use the exact same content as the independent test
         std::fs::write(&file, "Hello, 世界!\n你好世界\nこんにちは\n").unwrap();
         let output = cmd()
             .env("LC_ALL", "C")
@@ -963,11 +962,17 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // Verify the default output (lines, words, bytes) is parseable
         let parts: Vec<&str> = stdout.split_whitespace().collect();
         assert!(
             parts.len() >= 3,
             "Expected at least 3 fields (lines words bytes), got: {}",
+            stdout.trim()
+        );
+        // Word count must be 5 (matching GNU wc 9.7)
+        assert_eq!(
+            parts[1],
+            "5",
+            "Expected 5 words in C locale CJK text, got: {}",
             stdout.trim()
         );
     }

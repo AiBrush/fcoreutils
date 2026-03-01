@@ -64,7 +64,7 @@ fn main() {
             }
             s if s.starts_with('-') && s.len() > 1 => {
                 // Short option (not bare "-")
-                let first_char = s.chars().nth(1).unwrap();
+                let first_char = s.as_bytes()[1] as char;
                 let errmsg = format!(
                     "{}: invalid option -- '{}'\nTry '{} --help' for more information.\n",
                     TOOL_NAME, first_char, TOOL_NAME
@@ -363,11 +363,11 @@ mod tests {
         let text = String::from_utf8_lossy(&head.stdout);
         assert_eq!(text.trim(), "y");
 
-        // yes handles EPIPE: exits 1 silently (no stderr output, matching GNU)
+        // yes handles EPIPE: exits 1 with diagnostic to stderr (matching GNU)
         assert_eq!(status.code(), Some(1), "yes should exit 1 on pipe close");
         assert!(
-            stderr_output.is_empty(),
-            "stderr should be empty on broken pipe (GNU compat), got: {}",
+            stderr_output.contains("standard output"),
+            "stderr should contain broken pipe diagnostic (GNU compat), got: {}",
             stderr_output
         );
     }
@@ -394,11 +394,11 @@ mod tests {
 
         let status = child.wait().unwrap();
 
-        // SIGPIPE is ignored, so EPIPE is always caught → exit 1 silently (GNU compat)
+        // SIGPIPE is ignored, so EPIPE is always caught → exit 1 with diagnostic (GNU compat)
         assert_eq!(status.code(), Some(1), "yes should exit 1 on broken pipe");
         assert!(
-            stderr_output.is_empty(),
-            "stderr should be empty on broken pipe (GNU compat), got: {}",
+            stderr_output.contains("standard output"),
+            "stderr should contain broken pipe diagnostic (GNU compat), got: {}",
             stderr_output
         );
     }
@@ -528,11 +528,11 @@ mod tests {
         let status = child.wait().unwrap();
 
         assert_eq!(head.status.code(), Some(0));
-        // EPIPE caught: exit 1 silently (GNU compat — no stderr output)
+        // EPIPE caught: exit 1 with diagnostic to stderr (GNU compat)
         assert_eq!(status.code(), Some(1));
         assert!(
-            stderr_output.is_empty(),
-            "stderr should be empty on broken pipe (GNU compat), got: {}",
+            stderr_output.contains("standard output"),
+            "stderr should contain broken pipe diagnostic (GNU compat), got: {}",
             stderr_output
         );
     }
