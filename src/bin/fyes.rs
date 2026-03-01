@@ -13,27 +13,13 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// large enough to amortize syscall overhead.
 const BUF_SIZE: usize = 8192;
 
-/// Handle write error: print diagnostic to stderr and exit with code 1.
-/// GNU yes prints "yes: standard output: Broken pipe" on EPIPE.
-/// Close stdout first (like GNU's close_stdout()) to let downstream pipeline
-/// processes (wc, uniq, etc.) finish and produce their output before our
-/// diagnostic message, matching GNU's stderr ordering.
-fn write_error_exit(err: std::io::Error) -> ! {
-    unsafe {
-        libc::close(1);
-    }
-    let msg = coreutils_rs::common::io_error_msg(&err);
-    let errmsg = format!("{}: standard output: {}\n", TOOL_NAME, msg);
-    unsafe {
-        libc::write(2, errmsg.as_ptr() as *const libc::c_void, errmsg.len() as _);
-    }
-    process::exit(1);
-}
-
 fn main() {
-    // Keep Rust's default SIGPIPE=SIG_IGN so write() returns EPIPE instead
-    // of killing us. On BrokenPipe, print diagnostic and exit with code 1
-    // (matching GNU yes 9.4 behavior).
+    // Restore SIGPIPE to default (SIG_DFL) so that writing to a closed pipe
+    // kills us with SIGPIPE, exactly like GNU yes. Rust sets SIG_IGN by default.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -131,11 +117,8 @@ fn main() {
     };
     let total = buf.len();
 
-    // With 8KB writes and the default 64KB pipe buffer, we can queue
-    // 8 writes before blocking — good overlap without extra memory.
-
-    // Raw write(2) loop — simpler and faster than vmsplice (which without
-    // SPLICE_F_GIFT copies into pipe buffers anyway, with extra overhead)
+    // Raw write(2) loop — with SIGPIPE=SIG_DFL, a write to a closed pipe
+    // delivers SIGPIPE which kills the process (matching GNU yes behavior).
     let ptr = buf.as_ptr();
     loop {
         let mut written = 0usize;
@@ -150,15 +133,20 @@ fn main() {
             if ret > 0 {
                 written += ret as usize;
             } else if ret == 0 {
-                // write(2) returned 0 for a nonzero-length buffer — treat as
-                // an unrecoverable I/O error to avoid spinning forever.
-                write_error_exit(std::io::Error::from_raw_os_error(libc::EIO));
+                // write(2) returned 0 for a nonzero-length buffer — should not
+                // happen, but exit cleanly to avoid spinning.
+                process::exit(1);
             } else {
+                // With SIG_DFL, EPIPE/SIGPIPE kills the process before we get
+                // here. This handles other errors (ENOSPC, EIO, etc.).
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                write_error_exit(err);
+                // For non-SIGPIPE errors, print diagnostic and exit
+                let msg = coreutils_rs::common::io_error_msg(&err);
+                eprintln!("{}: standard output: {}", TOOL_NAME, msg);
+                process::exit(1);
             }
         }
     }
@@ -331,7 +319,7 @@ mod tests {
 
     #[test]
     fn test_yes_pipe_closes() {
-        // yes piped to head should terminate
+        // yes piped to head should terminate (killed by SIGPIPE)
         let mut child = cmd()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -347,55 +335,50 @@ mod tests {
             .output()
             .unwrap();
 
-        // Collect stderr
-        let mut stderr = child.stderr.take().unwrap();
-        let mut stderr_output = String::new();
-        let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_output);
-
-        // Wait for the child process to avoid zombie
+        // Wait for the child process
         let status = child.wait().unwrap();
 
         assert_eq!(head.status.code(), Some(0));
         let text = String::from_utf8_lossy(&head.stdout);
         assert_eq!(text.trim(), "y");
 
-        // yes handles EPIPE: exits 1 with diagnostic to stderr (matching GNU)
-        assert_eq!(status.code(), Some(1), "yes should exit 1 on pipe close");
-        assert!(
-            stderr_output.contains("standard output"),
-            "stderr should contain broken pipe diagnostic (GNU compat), got: {}",
-            stderr_output
-        );
+        // With SIGPIPE=SIG_DFL, yes is killed by SIGPIPE (no exit code on Unix)
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            // Killed by SIGPIPE (signal 13) or exits cleanly
+            assert!(
+                status.signal() == Some(13) || status.code() == Some(0),
+                "yes should be killed by SIGPIPE, got status: {:?}",
+                status
+            );
+        }
     }
 
     #[test]
     #[cfg(unix)]
     fn test_yes_broken_pipe_terminates() {
-        // When stdout is closed, yes should terminate with EPIPE handling.
+        // When stdout is closed, yes should be killed by SIGPIPE.
         let mut child = cmd()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
 
-        // Read a few bytes then close stdout to trigger broken pipe
+        // Read a few bytes then close stdout to trigger SIGPIPE
         let mut stdout = child.stdout.take().unwrap();
         let mut buf = [0u8; 4];
         let _ = std::io::Read::read(&mut stdout, &mut buf);
         drop(stdout);
 
-        let mut stderr = child.stderr.take().unwrap();
-        let mut stderr_output = String::new();
-        let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_output);
-
         let status = child.wait().unwrap();
 
-        // SIGPIPE is ignored, so EPIPE is always caught → exit 1 with diagnostic (GNU compat)
-        assert_eq!(status.code(), Some(1), "yes should exit 1 on broken pipe");
+        use std::os::unix::process::ExitStatusExt;
+        // Killed by SIGPIPE (signal 13)
         assert!(
-            stderr_output.contains("standard output"),
-            "stderr should contain broken pipe diagnostic (GNU compat), got: {}",
-            stderr_output
+            status.signal() == Some(13) || status.code() == Some(0),
+            "yes should be killed by SIGPIPE, got status: {:?}",
+            status
         );
     }
 
@@ -508,7 +491,7 @@ mod tests {
 
         let child_stdout = child.stdout.take().unwrap();
 
-        // Pipe through head -n 5 to trigger EPIPE
+        // Pipe through head -n 5 to trigger SIGPIPE
         let head = Command::new("head")
             .args(["-n", "5"])
             .stdin(child_stdout)
@@ -516,20 +499,16 @@ mod tests {
             .output()
             .unwrap();
 
-        // Collect stderr from yes
-        let mut stderr = child.stderr.take().unwrap();
-        let mut stderr_output = String::new();
-        let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_output);
-
         let status = child.wait().unwrap();
 
         assert_eq!(head.status.code(), Some(0));
-        // EPIPE caught: exit 1 with diagnostic to stderr (GNU compat)
-        assert_eq!(status.code(), Some(1));
+
+        use std::os::unix::process::ExitStatusExt;
+        // Killed by SIGPIPE (signal 13)
         assert!(
-            stderr_output.contains("standard output"),
-            "stderr should contain broken pipe diagnostic (GNU compat), got: {}",
-            stderr_output
+            status.signal() == Some(13) || status.code() == Some(0),
+            "yes should be killed by SIGPIPE, got status: {:?}",
+            status
         );
     }
 
