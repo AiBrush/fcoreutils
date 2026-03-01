@@ -143,13 +143,23 @@ fn main() {
                 // happen, but exit cleanly to avoid spinning.
                 process::exit(1);
             } else {
-                // With SIG_DFL, EPIPE/SIGPIPE kills the process before we get
-                // here. This handles other errors (ENOSPC, EIO, etc.).
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                // For non-SIGPIPE errors, print diagnostic and exit
+                // EPIPE: pipe closed — exit silently, matching GNU yes behavior.
+                // GNU yes is killed by SIGPIPE (no stderr output). Even though
+                // we set SIG_DFL + unblocked SIGPIPE, Rust's runtime may catch
+                // the signal before the default handler runs. Exit silently.
+                if err.raw_os_error() == Some(libc::EPIPE) {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::_exit(128 + libc::SIGPIPE)
+                    };
+                    #[cfg(not(unix))]
+                    process::exit(141); // 128 + 13 (SIGPIPE value on most POSIX)
+                }
+                // For other errors (ENOSPC, EIO, etc.), print diagnostic.
                 let msg = coreutils_rs::common::io_error_msg(&err);
                 eprintln!("{}: standard output: {}", TOOL_NAME, msg);
                 process::exit(1);
