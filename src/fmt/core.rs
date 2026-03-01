@@ -53,24 +53,47 @@ fn is_ws(b: u8) -> bool {
     unsafe { *WS_TABLE.get_unchecked(b as usize) != 0 }
 }
 
-/// Reusable DP and output buffers (no borrowed data, safe to carry across paragraphs).
-struct DpBufs {
+/// Word flags for GNU fmt cost model.
+/// Packed into the upper bits of the winfo u32 array for cache efficiency.
+const SENT_FLAG: u32 = 1 << 16; // sentence-final (period + double-space/eol context)
+const PERIOD_FLAG: u32 = 1 << 17; // has sentence-ending punct (.!?) regardless of context
+const PUNCT_FLAG: u32 = 1 << 18; // ends with non-period punctuation (,;:)
+const PAREN_FLAG: u32 = 1 << 19; // starts with opening paren/bracket
+
+/// Reusable buffers for the entire formatting session.
+/// All data is offset-based (no borrowed references), enabling reuse across paragraphs.
+struct FmtCtx {
+    /// Word byte offsets into the source text. One u32 per word.
+    word_off: Vec<u32>,
+    /// Packed word info: bits 0-15 = length, bits 16-19 = flags.
+    /// Parallel to word_off. Built once during word collection, used directly in DP.
     winfo: Vec<u32>,
+    /// DP cost array (n+1 elements).
     dp_cost: Vec<i64>,
+    /// Best break-point for word i (n elements).
     best: Vec<u32>,
+    /// Line length at break-point i (n+1 elements).
     line_len: Vec<i32>,
+    /// Output line buffer for batched writes.
     line_buf: Vec<u8>,
 }
 
-impl DpBufs {
+impl FmtCtx {
     fn new() -> Self {
         Self {
+            word_off: Vec::with_capacity(256),
             winfo: Vec::with_capacity(256),
             dp_cost: Vec::with_capacity(257),
             best: Vec::with_capacity(256),
             line_len: Vec::with_capacity(257),
             line_buf: Vec::with_capacity(256),
         }
+    }
+
+    #[inline(always)]
+    fn clear_words(&mut self) {
+        self.word_off.clear();
+        self.winfo.clear();
     }
 }
 
@@ -84,7 +107,6 @@ pub fn fmt_file<R: Read, W: Write>(
     output: &mut W,
     config: &FmtConfig,
 ) -> io::Result<()> {
-    // Read entire input into a contiguous buffer to avoid per-line String allocation.
     let mut data = Vec::new();
     input.read_to_end(&mut data)?;
     fmt_data(&data, output, config)
@@ -92,16 +114,25 @@ pub fn fmt_file<R: Read, W: Write>(
 
 /// Format in-memory data. Works on byte slices to avoid String allocation.
 pub fn fmt_data(data: &[u8], output: &mut impl Write, config: &FmtConfig) -> io::Result<()> {
-    // Convert to str once (fmt processes text, so UTF-8 is expected)
     let text = match std::str::from_utf8(data) {
         Ok(s) => s,
         Err(_) => {
-            // Fallback: lossy conversion
             let owned = String::from_utf8_lossy(data);
-            return fmt_str_owned(&owned, output, config);
+            return fmt_str(&owned, output, config);
         }
     };
     fmt_str(text, output, config)
+}
+
+/// Check if a byte range is all whitespace using our fast lookup table.
+#[inline(always)]
+fn is_blank_bytes(bytes: &[u8]) -> bool {
+    for &b in bytes {
+        if !is_ws(b) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Format a string slice, processing paragraph by paragraph with zero-copy word extraction.
@@ -109,133 +140,126 @@ fn fmt_str(text: &str, output: &mut impl Write, config: &FmtConfig) -> io::Resul
     let prefix_str = config.prefix.as_deref();
     let mut para_start = 0;
     let bytes = text.as_bytes();
-    let mut dp = DpBufs::new();
+    let blen = bytes.len();
+    let mut ctx = FmtCtx::new();
 
-    // Scan through the text finding paragraph boundaries
     let mut i = 0;
 
-    while i < bytes.len() {
+    while i < blen {
         // Find end of current line using memchr for SIMD-accelerated newline search
         let line_end = memchr::memchr(b'\n', &bytes[i..])
             .map(|p| i + p)
-            .unwrap_or(bytes.len());
+            .unwrap_or(blen);
 
-        let line = &text[i..line_end];
-
-        // Strip \r if present
-        let line = line.strip_suffix('\r').unwrap_or(line);
+        // Effective line end (strip \r)
+        let le = if line_end > i && bytes[line_end - 1] == b'\r' {
+            line_end - 1
+        } else {
+            line_end
+        };
 
         // Handle prefix filter
         if let Some(pfx) = prefix_str {
+            let line = &text[i..le];
             if !line.starts_with(pfx) {
                 // Flush current paragraph
                 if para_start < i {
-                    format_paragraph_str(text, para_start, i, config, output, &mut dp)?;
+                    format_paragraph(text, bytes, para_start, i, config, output, &mut ctx)?;
                 }
-                para_start = if line_end < bytes.len() {
-                    line_end + 1
-                } else {
-                    bytes.len()
-                };
+                let next = if line_end < blen { line_end + 1 } else { blen };
+                para_start = next;
                 // Emit verbatim
-                output.write_all(line.as_bytes())?;
+                output.write_all(&bytes[i..le])?;
                 output.write_all(b"\n")?;
-                i = para_start;
+                i = next;
                 continue;
             }
         }
 
-        if line.trim().is_empty() {
+        // Fast blank-line check using WS lookup table (no allocation)
+        if is_blank_bytes(&bytes[i..le]) {
             // Blank line = paragraph boundary
             if para_start < i {
-                format_paragraph_str(text, para_start, i, config, output, &mut dp)?;
+                format_paragraph(text, bytes, para_start, i, config, output, &mut ctx)?;
             }
             output.write_all(b"\n")?;
-            para_start = if line_end < bytes.len() {
-                line_end + 1
-            } else {
-                bytes.len()
-            };
+            let next = if line_end < blen { line_end + 1 } else { blen };
+            para_start = next;
         }
 
-        i = if line_end < bytes.len() {
-            line_end + 1
-        } else {
-            bytes.len()
-        };
+        i = if line_end < blen { line_end + 1 } else { blen };
     }
 
     // Flush remaining paragraph
-    if para_start < bytes.len() {
+    if para_start < blen {
         let remaining = text[para_start..].trim_end_matches('\n');
         if !remaining.is_empty() {
-            format_paragraph_str(text, para_start, bytes.len(), config, output, &mut dp)?;
+            format_paragraph(text, bytes, para_start, blen, config, output, &mut ctx)?;
         }
     }
 
     Ok(())
 }
 
-/// Fallback for non-UTF8 data (owned String from lossy conversion)
-fn fmt_str_owned(text: &str, output: &mut impl Write, config: &FmtConfig) -> io::Result<()> {
-    fmt_str(text, output, config)
-}
-
 /// Format a paragraph from a region of the source text [start..end).
-/// Extracts lines and words directly from the source text -- zero String allocation.
-/// Uses single-pass memchr-based line extraction instead of split/map/filter/collect.
-fn format_paragraph_str(
+/// Uses single-pass word extraction with offset-based storage.
+/// All flags are computed once during word collection, eliminating double punctuation analysis.
+fn format_paragraph(
     text: &str,
+    bytes: &[u8],
     start: usize,
     end: usize,
     config: &FmtConfig,
     output: &mut impl Write,
-    dp: &mut DpBufs,
+    ctx: &mut FmtCtx,
 ) -> io::Result<()> {
-    let region_bytes = &text.as_bytes()[start..end];
+    let region = &bytes[start..end];
+    let prefix_str = config.prefix.as_deref();
 
-    // Single-pass line extraction using memchr
-    let mut lines: Vec<&str> = Vec::with_capacity(16);
+    // Single-pass line extraction using memchr for indentation analysis.
+    // We need the first two non-empty lines for indent detection.
+    let mut first_line: Option<&str> = None;
+    let mut second_line: Option<&str> = None;
     {
+        let rlen = region.len();
         let mut pos = 0;
-        let rlen = region_bytes.len();
         while pos < rlen {
-            let nl = memchr::memchr(b'\n', &region_bytes[pos..])
+            let nl = memchr::memchr(b'\n', &region[pos..])
                 .map(|p| pos + p)
                 .unwrap_or(rlen);
-            let mut line_end = nl;
-            // Strip \r
-            if line_end > pos && region_bytes[line_end - 1] == b'\r' {
-                line_end -= 1;
+            let mut le = nl;
+            if le > pos && region[le - 1] == b'\r' {
+                le -= 1;
             }
-            if line_end > pos {
-                // SAFETY: start..end is a valid UTF-8 range (from text), and pos/line_end
-                // are within that range, split only on ASCII boundaries (\n, \r).
-                lines.push(&text[start + pos..start + line_end]);
+            if le > pos {
+                let line = &text[start + pos..start + le];
+                if first_line.is_none() {
+                    first_line = Some(line);
+                } else if second_line.is_none() {
+                    second_line = Some(line);
+                    break; // Only need first two lines for indent analysis
+                }
             }
             pos = nl + 1;
         }
     }
 
-    if lines.is_empty() {
-        return Ok(());
-    }
-
-    let prefix_str = config.prefix.as_deref();
-
-    // Strip the prefix from lines for indentation analysis.
-    let stripped_first = match prefix_str {
-        Some(pfx) => lines[0].strip_prefix(pfx).unwrap_or(lines[0]),
-        None => lines[0],
+    let fl = match first_line {
+        Some(l) => l,
+        None => return Ok(()),
     };
 
-    let stripped_second: &str = if lines.len() > 1 {
-        match prefix_str {
-            Some(pfx) => lines[1].strip_prefix(pfx).unwrap_or(lines[1]),
-            None => lines[1],
-        }
-    } else {
-        stripped_first
+    let stripped_first = match prefix_str {
+        Some(pfx) => fl.strip_prefix(pfx).unwrap_or(fl),
+        None => fl,
+    };
+
+    let stripped_second = match second_line {
+        Some(l) => match prefix_str {
+            Some(pfx) => l.strip_prefix(pfx).unwrap_or(l),
+            None => l,
+        },
+        None => stripped_first,
     };
 
     let first_indent = leading_indent(stripped_first);
@@ -248,40 +272,50 @@ fn format_paragraph_str(
     };
 
     if config.split_only {
-        for line in &lines {
-            split_line_optimal(line, config, prefix_str, output)?;
+        // Split-only mode: process each line independently.
+        let rlen = region.len();
+        let mut pos = 0;
+        while pos < rlen {
+            let nl = memchr::memchr(b'\n', &region[pos..])
+                .map(|p| pos + p)
+                .unwrap_or(rlen);
+            let mut le = nl;
+            if le > pos && region[le - 1] == b'\r' {
+                le -= 1;
+            }
+            if le > pos {
+                let line = &text[start + pos..start + le];
+                split_line_optimal(line, config, prefix_str, output)?;
+            }
+            pos = nl + 1;
         }
         return Ok(());
     }
 
-    // Collect words directly from source text -- zero-copy &str references.
-    let total_chars: usize = lines.iter().map(|l| l.len()).sum();
-    let mut all_words: Vec<&str> = Vec::with_capacity(total_chars / 5 + 16);
-    let mut sentence_ends: Vec<bool> = Vec::with_capacity(total_chars / 5 + 16);
+    // Collect words with full flag computation in a single pass.
+    // Words are stored as byte offsets (word_off) + packed winfo, avoiding Vec<&str>.
+    ctx.clear_words();
+    collect_words_from_region(bytes, region, start, prefix_str, ctx);
 
-    for line in &lines {
-        let s = match prefix_str {
-            Some(pfx) => line.strip_prefix(pfx).unwrap_or(line),
-            None => line,
-        };
-        collect_words_with_sentence_info(s, &mut all_words, &mut sentence_ends);
-    }
-
-    if all_words.is_empty() {
+    let n = ctx.word_off.len();
+    if n == 0 {
         output.write_all(b"\n")?;
         return Ok(());
     }
 
+    // Mark last word as sentence-final (GNU fmt convention).
+    let last_idx = n - 1;
+    ctx.winfo[last_idx] |= SENT_FLAG | PERIOD_FLAG;
+
     let pfx = prefix_str.unwrap_or("");
     reflow_paragraph(
-        &all_words,
-        &sentence_ends,
+        bytes,
         pfx,
         first_line_indent,
         cont_indent,
         config,
         output,
-        dp,
+        ctx,
     )
 }
 
@@ -291,15 +325,104 @@ fn leading_indent(line: &str) -> &str {
     &line[..line.len() - trimmed.len()]
 }
 
+/// Collect words from all lines in a paragraph region, computing all flags in one pass.
+/// Stores byte offsets + packed winfo in ctx. No intermediate Vec<&str> or Vec<bool>.
+fn collect_words_from_region(
+    bytes: &[u8],
+    region: &[u8],
+    start: usize,
+    prefix: Option<&str>,
+    ctx: &mut FmtCtx,
+) {
+    let rlen = region.len();
+    let mut pos = 0;
+    let pfx_len = prefix.map_or(0, |p| p.len());
+
+    while pos < rlen {
+        let nl = memchr::memchr(b'\n', &region[pos..])
+            .map(|p| pos + p)
+            .unwrap_or(rlen);
+        let mut le = nl;
+        if le > pos && region[le - 1] == b'\r' {
+            le -= 1;
+        }
+        if le > pos {
+            let line_start = start + pos;
+            let line_end = start + le;
+
+            // Strip prefix
+            let ls = if pfx_len > 0 && le - pos >= pfx_len {
+                let pfx_bytes = prefix.unwrap().as_bytes();
+                if &bytes[line_start..line_start + pfx_len] == pfx_bytes {
+                    line_start + pfx_len
+                } else {
+                    line_start
+                }
+            } else {
+                line_start
+            };
+
+            collect_words_line(bytes, ls, line_end, ctx);
+        }
+        pos = nl + 1;
+    }
+}
+
+/// Collect words from a single line [ls..le) in the source bytes.
+/// Computes all flags (SENT, PERIOD, PUNCT, PAREN) during collection.
+/// Uses lookup-table whitespace scanning and unsafe ptr for bounds-check elision.
+#[inline(always)]
+fn collect_words_line(bytes: &[u8], ls: usize, le: usize, ctx: &mut FmtCtx) {
+    let ptr = bytes.as_ptr();
+    let mut i = ls;
+
+    // Skip leading whitespace
+    while i < le && unsafe { is_ws(*ptr.add(i)) } {
+        i += 1;
+    }
+
+    while i < le {
+        let word_start = i;
+        while i < le && unsafe { !is_ws(*ptr.add(i)) } {
+            i += 1;
+        }
+        let wlen = i - word_start;
+
+        // Count trailing spaces
+        let space_start = i;
+        while i < le && unsafe { is_ws(*ptr.add(i)) } {
+            i += 1;
+        }
+        let space_count = i - space_start;
+
+        // Compute all flags in one pass
+        let wb = unsafe { std::slice::from_raw_parts(ptr.add(word_start), wlen) };
+        let mut flags = 0u32;
+
+        let (has_sent_punct, has_np_punct) = analyze_word_punct(wb);
+        if has_sent_punct {
+            flags |= PERIOD_FLAG;
+            // Check sentence-end context: at end of line or followed by 2+ spaces
+            if (i >= le || space_count >= 2) && is_sentence_end_contextual(wb) {
+                flags |= SENT_FLAG;
+            }
+        } else if has_np_punct {
+            flags |= PUNCT_FLAG;
+        }
+        if wlen > 0 && matches!(wb[0], b'(' | b'[' | b'{') {
+            flags |= PAREN_FLAG;
+        }
+
+        ctx.word_off.push(word_start as u32);
+        ctx.winfo.push((wlen as u32) | flags);
+    }
+}
+
 /// Analyze the trailing punctuation of a word in a single pass.
-/// Returns (has_sentence_punct, has_non_period_punct) where:
-/// - has_sentence_punct: word ends with .!? (after stripping closing quotes/brackets)
-/// - has_non_period_punct: word ends with ,;: (after stripping closing quotes/brackets)
-/// This replaces separate `has_sentence_ending_punct()` and `has_non_period_punct()` calls.
+/// Returns (has_sentence_punct, has_non_period_punct).
 #[inline(always)]
 fn analyze_word_punct(bytes: &[u8]) -> (bool, bool) {
     let mut i = bytes.len();
-    // Walk backwards past closing quotes/brackets
     while i > 0 && matches!(bytes[i - 1], b'"' | b'\'' | b')' | b']') {
         i -= 1;
     }
@@ -313,21 +436,11 @@ fn analyze_word_punct(bytes: &[u8]) -> (bool, bool) {
     )
 }
 
-/// Check if a word ends a sentence, considering original input context.
-/// GNU fmt rules: a word ending in .?! is a sentence end if:
-/// 1. It was followed by 2+ spaces in the original input, OR
-/// 2. It was at the end of a line
-/// Additionally, single uppercase letters (like "E.") are abbreviations, not sentence ends.
+/// Check if a word ends a sentence (assuming it has sentence-ending punctuation).
+/// Strips trailing punctuation to find the core word; single uppercase letters
+/// are treated as abbreviations, not sentence ends.
 #[inline(always)]
-fn is_sentence_end_contextual(
-    word_bytes: &[u8],
-    has_sent_punct: bool,
-    followed_by_double_space_or_eol: bool,
-) -> bool {
-    if !has_sent_punct || !followed_by_double_space_or_eol {
-        return false;
-    }
-    // Strip trailing punctuation to find the "core" word
+fn is_sentence_end_contextual(word_bytes: &[u8]) -> bool {
     let mut end = word_bytes.len();
     while end > 0
         && matches!(
@@ -337,89 +450,37 @@ fn is_sentence_end_contextual(
     {
         end -= 1;
     }
-    // A single uppercase letter followed by '.' is an abbreviation, not a sentence end
+    // Single uppercase letter followed by '.' is abbreviation
     if end == 1 && word_bytes[0].is_ascii_uppercase() {
         return false;
     }
-    // Empty core (e.g., just "." or "...") is not a sentence end
     end > 0
-}
-
-/// Word flags for GNU fmt cost model.
-/// Packed into the upper bits of the winfo u32 array for cache efficiency.
-const SENT_FLAG: u32 = 1 << 16; // sentence-final (period + double-space/eol context)
-const PERIOD_FLAG: u32 = 1 << 17; // has sentence-ending punct (.!?) regardless of context
-const PUNCT_FLAG: u32 = 1 << 18; // ends with non-period punctuation (,;:)
-const PAREN_FLAG: u32 = 1 << 19; // starts with opening paren/bracket
-
-/// Collect words from a line, tracking sentence endings and word properties
-/// for the GNU fmt cost model. Uses lookup-table whitespace scanning.
-fn collect_words_with_sentence_info<'a>(
-    line: &'a str,
-    words: &mut Vec<&'a str>,
-    sentence_ends: &mut Vec<bool>,
-) {
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    // Skip leading whitespace using lookup table
-    while i < len && is_ws(bytes[i]) {
-        i += 1;
-    }
-
-    while i < len {
-        // Find end of word using lookup table
-        let word_start = i;
-        while i < len && !is_ws(bytes[i]) {
-            i += 1;
-        }
-        let word = &line[word_start..i];
-        let word_bytes = &bytes[word_start..i];
-
-        // Count spaces after this word using lookup table
-        let space_start = i;
-        while i < len && is_ws(bytes[i]) {
-            i += 1;
-        }
-        let space_count = i - space_start;
-
-        // Analyze punctuation in one pass
-        let (has_sent_punct, _) = analyze_word_punct(word_bytes);
-        let is_sent_end =
-            is_sentence_end_contextual(word_bytes, has_sent_punct, i >= len || space_count >= 2);
-
-        words.push(word);
-        sentence_ends.push(is_sent_end);
-    }
 }
 
 /// Reflow words into lines that fit within the configured width.
 ///
 /// Uses optimal line breaking with a cost function matching GNU fmt.
-/// Builds each output line in a buffer and writes once, avoiding multiple
-/// small write_all() calls per line. Reuses DP buffers across paragraphs.
+/// Words are referenced by offset (ctx.word_off + ctx.winfo), not by &str slices.
+/// Builds each output line in a buffer and writes once.
 #[allow(clippy::too_many_arguments)]
 fn reflow_paragraph<W: Write>(
-    words: &[&str],
-    sentence_ends: &[bool],
+    bytes: &[u8],
     prefix: &str,
     first_indent: &str,
     cont_indent: &str,
     config: &FmtConfig,
     output: &mut W,
-    dp: &mut DpBufs,
+    ctx: &mut FmtCtx,
 ) -> io::Result<()> {
-    if words.is_empty() {
+    let n = ctx.word_off.len();
+    if n == 0 {
         return Ok(());
     }
 
-    let n = words.len();
     let first_base = prefix.len() + first_indent.len();
     let cont_base = prefix.len() + cont_indent.len();
     let goal = config.goal as i64;
     let width = config.width;
-    debug_assert_eq!(sentence_ends.len(), words.len());
 
     // GNU fmt cost model constants
     const SHORT_FACTOR: i64 = 100;
@@ -430,53 +491,26 @@ fn reflow_paragraph<W: Write>(
     const PUNCT_BONUS: i64 = 40 * 40;
     const PAREN_BONUS: i64 = 40 * 40;
 
-    // Reuse winfo buffer
-    dp.winfo.clear();
-    if dp.winfo.capacity() < n {
-        dp.winfo.reserve(n - dp.winfo.capacity());
-    }
-    for (i, w) in words.iter().enumerate() {
-        debug_assert!(w.len() <= 0xFFFF, "word too long for winfo packing");
-        let len = w.len() as u32;
-        let wb = w.as_bytes();
-        let mut flags = 0u32;
-
-        if sentence_ends[i] {
-            flags |= SENT_FLAG;
-        }
-
-        let (has_sent_punct, has_np_punct) = analyze_word_punct(wb);
-        if has_sent_punct {
-            flags |= PERIOD_FLAG;
-        }
-        if has_np_punct {
-            flags |= PUNCT_FLAG;
-        }
-        if !wb.is_empty() && matches!(wb[0], b'(' | b'[' | b'{') {
-            flags |= PAREN_FLAG;
-        }
-        if i == n - 1 {
-            flags |= SENT_FLAG | PERIOD_FLAG;
-        }
-        dp.winfo.push(len | flags);
-    }
-
     // Reuse DP buffers
-    dp.dp_cost.clear();
-    dp.dp_cost.resize(n + 1, i64::MAX);
-    dp.dp_cost[n] = 0;
+    ctx.dp_cost.clear();
+    ctx.dp_cost.resize(n + 1, i64::MAX);
+    ctx.dp_cost[n] = 0;
 
-    dp.best.clear();
-    dp.best.resize(n, 0);
+    ctx.best.clear();
+    ctx.best.resize(n, 0);
 
-    dp.line_len.clear();
-    dp.line_len.resize(n + 1, 0);
+    ctx.line_len.clear();
+    ctx.line_len.resize(n + 1, 0);
 
-    // SAFETY: All array indices are provably in-bounds (see original proof).
-    let winfo_ptr = dp.winfo.as_ptr();
-    let dp_cost_ptr = dp.dp_cost.as_mut_ptr();
-    let best_ptr = dp.best.as_mut_ptr();
-    let line_len_ptr = dp.line_len.as_mut_ptr();
+    // SAFETY: All array indices are provably in-bounds:
+    // - winfo has exactly n elements (one per word)
+    // - dp_cost has n+1 elements, accessed with indices 0..=n
+    // - best has n elements, accessed with indices 0..n-1
+    // - line_len has n+1 elements, accessed with indices 0..=n
+    let winfo_ptr = ctx.winfo.as_ptr();
+    let dp_cost_ptr = ctx.dp_cost.as_mut_ptr();
+    let best_ptr = ctx.best.as_mut_ptr();
+    let line_len_ptr = ctx.line_len.as_mut_ptr();
 
     for i in (0..n).rev() {
         let base = if i == 0 { first_base } else { cont_base };
@@ -576,13 +610,16 @@ fn reflow_paragraph<W: Write>(
     }
 
     // Reconstruct lines from DP solution.
-    // Build each line in a buffer and write once.
+    // Reference words by byte offset into source, build each line in buffer.
     let mut i = 0;
     let mut is_first_line = true;
-    let line_buf = &mut dp.line_buf;
+    let line_buf = &mut ctx.line_buf;
+    let word_off = &ctx.word_off;
+    let winfo = &ctx.winfo;
+    let best = &ctx.best;
 
     while i < n {
-        let j = dp.best[i] as usize;
+        let j = best[i] as usize;
 
         line_buf.clear();
 
@@ -592,15 +629,22 @@ fn reflow_paragraph<W: Write>(
         } else {
             line_buf.extend_from_slice(cont_indent.as_bytes());
         }
-        line_buf.extend_from_slice(words[i].as_bytes());
 
+        // First word on line
+        let off = word_off[i] as usize;
+        let wlen = (winfo[i] & 0xFFFF) as usize;
+        line_buf.extend_from_slice(&bytes[off..off + wlen]);
+
+        // Subsequent words on line
         for k in (i + 1)..=j {
-            if dp.winfo[k - 1] & SENT_FLAG != 0 {
+            if winfo[k - 1] & SENT_FLAG != 0 {
                 line_buf.extend_from_slice(b"  ");
             } else {
                 line_buf.push(b' ');
             }
-            line_buf.extend_from_slice(words[k].as_bytes());
+            let off = word_off[k] as usize;
+            let wlen = (winfo[k] & 0xFFFF) as usize;
+            line_buf.extend_from_slice(&bytes[off..off + wlen]);
         }
         line_buf.push(b'\n');
 
@@ -641,25 +685,23 @@ fn split_line_optimal<W: Write>(
         None => line,
     };
 
-    let mut words: Vec<&str> = Vec::new();
-    let mut sentence_ends: Vec<bool> = Vec::new();
-    collect_words_with_sentence_info(s, &mut words, &mut sentence_ends);
+    let bytes = line.as_bytes();
+    let mut ctx = FmtCtx::new();
 
-    if words.is_empty() {
+    // Find the offset of s within line
+    let s_start = s.as_ptr() as usize - line.as_ptr() as usize;
+    let s_end = s_start + s.len();
+    collect_words_line(bytes, s_start, s_end, &mut ctx);
+
+    if ctx.word_off.is_empty() {
         output.write_all(line.as_bytes())?;
         output.write_all(b"\n")?;
         return Ok(());
     }
 
-    let mut dp = DpBufs::new();
-    reflow_paragraph(
-        &words,
-        &sentence_ends,
-        pfx,
-        indent,
-        indent,
-        config,
-        output,
-        &mut dp,
-    )
+    // Mark last word as sentence-final
+    let last = ctx.winfo.len() - 1;
+    ctx.winfo[last] |= SENT_FLAG | PERIOD_FLAG;
+
+    reflow_paragraph(bytes, pfx, indent, indent, config, output, &mut ctx)
 }
