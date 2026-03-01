@@ -251,10 +251,20 @@ fn main() {
             }
         }
 
-        // Close inherited file descriptors to prevent leaks
-        for fd in 3..1024 {
-            unsafe {
-                libc::close(fd);
+        // Close inherited file descriptors above stderr.
+        // Use close_range() syscall (Linux 5.9+) for O(1) instead of looping 1021 close() calls.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            // close_range(3, UINT_MAX, 0) — not yet in libc crate, use syscall directly
+            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Fallback: only close FDs we know are open via /dev/fd or a small range
+            for fd in 3..64 {
+                unsafe {
+                    libc::close(fd);
+                }
             }
         }
 
