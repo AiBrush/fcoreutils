@@ -8,8 +8,10 @@ use std::process;
 const TOOL_NAME: &str = "yes";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Buffer size for bulk writes (1MB matches F_SETPIPE_SZ for minimal syscalls).
-const BUF_SIZE: usize = 1024 * 1024;
+/// Buffer size for bulk writes. 8KB matches GNU's BUFSIZ and is optimal
+/// for pipe throughput — small enough for fast producer-consumer alternation,
+/// large enough to amortize syscall overhead.
+const BUF_SIZE: usize = 8192;
 
 /// Handle write error: print diagnostic to stderr and exit with code 1.
 /// GNU yes prints "yes: standard output: Broken pipe" on EPIPE.
@@ -129,11 +131,8 @@ fn main() {
     };
     let total = buf.len();
 
-    // Enlarge pipe buffer to match our write size for minimal syscalls
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::fcntl(1, libc::F_SETPIPE_SZ, total as libc::c_int);
-    }
+    // With 8KB writes and the default 64KB pipe buffer, we can queue
+    // 8 writes before blocking — good overlap without extra memory.
 
     // Raw write(2) loop — simpler and faster than vmsplice (which without
     // SPLICE_F_GIFT copies into pipe buffers anyway, with extra overhead)
