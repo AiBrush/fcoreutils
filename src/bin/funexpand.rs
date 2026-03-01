@@ -1,4 +1,4 @@
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
 #[cfg(unix)]
@@ -6,7 +6,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{read_file, read_stdin};
+use coreutils_rs::common::io::read_file;
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::expand::{TabStops, parse_tab_stops, unexpand_bytes};
 
@@ -184,27 +184,82 @@ fn main() {
     let mut had_error = false;
 
     for filename in &files {
-        let data = if filename == "-" {
-            match read_stdin() {
-                Ok(d) => coreutils_rs::common::io::FileData::Owned(d),
-                Err(e) => {
-                    eprintln!("unexpand: standard input: {}", io_error_msg(&e));
-                    had_error = true;
-                    continue;
+        let result = if filename == "-" {
+            // Streaming stdin: read in chunks and process incrementally.
+            // We split at newline boundaries so column tracking stays correct
+            // across chunks. Leftover bytes (partial last line) carry over.
+            let stdin = io::stdin();
+            let mut reader = stdin.lock();
+            let mut buf = vec![0u8; 256 * 1024];
+            let mut leftover = 0usize; // bytes from previous read still in buf
+            let mut err: Option<io::Error> = None;
+            loop {
+                let n = match reader.read(&mut buf[leftover..]) {
+                    Ok(0) => {
+                        // EOF: process any remaining leftover
+                        if leftover > 0 {
+                            let r = unexpand_bytes(&buf[..leftover], &cli.tabs, cli.all, &mut out);
+                            if let Err(e) = r {
+                                err = Some(e);
+                            }
+                        }
+                        break;
+                    }
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        err = Some(e);
+                        break;
+                    }
+                };
+                let total = leftover + n;
+                // Find last newline to split at line boundary
+                let process_end = match memchr::memrchr(b'\n', &buf[..total]) {
+                    Some(pos) => pos + 1,
+                    None => {
+                        // No newline in buffer — keep accumulating
+                        leftover = total;
+                        if total >= buf.len() {
+                            // Buffer full with no newline — process it all
+                            if let Err(e) =
+                                unexpand_bytes(&buf[..total], &cli.tabs, cli.all, &mut out)
+                            {
+                                err = Some(e);
+                                break;
+                            }
+                            leftover = 0;
+                        }
+                        continue;
+                    }
+                };
+                if let Err(e) = unexpand_bytes(&buf[..process_end], &cli.tabs, cli.all, &mut out) {
+                    err = Some(e);
+                    break;
                 }
+                // Move leftover bytes to front
+                let remaining = total - process_end;
+                if remaining > 0 {
+                    buf.copy_within(process_end..total, 0);
+                }
+                leftover = remaining;
+            }
+            match err {
+                Some(e) => Err(e),
+                None => Ok(()),
             }
         } else {
-            match read_file(Path::new(filename)) {
+            let data = match read_file(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("unexpand: {}: {}", filename, io_error_msg(&e));
                     had_error = true;
                     continue;
                 }
-            }
+            };
+            unexpand_bytes(&data, &cli.tabs, cli.all, &mut out)
         };
 
-        if let Err(e) = unexpand_bytes(&data, &cli.tabs, cli.all, &mut out) {
+        if let Err(e) = result {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 process::exit(0);
             }
