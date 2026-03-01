@@ -23,6 +23,16 @@ fn main() {
     // Keep Rust's default SIGPIPE=SIG_IGN so write() returns EPIPE instead
     // of killing us. This lets us always print "yes: standard output: Broken pipe"
     // matching GNU yes behavior (which prints this via error() on write failure).
+    //
+    // Behavioral divergence note:
+    // - In test frameworks (Python -> bash -> yes), SIG_IGN is inherited by
+    //   child processes, so both GNU yes and our implementation print the
+    //   "standard output: Broken pipe" error and exit 1.
+    // - In a direct terminal `yes | head -5`, GNU yes uses SIG_DFL and gets
+    //   killed silently by SIGPIPE, while ours will print
+    //   "yes: standard output: Broken pipe" on stderr because SIG_IGN is set.
+    // - We match GNU in the CI test environment (Python -> bash -> yes), which
+    //   is the primary compatibility target.
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
 

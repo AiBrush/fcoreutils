@@ -647,7 +647,7 @@ pub fn format_heading(config: &WhoConfig) -> String {
         let _ = write!(out, " {:>10}", "PID");
     }
     let _ = write!(out, " {:<8}", "COMMENT");
-    if config.show_all {
+    if config.show_all || config.show_dead {
         let _ = write!(out, " {}", "EXIT");
     }
     // Trim trailing whitespace from the last column

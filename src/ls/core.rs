@@ -383,6 +383,8 @@ pub struct FileEntry {
     pub is_dir: bool,
     pub link_target: Option<String>,
     pub link_target_ok: bool,
+    /// Whether the symlink target is a directory (for --classify indicator on target).
+    pub link_target_is_dir: bool,
 }
 
 impl FileEntry {
@@ -442,16 +444,20 @@ impl FileEntry {
         let file_type = meta.file_type();
         let is_symlink = file_type.is_symlink();
 
-        let (link_target, link_target_ok) = if is_symlink {
+        let (link_target, link_target_ok, link_target_is_dir) = if is_symlink {
             match fs::read_link(&path) {
-                Ok(target) => {
-                    let ok = fs::metadata(&path).is_ok();
-                    (Some(target.to_string_lossy().into_owned()), ok)
-                }
-                Err(_) => (None, false),
+                Ok(target) => match fs::metadata(&path) {
+                    Ok(target_meta) => (
+                        Some(target.to_string_lossy().into_owned()),
+                        true,
+                        target_meta.is_dir(),
+                    ),
+                    Err(_) => (Some(target.to_string_lossy().into_owned()), false, false),
+                },
+                Err(_) => (None, false, false),
             }
         } else {
-            (None, true)
+            (None, true, false)
         };
 
         let rdev = meta.rdev();
@@ -479,6 +485,7 @@ impl FileEntry {
             is_dir: meta.is_dir(),
             link_target,
             link_target_ok,
+            link_target_is_dir,
         })
     }
 
@@ -577,6 +584,7 @@ impl FileEntry {
             is_dir: false,
             link_target: None,
             link_target_ok: false,
+            link_target_is_dir: false,
         }
     }
 
@@ -1491,6 +1499,21 @@ fn print_long(
         0
     };
 
+    // Compute timestamp width from non-broken entries so broken-deref "?" aligns.
+    let ts_width = entries
+        .iter()
+        .filter(|e| !e.is_broken_deref())
+        .map(|e| {
+            format_time(
+                e.time_secs(config.time_field),
+                e.time_nsec(config.time_field),
+                &config.time_style,
+            )
+            .len()
+        })
+        .max()
+        .unwrap_or(12);
+
     for entry in entries {
         // Broken dereference placeholder: show l????????? ? ?<pad> ?<pad> ?<pad> ? name
         if entry.is_broken_deref() {
@@ -1510,7 +1533,7 @@ fn print_long(
                 write!(out, "{:<width$} ", "?", width = max_group)?;
             }
             write!(out, "{:>width$} ", "?", width = max_size)?;
-            write!(out, "{:>12} ", "?")?;
+            write!(out, "{:>width$} ", "?", width = ts_width)?;
             writeln!(out, "{}", quoted)?;
             continue;
         }
@@ -1591,7 +1614,17 @@ fn print_long(
 
         // Symlink target
         if let Some(ref target) = entry.link_target {
-            write!(out, " -> {}", target)?;
+            let quoted_target = quote_name(target, config);
+            write!(out, " -> {}", quoted_target)?;
+            // Append classify indicator for the target (e.g. '/' if target is a dir)
+            if config.indicator_style == IndicatorStyle::Classify
+                || config.indicator_style == IndicatorStyle::FileType
+                || config.indicator_style == IndicatorStyle::Slash
+            {
+                if entry.link_target_is_dir {
+                    write!(out, "/")?;
+                }
+            }
         }
 
         if config.zero {
