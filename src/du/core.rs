@@ -217,8 +217,9 @@ fn du_recursive(
                 continue;
             }
 
-            // Check if child is a directory (for separate_dirs logic).
-            let child_is_dir = child_path.symlink_metadata().map_or(false, |m| m.is_dir());
+            // Use DirEntry::file_type() which is free on Linux (uses d_type from readdir)
+            // instead of an extra symlink_metadata() syscall.
+            let child_is_dir = entry.file_type().map_or(false, |ft| ft.is_dir());
 
             let child_size = du_recursive(
                 &child_path,

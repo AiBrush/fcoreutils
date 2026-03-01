@@ -332,7 +332,42 @@ pub fn head_file(
         }
     }
 
-    // Slow path: read entire file (needed for -n -N, -c -N, or stdin)
+    // Fast path for stdin with positive line/byte counts — stream without buffering everything.
+    if filename == "-" {
+        match &config.mode {
+            HeadMode::Lines(n) => {
+                return match head_stdin_lines_streaming(*n, delimiter, out) {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(true),
+                    Err(e) => {
+                        eprintln!(
+                            "{}: standard input: {}",
+                            tool_name,
+                            crate::common::io_error_msg(&e)
+                        );
+                        Ok(false)
+                    }
+                };
+            }
+            HeadMode::Bytes(n) => {
+                return match head_stdin_bytes_streaming(*n, out) {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(true),
+                    Err(e) => {
+                        eprintln!(
+                            "{}: standard input: {}",
+                            tool_name,
+                            crate::common::io_error_msg(&e)
+                        );
+                        Ok(false)
+                    }
+                };
+            }
+            _ => {} // LinesFromEnd/BytesFromEnd need full buffer
+        }
+    }
+
+    // Slow path: read entire file (needed for -n -N, -c -N, or stdin from-end modes)
     let data: FileData = if filename == "-" {
         match read_stdin() {
             Ok(d) => FileData::Owned(d),
@@ -425,6 +460,36 @@ pub fn head_stdin_lines_streaming(n: u64, delimiter: u8, out: &mut impl Write) -
 
         // Haven't reached N lines yet, output entire chunk
         out.write_all(chunk)?;
+    }
+
+    Ok(())
+}
+
+/// Process head for stdin streaming (byte mode, positive count).
+/// Reads chunks and outputs up to N bytes, stopping early.
+fn head_stdin_bytes_streaming(n: u64, out: &mut impl Write) -> io::Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut buf = [0u8; 262144];
+    let mut remaining = n;
+
+    loop {
+        let to_read = (remaining as usize).min(buf.len());
+        let bytes_read = match reader.read(&mut buf[..to_read]) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        out.write_all(&buf[..bytes_read])?;
+        remaining -= bytes_read as u64;
+        if remaining == 0 {
+            break;
+        }
     }
 
     Ok(())
