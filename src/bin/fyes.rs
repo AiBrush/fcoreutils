@@ -58,26 +58,18 @@ fn main() {
                 process::exit(0);
             }
             s if s.starts_with("--") => {
-                // Unknown long option
-                let errmsg = format!(
-                    "{}: unrecognized option '{}'\nTry '{} --help' for more information.\n",
+                eprintln!(
+                    "{}: unrecognized option '{}'\nTry '{} --help' for more information.",
                     TOOL_NAME, s, TOOL_NAME
                 );
-                unsafe {
-                    libc::write(2, errmsg.as_ptr() as *const libc::c_void, errmsg.len() as _);
-                }
                 process::exit(1);
             }
             s if s.starts_with('-') && s.len() > 1 => {
-                // Short option (not bare "-")
                 let first_char = s.as_bytes()[1] as char;
-                let errmsg = format!(
-                    "{}: invalid option -- '{}'\nTry '{} --help' for more information.\n",
+                eprintln!(
+                    "{}: invalid option -- '{}'\nTry '{} --help' for more information.",
                     TOOL_NAME, first_char, TOOL_NAME
                 );
-                unsafe {
-                    libc::write(2, errmsg.as_ptr() as *const libc::c_void, errmsg.len() as _);
-                }
                 process::exit(1);
             }
             _ => {}
