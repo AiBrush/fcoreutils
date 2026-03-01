@@ -415,6 +415,27 @@ fn parse_args() -> (LsConfig, Vec<String>) {
                     }
                     config.color = ColorMode::Never;
                 }
+                "block-size" => {
+                    let val = eq_val.map(|v| v.to_string()).unwrap_or_else(|| {
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("ls: option '--block-size' requires an argument");
+                                process::exit(2);
+                            })
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                    match coreutils_rs::ls::parse_block_size(&val) {
+                        Ok((bs, suffix)) => {
+                            config.block_size = Some(bs);
+                            config.block_size_suffix = suffix;
+                        }
+                        Err(msg) => {
+                            eprintln!("ls: {}", msg);
+                            process::exit(2);
+                        }
+                    }
+                }
                 _ => {
                     eprintln!("ls: unrecognized option '--{}'", name);
                     eprintln!("Try 'ls --help' for more information.");
