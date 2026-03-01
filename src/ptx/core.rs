@@ -52,49 +52,77 @@ impl Default for PtxConfig {
     }
 }
 
-/// A single KWIC (Key Word In Context) entry.
-#[derive(Clone, Debug)]
-struct KwicEntry {
-    /// Reference (filename:line or line number).
-    reference: String,
-    /// The full input line.
-    full_line: String,
-    /// Byte offset of the keyword within the full line.
-    word_start: usize,
-    /// The keyword itself.
-    keyword: String,
-    /// Sort key (lowercase keyword for case-insensitive sorting).
-    sort_key: String,
+/// Pre-normalized word sets for O(1) case-insensitive lookup.
+struct NormalizedSets {
+    ignore_lower: HashSet<String>,
+    only_lower: Option<HashSet<String>>,
 }
 
-/// Computed layout fields for a KWIC entry.
-///
-/// These correspond to the four display regions in GNU ptx output:
-///   Left half:  [tail] ... [before]
-///   Gap
-///   Right half: [keyafter] ... [head]
-///
-/// For roff:  .xx "tail" "before" "keyafter" "head" ["reference"]
-/// For TeX:   \xx {tail}{before}{keyword}{after}{head} [{reference}]
-struct LayoutFields {
-    tail: String,
-    before: String,
-    keyafter: String,
-    keyword: String,
-    after: String,
-    head: String,
+impl NormalizedSets {
+    fn new(config: &PtxConfig) -> Self {
+        if config.ignore_case {
+            let ignore_lower = config
+                .ignore_words
+                .iter()
+                .map(|w| w.to_lowercase())
+                .collect();
+            let only_lower = config
+                .only_words
+                .as_ref()
+                .map(|s| s.iter().map(|w| w.to_lowercase()).collect());
+            Self {
+                ignore_lower,
+                only_lower,
+            }
+        } else {
+            // No normalization needed - we'll use the original sets directly
+            Self {
+                ignore_lower: HashSet::new(),
+                only_lower: None,
+            }
+        }
+    }
+}
+
+/// Compact KWIC entry — no owned strings, just indices.
+struct KwicEntry {
+    line_idx: u32,
+    word_start: u32,
+    word_len: u16,
+}
+
+/// Computed layout fields for a KWIC entry — all borrowed slices.
+struct LayoutFields<'a> {
+    tail: &'a str,
+    before: &'a str,
+    keyafter: &'a str,
+    keyword: &'a str,
+    after: &'a str,
+    head: &'a str,
     tail_truncated: bool,
     before_truncated: bool,
     keyafter_truncated: bool,
     head_truncated: bool,
 }
 
+// Static padding buffer for fast space-filling
+const SPACES: &[u8; 256] = b"                                                                                                                                                                                                                                                                ";
+
+/// Write `n` spaces to the writer.
+#[inline]
+fn write_spaces<W: Write>(out: &mut W, n: usize) -> io::Result<()> {
+    let mut remaining = n;
+    while remaining > 0 {
+        let chunk = remaining.min(SPACES.len());
+        out.write_all(&SPACES[..chunk])?;
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
 /// Extract words from a line of text.
 ///
-/// GNU ptx's default word regex is effectively `[a-zA-Z][a-zA-Z0-9]*`:
-/// a word must start with a letter and may continue with letters or digits.
-/// Underscores and other non-alphanumeric characters are word separators.
-/// Pure-digit tokens are not considered words.
+/// GNU ptx's default word regex is effectively `[a-zA-Z][a-zA-Z0-9]*`.
 fn extract_words(line: &str) -> Vec<(usize, &str)> {
     let mut words = Vec::new();
     let bytes = line.as_bytes();
@@ -102,11 +130,9 @@ fn extract_words(line: &str) -> Vec<(usize, &str)> {
     let mut i = 0;
 
     while i < len {
-        // A word must start with an ASCII letter
         if bytes[i].is_ascii_alphabetic() {
             let start = i;
             i += 1;
-            // Continue with letters or digits
             while i < len && bytes[i].is_ascii_alphanumeric() {
                 i += 1;
             }
@@ -119,95 +145,109 @@ fn extract_words(line: &str) -> Vec<(usize, &str)> {
     words
 }
 
-/// Check if a word should be indexed.
-fn should_index(word: &str, config: &PtxConfig) -> bool {
-    let check_word = if config.ignore_case {
-        word.to_lowercase()
-    } else {
-        word.to_string()
-    };
-
-    // If only_words is set, the word must be in that set
-    if let Some(ref only) = config.only_words {
-        if config.ignore_case {
-            return only.iter().any(|w| w.to_lowercase() == check_word);
-        }
-        return only.contains(&check_word);
-    }
-
-    // Otherwise, word must not be in ignore list
+/// Check if a word should be indexed, using pre-normalized sets.
+#[inline]
+fn should_index(word: &str, config: &PtxConfig, norm: &NormalizedSets) -> bool {
     if config.ignore_case {
-        !config
-            .ignore_words
-            .iter()
-            .any(|w| w.to_lowercase() == check_word)
+        // Use pre-normalized lowercase sets for O(1) lookup
+        if let Some(ref only) = norm.only_lower {
+            // Must be in only-set
+            let lower = word.to_ascii_lowercase();
+            return only.contains(lower.as_str());
+        }
+        let lower = word.to_ascii_lowercase();
+        !norm.ignore_lower.contains(lower.as_str())
     } else {
-        !config.ignore_words.contains(&check_word)
+        if let Some(ref only) = config.only_words {
+            return only.contains(word);
+        }
+        !config.ignore_words.contains(word)
     }
 }
 
-/// Generate KWIC entries from input lines.
-fn generate_entries(lines: &[(String, String)], config: &PtxConfig) -> Vec<KwicEntry> {
+/// Generate KWIC entries and compute max_word_length in a single pass.
+fn generate_entries(
+    lines: &[(String, String)],
+    config: &PtxConfig,
+    norm: &NormalizedSets,
+) -> (Vec<KwicEntry>, usize) {
     let mut entries = Vec::new();
+    let mut max_word_length: usize = 0;
 
-    for (reference, line) in lines {
+    for (line_idx, (_reference, line)) in lines.iter().enumerate() {
         let words = extract_words(line);
 
         for &(word_start, word) in &words {
-            if !should_index(word, config) {
+            let wlen = word.len();
+            if wlen > max_word_length {
+                max_word_length = wlen;
+            }
+
+            if !should_index(word, config, norm) {
                 continue;
             }
 
-            let sort_key = if config.ignore_case {
-                word.to_lowercase()
-            } else {
-                word.to_string()
-            };
-
             entries.push(KwicEntry {
-                reference: reference.clone(),
-                full_line: line.clone(),
-                word_start,
-                keyword: word.to_string(),
-                sort_key,
+                line_idx: line_idx as u32,
+                word_start: word_start as u32,
+                word_len: wlen as u16,
             });
         }
     }
 
     // Sort by keyword (case-insensitive if requested), then by reference
-    entries.sort_by(|a, b| {
-        a.sort_key
-            .cmp(&b.sort_key)
-            .then_with(|| a.reference.cmp(&b.reference))
-    });
+    if config.ignore_case {
+        entries.sort_unstable_by(|a, b| {
+            let a_line = &lines[a.line_idx as usize].1;
+            let b_line = &lines[b.line_idx as usize].1;
+            let a_kw = &a_line[a.word_start as usize..a.word_start as usize + a.word_len as usize];
+            let b_kw = &b_line[b.word_start as usize..b.word_start as usize + b.word_len as usize];
+            a_kw.bytes()
+                .map(|c| c.to_ascii_lowercase())
+                .cmp(b_kw.bytes().map(|c| c.to_ascii_lowercase()))
+                .then_with(|| {
+                    lines[a.line_idx as usize]
+                        .0
+                        .cmp(&lines[b.line_idx as usize].0)
+                })
+        });
+    } else {
+        entries.sort_unstable_by(|a, b| {
+            let a_line = &lines[a.line_idx as usize].1;
+            let b_line = &lines[b.line_idx as usize].1;
+            let a_kw = &a_line[a.word_start as usize..a.word_start as usize + a.word_len as usize];
+            let b_kw = &b_line[b.word_start as usize..b.word_start as usize + b.word_len as usize];
+            a_kw.cmp(b_kw).then_with(|| {
+                lines[a.line_idx as usize]
+                    .0
+                    .cmp(&lines[b.line_idx as usize].0)
+            })
+        });
+    }
 
-    entries
+    (entries, max_word_length)
 }
 
-/// Advance past one "word" (consecutive word chars) or one non-word char.
-/// Returns the new position after skipping.
-///
-/// A "word" here matches the default GNU ptx word definition: starts with
-/// a letter, continues with letters or digits.
+/// Advance past one "word" or one non-word char.
+#[inline]
 fn skip_something(s: &str, pos: usize) -> usize {
     if pos >= s.len() {
         return pos;
     }
     let bytes = s.as_bytes();
     if bytes[pos].is_ascii_alphabetic() {
-        // Skip a word: letter followed by alphanumeric chars
         let mut p = pos + 1;
         while p < s.len() && bytes[p].is_ascii_alphanumeric() {
             p += 1;
         }
         p
     } else {
-        // Skip one non-word character (digit, underscore, punctuation, etc.)
         pos + 1
     }
 }
 
 /// Skip whitespace forward from position.
+#[inline]
 fn skip_white(s: &str, pos: usize) -> usize {
     let bytes = s.as_bytes();
     let mut p = pos;
@@ -218,6 +258,7 @@ fn skip_white(s: &str, pos: usize) -> usize {
 }
 
 /// Skip whitespace backward from position (exclusive end).
+#[inline]
 fn skip_white_backwards(s: &str, pos: usize, start: usize) -> usize {
     let bytes = s.as_bytes();
     let mut p = pos;
@@ -227,27 +268,20 @@ fn skip_white_backwards(s: &str, pos: usize, start: usize) -> usize {
     p
 }
 
-/// Compute the layout fields for a KWIC entry using the GNU ptx algorithm.
-///
-/// This computes the four display regions (tail, before, keyafter, head)
-/// that are used by all three output formats (plain, roff, TeX).
-fn compute_layout(
-    entry: &KwicEntry,
+/// Compute the layout fields for a KWIC entry.
+fn compute_layout<'a>(
+    sentence: &'a str,
+    word_start: usize,
+    keyword_len: usize,
+    ref_str: &str,
     config: &PtxConfig,
     max_word_length: usize,
     ref_max_width: usize,
-) -> LayoutFields {
-    let ref_str = if config.auto_reference || config.references {
-        &entry.reference
-    } else {
-        ""
-    };
-
+) -> LayoutFields<'a> {
     let total_width = config.width;
     let gap = config.gap_size;
     let trunc_len = 1; // "/" is 1 char
 
-    // Calculate available line width (subtract reference if on the left)
     let ref_width = if ref_str.is_empty() || config.right_reference {
         0
     } else {
@@ -262,8 +296,6 @@ fn compute_layout(
 
     let half_line_width = line_width / 2;
 
-    // GNU ptx: before_max_width = half_line_width - gap_size - 2 * trunc_len
-    // keyafter_max_width = half_line_width - 2 * trunc_len
     let before_max_width = if half_line_width > gap + 2 * trunc_len {
         half_line_width - gap - 2 * trunc_len
     } else {
@@ -275,9 +307,6 @@ fn compute_layout(
         0
     };
 
-    let sentence = &entry.full_line;
-    let word_start = entry.word_start;
-    let keyword_len = entry.keyword.len();
     let line_len = sentence.len();
 
     // ========== Step 1: Compute keyafter ==========
@@ -299,9 +328,8 @@ fn compute_layout(
     // ========== Compute left_field_start ==========
     let left_context_start: usize = 0;
     let left_field_start = if word_start > half_line_width + max_word_length {
-        let mut lfs = word_start - (half_line_width + max_word_length);
-        lfs = skip_something(sentence, lfs);
-        lfs
+        let lfs = word_start - (half_line_width + max_word_length);
+        skip_something(sentence, lfs)
     } else {
         left_context_start
     };
@@ -396,7 +424,7 @@ fn compute_layout(
         }
     }
 
-    // ========== Extract text fields ==========
+    // ========== Extract text fields as slices ==========
     let before_text = if before_len > 0 {
         &sentence[before_start..before_end]
     } else {
@@ -418,9 +446,8 @@ fn compute_layout(
         ""
     };
 
-    // Extract keyword and after separately (for TeX format)
-    let keyword_text = &entry.keyword;
-    let after_start = keyafter_start + keyword_len;
+    let keyword_text = &sentence[word_start..word_start + keyword_len];
+    let after_start = word_start + keyword_len;
     let after_text = if keyafter_end > after_start {
         &sentence[after_start..keyafter_end]
     } else {
@@ -428,12 +455,12 @@ fn compute_layout(
     };
 
     LayoutFields {
-        tail: tail_text.to_string(),
-        before: before_text.to_string(),
-        keyafter: keyafter_text.to_string(),
-        keyword: keyword_text.to_string(),
-        after: after_text.to_string(),
-        head: head_text.to_string(),
+        tail: tail_text,
+        before: before_text,
+        keyafter: keyafter_text,
+        keyword: keyword_text,
+        after: after_text,
+        head: head_text,
         tail_truncated: tail_truncation,
         before_truncated: before_truncation,
         keyafter_truncated: keyafter_truncation,
@@ -441,19 +468,14 @@ fn compute_layout(
     }
 }
 
-/// Format a KWIC entry for plain text output.
-fn format_plain(
-    entry: &KwicEntry,
+/// Write a KWIC entry in plain text format directly to the output.
+fn write_plain<W: Write>(
+    out: &mut W,
+    ref_str: &str,
     config: &PtxConfig,
-    layout: &LayoutFields,
+    layout: &LayoutFields<'_>,
     ref_max_width: usize,
-) -> String {
-    let ref_str = if config.auto_reference || config.references {
-        &entry.reference
-    } else {
-        ""
-    };
-
+) -> io::Result<()> {
     let total_width = config.width;
     let gap = config.gap_size;
     let trunc_str = config.flag_truncation.as_deref().unwrap_or("/");
@@ -486,38 +508,28 @@ fn format_plain(
     let tail_trunc_len = if layout.tail_truncated { trunc_len } else { 0 };
     let head_trunc_len = if layout.head_truncated { trunc_len } else { 0 };
 
-    let mut result = String::with_capacity(total_width + 10);
-
     // Reference prefix (if not right_reference)
     if !config.right_reference {
         if !ref_str.is_empty() && config.auto_reference {
-            result.push_str(ref_str);
-            result.push(':');
+            out.write_all(ref_str.as_bytes())?;
+            out.write_all(b":")?;
             let ref_total = ref_str.len() + 1;
             let ref_pad_total = ref_max_width + gap;
-            let padding = ref_pad_total.saturating_sub(ref_total);
-            for _ in 0..padding {
-                result.push(' ');
-            }
+            write_spaces(out, ref_pad_total.saturating_sub(ref_total))?;
         } else if !ref_str.is_empty() {
-            result.push_str(ref_str);
+            out.write_all(ref_str.as_bytes())?;
             let ref_pad_total = ref_max_width + gap;
-            let padding = ref_pad_total.saturating_sub(ref_str.len());
-            for _ in 0..padding {
-                result.push(' ');
-            }
+            write_spaces(out, ref_pad_total.saturating_sub(ref_str.len()))?;
         } else {
-            for _ in 0..gap {
-                result.push(' ');
-            }
+            write_spaces(out, gap)?;
         }
     }
 
     // Left half: [tail][tail_trunc] ... padding ... [before_trunc][before]
     if !layout.tail.is_empty() {
-        result.push_str(&layout.tail);
+        out.write_all(layout.tail.as_bytes())?;
         if layout.tail_truncated {
-            result.push_str(trunc_str);
+            out.write_all(trunc_str.as_bytes())?;
         }
         let tail_used = layout.tail.len() + tail_trunc_len;
         let before_used = layout.before.len() + before_trunc_len;
@@ -525,33 +537,27 @@ fn format_plain(
             .saturating_sub(gap)
             .saturating_sub(tail_used)
             .saturating_sub(before_used);
-        for _ in 0..padding {
-            result.push(' ');
-        }
+        write_spaces(out, padding)?;
     } else {
         let before_used = layout.before.len() + before_trunc_len;
         let padding = half_line_width
             .saturating_sub(gap)
             .saturating_sub(before_used);
-        for _ in 0..padding {
-            result.push(' ');
-        }
+        write_spaces(out, padding)?;
     }
 
     if layout.before_truncated {
-        result.push_str(trunc_str);
+        out.write_all(trunc_str.as_bytes())?;
     }
-    result.push_str(&layout.before);
+    out.write_all(layout.before.as_bytes())?;
 
     // Gap
-    for _ in 0..gap {
-        result.push(' ');
-    }
+    write_spaces(out, gap)?;
 
     // Right half: [keyafter][keyafter_trunc] ... padding ... [head_trunc][head]
-    result.push_str(&layout.keyafter);
+    out.write_all(layout.keyafter.as_bytes())?;
     if layout.keyafter_truncated {
-        result.push_str(trunc_str);
+        out.write_all(trunc_str.as_bytes())?;
     }
 
     if !layout.head.is_empty() {
@@ -560,30 +566,24 @@ fn format_plain(
         let padding = half_line_width
             .saturating_sub(keyafter_used)
             .saturating_sub(head_used);
-        for _ in 0..padding {
-            result.push(' ');
-        }
+        write_spaces(out, padding)?;
         if layout.head_truncated {
-            result.push_str(trunc_str);
+            out.write_all(trunc_str.as_bytes())?;
         }
-        result.push_str(&layout.head);
+        out.write_all(layout.head.as_bytes())?;
     } else if !ref_str.is_empty() && config.right_reference {
         let keyafter_used = layout.keyafter.len() + keyafter_trunc_len;
         let padding = half_line_width.saturating_sub(keyafter_used);
-        for _ in 0..padding {
-            result.push(' ');
-        }
+        write_spaces(out, padding)?;
     }
 
     // Reference on the right (if right_reference)
     if !ref_str.is_empty() && config.right_reference {
-        for _ in 0..gap {
-            result.push(' ');
-        }
-        result.push_str(ref_str);
+        write_spaces(out, gap)?;
+        out.write_all(ref_str.as_bytes())?;
     }
 
-    result
+    out.write_all(b"\n")
 }
 
 /// Escape a string for roff output (backslashes and quotes).
@@ -591,66 +591,56 @@ fn escape_roff(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Format a KWIC entry for roff output.
-///
-/// GNU ptx roff format: .xx "tail" "before" "keyafter" "head" ["reference"]
-/// Truncation flags are embedded in the field text.
-fn format_roff(entry: &KwicEntry, config: &PtxConfig, layout: &LayoutFields) -> String {
-    let ref_str = if config.auto_reference || config.references {
-        &entry.reference
-    } else {
-        ""
-    };
-
+/// Write a KWIC entry in roff format directly to output.
+fn write_roff<W: Write>(
+    out: &mut W,
+    ref_str: &str,
+    config: &PtxConfig,
+    layout: &LayoutFields<'_>,
+) -> io::Result<()> {
     let trunc_flag = config.flag_truncation.as_deref().unwrap_or("/");
-
     let macro_name = config.macro_name.as_deref().unwrap_or("xx");
 
-    // Build fields with truncation flags embedded
-    let tail = if layout.tail_truncated {
-        format!("{}{}", layout.tail, trunc_flag)
-    } else {
-        layout.tail.clone()
-    };
+    out.write_all(b".")?;
+    out.write_all(macro_name.as_bytes())?;
 
-    let before = if layout.before_truncated {
-        format!("{}{}", trunc_flag, layout.before)
-    } else {
-        layout.before.clone()
-    };
-
-    let keyafter = if layout.keyafter_truncated {
-        format!("{}{}", layout.keyafter, trunc_flag)
-    } else {
-        layout.keyafter.clone()
-    };
-
-    let head = if layout.head_truncated {
-        format!("{}{}", trunc_flag, layout.head)
-    } else {
-        layout.head.clone()
-    };
-
-    if ref_str.is_empty() {
-        format!(
-            ".{} \"{}\" \"{}\" \"{}\" \"{}\"",
-            macro_name,
-            escape_roff(&tail),
-            escape_roff(&before),
-            escape_roff(&keyafter),
-            escape_roff(&head),
-        )
-    } else {
-        format!(
-            ".{} \"{}\" \"{}\" \"{}\" \"{}\" \"{}\"",
-            macro_name,
-            escape_roff(&tail),
-            escape_roff(&before),
-            escape_roff(&keyafter),
-            escape_roff(&head),
-            escape_roff(ref_str),
-        )
+    // tail
+    out.write_all(b" \"")?;
+    out.write_all(escape_roff(layout.tail).as_bytes())?;
+    if layout.tail_truncated {
+        out.write_all(escape_roff(trunc_flag).as_bytes())?;
     }
+
+    // before
+    out.write_all(b"\" \"")?;
+    if layout.before_truncated {
+        out.write_all(escape_roff(trunc_flag).as_bytes())?;
+    }
+    out.write_all(escape_roff(layout.before).as_bytes())?;
+
+    // keyafter
+    out.write_all(b"\" \"")?;
+    out.write_all(escape_roff(layout.keyafter).as_bytes())?;
+    if layout.keyafter_truncated {
+        out.write_all(escape_roff(trunc_flag).as_bytes())?;
+    }
+
+    // head
+    out.write_all(b"\" \"")?;
+    if layout.head_truncated {
+        out.write_all(escape_roff(trunc_flag).as_bytes())?;
+    }
+    out.write_all(escape_roff(layout.head).as_bytes())?;
+    out.write_all(b"\"")?;
+
+    // reference
+    if !ref_str.is_empty() {
+        out.write_all(b" \"")?;
+        out.write_all(escape_roff(ref_str).as_bytes())?;
+        out.write_all(b"\"")?;
+    }
+
+    out.write_all(b"\n")
 }
 
 /// Escape a string for TeX output.
@@ -674,48 +664,39 @@ fn escape_tex(s: &str) -> String {
     result
 }
 
-/// Format a KWIC entry for TeX output.
-///
-/// GNU ptx TeX format: \xx {tail}{before}{keyword}{after}{head} [{reference}]
-/// No truncation flags are used in TeX output.
-fn format_tex(entry: &KwicEntry, config: &PtxConfig, layout: &LayoutFields) -> String {
-    let ref_str = if config.auto_reference || config.references {
-        &entry.reference
-    } else {
-        ""
-    };
-
+/// Write a KWIC entry in TeX format directly to output.
+fn write_tex<W: Write>(
+    out: &mut W,
+    ref_str: &str,
+    config: &PtxConfig,
+    layout: &LayoutFields<'_>,
+) -> io::Result<()> {
     let macro_name = config.macro_name.as_deref().unwrap_or("xx");
 
-    if ref_str.is_empty() {
-        format!(
-            "\\{} {{{}}}{{{}}}{{{}}}{{{}}}{{{}}}",
-            macro_name,
-            escape_tex(&layout.tail),
-            escape_tex(&layout.before),
-            escape_tex(&layout.keyword),
-            escape_tex(&layout.after),
-            escape_tex(&layout.head),
-        )
-    } else {
-        format!(
-            "\\{} {{{}}}{{{}}}{{{}}}{{{}}}{{{}}}{{{}}}",
-            macro_name,
-            escape_tex(&layout.tail),
-            escape_tex(&layout.before),
-            escape_tex(&layout.keyword),
-            escape_tex(&layout.after),
-            escape_tex(&layout.head),
-            escape_tex(ref_str),
-        )
+    out.write_all(b"\\")?;
+    out.write_all(macro_name.as_bytes())?;
+    out.write_all(b" {")?;
+    out.write_all(escape_tex(layout.tail).as_bytes())?;
+    out.write_all(b"}{")?;
+    out.write_all(escape_tex(layout.before).as_bytes())?;
+    out.write_all(b"}{")?;
+    out.write_all(escape_tex(layout.keyword).as_bytes())?;
+    out.write_all(b"}{")?;
+    out.write_all(escape_tex(layout.after).as_bytes())?;
+    out.write_all(b"}{")?;
+    out.write_all(escape_tex(layout.head).as_bytes())?;
+    out.write_all(b"}")?;
+
+    if !ref_str.is_empty() {
+        out.write_all(b"{")?;
+        out.write_all(escape_tex(ref_str).as_bytes())?;
+        out.write_all(b"}")?;
     }
+
+    out.write_all(b"\n")
 }
 
 /// Process lines from a single source, grouping them into sentence contexts.
-///
-/// GNU ptx joins consecutive lines within a single file into one context
-/// unless a line ends with a sentence terminator (`.`, `?`, `!`).
-/// File boundaries always break sentences.
 fn process_lines_into_contexts(
     content: &str,
     filename: Option<&str>,
@@ -749,7 +730,6 @@ fn process_lines_into_contexts(
         }
         current_text.push_str(line);
 
-        // Check if line ends with a sentence terminator
         let trimmed = line.trim_end();
         let ends_with_terminator =
             trimmed.ends_with('.') || trimmed.ends_with('?') || trimmed.ends_with('!');
@@ -763,7 +743,6 @@ fn process_lines_into_contexts(
         }
     }
 
-    // Don't forget any remaining context (lines without terminators at end of file)
     if !current_text.trim().is_empty() {
         lines_out.push((context_ref.clone(), current_text.clone()));
     }
@@ -774,51 +753,59 @@ fn format_and_write<W: Write>(
     output: &mut W,
     config: &PtxConfig,
 ) -> io::Result<()> {
-    // Generate KWIC entries
-    let entries = generate_entries(lines, config);
+    let norm = NormalizedSets::new(config);
+    let (entries, max_word_length) = generate_entries(lines, config, &norm);
 
-    // Compute maximum word length across all input (needed for left_field_start)
-    let max_word_length = lines
-        .iter()
-        .flat_map(|(_, line)| extract_words(line))
-        .map(|(_, word)| word.len())
-        .max()
-        .unwrap_or(0);
+    // Compute maximum reference width
+    let ref_max_width = if config.auto_reference || config.references {
+        entries
+            .iter()
+            .map(|e| lines[e.line_idx as usize].0.len())
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
-    // Compute maximum reference width (for consistent left-alignment)
-    // Note: do NOT add +1 for auto_reference here; the ":" is handled
-    // in the display formatting (ref_total = ref_str.len() + 1).
-    let ref_max_width = entries.iter().map(|e| e.reference.len()).max().unwrap_or(0);
-
-    // Format and output
     for entry in &entries {
-        let layout = compute_layout(entry, config, max_word_length, ref_max_width);
-        let formatted = match config.format {
-            OutputFormat::Plain => format_plain(entry, config, &layout, ref_max_width),
-            OutputFormat::Roff => format_roff(entry, config, &layout),
-            OutputFormat::Tex => format_tex(entry, config, &layout),
+        let line_data = &lines[entry.line_idx as usize];
+        let ref_str = if config.auto_reference || config.references {
+            &line_data.0
+        } else {
+            ""
         };
-        writeln!(output, "{}", formatted)?;
+        let sentence = &line_data.1;
+        let word_start = entry.word_start as usize;
+        let keyword_len = entry.word_len as usize;
+
+        let layout = compute_layout(
+            sentence,
+            word_start,
+            keyword_len,
+            ref_str,
+            config,
+            max_word_length,
+            ref_max_width,
+        );
+
+        match config.format {
+            OutputFormat::Plain => write_plain(output, ref_str, config, &layout, ref_max_width)?,
+            OutputFormat::Roff => write_roff(output, ref_str, config, &layout)?,
+            OutputFormat::Tex => write_tex(output, ref_str, config, &layout)?,
+        }
     }
 
     Ok(())
 }
 
 /// Generate a permuted index from input.
-///
-/// Reads lines from `input`, generates KWIC entries for each indexable word,
-/// sorts them, and writes the formatted output to `output`.
 pub fn generate_ptx<R: BufRead, W: Write>(
-    input: R,
+    mut input: R,
     output: &mut W,
     config: &PtxConfig,
 ) -> io::Result<()> {
     let mut content = String::new();
-    for line_result in input.lines() {
-        let line = line_result?;
-        content.push_str(&line);
-        content.push('\n');
-    }
+    input.read_to_string(&mut content)?;
 
     let mut lines: Vec<(String, String)> = Vec::new();
     let mut global_line_num = 0usize;
@@ -828,10 +815,6 @@ pub fn generate_ptx<R: BufRead, W: Write>(
 }
 
 /// Generate a permuted index from multiple named file contents.
-///
-/// Each file's lines are processed independently for sentence grouping
-/// (file boundaries always break sentences), matching GNU ptx behavior.
-/// When auto_reference is enabled, references include the filename.
 pub fn generate_ptx_multi<W: Write>(
     file_contents: &[(Option<String>, String)],
     output: &mut W,
