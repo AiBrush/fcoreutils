@@ -89,13 +89,12 @@ fn main() {
 /// Returns Ok(true) if directory was removed, Ok(false) if it was skipped
 /// due to --ignore-fail-on-non-empty, or Err(1) on real failure.
 fn remove_one(dir: &str, ignore_nonempty: bool, verbose: bool) -> Result<bool, i32> {
+    // GNU rmdir prints verbose message BEFORE attempting removal
+    if verbose {
+        println!("{}: removing directory, '{}'", TOOL_NAME, dir);
+    }
     match std::fs::remove_dir(dir) {
-        Ok(()) => {
-            if verbose {
-                println!("{}: removing directory, '{}'", TOOL_NAME, dir);
-            }
-            Ok(true)
-        }
+        Ok(()) => Ok(true),
         Err(e) => {
             if ignore_nonempty && is_nonempty_error(&e) {
                 return Ok(false);
@@ -331,7 +330,7 @@ mod tests {
         let nested = dir.path().join("outer").join("inner");
         std::fs::create_dir_all(&nested).unwrap();
         let path_with_slash = format!("{}/", nested.to_str().unwrap());
-        let output = cmd().args(["-p", &path_with_slash]).output().unwrap();
+        let _output = cmd().args(["-p", &path_with_slash]).output().unwrap();
         // Will fail trying to remove tempdir parent, but outer/inner should be gone
         assert!(
             !dir.path().join("outer").exists(),

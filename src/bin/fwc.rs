@@ -961,7 +961,7 @@ mod tests {
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         // Verify the default output (lines, words, bytes) is parseable
-        let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
         assert!(
             parts.len() >= 3,
             "Expected at least 3 fields (lines words bytes), got: {}",

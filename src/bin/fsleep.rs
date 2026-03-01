@@ -168,7 +168,7 @@ mod tests {
         let output = cmd().arg("0.1").output().unwrap();
         assert!(output.status.success());
         let elapsed = start.elapsed().as_millis();
-        assert!(elapsed >= 50 && elapsed < 2000);
+        assert!((50..2000).contains(&elapsed));
     }
 
     #[test]

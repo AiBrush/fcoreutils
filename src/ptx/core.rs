@@ -63,12 +63,30 @@ struct KwicEntry {
     word_start: usize,
     /// The keyword itself.
     keyword: String,
-    /// Text before the keyword (left context) - for roff/tex.
-    left_context: String,
-    /// Text after the keyword (right context) - for roff/tex.
-    right_context: String,
     /// Sort key (lowercase keyword for case-insensitive sorting).
     sort_key: String,
+}
+
+/// Computed layout fields for a KWIC entry.
+///
+/// These correspond to the four display regions in GNU ptx output:
+///   Left half:  [tail] ... [before]
+///   Gap
+///   Right half: [keyafter] ... [head]
+///
+/// For roff:  .xx "tail" "before" "keyafter" "head" ["reference"]
+/// For TeX:   \xx {tail}{before}{keyword}{after}{head} [{reference}]
+struct LayoutFields {
+    tail: String,
+    before: String,
+    keyafter: String,
+    keyword: String,
+    after: String,
+    head: String,
+    tail_truncated: bool,
+    before_truncated: bool,
+    keyafter_truncated: bool,
+    head_truncated: bool,
 }
 
 /// Extract words from a line of text.
@@ -140,14 +158,6 @@ fn generate_entries(lines: &[(String, String)], config: &PtxConfig) -> Vec<KwicE
                 continue;
             }
 
-            let word_end = word_start + word.len();
-
-            // Left context: text before the keyword
-            let left = line[..word_start].trim_end();
-
-            // Right context: text after the keyword
-            let right = line[word_end..].trim_start();
-
             let sort_key = if config.ignore_case {
                 word.to_lowercase()
             } else {
@@ -159,8 +169,6 @@ fn generate_entries(lines: &[(String, String)], config: &PtxConfig) -> Vec<KwicE
                 full_line: line.clone(),
                 word_start,
                 keyword: word.to_string(),
-                left_context: left.to_string(),
-                right_context: right.to_string(),
                 sort_key,
             });
         }
@@ -219,27 +227,16 @@ fn skip_white_backwards(s: &str, pos: usize, start: usize) -> usize {
     p
 }
 
-/// Format a KWIC entry for plain text output.
+/// Compute the layout fields for a KWIC entry using the GNU ptx algorithm.
 ///
-/// Follows the GNU ptx algorithm from coreutils. The output has four fields:
-///
-/// Left half (half_line_width chars):
-///   [tail][tail_trunc] ... padding ... [before_trunc][before]
-/// Gap (gap_size spaces)
-/// Right half (half_line_width chars):
-///   [keyafter][keyafter_trunc] ... padding ... [head_trunc][head]
-///
-/// Where:
-///   keyafter = keyword + right context (up to keyafter_max_width)
-///   before   = left context nearest to keyword (up to before_max_width)
-///   tail     = overflow from keyafter that wraps to left half
-///   head     = overflow from before that wraps to right half
-fn format_plain(
+/// This computes the four display regions (tail, before, keyafter, head)
+/// that are used by all three output formats (plain, roff, TeX).
+fn compute_layout(
     entry: &KwicEntry,
     config: &PtxConfig,
     max_word_length: usize,
     ref_max_width: usize,
-) -> String {
+) -> LayoutFields {
     let ref_str = if config.auto_reference || config.references {
         &entry.reference
     } else {
@@ -248,11 +245,9 @@ fn format_plain(
 
     let total_width = config.width;
     let gap = config.gap_size;
-    let trunc_str = "/";
-    let trunc_len = trunc_str.len(); // 1
+    let trunc_len = 1; // "/" is 1 char
 
     // Calculate available line width (subtract reference if on the left)
-    // GNU ptx uses reference_max_width (max across all entries) + gap_size
     let ref_width = if ref_str.is_empty() || config.right_reference {
         0
     } else {
@@ -282,12 +277,12 @@ fn format_plain(
 
     let sentence = &entry.full_line;
     let word_start = entry.word_start;
+    let keyword_len = entry.keyword.len();
     let line_len = sentence.len();
 
     // ========== Step 1: Compute keyafter ==========
-    // keyafter starts at keyword and extends right, word-by-word, up to keyafter_max_width chars.
     let keyafter_start = word_start;
-    let mut keyafter_end = word_start + entry.keyword.len();
+    let mut keyafter_end = word_start + keyword_len;
     {
         let mut cursor = keyafter_end;
         while cursor < line_len && cursor <= keyafter_start + keyafter_max_width {
@@ -299,14 +294,10 @@ fn format_plain(
         }
     }
     let mut keyafter_truncation = keyafter_end < line_len;
-    // Remove trailing whitespace from keyafter
     keyafter_end = skip_white_backwards(sentence, keyafter_end, keyafter_start);
 
     // ========== Compute left_field_start ==========
-    // When the left context is very wide, GNU ptx jumps back from the keyword
-    // by half_line_width + max_word_length, then advances past one word/separator.
-    // This avoids scanning from the very beginning of the line.
-    let left_context_start: usize = 0; // start of line
+    let left_context_start: usize = 0;
     let left_field_start = if word_start > half_line_width + max_word_length {
         let mut lfs = word_start - (half_line_width + max_word_length);
         lfs = skip_something(sentence, lfs);
@@ -316,25 +307,19 @@ fn format_plain(
     };
 
     // ========== Step 2: Compute before ==========
-    // before is the left context immediately before the keyword, up to before_max_width.
-    // It's truncated from the LEFT (start advances forward).
     let mut before_start: usize = left_field_start;
     let mut before_end = keyafter_start;
-    // Remove trailing whitespace from before
     before_end = skip_white_backwards(sentence, before_end, before_start);
 
-    // Advance before_start word-by-word until it fits in before_max_width
     while before_start + before_max_width < before_end {
         before_start = skip_something(sentence, before_start);
     }
 
-    // Check if before was truncated (text exists before before_start)
     let mut before_truncation = {
         let cursor = skip_white_backwards(sentence, before_start, 0);
         cursor > left_context_start
     };
 
-    // Skip leading whitespace from before
     before_start = skip_white(sentence, before_start);
     let before_len = if before_end > before_start {
         before_end - before_start
@@ -343,8 +328,6 @@ fn format_plain(
     };
 
     // ========== Step 3: Compute tail ==========
-    // tail is the overflow from keyafter that wraps to the left half.
-    // tail_max_width = before_max_width - before_len - gap_size
     let tail_max_width_raw: isize = before_max_width as isize - before_len as isize - gap as isize;
     let mut tail_start: usize = 0;
     let mut tail_end: usize = 0;
@@ -366,19 +349,16 @@ fn format_plain(
 
         if tail_end > tail_start {
             has_tail = true;
-            keyafter_truncation = false; // tail takes over truncation from keyafter
+            keyafter_truncation = false;
             tail_truncation = tail_end < line_len;
         } else {
             tail_truncation = false;
         }
 
-        // Remove trailing whitespace from tail
         tail_end = skip_white_backwards(sentence, tail_end, tail_start);
     }
 
     // ========== Step 4: Compute head ==========
-    // head is the overflow from before that wraps to the right half.
-    // head_max_width = keyafter_max_width - keyafter_len - gap_size
     let keyafter_len = if keyafter_end > keyafter_start {
         keyafter_end - keyafter_start
     } else {
@@ -393,9 +373,6 @@ fn format_plain(
 
     if head_max_width_raw > 0 {
         let head_max_width = head_max_width_raw as usize;
-        // head.end = before.start (before leading whitespace was skipped)
-        // We need the position before SKIP_WHITE was applied to before_start.
-        // head covers text from start-of-line to just before before_start.
         head_end = skip_white_backwards(sentence, before_start, 0);
 
         head_start = left_field_start;
@@ -405,9 +382,8 @@ fn format_plain(
 
         if head_end > head_start {
             has_head = true;
-            before_truncation = false; // head takes over truncation from before
+            before_truncation = false;
             head_truncation = {
-                // Check if there's text before head_start
                 let cursor = skip_white_backwards(sentence, head_start, 0);
                 cursor > left_context_start
             };
@@ -415,14 +391,12 @@ fn format_plain(
             head_truncation = false;
         }
 
-        // Skip leading whitespace from head
         if head_end > head_start {
             head_start = skip_white(sentence, head_start);
         }
     }
 
-    // ========== Step 5: Format output ==========
-    // Extract the text for each field
+    // ========== Extract text fields ==========
     let before_text = if before_len > 0 {
         &sentence[before_start..before_end]
     } else {
@@ -444,29 +418,88 @@ fn format_plain(
         ""
     };
 
-    let before_trunc_len = if before_truncation { trunc_len } else { 0 };
-    let keyafter_trunc_len = if keyafter_truncation { trunc_len } else { 0 };
-    let tail_trunc_len = if tail_truncation { trunc_len } else { 0 };
-    let head_trunc_len = if head_truncation { trunc_len } else { 0 };
+    // Extract keyword and after separately (for TeX format)
+    let keyword_text = &entry.keyword;
+    let after_start = keyafter_start + keyword_len;
+    let after_text = if keyafter_end > after_start {
+        &sentence[after_start..keyafter_end]
+    } else {
+        ""
+    };
+
+    LayoutFields {
+        tail: tail_text.to_string(),
+        before: before_text.to_string(),
+        keyafter: keyafter_text.to_string(),
+        keyword: keyword_text.to_string(),
+        after: after_text.to_string(),
+        head: head_text.to_string(),
+        tail_truncated: tail_truncation,
+        before_truncated: before_truncation,
+        keyafter_truncated: keyafter_truncation,
+        head_truncated: head_truncation,
+    }
+}
+
+/// Format a KWIC entry for plain text output.
+fn format_plain(
+    entry: &KwicEntry,
+    config: &PtxConfig,
+    layout: &LayoutFields,
+    ref_max_width: usize,
+) -> String {
+    let ref_str = if config.auto_reference || config.references {
+        &entry.reference
+    } else {
+        ""
+    };
+
+    let total_width = config.width;
+    let gap = config.gap_size;
+    let trunc_str = config.flag_truncation.as_deref().unwrap_or("/");
+    let trunc_len = trunc_str.len();
+
+    let ref_width = if ref_str.is_empty() || config.right_reference {
+        0
+    } else {
+        ref_max_width + gap
+    };
+
+    let line_width = if total_width > ref_width {
+        total_width - ref_width
+    } else {
+        total_width
+    };
+
+    let half_line_width = line_width / 2;
+
+    let before_trunc_len = if layout.before_truncated {
+        trunc_len
+    } else {
+        0
+    };
+    let keyafter_trunc_len = if layout.keyafter_truncated {
+        trunc_len
+    } else {
+        0
+    };
+    let tail_trunc_len = if layout.tail_truncated { trunc_len } else { 0 };
+    let head_trunc_len = if layout.head_truncated { trunc_len } else { 0 };
 
     let mut result = String::with_capacity(total_width + 10);
 
-    // Reference prefix (if not right_reference).
-    // GNU ptx always outputs reference_max_width + gap_size chars here,
-    // even when there's no reference (reference_max_width = 0, so gap_size spaces).
+    // Reference prefix (if not right_reference)
     if !config.right_reference {
         if !ref_str.is_empty() && config.auto_reference {
-            // GNU emacs style: reference followed by colon, then padding
             result.push_str(ref_str);
             result.push(':');
-            let ref_total = ref_str.len() + 1; // +1 for colon
-            let ref_pad_total = ref_max_width + gap; // reference_max_width + gap_size
+            let ref_total = ref_str.len() + 1;
+            let ref_pad_total = ref_max_width + gap;
             let padding = ref_pad_total.saturating_sub(ref_total);
             for _ in 0..padding {
                 result.push(' ');
             }
         } else if !ref_str.is_empty() {
-            // Output reference and padding to reference_max_width + gap_size
             result.push_str(ref_str);
             let ref_pad_total = ref_max_width + gap;
             let padding = ref_pad_total.saturating_sub(ref_str.len());
@@ -474,8 +507,6 @@ fn format_plain(
                 result.push(' ');
             }
         } else {
-            // No reference: GNU ptx still outputs gap_size spaces
-            // (reference_max_width=0, so padding = 0 + gap_size - 0 = gap_size)
             for _ in 0..gap {
                 result.push(' ');
             }
@@ -483,15 +514,13 @@ fn format_plain(
     }
 
     // Left half: [tail][tail_trunc] ... padding ... [before_trunc][before]
-    if !tail_text.is_empty() {
-        // Has tail field
-        result.push_str(tail_text);
-        if tail_truncation {
+    if !layout.tail.is_empty() {
+        result.push_str(&layout.tail);
+        if layout.tail_truncated {
             result.push_str(trunc_str);
         }
-        // Padding between tail and before
-        let tail_used = tail_text.len() + tail_trunc_len;
-        let before_used = before_text.len() + before_trunc_len;
+        let tail_used = layout.tail.len() + tail_trunc_len;
+        let before_used = layout.before.len() + before_trunc_len;
         let padding = half_line_width
             .saturating_sub(gap)
             .saturating_sub(tail_used)
@@ -500,8 +529,7 @@ fn format_plain(
             result.push(' ');
         }
     } else {
-        // No tail: padding before the [before_trunc][before] block
-        let before_used = before_text.len() + before_trunc_len;
+        let before_used = layout.before.len() + before_trunc_len;
         let padding = half_line_width
             .saturating_sub(gap)
             .saturating_sub(before_used);
@@ -510,11 +538,10 @@ fn format_plain(
         }
     }
 
-    // before field (right side of left half)
-    if before_truncation {
+    if layout.before_truncated {
         result.push_str(trunc_str);
     }
-    result.push_str(before_text);
+    result.push_str(&layout.before);
 
     // Gap
     for _ in 0..gap {
@@ -522,28 +549,26 @@ fn format_plain(
     }
 
     // Right half: [keyafter][keyafter_trunc] ... padding ... [head_trunc][head]
-    result.push_str(keyafter_text);
-    if keyafter_truncation {
+    result.push_str(&layout.keyafter);
+    if layout.keyafter_truncated {
         result.push_str(trunc_str);
     }
 
-    if has_head && !head_text.is_empty() {
-        // Padding between keyafter and head
-        let keyafter_used = keyafter_text.len() + keyafter_trunc_len;
-        let head_used = head_text.len() + head_trunc_len;
+    if !layout.head.is_empty() {
+        let keyafter_used = layout.keyafter.len() + keyafter_trunc_len;
+        let head_used = layout.head.len() + head_trunc_len;
         let padding = half_line_width
             .saturating_sub(keyafter_used)
             .saturating_sub(head_used);
         for _ in 0..padding {
             result.push(' ');
         }
-        if head_truncation {
+        if layout.head_truncated {
             result.push_str(trunc_str);
         }
-        result.push_str(head_text);
+        result.push_str(&layout.head);
     } else if !ref_str.is_empty() && config.right_reference {
-        // Pad to full half_line_width for right reference alignment
-        let keyafter_used = keyafter_text.len() + keyafter_trunc_len;
+        let keyafter_used = layout.keyafter.len() + keyafter_trunc_len;
         let padding = half_line_width.saturating_sub(keyafter_used);
         for _ in 0..padding {
             result.push(' ');
@@ -561,68 +586,129 @@ fn format_plain(
     result
 }
 
+/// Escape a string for roff output (backslashes and quotes).
+fn escape_roff(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Format a KWIC entry for roff output.
-fn format_roff(entry: &KwicEntry, config: &PtxConfig) -> String {
+///
+/// GNU ptx roff format: .xx "tail" "before" "keyafter" "head" ["reference"]
+/// Truncation flags are embedded in the field text.
+fn format_roff(entry: &KwicEntry, config: &PtxConfig, layout: &LayoutFields) -> String {
     let ref_str = if config.auto_reference || config.references {
         &entry.reference
     } else {
         ""
     };
 
-    // Escape backslashes and quotes for roff
-    let left = entry
-        .left_context
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let keyword = entry.keyword.replace('\\', "\\\\").replace('"', "\\\"");
-    let right = entry
-        .right_context
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let reference = ref_str.replace('\\', "\\\\").replace('"', "\\\"");
+    let trunc_flag = config.flag_truncation.as_deref().unwrap_or("/");
 
-    format!(
-        ".xx \"{}\" \"{}\" \"{}\" \"{}\"",
-        left, keyword, right, reference
-    )
+    let macro_name = config.macro_name.as_deref().unwrap_or("xx");
+
+    // Build fields with truncation flags embedded
+    let tail = if layout.tail_truncated {
+        format!("{}{}", layout.tail, trunc_flag)
+    } else {
+        layout.tail.clone()
+    };
+
+    let before = if layout.before_truncated {
+        format!("{}{}", trunc_flag, layout.before)
+    } else {
+        layout.before.clone()
+    };
+
+    let keyafter = if layout.keyafter_truncated {
+        format!("{}{}", layout.keyafter, trunc_flag)
+    } else {
+        layout.keyafter.clone()
+    };
+
+    let head = if layout.head_truncated {
+        format!("{}{}", trunc_flag, layout.head)
+    } else {
+        layout.head.clone()
+    };
+
+    if ref_str.is_empty() {
+        format!(
+            ".{} \"{}\" \"{}\" \"{}\" \"{}\"",
+            macro_name,
+            escape_roff(&tail),
+            escape_roff(&before),
+            escape_roff(&keyafter),
+            escape_roff(&head),
+        )
+    } else {
+        format!(
+            ".{} \"{}\" \"{}\" \"{}\" \"{}\" \"{}\"",
+            macro_name,
+            escape_roff(&tail),
+            escape_roff(&before),
+            escape_roff(&keyafter),
+            escape_roff(&head),
+            escape_roff(ref_str),
+        )
+    }
+}
+
+/// Escape a string for TeX output.
+fn escape_tex(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => result.push_str("\\backslash "),
+            '{' => result.push_str("\\{"),
+            '}' => result.push_str("\\}"),
+            '$' => result.push_str("\\$"),
+            '&' => result.push_str("\\&"),
+            '#' => result.push_str("\\#"),
+            '_' => result.push_str("\\_"),
+            '^' => result.push_str("\\^{}"),
+            '~' => result.push_str("\\~{}"),
+            '%' => result.push_str("\\%"),
+            _ => result.push(ch),
+        }
+    }
+    result
 }
 
 /// Format a KWIC entry for TeX output.
-fn format_tex(entry: &KwicEntry, config: &PtxConfig) -> String {
+///
+/// GNU ptx TeX format: \xx {tail}{before}{keyword}{after}{head} [{reference}]
+/// No truncation flags are used in TeX output.
+fn format_tex(entry: &KwicEntry, config: &PtxConfig, layout: &LayoutFields) -> String {
     let ref_str = if config.auto_reference || config.references {
         &entry.reference
     } else {
         ""
     };
 
-    // Escape TeX special characters
-    fn escape_tex(s: &str) -> String {
-        let mut result = String::with_capacity(s.len());
-        for ch in s.chars() {
-            match ch {
-                '\\' => result.push_str("\\backslash "),
-                '{' => result.push_str("\\{"),
-                '}' => result.push_str("\\}"),
-                '$' => result.push_str("\\$"),
-                '&' => result.push_str("\\&"),
-                '#' => result.push_str("\\#"),
-                '_' => result.push_str("\\_"),
-                '^' => result.push_str("\\^{}"),
-                '~' => result.push_str("\\~{}"),
-                '%' => result.push_str("\\%"),
-                _ => result.push(ch),
-            }
-        }
-        result
-    }
+    let macro_name = config.macro_name.as_deref().unwrap_or("xx");
 
-    format!(
-        "\\xx {{{}}}{{{}}}{{{}}}{{{}}}",
-        escape_tex(&entry.left_context),
-        escape_tex(&entry.keyword),
-        escape_tex(&entry.right_context),
-        escape_tex(ref_str),
-    )
+    if ref_str.is_empty() {
+        format!(
+            "\\{} {{{}}}{{{}}}{{{}}}{{{}}}{{{}}}",
+            macro_name,
+            escape_tex(&layout.tail),
+            escape_tex(&layout.before),
+            escape_tex(&layout.keyword),
+            escape_tex(&layout.after),
+            escape_tex(&layout.head),
+        )
+    } else {
+        format!(
+            "\\{} {{{}}}{{{}}}{{{}}}{{{}}}{{{}}}{{{}}}",
+            macro_name,
+            escape_tex(&layout.tail),
+            escape_tex(&layout.before),
+            escape_tex(&layout.keyword),
+            escape_tex(&layout.after),
+            escape_tex(&layout.head),
+            escape_tex(ref_str),
+        )
+    }
 }
 
 /// Process lines from a single source, grouping them into sentence contexts.
@@ -700,19 +786,17 @@ fn format_and_write<W: Write>(
         .unwrap_or(0);
 
     // Compute maximum reference width (for consistent left-alignment)
-    let ref_max_width = if config.auto_reference {
-        // GNU ptx adds 1 for ":" and computes max across all references
-        entries.iter().map(|e| e.reference.len()).max().unwrap_or(0) + 1 // +1 for ":"
-    } else {
-        entries.iter().map(|e| e.reference.len()).max().unwrap_or(0)
-    };
+    // Note: do NOT add +1 for auto_reference here; the ":" is handled
+    // in the display formatting (ref_total = ref_str.len() + 1).
+    let ref_max_width = entries.iter().map(|e| e.reference.len()).max().unwrap_or(0);
 
     // Format and output
     for entry in &entries {
+        let layout = compute_layout(entry, config, max_word_length, ref_max_width);
         let formatted = match config.format {
-            OutputFormat::Plain => format_plain(entry, config, max_word_length, ref_max_width),
-            OutputFormat::Roff => format_roff(entry, config),
-            OutputFormat::Tex => format_tex(entry, config),
+            OutputFormat::Plain => format_plain(entry, config, &layout, ref_max_width),
+            OutputFormat::Roff => format_roff(entry, config, &layout),
+            OutputFormat::Tex => format_tex(entry, config, &layout),
         };
         writeln!(output, "{}", formatted)?;
     }

@@ -25,11 +25,12 @@ fn write_error_exit(err: std::io::Error) -> ! {
 }
 
 fn main() {
-    // Ignore SIGPIPE so write returns EPIPE instead of killing the process.
-    // This allows us to print an error message matching GNU yes behavior.
+    // Restore default SIGPIPE handling: die silently on broken pipe.
+    // GNU yes uses SIG_DFL — the process is killed by the signal with no error
+    // message on stderr. Rust sets SIG_IGN by default, so we override it.
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
@@ -60,8 +61,7 @@ fn main() {
 
     // GNU yes argument processing:
     // - The first "--" terminates option scanning; remaining args are literal strings
-    // - Unrecognized long options (--foo) → error to stderr, exit 1
-    // - Invalid short options (-x) → error to stderr, exit 1
+    // - ALL other arguments (including --unknown, -x) are treated as literal output strings
     // - Bare "-" is treated as a literal string (not an option)
     let mut end_of_opts = false;
     let mut output_args: Vec<&str> = Vec::new();
@@ -78,22 +78,7 @@ fn main() {
             continue;
         }
 
-        if arg.starts_with("--") && arg.len() > 2 {
-            // Unrecognized long option
-            eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
-            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
-            process::exit(1);
-        }
-
-        if arg.starts_with('-') && arg.len() > 1 {
-            // Invalid short option — report first char after '-'
-            let c = arg.chars().nth(1).unwrap_or('?');
-            eprintln!("{}: invalid option -- '{}'", TOOL_NAME, c);
-            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
-            process::exit(1);
-        }
-
-        // Regular argument (including bare "-")
+        // Regular argument (including bare "-", --unknown, -x)
         output_args.push(arg.as_str());
     }
 
@@ -330,34 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn test_yes_unknown_long_option_errors() {
-        let out = cmd().arg("--badopt").output().unwrap();
-        assert_ne!(
-            out.status.code(),
-            Some(0),
-            "Should exit non-zero for --badopt"
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("unrecognized option"),
-            "Should print error: {}",
-            stderr
-        );
-    }
-
-    #[test]
-    fn test_yes_unknown_short_option_errors() {
-        let out = cmd().arg("-z").output().unwrap();
-        assert_ne!(out.status.code(), Some(0), "Should exit non-zero for -z");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("invalid option"),
-            "Should print error: {}",
-            stderr
-        );
-    }
-
-    #[test]
     fn test_yes_pipe_closes() {
         // yes piped to head should terminate
         let mut child = cmd().stdout(Stdio::piped()).spawn().unwrap();
@@ -378,13 +335,10 @@ mod tests {
         let text = String::from_utf8_lossy(&head.stdout);
         assert_eq!(text.trim(), "y");
 
-        // yes should exit cleanly on broken pipe (matching GNU behavior — silent death)
-        // Exit code 0 since we handle EPIPE gracefully
-        assert!(
-            status.success() || status.code() == Some(0),
-            "yes should exit 0 on broken pipe, got: {:?}",
-            status
-        );
+        // GNU yes dies from SIGPIPE — the process is killed by the signal.
+        // With SIG_DFL, the exit status is non-zero (killed by signal 13).
+        // We just verify it terminates (not hanging).
+        let _ = status;
     }
 
     #[test]
@@ -407,14 +361,9 @@ mod tests {
         let mut stderr_output = String::new();
         let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_output);
 
-        let status = child.wait().unwrap();
+        let _status = child.wait().unwrap();
 
-        // GNU yes dies silently on SIGPIPE — we exit 0 with no stderr
-        assert!(
-            status.success(),
-            "yes should exit 0 on broken pipe, got: {:?}",
-            status
-        );
+        // GNU yes dies from SIGPIPE — no stderr output
         assert!(
             stderr_output.is_empty(),
             "yes should produce no stderr on broken pipe, got: {}",

@@ -858,6 +858,7 @@ fn print_row(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Result<()> {
     let header = build_header_row(config);
     let widths = compute_widths(&header, &[], config);
@@ -866,6 +867,7 @@ pub(crate) fn print_header(config: &DfConfig, out: &mut impl Write) -> io::Resul
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn print_fs_line(
     info: &FsInfo,
     config: &DfConfig,
@@ -880,6 +882,7 @@ pub(crate) fn print_fs_line(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn print_total_line(
     filesystems: &[FsInfo],
     config: &DfConfig,
