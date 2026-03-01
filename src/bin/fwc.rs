@@ -79,9 +79,10 @@ impl ShowFlags {
 /// benefits inputs as small as 1MB on multi-core machines.
 const WC_PARALLEL_THRESHOLD: usize = 1024 * 1024; // 1MB
 
-/// Parallel threshold for line counting (2MB).
-/// Below this, serial memchr is faster than paying rayon overhead.
-const LINE_PARALLEL_THRESHOLD: usize = 2 * 1024 * 1024;
+/// Parallel threshold for line counting (32MB).
+/// Below this, serial memchr is faster than paying rayon init + scheduling overhead.
+/// memchr with SIMD processes ~15-20 GB/s serially — a 32MB file takes <2ms.
+const LINE_PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
 
 /// Lines-only fast path: mmap + parallel SIMD memchr for maximum throughput.
 /// For files > 2MB, splits data across all CPU cores for parallel newline counting.
@@ -95,10 +96,10 @@ fn count_lines_streaming(path: &Path) -> io::Result<(u64, u64)> {
         return Ok((0, file_bytes));
     }
 
-    // Fast path: mmap + parallel SIMD memchr.
-    // No populate() — let kernel's readahead handle page faults on demand.
-    // This avoids upfront page table creation overhead (~25K PTEs for 100MB)
-    // and allows counting to start while later pages are still being faulted.
+    // Fast path: mmap + SIMD memchr (serial for <32MB, parallel for >=32MB).
+    // Use MADV_SEQUENTIAL to hint kernel readahead direction. Avoid MADV_WILLNEED
+    // which blocks waiting for I/O — the kernel readahead from SEQUENTIAL is
+    // sufficient and allows counting to start immediately while pages fault in.
     if let Ok(mmap) = unsafe { MmapOptions::new().map(&file) } {
         #[cfg(target_os = "linux")]
         {
@@ -108,13 +109,7 @@ fn count_lines_streaming(path: &Path) -> io::Result<(u64, u64)> {
                     mmap.len(),
                     libc::MADV_SEQUENTIAL,
                 );
-                // WILLNEED triggers aggressive kernel readahead immediately
-                libc::madvise(
-                    mmap.as_ptr() as *mut libc::c_void,
-                    mmap.len(),
-                    libc::MADV_WILLNEED,
-                );
-                // HUGEPAGE reduces TLB misses: 100MB = 50 huge pages vs 25,600 regular pages
+                // HUGEPAGE reduces TLB misses for large files
                 if mmap.len() >= LINE_PARALLEL_THRESHOLD {
                     libc::madvise(
                         mmap.as_ptr() as *mut libc::c_void,
