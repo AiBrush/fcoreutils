@@ -269,61 +269,59 @@ pub fn format_short_entry(entry: &who::UtmpxEntry, config: &PinkyConfig) -> Stri
 }
 
 /// Format output in long format for a specific user.
+/// Returns the complete output including trailing newlines, matching GNU pinky:
+/// - Nonexistent user: "Login name: ... In real life:  ???\n" (no trailing blank line)
+/// - Existing user: all info lines + trailing blank line (\n)
 pub fn format_long_entry(username: &str, config: &PinkyConfig) -> String {
     let mut out = String::new();
 
     let info = get_user_info(username);
 
     let _ = write!(out, "Login name: {:<28}", username);
-    if let Some(ref info) = info {
-        let _ = write!(out, "In real life:  {}", info.fullname);
+
+    if info.is_none() {
+        // GNU prints "???\n" and returns immediately — no trailing blank line
+        let _ = writeln!(out, "In real life:  ???");
+        return out;
     }
-    let _ = writeln!(out);
+
+    let info = info.unwrap();
+    let _ = writeln!(out, "In real life:  {}", info.fullname);
 
     if !config.omit_home_shell {
-        if let Some(ref info) = info {
-            let _ = write!(out, "Directory: {:<29}", info.home_dir);
-            let _ = writeln!(out, "Shell:  {}", info.shell);
-        } else {
-            let _ = writeln!(out, "Directory: ???");
-        }
+        let _ = write!(out, "Directory: {:<29}", info.home_dir);
+        let _ = writeln!(out, "Shell:  {}", info.shell);
     }
 
     // Project file
     if !config.omit_project {
-        if let Some(ref info) = info {
-            let project_path = PathBuf::from(&info.home_dir).join(".project");
-            if project_path.exists() {
-                let project = read_first_line(&project_path);
-                if !project.is_empty() {
-                    let _ = writeln!(out, "Project: {}", project);
-                }
+        let project_path = PathBuf::from(&info.home_dir).join(".project");
+        if project_path.exists() {
+            let project = read_first_line(&project_path);
+            if !project.is_empty() {
+                let _ = writeln!(out, "Project: {}", project);
             }
         }
     }
 
     // Plan file
     if !config.omit_plan {
-        if let Some(ref info) = info {
-            let plan_path = PathBuf::from(&info.home_dir).join(".plan");
-            if plan_path.exists() {
-                let plan = read_file_contents(&plan_path);
-                if !plan.is_empty() {
-                    let _ = writeln!(out, "Plan:");
-                    let _ = write!(out, "{}", plan);
-                    // Ensure plan ends with newline
-                    if !plan.ends_with('\n') {
-                        let _ = writeln!(out);
-                    }
+        let plan_path = PathBuf::from(&info.home_dir).join(".plan");
+        if plan_path.exists() {
+            let plan = read_file_contents(&plan_path);
+            if !plan.is_empty() {
+                let _ = writeln!(out, "Plan:");
+                let _ = write!(out, "{}", plan);
+                // Ensure plan ends with newline
+                if !plan.ends_with('\n') {
+                    let _ = writeln!(out);
                 }
             }
         }
     }
 
-    // Remove trailing newline for consistency - caller adds blank line separator
-    if out.ends_with('\n') {
-        out.pop();
-    }
+    // GNU adds a trailing blank line after each existing user's entry
+    let _ = writeln!(out);
 
     out
 }
@@ -350,8 +348,8 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
         };
 
         for user in users.iter() {
-            // Write entry then blank line (GNU pinky separates entries with blank lines)
-            let _ = writeln!(output, "{}", format_long_entry(user, config));
+            // format_long_entry returns complete output with proper trailing newlines
+            let _ = write!(output, "{}", format_long_entry(user, config));
         }
     } else {
         // Short format (default)
@@ -381,9 +379,8 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
         }
     }
 
-    // Short format: remove trailing newline (fpinky uses println! which adds one)
-    // Long format: keep trailing newline so fpinky's println! creates the blank separator
-    if !config.long_format && output.ends_with('\n') {
+    // Remove trailing newline — fpinky's println! adds one back
+    if output.ends_with('\n') {
         output.pop();
     }
 

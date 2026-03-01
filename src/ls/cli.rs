@@ -386,6 +386,19 @@ pub fn parse_ls_args(flavor: LsFlavor) -> (LsConfig, Vec<String>) {
                         }
                     };
                 }
+                "block-size" => {
+                    let val = next_opt_val(eq_val, &mut args, prog, "block-size");
+                    match super::parse_block_size(&val) {
+                        Ok((bs, suffix)) => {
+                            config.block_size = Some(bs);
+                            config.block_size_suffix = suffix;
+                        }
+                        Err(msg) => {
+                            eprintln!("{}: {}", prog, msg);
+                            std::process::exit(2);
+                        }
+                    }
+                }
                 _ => {
                     eprintln!("{}: unrecognized option '--{}'", prog, name);
                     eprintln!("Try '{} --help' for more information.", prog);
@@ -530,7 +543,7 @@ pub fn run_ls(flavor: LsFlavor) {
 
     match ls_main(&file_args, &config) {
         Ok(true) => {}
-        Ok(false) => std::process::exit(2),
+        Ok(false) => std::process::exit(1),
         Err(e) => {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 std::process::exit(141);

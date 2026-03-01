@@ -634,9 +634,11 @@ pub fn format_count(entries: &[UtmpxEntry]) -> String {
 /// Format heading line.
 pub fn format_heading(config: &WhoConfig) -> String {
     let mut out = String::new();
-    let _ = write!(out, "{:<8}", "NAME");
     if config.show_mesg {
-        let _ = write!(out, " S");
+        // With -T/-w or -a: NAME column is 10 chars wide (absorbs mesg column)
+        let _ = write!(out, "{:<10}", "NAME");
+    } else {
+        let _ = write!(out, "{:<8}", "NAME");
     }
     let _ = write!(out, " {:<12}", "LINE");
     let _ = write!(out, " {:<16}", "TIME");
@@ -644,8 +646,12 @@ pub fn format_heading(config: &WhoConfig) -> String {
         let _ = write!(out, " {:<6}", "IDLE");
         let _ = write!(out, " {:>10}", "PID");
     }
-    let _ = write!(out, " {}", "COMMENT");
-    out
+    let _ = write!(out, " {:<8}", "COMMENT");
+    if config.show_all {
+        let _ = write!(out, " {}", "EXIT");
+    }
+    // Trim trailing whitespace from the last column
+    out.trim_end().to_string()
 }
 
 /// Read boot time from /proc/stat (Linux-specific fallback).

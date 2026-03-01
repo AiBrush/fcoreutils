@@ -12,25 +12,17 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUF_SIZE: usize = 1024 * 1024;
 
 /// Handle write error: print message to stderr and exit with code 1.
-/// For EPIPE (broken pipe), exit silently — GNU yes uses SIG_DFL for SIGPIPE
-/// which terminates the process without any output.
+/// GNU yes prints "yes: standard output: Broken pipe" on EPIPE and exits 1.
 fn write_error_exit(err: std::io::Error) -> ! {
-    if err.kind() == std::io::ErrorKind::BrokenPipe {
-        // Match GNU yes: die silently on broken pipe
-        process::exit(0);
-    }
     let msg = coreutils_rs::common::io_error_msg(&err);
     eprintln!("{}: standard output: {}", TOOL_NAME, msg);
     process::exit(1);
 }
 
 fn main() {
-    // Ignore SIGPIPE so write returns EPIPE instead of killing the process.
-    // This allows us to print an error message matching GNU yes behavior.
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-    }
+    // Keep Rust's default SIGPIPE=SIG_IGN so write() returns EPIPE instead
+    // of killing us. This lets us always print "yes: standard output: Broken pipe"
+    // matching GNU yes behavior (which prints this via error() on write failure).
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -60,8 +52,7 @@ fn main() {
 
     // GNU yes argument processing:
     // - The first "--" terminates option scanning; remaining args are literal strings
-    // - Unrecognized long options (--foo) → error to stderr, exit 1
-    // - Invalid short options (-x) → error to stderr, exit 1
+    // - ALL other arguments (including --unknown, -x) are treated as literal output strings
     // - Bare "-" is treated as a literal string (not an option)
     let mut end_of_opts = false;
     let mut output_args: Vec<&str> = Vec::new();
@@ -78,22 +69,7 @@ fn main() {
             continue;
         }
 
-        if arg.starts_with("--") && arg.len() > 2 {
-            // Unrecognized long option
-            eprintln!("{}: unrecognized option '{}'", TOOL_NAME, arg);
-            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
-            process::exit(1);
-        }
-
-        if arg.starts_with('-') && arg.len() > 1 {
-            // Invalid short option — report first char after '-'
-            let c = arg.chars().nth(1).unwrap_or('?');
-            eprintln!("{}: invalid option -- '{}'", TOOL_NAME, c);
-            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
-            process::exit(1);
-        }
-
-        // Regular argument (including bare "-")
+        // Regular argument (including bare "-", --unknown, -x)
         output_args.push(arg.as_str());
     }
 
@@ -330,37 +306,13 @@ mod tests {
     }
 
     #[test]
-    fn test_yes_unknown_long_option_errors() {
-        let out = cmd().arg("--badopt").output().unwrap();
-        assert_ne!(
-            out.status.code(),
-            Some(0),
-            "Should exit non-zero for --badopt"
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("unrecognized option"),
-            "Should print error: {}",
-            stderr
-        );
-    }
-
-    #[test]
-    fn test_yes_unknown_short_option_errors() {
-        let out = cmd().arg("-z").output().unwrap();
-        assert_ne!(out.status.code(), Some(0), "Should exit non-zero for -z");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("invalid option"),
-            "Should print error: {}",
-            stderr
-        );
-    }
-
-    #[test]
     fn test_yes_pipe_closes() {
         // yes piped to head should terminate
-        let mut child = cmd().stdout(Stdio::piped()).spawn().unwrap();
+        let mut child = cmd()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
         let child_stdout = child.stdout.take().unwrap();
 
         let head = Command::new("head")
@@ -371,6 +323,11 @@ mod tests {
             .output()
             .unwrap();
 
+        // Collect stderr
+        let mut stderr = child.stderr.take().unwrap();
+        let mut stderr_output = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_output);
+
         // Wait for the child process to avoid zombie
         let status = child.wait().unwrap();
 
@@ -378,19 +335,19 @@ mod tests {
         let text = String::from_utf8_lossy(&head.stdout);
         assert_eq!(text.trim(), "y");
 
-        // yes should exit cleanly on broken pipe (matching GNU behavior — silent death)
-        // Exit code 0 since we handle EPIPE gracefully
+        // yes handles EPIPE: prints error to stderr and exits 1
+        assert_eq!(status.code(), Some(1), "yes should exit 1 on pipe close");
         assert!(
-            status.success() || status.code() == Some(0),
-            "yes should exit 0 on broken pipe, got: {:?}",
-            status
+            stderr_output.contains("standard output"),
+            "stderr should contain broken pipe message, got: {}",
+            stderr_output
         );
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_yes_broken_pipe_silent() {
-        // When stdout is closed, yes should exit silently (matching GNU yes behavior)
+    fn test_yes_broken_pipe_terminates() {
+        // When stdout is closed, yes should terminate with EPIPE handling.
         let mut child = cmd()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -409,15 +366,11 @@ mod tests {
 
         let status = child.wait().unwrap();
 
-        // GNU yes dies silently on SIGPIPE — we exit 0 with no stderr
+        // SIGPIPE is ignored, so EPIPE is always caught → error printed, exit 1
+        assert_eq!(status.code(), Some(1), "yes should exit 1 on broken pipe");
         assert!(
-            status.success(),
-            "yes should exit 0 on broken pipe, got: {:?}",
-            status
-        );
-        assert!(
-            stderr_output.is_empty(),
-            "yes should produce no stderr on broken pipe, got: {}",
+            stderr_output.contains("standard output"),
+            "stderr should contain broken pipe message, got: {}",
             stderr_output
         );
     }
@@ -519,12 +472,10 @@ mod tests {
         assert_padded_string_unique(8192);
     }
 
-    /// Verify that yes produces no stderr output when piped through head.
-    /// This matches the independent test framework behavior where stderr
-    /// is captured alongside stdout via `2>&1`.
+    /// Verify that yes terminates cleanly when piped through head.
     #[test]
     #[cfg(unix)]
-    fn test_yes_no_stderr_in_pipeline() {
+    fn test_yes_pipeline_terminates() {
         let mut child = cmd()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -546,13 +497,11 @@ mod tests {
         let mut stderr_output = String::new();
         let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_output);
 
-        let _ = child.wait();
+        let status = child.wait().unwrap();
 
         assert_eq!(head.status.code(), Some(0));
-        assert!(
-            stderr_output.is_empty(),
-            "yes should produce no stderr when piped, got: {}",
-            stderr_output
-        );
+        // EPIPE always caught: error printed, exit 1
+        assert_eq!(status.code(), Some(1));
+        assert!(stderr_output.contains("standard output"));
     }
 }
