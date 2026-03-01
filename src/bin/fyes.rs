@@ -149,23 +149,14 @@ fn main() {
                 // happen, but exit cleanly to avoid spinning.
                 process::exit(1);
             } else {
-                // Read errno directly from thread-local storage before any
-                // Rust runtime code can clobber it.
-                #[cfg(target_os = "linux")]
-                let raw_errno = unsafe { *libc::__errno_location() };
-                #[cfg(target_os = "macos")]
-                let raw_errno = unsafe { *libc::__error() };
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                let raw_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-
-                if raw_errno == libc::EINTR {
+                // GNU yes never prints errors — it is killed by SIGPIPE.
+                // If SIGPIPE delivery fails (blocked by parent/runtime),
+                // write() returns -1 with EPIPE. Exit silently in that case.
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                // EPIPE: pipe closed — exit silently, matching GNU yes behavior.
-                // GNU yes is killed by SIGPIPE (no stderr output). Check both
-                // raw errno and Rust ErrorKind for maximum robustness across
-                // different environments (CI runners, signal configurations).
-                if raw_errno == libc::EPIPE {
+                if err.kind() == std::io::ErrorKind::BrokenPipe {
                     #[cfg(unix)]
                     unsafe {
                         libc::_exit(128 + libc::SIGPIPE)
@@ -173,8 +164,6 @@ fn main() {
                     #[cfg(not(unix))]
                     process::exit(141);
                 }
-                // For other errors (ENOSPC, EIO, etc.), print diagnostic.
-                let err = std::io::Error::from_raw_os_error(raw_errno);
                 let msg = coreutils_rs::common::io_error_msg(&err);
                 eprintln!("{}: standard output: {}", TOOL_NAME, msg);
                 process::exit(1);
