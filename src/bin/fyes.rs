@@ -152,7 +152,12 @@ fn main() {
                 // we set SIG_DFL + unblocked SIGPIPE, Rust's runtime may catch
                 // the signal before the default handler runs. Exit silently.
                 if err.raw_os_error() == Some(libc::EPIPE) {
-                    unsafe { libc::_exit(128 + libc::SIGPIPE) };
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::_exit(128 + libc::SIGPIPE)
+                    };
+                    #[cfg(not(unix))]
+                    process::exit(141); // 128 + 13 (SIGPIPE value on most POSIX)
                 }
                 // For other errors (ENOSPC, EIO, etc.), print diagnostic.
                 let msg = coreutils_rs::common::io_error_msg(&err);
