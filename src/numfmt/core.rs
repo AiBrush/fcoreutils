@@ -1373,8 +1373,22 @@ fn process_line_fast_ws(
     }
 
     // Handle completely blank / empty lines.
+    // GNU numfmt treats an empty line as an invalid number at field 1.
     if field_num == 0 {
-        out.extend_from_slice(line);
+        if field_set.contains(1) {
+            match convert_number_to_buf("", config, parsed_fmt, out) {
+                Ok(()) => {}
+                Err(e) => match config.invalid {
+                    InvalidMode::Abort | InvalidMode::Fail => return Err(e),
+                    InvalidMode::Warn => {
+                        eprintln!("numfmt: {}", e);
+                    }
+                    InvalidMode::Ignore => {}
+                },
+            }
+        } else {
+            out.extend_from_slice(line);
+        }
     }
 
     Ok(())

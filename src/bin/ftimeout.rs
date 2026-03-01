@@ -312,49 +312,81 @@ fn main() {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
 
-    // Wait for child with timeout using a polling approach
-    let duration_nanos = (duration * 1_000_000_000.0) as u128;
-    let start_time = std::time::Instant::now();
+    // Wait for child with timeout using SIGALRM + blocking waitpid.
+    // This is how GNU timeout works: set an alarm, then block in waitpid.
+    // SIGCHLD wakes waitpid when child exits; SIGALRM wakes it on timeout.
     let mut timed_out = false;
     let mut status: libc::c_int = 0;
 
+    // Install a no-op SIGALRM handler (so alarm interrupts waitpid with EINTR).
+    unsafe {
+        extern "C" fn sigalrm_handler(_: libc::c_int) {}
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = sigalrm_handler as *const () as usize;
+        sa.sa_flags = 0; // No SA_RESTART — we WANT waitpid to be interrupted
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGALRM, &sa, std::ptr::null_mut());
+    }
+
+    if duration > 0.0 {
+        // Use setitimer for sub-second precision (alarm() is seconds only).
+        let secs = duration as libc::time_t;
+        let usecs = ((duration - secs as f64) * 1_000_000.0) as libc::suseconds_t;
+        let itval = libc::itimerval {
+            it_interval: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: libc::timeval {
+                tv_sec: secs,
+                tv_usec: usecs,
+            },
+        };
+        unsafe {
+            libc::setitimer(libc::ITIMER_REAL, &itval, std::ptr::null_mut());
+        }
+    }
+
+    // Blocking wait — returns when child exits (SIGCHLD) or alarm fires (EINTR).
     loop {
-        let ret = unsafe { libc::waitpid(child_pid, &mut status, libc::WNOHANG) };
+        let ret = unsafe { libc::waitpid(child_pid, &mut status, 0) };
         if ret == child_pid {
-            // Child exited
+            // Child exited before timeout
             break;
         }
         if ret < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            // Child no longer exists
-            break;
-        }
-
-        // Check timeout (duration of 0 means no timeout)
-        if duration > 0.0 && start_time.elapsed().as_nanos() >= duration_nanos {
-            timed_out = true;
-            if verbose {
-                eprintln!(
-                    "{}: sending signal {} to command '{}'",
-                    TOOL_NAME, signal_name, command
-                );
-            }
-            let ret = unsafe { libc::kill(target_pid, sig) };
-            if ret != 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::ESRCH) {
-                    // Process already exited before we could signal it
-                    timed_out = false;
+            #[cfg(target_os = "linux")]
+            let errno = unsafe { *libc::__errno_location() };
+            #[cfg(target_os = "macos")]
+            let errno = unsafe { *libc::__error() };
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if errno == libc::EINTR {
+                // Interrupted — check if child already exited
+                let ret2 = unsafe { libc::waitpid(child_pid, &mut status, libc::WNOHANG) };
+                if ret2 == child_pid {
+                    break; // Child exited
                 }
+                // SIGALRM fired — timeout
+                timed_out = true;
+                if verbose {
+                    eprintln!(
+                        "{}: sending signal {} to command '{}'",
+                        TOOL_NAME, signal_name, command
+                    );
+                }
+                let kill_ret = unsafe { libc::kill(target_pid, sig) };
+                if kill_ret != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::ESRCH) {
+                        timed_out = false;
+                    }
+                }
+                break;
             }
+            // Other error (ECHILD) — child no longer exists
             break;
         }
-
-        // Sleep briefly to avoid busy-wait
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
     if timed_out {
