@@ -527,19 +527,18 @@ inherits = "release"
 debug = true
 strip = false
 
-# ring for SHA-256 on non-Apple targets: BoringSSL assembly with SHA-NI/AVX2
-# (ring 0.17 has compile error on macOS aarch64 / Apple Silicon)
-[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+# ring for SHA-256 on non-Apple, non-Linux targets (Windows/FreeBSD): BoringSSL assembly.
+# Not needed on Linux/Apple: sha2/sha1/md-5 crates use SHA-NI via cpufeatures runtime detection.
+# ring 0.17 has compile error on macOS aarch64 / Apple Silicon, so skip Apple entirely.
+[target.'cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))'.dependencies]
 ring = "0.17"
 
-# Enable ASM acceleration for hash crates on non-MSVC targets
-# (sha2-asm/md5-asm use .S assembly files that MSVC cl.exe can't compile)
+# sha1/sha2/md-5 crates for all non-MSVC targets.
+# NOTE: Do NOT add "asm" feature — sha2-asm uses older SSE4 assembly which BYPASSES SHA-NI.
+# The default sha2/sha1 backends use cpufeatures for runtime SHA-NI dispatch, which is
+# faster on machines with SHA-NI hardware (Intel Goldmont+, Ice Lake+, AMD Zen4+, ARM Neoverse).
+# On MSVC (Windows x86): sha2-asm .S files cannot be compiled by cl.exe — skip.
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-sha1 = { version = "0.10", features = ["asm"] }
-sha2 = { version = "0.10", features = ["asm"] }
-md-5 = { version = "0.10", features = ["asm"] }
-
-# OpenSSL for optimized MD5 and SHA-256 on Linux (uses system OpenSSL assembly)
-# Windows doesn't have OpenSSL by default; falls back to md-5/ring crates
-[target.'cfg(target_os = "linux")'.dependencies]
-openssl = "0.10"
+sha1 = { version = "0.10" }
+sha2 = { version = "0.10" }
+md-5 = { version = "0.10" }
