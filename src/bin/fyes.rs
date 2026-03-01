@@ -13,17 +13,25 @@ const BUF_SIZE: usize = 1024 * 1024;
 
 /// Handle write error: print diagnostic to stderr and exit with code 1.
 /// GNU yes prints "yes: standard output: Broken pipe" on EPIPE.
-/// Close stdout first (like GNU's close_stdout()) to let downstream pipeline
-/// processes (wc, uniq, etc.) finish and produce their output before our
-/// diagnostic message, matching GNU's stderr ordering.
-fn write_error_exit(err: std::io::Error) -> ! {
-    unsafe {
-        libc::close(1);
-    }
-    let msg = coreutils_rs::common::io_error_msg(&err);
-    let errmsg = format!("{}: standard output: {}\n", TOOL_NAME, msg);
-    unsafe {
-        libc::write(2, errmsg.as_ptr() as *const libc::c_void, errmsg.len() as _);
+/// Uses a static message for EPIPE (the common case) to minimize latency
+/// between EPIPE detection and error write, ensuring our error appears
+/// before downstream pipeline output (wc, uniq, etc.) in merged stderr.
+fn write_error_exit_raw(errno: i32) -> ! {
+    // Fast path for EPIPE: use static message to avoid format!/allocation overhead.
+    // This ensures we write the error to stderr before downstream processes (wc, uniq)
+    // have a chance to write their output when stdout and stderr are merged.
+    if errno == libc::EPIPE {
+        const MSG: &[u8] = b"yes: standard output: Broken pipe\n";
+        unsafe {
+            libc::write(2, MSG.as_ptr() as *const libc::c_void, MSG.len() as _);
+        }
+    } else {
+        let err = std::io::Error::from_raw_os_error(errno);
+        let msg = coreutils_rs::common::io_error_msg(&err);
+        let errmsg = format!("{}: standard output: {}\n", TOOL_NAME, msg);
+        unsafe {
+            libc::write(2, errmsg.as_ptr() as *const libc::c_void, errmsg.len() as _);
+        }
     }
     process::exit(1);
 }
@@ -153,11 +161,15 @@ fn main() {
             } else if ret == 0 {
                 break;
             } else {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
+                // Read errno directly to minimize latency to error write.
+                // For EPIPE, every microsecond matters: we must write our
+                // diagnostic to stderr before downstream processes (wc, uniq)
+                // write their output when stdout and stderr are merged.
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                if errno == libc::EINTR {
                     continue;
                 }
-                write_error_exit(err);
+                write_error_exit_raw(errno);
             }
         }
     }
