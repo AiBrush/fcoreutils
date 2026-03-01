@@ -149,19 +149,19 @@ mod tests {
         // Long format with -l; needs a username
         // Get current username for testing
         let whoami = Command::new("whoami").output();
-        if let Ok(whoami) = whoami {
-            if whoami.status.success() {
-                let username = String::from_utf8_lossy(&whoami.stdout).trim().to_string();
-                if !username.is_empty() {
-                    let output = cmd().args(["-l", &username]).output().unwrap();
-                    assert!(output.status.success());
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    assert!(
-                        stdout.contains("Login name:"),
-                        "Long format should contain 'Login name:', got: {}",
-                        stdout
-                    );
-                }
+        if let Ok(whoami) = whoami
+            && whoami.status.success()
+        {
+            let username = String::from_utf8_lossy(&whoami.stdout).trim().to_string();
+            if !username.is_empty() {
+                let output = cmd().args(["-l", &username]).output().unwrap();
+                assert!(output.status.success());
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    stdout.contains("Login name:"),
+                    "Long format should contain 'Login name:', got: {}",
+                    stdout
+                );
             }
         }
     }
@@ -171,16 +171,16 @@ mod tests {
     fn test_pinky_specific_user() {
         // Look up current user
         let whoami = Command::new("whoami").output();
-        if let Ok(whoami) = whoami {
-            if whoami.status.success() {
-                let username = String::from_utf8_lossy(&whoami.stdout).trim().to_string();
-                if !username.is_empty() {
-                    let output = cmd().arg(&username).output().unwrap();
-                    assert!(
-                        output.status.success(),
-                        "pinky should succeed for specific user"
-                    );
-                }
+        if let Ok(whoami) = whoami
+            && whoami.status.success()
+        {
+            let username = String::from_utf8_lossy(&whoami.stdout).trim().to_string();
+            if !username.is_empty() {
+                let output = cmd().arg(&username).output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "pinky should succeed for specific user"
+                );
             }
         }
     }
@@ -214,23 +214,23 @@ mod tests {
     fn test_long_format_via_binary() {
         // Test -l flag via binary with current user
         let whoami_output = Command::new("whoami").output();
-        if let Ok(whoami) = whoami_output {
-            if whoami.status.success() {
-                let username = String::from_utf8_lossy(&whoami.stdout).trim().to_string();
-                if !username.is_empty() {
-                    let output = cmd().args(["-l", &username]).output().unwrap();
-                    assert!(output.status.success());
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    assert!(
-                        stdout.contains("Login name:"),
-                        "Long format should contain 'Login name:', got: {}",
-                        stdout
-                    );
-                    assert!(
-                        stdout.contains(&username),
-                        "Long format should contain the username"
-                    );
-                }
+        if let Ok(whoami) = whoami_output
+            && whoami.status.success()
+        {
+            let username = String::from_utf8_lossy(&whoami.stdout).trim().to_string();
+            if !username.is_empty() {
+                let output = cmd().args(["-l", &username]).output().unwrap();
+                assert!(output.status.success());
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    stdout.contains("Login name:"),
+                    "Long format should contain 'Login name:', got: {}",
+                    stdout
+                );
+                assert!(
+                    stdout.contains(&username),
+                    "Long format should contain the username"
+                );
             }
         }
     }
@@ -240,22 +240,22 @@ mod tests {
     fn test_long_format_omit_flags() {
         // Test -l -b -h -p flags via binary
         let whoami_output = Command::new("whoami").output();
-        if let Ok(whoami) = whoami_output {
-            if whoami.status.success() {
-                let username = String::from_utf8_lossy(&whoami.stdout).trim().to_string();
-                if !username.is_empty() {
-                    let output = cmd()
-                        .args(["-l", "-b", "-h", "-p", &username])
-                        .output()
-                        .unwrap();
-                    assert!(output.status.success());
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    assert!(stdout.contains("Login name:"));
-                    assert!(
-                        !stdout.contains("Directory:"),
-                        "With -b, should omit directory line"
-                    );
-                }
+        if let Ok(whoami) = whoami_output
+            && whoami.status.success()
+        {
+            let username = String::from_utf8_lossy(&whoami.stdout).trim().to_string();
+            if !username.is_empty() {
+                let output = cmd()
+                    .args(["-l", "-b", "-h", "-p", &username])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(stdout.contains("Login name:"));
+                assert!(
+                    !stdout.contains("Directory:"),
+                    "With -b, should omit directory line"
+                );
             }
         }
     }

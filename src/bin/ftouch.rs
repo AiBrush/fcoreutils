@@ -440,6 +440,8 @@ fn mktime_utc(
 }
 
 /// Apply timestamps to a file using utimensat for nanosecond precision.
+/// When `time_pair` is provided, use its separate atime/mtime values (for `-r` reference).
+/// Otherwise, use the single `sec`/`nsec` for the requested timestamp(s).
 #[cfg(unix)]
 fn set_file_times(
     path: &str,
@@ -447,6 +449,7 @@ fn set_file_times(
     sec: i64,
     nsec: i64,
     no_deref: bool,
+    time_pair: Option<&TimePair>,
 ) -> Result<(), std::io::Error> {
     // Get current times to preserve the one we're not changing
     let current = get_file_times(path).unwrap_or(TimePair {
@@ -457,10 +460,19 @@ fn set_file_times(
     });
 
     let atime = match target {
-        TimeTarget::Both | TimeTarget::AccessOnly => libc::timespec {
-            tv_sec: sec,
-            tv_nsec: nsec,
-        },
+        TimeTarget::Both | TimeTarget::AccessOnly => {
+            if let Some(tp) = time_pair {
+                libc::timespec {
+                    tv_sec: tp.atime_sec,
+                    tv_nsec: tp.atime_nsec,
+                }
+            } else {
+                libc::timespec {
+                    tv_sec: sec,
+                    tv_nsec: nsec,
+                }
+            }
+        }
         TimeTarget::ModifyOnly => libc::timespec {
             tv_sec: current.atime_sec,
             tv_nsec: current.atime_nsec,
@@ -468,10 +480,19 @@ fn set_file_times(
     };
 
     let mtime = match target {
-        TimeTarget::Both | TimeTarget::ModifyOnly => libc::timespec {
-            tv_sec: sec,
-            tv_nsec: nsec,
-        },
+        TimeTarget::Both | TimeTarget::ModifyOnly => {
+            if let Some(tp) = time_pair {
+                libc::timespec {
+                    tv_sec: tp.mtime_sec,
+                    tv_nsec: tp.mtime_nsec,
+                }
+            } else {
+                libc::timespec {
+                    tv_sec: sec,
+                    tv_nsec: nsec,
+                }
+            }
+        }
         TimeTarget::AccessOnly => libc::timespec {
             tv_sec: current.mtime_sec,
             tv_nsec: current.mtime_nsec,
@@ -713,18 +734,24 @@ fn main() {
 
     // Determine the timestamp to apply.
     // When --date is given (possibly combined with --reference), --date wins.
-    // Otherwise --reference, then --stamp, then current time.
-    let (ts_sec, ts_nsec) = if let Some(Ok((sec, nsec))) = parsed_date {
-        (sec, nsec)
+    // Otherwise --reference (preserving separate atime/mtime), then --stamp, then current time.
+    //
+    // use_ref_pair is set when --reference is the source and no --date override,
+    // so that set_file_times can use separate atime/mtime from the reference file.
+    let (ts_sec, ts_nsec, use_ref_pair) = if let Some(Ok((sec, nsec))) = parsed_date {
+        (sec, nsec, false)
     } else if let Some(ref tp) = ref_times {
+        // Use atime as the "single" fallback, but use_ref_pair=true will make
+        // set_file_times use the full pair for TimeTarget::Both.
         match target {
-            TimeTarget::Both | TimeTarget::AccessOnly => (tp.atime_sec, tp.atime_nsec),
-            TimeTarget::ModifyOnly => (tp.mtime_sec, tp.mtime_nsec),
+            TimeTarget::Both | TimeTarget::AccessOnly => (tp.atime_sec, tp.atime_nsec, true),
+            TimeTarget::ModifyOnly => (tp.mtime_sec, tp.mtime_nsec, true),
         }
     } else if let Some(Ok((sec, nsec))) = parsed_stamp {
-        (sec, nsec)
+        (sec, nsec, false)
     } else {
-        current_time()
+        let t = current_time();
+        (t.0, t.1, false)
     };
 
     let mut exit_code = 0;
@@ -838,7 +865,12 @@ fn main() {
             }
         }
 
-        if let Err(e) = set_file_times(file, target, ts_sec, ts_nsec, no_deref) {
+        let ref_pair = if use_ref_pair {
+            ref_times.as_ref()
+        } else {
+            None
+        };
+        if let Err(e) = set_file_times(file, target, ts_sec, ts_nsec, no_deref, ref_pair) {
             eprintln!(
                 "{}: setting times of '{}': {}",
                 TOOL_NAME,

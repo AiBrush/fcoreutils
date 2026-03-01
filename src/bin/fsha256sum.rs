@@ -656,7 +656,7 @@ mod tests {
     fn test_binary_data() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("binary.bin");
-        std::fs::write(&file, &[0u8, 1, 2, 255]).unwrap();
+        std::fs::write(&file, [0u8, 1, 2, 255]).unwrap();
         let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);

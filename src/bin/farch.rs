@@ -131,7 +131,7 @@ mod tests {
             "x86_64", "aarch64", "arm64", "i686", "armv7l", "s390x", "ppc64le", "riscv64",
         ];
         assert!(
-            known.iter().any(|k| arch == *k) || !arch.is_empty(),
+            known.contains(&arch) || !arch.is_empty(),
             "unexpected arch: {}",
             arch
         );

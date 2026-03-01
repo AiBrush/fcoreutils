@@ -575,7 +575,7 @@ mod tests {
     fn test_od_file() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.bin");
-        std::fs::write(&file, &[0x41, 0x42, 0x43]).unwrap();
+        std::fs::write(&file, [0x41, 0x42, 0x43]).unwrap();
         let output = cmd().arg(file.to_str().unwrap()).output().unwrap();
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);

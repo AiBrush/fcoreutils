@@ -29,6 +29,11 @@ fn mark_conv_error(s: &str) {
     CONV_ERROR.with(|c| c.set(true));
 }
 
+fn mark_range_error(s: &str) {
+    eprintln!("printf: '{}': Numerical result out of range", s);
+    CONV_ERROR.with(|c| c.set(true));
+}
+
 /// Process a printf format string with the given arguments, returning raw bytes.
 ///
 /// The format string repeats if there are more arguments than one pass consumes.
@@ -570,24 +575,54 @@ fn parse_integer(s: &str) -> i64 {
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        u64::from_str_radix(hex, 16).unwrap_or_else(|_| {
-            mark_conv_error(s);
-            0
-        })
+        match u64::from_str_radix(hex, 16) {
+            Ok(v) => v,
+            Err(e) if e.kind() == &std::num::IntErrorKind::PosOverflow => {
+                mark_range_error(s);
+                if negative {
+                    return i64::MIN;
+                }
+                return i64::MAX;
+            }
+            Err(_) => {
+                mark_conv_error(s);
+                0
+            }
+        }
     } else if let Some(oct) = digits.strip_prefix('0') {
         if oct.is_empty() {
             0
         } else {
-            u64::from_str_radix(oct, 8).unwrap_or_else(|_| {
-                mark_conv_error(s);
-                0
-            })
+            match u64::from_str_radix(oct, 8) {
+                Ok(v) => v,
+                Err(e) if e.kind() == &std::num::IntErrorKind::PosOverflow => {
+                    mark_range_error(s);
+                    if negative {
+                        return i64::MIN;
+                    }
+                    return i64::MAX;
+                }
+                Err(_) => {
+                    mark_conv_error(s);
+                    0
+                }
+            }
         }
     } else {
-        digits.parse::<u64>().unwrap_or_else(|_| {
-            mark_conv_error(s);
-            0
-        })
+        match digits.parse::<u64>() {
+            Ok(v) => v,
+            Err(e) if e.kind() == &std::num::IntErrorKind::PosOverflow => {
+                mark_range_error(s);
+                if negative {
+                    return i64::MIN;
+                }
+                return i64::MAX;
+            }
+            Err(_) => {
+                mark_conv_error(s);
+                0
+            }
+        }
     };
 
     if negative {
@@ -628,24 +663,45 @@ fn parse_unsigned(s: &str) -> u64 {
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        u64::from_str_radix(hex, 16).unwrap_or_else(|_| {
-            mark_conv_error(s);
-            0
-        })
+        match u64::from_str_radix(hex, 16) {
+            Ok(v) => v,
+            Err(e) if e.kind() == &std::num::IntErrorKind::PosOverflow => {
+                mark_range_error(s);
+                u64::MAX
+            }
+            Err(_) => {
+                mark_conv_error(s);
+                0
+            }
+        }
     } else if let Some(oct) = digits.strip_prefix('0') {
         if oct.is_empty() {
             0
         } else {
-            u64::from_str_radix(oct, 8).unwrap_or_else(|_| {
-                mark_conv_error(s);
-                0
-            })
+            match u64::from_str_radix(oct, 8) {
+                Ok(v) => v,
+                Err(e) if e.kind() == &std::num::IntErrorKind::PosOverflow => {
+                    mark_range_error(s);
+                    u64::MAX
+                }
+                Err(_) => {
+                    mark_conv_error(s);
+                    0
+                }
+            }
         }
     } else {
-        digits.parse::<u64>().unwrap_or_else(|_| {
-            mark_conv_error(s);
-            0
-        })
+        match digits.parse::<u64>() {
+            Ok(v) => v,
+            Err(e) if e.kind() == &std::num::IntErrorKind::PosOverflow => {
+                mark_range_error(s);
+                u64::MAX
+            }
+            Err(_) => {
+                mark_conv_error(s);
+                0
+            }
+        }
     };
 
     if negative {
@@ -895,20 +951,18 @@ fn format_g(value: f64, prec: usize, upper: bool) -> String {
 }
 
 /// Shell-quote a string for %q format specifier (GNU printf compat).
-/// Matches GNU coreutils quoting style:
+/// Matches GNU coreutils quoting style (quotearg shell_escape_always_quoting_style):
 /// - Empty string -> ''
 /// - Safe chars only -> no quoting
-/// - No single quotes or control chars -> single-quote: 'hello world'
-/// - Has single quotes but no control/special double-quote chars -> double-quote: "it's"
-/// - Otherwise -> $'...' quoting
+/// - Has control/high bytes -> segment-based: 'safe'$'\t''safe'
+/// - Has single quotes but no control -> double-quote: "it's"
+/// - Otherwise -> single-quote: 'hello world'
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
     }
 
     // Check if the string needs quoting at all.
-    // Safe chars match GNU quotearg shell_escape_quoting_style.
-    // Leading tilde is unsafe (triggers shell tilde expansion).
     let needs_quoting = s.starts_with('~')
         || s.bytes().any(|b| {
             !b.is_ascii_alphanumeric()
@@ -930,61 +984,91 @@ fn shell_quote(s: &str) -> String {
         return s.to_string();
     }
 
-    // Check if we have control characters that need $'...' quoting.
     let has_control = s.bytes().any(|b| b < 0x20 || b == 0x7f || b >= 0x80);
     let has_single_quote = s.contains('\'');
 
     if has_control {
-        // Use $'...' quoting for control characters.
-        let mut result = String::from("$'");
-        for byte in s.bytes() {
-            match byte {
-                b'\'' => result.push_str("\\'"),
-                b'\\' => result.push_str("\\\\"),
-                b'\n' => result.push_str("\\n"),
-                b'\t' => result.push_str("\\t"),
-                b'\r' => result.push_str("\\r"),
-                0x07 => result.push_str("\\a"),
-                0x08 => result.push_str("\\b"),
-                0x0c => result.push_str("\\f"),
-                0x0b => result.push_str("\\v"),
-                0x1b => result.push_str("\\E"),
-                b if b < 0x20 || b == 0x7f => {
-                    result.push_str(&format!("\\{:03o}", b));
+        // GNU uses segment-based quoting: 'safe'$'\t''safe'
+        // GNU always starts in single-quote mode, so strings beginning with
+        // a control char get an empty '' prefix: ''$'\t''hello'
+        let mut result = String::new();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        // Track whether we're at the start - if first char is control, emit ''
+        let mut need_sq_start = true;
+
+        while i < bytes.len() {
+            if is_control_byte(bytes[i]) {
+                if need_sq_start {
+                    // Emit empty single-quote segment before first $'...'
+                    result.push_str("''");
+                    need_sq_start = false;
                 }
-                b if b >= 0x80 => {
-                    result.push_str(&format!("\\{:03o}", b));
+                // Emit $'...' segment for consecutive control/high bytes
+                result.push_str("$'");
+                while i < bytes.len() && is_control_byte(bytes[i]) {
+                    emit_escape(bytes[i], &mut result);
+                    i += 1;
                 }
-                _ => result.push(byte as char),
+                result.push('\'');
+            } else {
+                need_sq_start = false;
+                // Emit '...' segment for consecutive safe bytes
+                result.push('\'');
+                while i < bytes.len() && !is_control_byte(bytes[i]) {
+                    if bytes[i] == b'\'' {
+                        // Close single quote, emit escaped quote, reopen
+                        result.push_str("'\\'");
+                    } else {
+                        result.push(bytes[i] as char);
+                    }
+                    i += 1;
+                }
+                result.push('\'');
             }
         }
-        result.push('\'');
         result
     } else if !has_single_quote {
-        // No control chars, no single quotes: wrap in single quotes.
         format!("'{}'", s)
     } else {
         // Has single quotes but no control chars.
-        // Check if safe for double-quoting (no $, `, \, !, " that would be
-        // interpreted inside double quotes).
         let unsafe_for_dquote = s
             .bytes()
             .any(|b| b == b'$' || b == b'`' || b == b'\\' || b == b'!' || b == b'"');
         if !unsafe_for_dquote {
-            // Safe to double-quote.
             format!("\"{}\"", s)
         } else {
-            // Fall back to $'...' quoting.
-            let mut result = String::from("$'");
+            // Use '\'' escaping for single quotes within single-quoted segments
+            let mut result = String::from("'");
             for byte in s.bytes() {
-                match byte {
-                    b'\'' => result.push_str("\\'"),
-                    b'\\' => result.push_str("\\\\"),
-                    _ => result.push(byte as char),
+                if byte == b'\'' {
+                    result.push_str("'\\''");
+                } else {
+                    result.push(byte as char);
                 }
             }
             result.push('\'');
             result
+        }
+    }
+}
+
+fn is_control_byte(b: u8) -> bool {
+    b < 0x20 || b == 0x7f || b >= 0x80
+}
+
+fn emit_escape(byte: u8, result: &mut String) {
+    match byte {
+        b'\n' => result.push_str("\\n"),
+        b'\t' => result.push_str("\\t"),
+        b'\r' => result.push_str("\\r"),
+        0x07 => result.push_str("\\a"),
+        0x08 => result.push_str("\\b"),
+        0x0c => result.push_str("\\f"),
+        0x0b => result.push_str("\\v"),
+        0x1b => result.push_str("\\E"),
+        b => {
+            result.push_str(&format!("\\{:03o}", b));
         }
     }
 }

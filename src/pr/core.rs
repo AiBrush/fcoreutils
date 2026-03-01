@@ -556,13 +556,14 @@ pub fn pr_merge<W: Write>(
                         content
                     };
                     if fi < num_files - 1 {
-                        // Non-last column: pad to next column boundary
+                        // Non-last column
                         if explicit_sep {
+                            // GNU pr with explicit separator: no padding between columns
                             if fi > 0 {
                                 write!(output, "{}", col_sep)?;
                             }
-                            write!(output, "{:<width$}", truncated, width = col_width)?;
-                            abs_pos = (fi + 1) * col_width + config.indent + fi * col_sep.len();
+                            write!(output, "{}", truncated)?;
+                            abs_pos += truncated.len() + if fi > 0 { col_sep.len() } else { 0 };
                         } else {
                             write!(output, "{}", truncated)?;
                             abs_pos += truncated.len();
