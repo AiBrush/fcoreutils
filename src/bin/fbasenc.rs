@@ -278,8 +278,8 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         }
     }
 
-    // Incomplete final group: GNU basenc 9.5+ auto-pads unpadded input.
-    // n >= 2 produces partial bytes without error.
+    // Incomplete final group without proper padding: GNU basenc 9.4 outputs
+    // partial decoded bytes but reports "invalid input" and exits with code 1.
     // n == 1 is genuinely invalid (6 bits isn't enough for any output byte).
     if n == 1 {
         return DecodeOutput {
@@ -292,6 +292,12 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
     }
     if n >= 3 {
         result.push((vals[1] << 4) | (vals[2] >> 2));
+    }
+    if n >= 2 {
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
     DecodeOutput {
@@ -1903,14 +1909,14 @@ mod tests {
         assert!(r.error.is_none());
         assert_eq!(r.data, b"foobar");
 
-        // Unpadded: 2 chars - GNU basenc 9.5+ auto-pads unpadded input
+        // Unpadded: 2 chars - GNU basenc 9.4 outputs partial data but reports error
         let r = base64_decode(b"QQ", &BASE64_DECODE, false);
-        assert!(r.error.is_none());
+        assert!(r.error.is_some());
         assert_eq!(r.data, b"A");
 
-        // 3 chars: GNU basenc 9.5+ auto-pads unpadded input
+        // 3 chars: GNU basenc 9.4 outputs partial data but reports error
         let r = base64_decode(b"QWI", &BASE64_DECODE, false);
-        assert!(r.error.is_none());
+        assert!(r.error.is_some());
         assert_eq!(r.data, b"Ab");
 
         // 1 char: invalid (not enough data for any output byte), should error
