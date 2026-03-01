@@ -60,7 +60,7 @@ fn main() {
             match get_user_groups(user) {
                 Ok(groups) => println!("{} : {}", user, groups.join(" ")),
                 Err(e) => {
-                    eprintln!("{}: '{}': {}", TOOL_NAME, user, e);
+                    eprintln!("{}: \u{2018}{}\u{2019}: {}", TOOL_NAME, user, e);
                     exit_code = 1;
                 }
             }

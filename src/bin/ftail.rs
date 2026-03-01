@@ -216,6 +216,13 @@ fn parse_args() -> Cli {
 }
 
 fn parse_lines_value(val: &str, config: &mut TailConfig) {
+    if check_numeric_overflow(val) {
+        eprintln!(
+            "tail: invalid number of lines: \u{2018}{}\u{2019}: Value too large for defined data type",
+            val
+        );
+        process::exit(1);
+    }
     if let Some(stripped) = val.strip_prefix('+') {
         match tail::parse_size(stripped) {
             Ok(n) => config.mode = TailMode::LinesFrom(n),
@@ -236,7 +243,24 @@ fn parse_lines_value(val: &str, config: &mut TailConfig) {
     }
 }
 
+fn check_numeric_overflow(val: &str) -> bool {
+    let clean = val
+        .strip_prefix('+')
+        .or_else(|| val.strip_prefix('-'))
+        .unwrap_or(val);
+    let num_end = clean.bytes().take_while(u8::is_ascii_digit).count();
+    let num_part = &clean[..num_end];
+    !num_part.is_empty() && num_part.parse::<u64>().is_err()
+}
+
 fn parse_bytes_value(val: &str, config: &mut TailConfig) {
+    if check_numeric_overflow(val) {
+        eprintln!(
+            "tail: invalid number of bytes: \u{2018}{}\u{2019}: Value too large for defined data type",
+            val
+        );
+        process::exit(1);
+    }
     if let Some(stripped) = val.strip_prefix('+') {
         match tail::parse_size(stripped) {
             Ok(n) => config.mode = TailMode::BytesFrom(n),
@@ -578,8 +602,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tail_c_huge_number_empty_input() {
-        // GNU compat: tail -c with number > u64::MAX on empty input should succeed
+    fn test_tail_c_huge_number_overflow() {
+        // GNU compat: tail -c with number > u64::MAX should fail with overflow error
         use std::process::Stdio;
         let mut child = cmd()
             .args(["-c", "99999999999999999999"])
@@ -591,24 +615,14 @@ mod tests {
         drop(child.stdin.take().unwrap());
         let output = child.wait_with_output().unwrap();
         assert!(
-            output.status.success(),
-            "tail -c huge on empty should succeed, stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
+            !output.status.success(),
+            "tail -c huge should fail with overflow error"
         );
-        assert_eq!(output.stdout, b"");
-    }
-
-    #[test]
-    fn test_tail_c_huge_number_small_file() {
-        // tail -c with huge number on small file should output entire file
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("test.txt");
-        std::fs::write(&file, "hello\n").unwrap();
-        let output = cmd()
-            .args(["-c", "99999999999999999999", file.to_str().unwrap()])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("Value too large"),
+            "Expected overflow error, got: {}",
+            stderr
+        );
     }
 }

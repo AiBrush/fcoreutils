@@ -561,7 +561,7 @@ fn main() {
 
     match ls_main(&file_args, &config) {
         Ok(true) => {}
-        Ok(false) => process::exit(2),
+        Ok(false) => process::exit(1),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::BrokenPipe {
                 // Exit with 141 (128 + SIGPIPE) to match GNU coreutils behavior

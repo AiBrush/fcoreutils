@@ -636,7 +636,7 @@ pub fn format_heading(config: &WhoConfig) -> String {
     let mut out = String::new();
     let _ = write!(out, "{:<8}", "NAME");
     if config.show_mesg {
-        let _ = write!(out, " S");
+        let _ = write!(out, " "); // mesg column space (no header label, GNU compat)
     }
     let _ = write!(out, " {:<12}", "LINE");
     let _ = write!(out, " {:<16}", "TIME");
@@ -644,7 +644,10 @@ pub fn format_heading(config: &WhoConfig) -> String {
         let _ = write!(out, " {:<6}", "IDLE");
         let _ = write!(out, " {:>10}", "PID");
     }
-    let _ = write!(out, " {}", "COMMENT");
+    let _ = write!(out, " {:<8}", "COMMENT");
+    if config.show_all || config.show_dead {
+        let _ = write!(out, " {}", "EXIT");
+    }
     out
 }
 

@@ -179,8 +179,16 @@ fn main() {
             use std::os::unix::io::FromRawFd;
             let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
             let mut had_error = false;
+            let mut pending_cr = false;
             for filename in &files {
-                match cat::cat_file(filename, &cli.config, &mut 1u64, &mut *raw_out, tool_name) {
+                match cat::cat_file(
+                    filename,
+                    &cli.config,
+                    &mut 1u64,
+                    &mut pending_cr,
+                    &mut *raw_out,
+                    tool_name,
+                ) {
                     Ok(true) => {}
                     Ok(false) => had_error = true,
                     Err(e) => {
@@ -202,8 +210,16 @@ fn main() {
             let stdout = io::stdout();
             let mut out = stdout.lock();
             let mut had_error = false;
+            let mut pending_cr = false;
             for filename in &files {
-                match cat::cat_file(filename, &cli.config, &mut 1u64, &mut out, tool_name) {
+                match cat::cat_file(
+                    filename,
+                    &cli.config,
+                    &mut 1u64,
+                    &mut pending_cr,
+                    &mut out,
+                    tool_name,
+                ) {
                     Ok(true) => {}
                     Ok(false) => had_error = true,
                     Err(e) => {
@@ -227,9 +243,17 @@ fn main() {
     let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
     let mut had_error = false;
     let mut line_num = 1u64;
+    let mut pending_cr = false;
 
     for filename in &files {
-        match cat::cat_file(filename, &cli.config, &mut line_num, &mut out, tool_name) {
+        match cat::cat_file(
+            filename,
+            &cli.config,
+            &mut line_num,
+            &mut pending_cr,
+            &mut out,
+            tool_name,
+        ) {
             Ok(true) => {}
             Ok(false) => had_error = true,
             Err(e) => {
@@ -241,6 +265,11 @@ fn main() {
                 had_error = true;
             }
         }
+    }
+
+    // Emit any pending CR that wasn't followed by LF
+    if pending_cr {
+        let _ = out.write_all(b"\r");
     }
 
     let _ = out.flush();

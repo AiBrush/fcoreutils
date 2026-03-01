@@ -278,20 +278,19 @@ fn base64_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         }
     }
 
-    // Incomplete final group: GNU basenc 9.5+ auto-pads unpadded input.
-    // n >= 2 produces partial bytes without error.
-    // n == 1 is genuinely invalid (6 bits isn't enough for any output byte).
-    if n == 1 {
+    // Incomplete final group without proper padding is invalid (GNU compat).
+    // Decode partial bytes where possible, but report error.
+    if n > 0 {
+        if n >= 2 {
+            result.push((vals[0] << 2) | (vals[1] >> 4));
+        }
+        if n >= 3 {
+            result.push((vals[1] << 4) | (vals[2] >> 2));
+        }
         return DecodeOutput {
             data: result,
             error: Some(format!("{}: invalid input", TOOL_NAME)),
         };
-    }
-    if n >= 2 {
-        result.push((vals[0] << 2) | (vals[1] >> 4));
-    }
-    if n >= 3 {
-        result.push((vals[1] << 4) | (vals[2] >> 2));
     }
 
     DecodeOutput {
@@ -407,19 +406,25 @@ fn base32_decode(input: &[u8], decode_table: &[u8; 256], ignore_garbage: bool) -
         }
     }
 
-    // Incomplete final group: GNU basenc 9.5+ auto-pads unpadded input.
-    // Decode partial bytes without error.
-    if n >= 2 {
-        result.push((vals[0] << 3) | (vals[1] >> 2));
-    }
-    if n >= 4 {
-        result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
-    }
-    if n >= 5 {
-        result.push((vals[3] << 4) | (vals[4] >> 1));
-    }
-    if n >= 7 {
-        result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
+    // Incomplete final group without proper padding is invalid (GNU compat).
+    // Decode partial bytes where possible, but report error.
+    if n > 0 {
+        if n >= 2 {
+            result.push((vals[0] << 3) | (vals[1] >> 2));
+        }
+        if n >= 4 {
+            result.push((vals[1] << 6) | (vals[2] << 1) | (vals[3] >> 4));
+        }
+        if n >= 5 {
+            result.push((vals[3] << 4) | (vals[4] >> 1));
+        }
+        if n >= 7 {
+            result.push((vals[4] << 7) | (vals[5] << 2) | (vals[6] >> 3));
+        }
+        return DecodeOutput {
+            data: result,
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
     }
 
     DecodeOutput {
@@ -1337,8 +1342,7 @@ fn main() {
         }
     } else if let Err(e) = encode_streaming(&data, encoding, cli.wrap, &mut out) {
         if e.kind() == io::ErrorKind::BrokenPipe {
-            eprintln!("{}: write error: Broken pipe", TOOL_NAME);
-            process::exit(1);
+            process::exit(0);
         }
         let msg = e.to_string();
         eprintln!("{}: {}", TOOL_NAME, msg);
@@ -1347,8 +1351,7 @@ fn main() {
 
     if let Err(e) = out.flush() {
         if e.kind() == io::ErrorKind::BrokenPipe {
-            eprintln!("{}: write error: Broken pipe", TOOL_NAME);
-            process::exit(1);
+            process::exit(0);
         }
         eprintln!("{}: write error: {}", TOOL_NAME, e);
         process::exit(1);
@@ -1912,15 +1915,15 @@ mod tests {
         assert!(r.error.is_none());
         assert_eq!(r.data, b"foobar");
 
-        // Unpadded: 2 chars - GNU basenc 9.5+ auto-pads unpadded input
+        // Unpadded: 2 chars - GNU rejects unpadded input as invalid
         let r = base64_decode(b"QQ", &BASE64_DECODE, false);
-        assert!(r.error.is_none());
-        assert_eq!(r.data, b"A");
+        assert!(r.error.is_some());
+        assert_eq!(r.data, b"A"); // partial data is still decoded
 
-        // 3 chars: GNU basenc 9.5+ auto-pads unpadded input
+        // 3 chars: GNU rejects unpadded input as invalid
         let r = base64_decode(b"QWI", &BASE64_DECODE, false);
-        assert!(r.error.is_none());
-        assert_eq!(r.data, b"Ab");
+        assert!(r.error.is_some());
+        assert_eq!(r.data, b"Ab"); // partial data is still decoded
 
         // 1 char: invalid (not enough data for any output byte), should error
         let r = base64_decode(b"Q", &BASE64_DECODE, false);

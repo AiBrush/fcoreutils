@@ -385,7 +385,23 @@ impl FileEntry {
         let path = de.path();
 
         let meta = if config.dereference {
-            fs::metadata(&path).or_else(|_| fs::symlink_metadata(&path))?
+            match fs::metadata(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    // Check if it's a broken symlink when dereferencing
+                    if let Ok(lmeta) = fs::symlink_metadata(&path) {
+                        if lmeta.file_type().is_symlink() {
+                            eprintln!(
+                                "ls: cannot access '{}': {}",
+                                name,
+                                crate::common::io_error_msg(&e)
+                            );
+                            return Ok(Self::broken_deref(name, path));
+                        }
+                    }
+                    return Err(e);
+                }
+            }
         } else {
             fs::symlink_metadata(&path)?
         };
@@ -522,6 +538,40 @@ impl FileEntry {
         }
     }
 
+    /// Create a placeholder entry for a broken symlink when -L (dereference) is used.
+    /// GNU ls shows `l????????? ? ? ? ? ? name` for such entries.
+    pub fn broken_deref(name: String, path: PathBuf) -> Self {
+        let sort_key = CString::new(name.as_str()).unwrap_or_default();
+        FileEntry {
+            name,
+            path,
+            sort_key,
+            ino: 0,
+            nlink: 0, // marker: normal entries have nlink >= 1
+            mode: libc::S_IFLNK as u32,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            blocks: 0,
+            mtime: 0,
+            mtime_nsec: 0,
+            atime: 0,
+            atime_nsec: 0,
+            ctime: 0,
+            ctime_nsec: 0,
+            rdev_major: 0,
+            rdev_minor: 0,
+            is_dir: false,
+            link_target: None,
+            link_target_ok: false,
+        }
+    }
+
+    /// Whether this is a broken dereference placeholder.
+    fn is_broken_deref(&self) -> bool {
+        self.nlink == 0 && (self.mode & libc::S_IFMT as u32) == libc::S_IFLNK as u32
+    }
+
     /// Display width of the name (accounting for quoting, indicator).
     fn display_width(&self, config: &LsConfig) -> usize {
         let quoted = quote_name(&self.name, config);
@@ -551,6 +601,47 @@ pub fn quote_name(name: &str, config: &LsConfig) -> String {
         QuotingStyle::ShellEscape => shell_quote(name, false, true),
         QuotingStyle::ShellEscapeAlways => shell_quote(name, true, true),
         QuotingStyle::Locale => locale_quote(name),
+    }
+}
+
+/// Get the classify indicator for a symlink's resolved target.
+/// Follows the symlink and checks the target's file type.
+fn get_link_target_indicator(symlink_path: &Path, style: IndicatorStyle) -> &'static str {
+    if style == IndicatorStyle::None || style == IndicatorStyle::Slash {
+        return "";
+    }
+    // Follow the symlink to get target metadata
+    let meta = match fs::metadata(symlink_path) {
+        Ok(m) => m,
+        Err(_) => return "", // broken symlink, no indicator
+    };
+    let mode = meta.mode();
+    let ft = mode & (libc::S_IFMT as u32);
+    match style {
+        IndicatorStyle::FileType => match ft {
+            x if x == libc::S_IFDIR as u32 => "/",
+            x if x == libc::S_IFLNK as u32 => "@",
+            x if x == libc::S_IFIFO as u32 => "|",
+            x if x == libc::S_IFSOCK as u32 => "=",
+            _ => "",
+        },
+        IndicatorStyle::Classify => match ft {
+            x if x == libc::S_IFDIR as u32 => "/",
+            x if x == libc::S_IFLNK as u32 => "@",
+            x if x == libc::S_IFIFO as u32 => "|",
+            x if x == libc::S_IFSOCK as u32 => "=",
+            _ => {
+                if ft == libc::S_IFREG as u32
+                    && mode & (libc::S_IXUSR as u32 | libc::S_IXGRP as u32 | libc::S_IXOTH as u32)
+                        != 0
+                {
+                    "*"
+                } else {
+                    ""
+                }
+            }
+        },
+        _ => "",
     }
 }
 
@@ -1341,6 +1432,13 @@ fn print_long(
     };
 
     for entry in entries {
+        // Broken dereference placeholder: show l????????? ? ? ? ? ? name
+        if entry.is_broken_deref() {
+            let quoted = quote_name(&entry.name, config);
+            writeln!(out, "l????????? ? ? ? ?            ? {}", quoted)?;
+            continue;
+        }
+
         // Inode
         if config.show_inode {
             write!(out, "{:>width$} ", entry.ino, width = max_inode)?;
@@ -1419,15 +1517,29 @@ fn print_long(
             write!(out, "{}", quoted)?;
         }
 
-        // Indicator
-        let ind = entry.indicator(config.indicator_style);
-        if !ind.is_empty() {
-            write!(out, "{}", ind)?;
+        // Indicator — in long format, GNU ls does NOT add '@' to symlink names.
+        // Instead, the indicator goes on the target (if the target exists).
+        let is_symlink = (entry.mode & libc::S_IFMT as u32) == libc::S_IFLNK as u32;
+        if !is_symlink {
+            let ind = entry.indicator(config.indicator_style);
+            if !ind.is_empty() {
+                write!(out, "{}", ind)?;
+            }
         }
 
-        // Symlink target
+        // Symlink target (with quoting and target indicator)
         if let Some(ref target) = entry.link_target {
-            write!(out, " -> {}", target)?;
+            let target_quoted = quote_name(target, config);
+            if entry.link_target_ok
+                && config.indicator_style != IndicatorStyle::None
+                && config.indicator_style != IndicatorStyle::Slash
+            {
+                // Get the target's indicator by checking the resolved path metadata
+                let target_ind = get_link_target_indicator(&entry.path, config.indicator_style);
+                write!(out, " -> {}{}", target_quoted, target_ind)?;
+            } else {
+                write!(out, " -> {}", target_quoted)?;
+            }
         }
 
         if config.zero {
@@ -1966,6 +2078,9 @@ pub fn ls_dir(
     let mut entries = read_entries(path, config)?;
     sort_entries(&mut entries, config);
 
+    // Track if any entries have errors (e.g., broken symlink with -L)
+    let has_broken_deref = entries.iter().any(|e| e.is_broken_deref());
+
     // Print total in long / show_size modes
     if config.long_format || config.show_size {
         print_total(out, &entries, config)?;
@@ -1999,7 +2114,7 @@ pub fn ls_dir(
         }
     }
 
-    Ok(true)
+    Ok(!has_broken_deref)
 }
 
 /// Top-level entry: list the given paths.
@@ -2042,7 +2157,26 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
     for p in paths {
         let path = PathBuf::from(p);
         let meta_result = if config.dereference {
-            fs::metadata(&path).or_else(|_| fs::symlink_metadata(&path))
+            match fs::metadata(&path) {
+                Ok(m) => Ok(m),
+                Err(e) => {
+                    // When -L and metadata fails, check if it's a broken symlink
+                    if let Ok(lmeta) = fs::symlink_metadata(&path) {
+                        if lmeta.file_type().is_symlink() {
+                            // Broken symlink with -L: show error + placeholder entry
+                            eprintln!(
+                                "ls: cannot access '{}': {}",
+                                p,
+                                crate::common::io_error_msg(&e)
+                            );
+                            had_error = true;
+                            file_args.push(FileEntry::broken_deref(p.to_string(), path));
+                            continue;
+                        }
+                    }
+                    Err(e)
+                }
+            }
         } else {
             fs::symlink_metadata(&path)
         };
@@ -2105,7 +2239,10 @@ pub fn ls_main(paths: &[String], config: &LsConfig) -> io::Result<bool> {
             writeln!(out)?;
         }
         match ls_dir(&mut out, dir, config, color_db.as_ref(), show_header) {
-            Ok(_) => {}
+            Ok(true) => {}
+            Ok(false) => {
+                had_error = true;
+            }
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Err(e),
             Err(e) => {
                 eprintln!(
