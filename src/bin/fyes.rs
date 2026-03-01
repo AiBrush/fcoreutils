@@ -11,33 +11,28 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Buffer size for bulk writes (1MB matches F_SETPIPE_SZ for minimal syscalls).
 const BUF_SIZE: usize = 1024 * 1024;
 
-/// Handle write error: print message to stderr and exit with code 1.
-/// GNU yes prints "yes: standard output: Broken pipe" on EPIPE and exits 1.
+/// Handle write error: print diagnostic to stderr and exit with code 1.
+/// GNU yes 9.4 prints "yes: standard output: Broken pipe" on EPIPE.
 fn write_error_exit(err: std::io::Error) -> ! {
     let msg = coreutils_rs::common::io_error_msg(&err);
-    eprintln!("{}: standard output: {}", TOOL_NAME, msg);
+    let errmsg = format!("{}: standard output: {}\n", TOOL_NAME, msg);
+    unsafe {
+        libc::write(2, errmsg.as_ptr() as *const libc::c_void, errmsg.len() as _);
+    }
     process::exit(1);
 }
 
 fn main() {
     // Keep Rust's default SIGPIPE=SIG_IGN so write() returns EPIPE instead
-    // of killing us. This lets us always print "yes: standard output: Broken pipe"
-    // matching GNU yes behavior (which prints this via error() on write failure).
-    //
-    // Behavioral divergence note:
-    // - In test frameworks (Python -> bash -> yes), SIG_IGN is inherited by
-    //   child processes, so both GNU yes and our implementation print the
-    //   "standard output: Broken pipe" error and exit 1.
-    // - In a direct terminal `yes | head -5`, GNU yes uses SIG_DFL and gets
-    //   killed silently by SIGPIPE, while ours will print
-    //   "yes: standard output: Broken pipe" on stderr because SIG_IGN is set.
-    // - We match GNU in the CI test environment (Python -> bash -> yes), which
-    //   is the primary compatibility target.
+    // of killing us. On BrokenPipe, print diagnostic and exit with code 1
+    // (matching GNU yes 9.4 behavior).
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
 
     // GNU yes: scan args BEFORE "--" for --help / --version (GNU permutation behavior)
     // Once "--" is seen, --help/--version are literal strings, not options.
+    // Unknown long options (--anything) and short options (-x) are rejected.
+    // Bare "-" is treated as a literal string.
     for arg in &raw_args {
         if arg == "--" {
             break; // stop scanning for options
@@ -55,6 +50,29 @@ fn main() {
             "--version" => {
                 println!("{} (fcoreutils) {}", TOOL_NAME, VERSION);
                 process::exit(0);
+            }
+            s if s.starts_with("--") => {
+                // Unknown long option
+                let errmsg = format!(
+                    "{}: unrecognized option '{}'\nTry '{} --help' for more information.\n",
+                    TOOL_NAME, s, TOOL_NAME
+                );
+                unsafe {
+                    libc::write(2, errmsg.as_ptr() as *const libc::c_void, errmsg.len() as _);
+                }
+                process::exit(1);
+            }
+            s if s.starts_with('-') && s.len() > 1 => {
+                // Short option (not bare "-")
+                let first_char = s.chars().nth(1).unwrap();
+                let errmsg = format!(
+                    "{}: invalid option -- '{}'\nTry '{} --help' for more information.\n",
+                    TOOL_NAME, first_char, TOOL_NAME
+                );
+                unsafe {
+                    libc::write(2, errmsg.as_ptr() as *const libc::c_void, errmsg.len() as _);
+                }
+                process::exit(1);
             }
             _ => {}
         }
@@ -345,11 +363,11 @@ mod tests {
         let text = String::from_utf8_lossy(&head.stdout);
         assert_eq!(text.trim(), "y");
 
-        // yes handles EPIPE: prints error to stderr and exits 1
+        // yes handles EPIPE: exits 1 silently (no stderr output, matching GNU)
         assert_eq!(status.code(), Some(1), "yes should exit 1 on pipe close");
         assert!(
-            stderr_output.contains("standard output"),
-            "stderr should contain broken pipe message, got: {}",
+            stderr_output.is_empty(),
+            "stderr should be empty on broken pipe (GNU compat), got: {}",
             stderr_output
         );
     }
@@ -376,11 +394,11 @@ mod tests {
 
         let status = child.wait().unwrap();
 
-        // SIGPIPE is ignored, so EPIPE is always caught → error printed, exit 1
+        // SIGPIPE is ignored, so EPIPE is always caught → exit 1 silently (GNU compat)
         assert_eq!(status.code(), Some(1), "yes should exit 1 on broken pipe");
         assert!(
-            stderr_output.contains("standard output"),
-            "stderr should contain broken pipe message, got: {}",
+            stderr_output.is_empty(),
+            "stderr should be empty on broken pipe (GNU compat), got: {}",
             stderr_output
         );
     }
@@ -510,8 +528,116 @@ mod tests {
         let status = child.wait().unwrap();
 
         assert_eq!(head.status.code(), Some(0));
-        // EPIPE always caught: error printed, exit 1
+        // EPIPE caught: exit 1 silently (GNU compat — no stderr output)
         assert_eq!(status.code(), Some(1));
-        assert!(stderr_output.contains("standard output"));
+        assert!(
+            stderr_output.is_empty(),
+            "stderr should be empty on broken pipe (GNU compat), got: {}",
+            stderr_output
+        );
+    }
+
+    #[test]
+    fn test_yes_unknown_long_option() {
+        let output = cmd()
+            .arg("--badopt")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("yes: unrecognized option '--badopt'"),
+            "stderr should contain unrecognized option message, got: {}",
+            stderr
+        );
+        assert!(
+            stderr.contains("Try 'yes --help' for more information."),
+            "stderr should contain help hint, got: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_yes_unknown_short_option() {
+        let output = cmd()
+            .arg("-z")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("yes: invalid option -- 'z'"),
+            "stderr should contain invalid option message, got: {}",
+            stderr
+        );
+        assert!(
+            stderr.contains("Try 'yes --help' for more information."),
+            "stderr should contain help hint, got: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_yes_bare_dash_is_literal() {
+        // Bare "-" should be treated as literal string, not an option
+        let mut child = cmd().arg("-").stdout(Stdio::piped()).spawn().unwrap();
+
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        while buf.len() < 10 {
+            let n = stdout.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        drop(stdout);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let text = String::from_utf8_lossy(&buf);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() >= 2);
+        for line in &lines[..2] {
+            assert_eq!(*line, "-");
+        }
+    }
+
+    #[test]
+    fn test_yes_option_after_dashdash_is_literal() {
+        // yes -- --badopt should output "--badopt" as a literal string
+        let mut child = cmd()
+            .args(["--", "--badopt"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        while buf.len() < 20 {
+            let n = stdout.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        drop(stdout);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let text = String::from_utf8_lossy(&buf);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() >= 2);
+        for line in &lines[..2] {
+            assert_eq!(*line, "--badopt");
+        }
     }
 }

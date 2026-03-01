@@ -385,6 +385,8 @@ pub struct FileEntry {
     pub link_target_ok: bool,
     /// Whether the symlink target is a directory (for --classify indicator on target).
     pub link_target_is_dir: bool,
+    /// The mode of the symlink target (for full --classify indicator on target).
+    pub link_target_mode: Option<u32>,
 }
 
 impl FileEntry {
@@ -444,20 +446,29 @@ impl FileEntry {
         let file_type = meta.file_type();
         let is_symlink = file_type.is_symlink();
 
-        let (link_target, link_target_ok, link_target_is_dir) = if is_symlink {
+        let (link_target, link_target_ok, link_target_is_dir, link_target_mode) = if is_symlink {
             match fs::read_link(&path) {
                 Ok(target) => match fs::metadata(&path) {
-                    Ok(target_meta) => (
+                    Ok(target_meta) => {
+                        let tmode = target_meta.mode();
+                        (
+                            Some(target.to_string_lossy().into_owned()),
+                            true,
+                            target_meta.is_dir(),
+                            Some(tmode),
+                        )
+                    }
+                    Err(_) => (
                         Some(target.to_string_lossy().into_owned()),
-                        true,
-                        target_meta.is_dir(),
+                        false,
+                        false,
+                        None,
                     ),
-                    Err(_) => (Some(target.to_string_lossy().into_owned()), false, false),
                 },
-                Err(_) => (None, false, false),
+                Err(_) => (None, false, false, None),
             }
         } else {
-            (None, true, false)
+            (None, true, false, None)
         };
 
         let rdev = meta.rdev();
@@ -486,6 +497,7 @@ impl FileEntry {
             link_target,
             link_target_ok,
             link_target_is_dir,
+            link_target_mode,
         })
     }
 
@@ -585,6 +597,7 @@ impl FileEntry {
             link_target: None,
             link_target_ok: false,
             link_target_is_dir: false,
+            link_target_mode: None,
         }
     }
 
@@ -1606,23 +1619,53 @@ fn print_long(
             write!(out, "{}", quoted)?;
         }
 
-        // Indicator
-        let ind = entry.indicator(config.indicator_style);
-        if !ind.is_empty() {
-            write!(out, "{}", ind)?;
+        // Indicator — GNU ls does not append '@' to symlinks in long format;
+        // the 'l' in the permission string already indicates a symlink.
+        // Instead, the classify indicator goes on the TARGET filename.
+        let is_symlink = (entry.mode & libc::S_IFMT as u32) == libc::S_IFLNK as u32;
+        if !is_symlink {
+            let ind = entry.indicator(config.indicator_style);
+            if !ind.is_empty() {
+                write!(out, "{}", ind)?;
+            }
         }
 
         // Symlink target
         if let Some(ref target) = entry.link_target {
             let quoted_target = quote_name(target, config);
             write!(out, " -> {}", quoted_target)?;
-            // Append classify indicator for the target (e.g. '/' if target is a dir)
+            // Append classify indicator for the target based on target's mode
             if config.indicator_style == IndicatorStyle::Classify
                 || config.indicator_style == IndicatorStyle::FileType
                 || config.indicator_style == IndicatorStyle::Slash
             {
-                if entry.link_target_is_dir {
-                    write!(out, "/")?;
+                if let Some(tmode) = entry.link_target_mode {
+                    let tft = tmode & libc::S_IFMT as u32;
+                    let target_ind = if tft == libc::S_IFDIR as u32 {
+                        "/"
+                    } else if config.indicator_style == IndicatorStyle::Classify
+                        && tft == libc::S_IFREG as u32
+                        && tmode
+                            & (libc::S_IXUSR as u32 | libc::S_IXGRP as u32 | libc::S_IXOTH as u32)
+                            != 0
+                    {
+                        "*"
+                    } else if (config.indicator_style == IndicatorStyle::Classify
+                        || config.indicator_style == IndicatorStyle::FileType)
+                        && tft == libc::S_IFIFO as u32
+                    {
+                        "|"
+                    } else if (config.indicator_style == IndicatorStyle::Classify
+                        || config.indicator_style == IndicatorStyle::FileType)
+                        && tft == libc::S_IFSOCK as u32
+                    {
+                        "="
+                    } else {
+                        ""
+                    };
+                    if !target_ind.is_empty() {
+                        write!(out, "{}", target_ind)?;
+                    }
                 }
             }
         }
