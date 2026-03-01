@@ -1909,14 +1909,14 @@ mod tests {
         assert!(r.error.is_none());
         assert_eq!(r.data, b"foobar");
 
-        // Unpadded: 2 chars - GNU basenc 9.5+ auto-pads unpadded input
+        // Unpadded: 2 chars - GNU basenc 9.4 outputs partial data but reports error
         let r = base64_decode(b"QQ", &BASE64_DECODE, false);
-        assert!(r.error.is_none());
+        assert!(r.error.is_some());
         assert_eq!(r.data, b"A");
 
-        // 3 chars: GNU basenc 9.5+ auto-pads unpadded input
+        // 3 chars: GNU basenc 9.4 outputs partial data but reports error
         let r = base64_decode(b"QWI", &BASE64_DECODE, false);
-        assert!(r.error.is_none());
+        assert!(r.error.is_some());
         assert_eq!(r.data, b"Ab");
 
         // 1 char: invalid (not enough data for any output byte), should error
