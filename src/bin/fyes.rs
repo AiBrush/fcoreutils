@@ -16,9 +16,15 @@ const BUF_SIZE: usize = 8192;
 fn main() {
     // Restore SIGPIPE to default (SIG_DFL) so that writing to a closed pipe
     // kills us with SIGPIPE, exactly like GNU yes. Rust sets SIG_IGN by default.
+    // Also unblock SIGPIPE from the process signal mask — parent processes
+    // (e.g. CI runners like Node.js) may have blocked it via sigprocmask.
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGPIPE);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
     }
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
