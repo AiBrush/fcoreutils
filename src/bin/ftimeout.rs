@@ -355,11 +355,6 @@ fn main() {
             break;
         }
         if ret < 0 {
-            #[cfg(target_os = "linux")]
-            let errno = unsafe { *libc::__errno_location() };
-            #[cfg(target_os = "macos")]
-            let errno = unsafe { *libc::__error() };
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             if errno == libc::EINTR {
                 // Interrupted — check if child already exited
