@@ -51,6 +51,17 @@ pub enum ReflinkMode {
     Never,
 }
 
+/// Sparse file copy strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SparseMode {
+    /// Detect sparse files and create sparse output.
+    Auto,
+    /// Always try to create sparse output.
+    Always,
+    /// Never create sparse output.
+    Never,
+}
+
 /// Configuration for a cp invocation.
 pub struct CpConfig {
     pub recursive: bool,
@@ -71,6 +82,10 @@ pub struct CpConfig {
     pub reflink: ReflinkMode,
     pub target_directory: Option<String>,
     pub no_target_directory: bool,
+    pub strip_trailing_slashes: bool,
+    pub attributes_only: bool,
+    pub parents: bool,
+    pub sparse: SparseMode,
 }
 
 impl Default for CpConfig {
@@ -94,6 +109,38 @@ impl Default for CpConfig {
             reflink: ReflinkMode::Auto,
             target_directory: None,
             no_target_directory: false,
+            strip_trailing_slashes: false,
+            attributes_only: false,
+            parents: false,
+            sparse: SparseMode::Auto,
+        }
+    }
+}
+
+/// Parse a `--sparse=WHEN` value.
+pub fn parse_sparse_mode(s: &str) -> Result<SparseMode, String> {
+    match s {
+        "auto" => Ok(SparseMode::Auto),
+        "always" => Ok(SparseMode::Always),
+        "never" => Ok(SparseMode::Never),
+        _ => Err(format!("invalid argument '{}' for '--sparse'", s)),
+    }
+}
+
+/// Parse a `--no-preserve=LIST` attribute list. Unsets the corresponding flags.
+pub fn apply_no_preserve(list: &str, config: &mut CpConfig) {
+    for attr in list.split(',') {
+        match attr.trim() {
+            "mode" => config.preserve_mode = false,
+            "ownership" => config.preserve_ownership = false,
+            "timestamps" => config.preserve_timestamps = false,
+            "links" | "context" | "xattr" => { /* acknowledged */ }
+            "all" => {
+                config.preserve_mode = false;
+                config.preserve_ownership = false;
+                config.preserve_timestamps = false;
+            }
+            _ => {}
         }
     }
 }
@@ -320,16 +367,14 @@ fn copy_data_large_buf(src: &Path, dst: &Path, src_len: u64, src_mode: u32) -> i
 // that the old code paid when FICLONE failed on non-reflink filesystems.
 
 #[cfg(target_os = "linux")]
-fn copy_data_linux(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> {
+fn copy_data_linux(src: &Path, dst: &Path, config: &CpConfig, create_mode: u32) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
     let src_file = std::fs::File::open(src)?;
     let src_fd = src_file.as_raw_fd();
 
-    // Use fstat on the opened fd (not src_meta) to get the real file size and mode.
-    // src_meta may come from symlink_metadata, giving the symlink path length
-    // instead of the target file size when dereference != Always.
+    // Use fstat on the opened fd (not src_meta) to get the real file size.
     let fd_meta = src_file.metadata()?;
     let len = fd_meta.len();
 
@@ -337,7 +382,7 @@ fn copy_data_linux(src: &Path, dst: &Path, config: &CpConfig) -> io::Result<()> 
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(fd_meta.mode())
+        .mode(create_mode)
         .open(dst)?;
     let dst_fd = dst_file.as_raw_fd();
 
@@ -519,6 +564,16 @@ fn copy_file_with_meta(
         return Ok(());
     }
 
+    // Attributes-only: copy only metadata, not file data.
+    if config.attributes_only {
+        if !dst.exists() {
+            // Create empty file so we can set attributes
+            std::fs::File::create(dst)?;
+        }
+        preserve_attributes_from_meta(src_meta, dst, config)?;
+        return Ok(());
+    }
+
     // Hard link mode.
     if config.link {
         std::fs::hard_link(src, dst)?;
@@ -541,10 +596,18 @@ fn copy_file_with_meta(
         return Ok(());
     }
 
+    // Determine create mode: use source mode when preserving, else default 0666 (umask applies).
+    #[cfg(unix)]
+    let create_mode: u32 = if config.preserve_mode {
+        src_meta.mode()
+    } else {
+        0o666
+    };
+
     // Linux: single-open cascade (FICLONE → copy_file_range → read/write).
     #[cfg(target_os = "linux")]
     {
-        copy_data_linux(src, dst, config)?;
+        copy_data_linux(src, dst, config, create_mode)?;
         preserve_attributes_from_meta(src_meta, dst, config)?;
         return Ok(());
     }
@@ -552,11 +615,9 @@ fn copy_file_with_meta(
     // Non-Linux fallback: large-buffer copy (up to 4MB vs stdlib's 64KB).
     #[cfg(not(target_os = "linux"))]
     {
-        #[cfg(unix)]
-        let mode = src_meta.mode();
         #[cfg(not(unix))]
-        let mode = 0o666u32;
-        copy_data_large_buf(src, dst, src_meta.len(), mode)?;
+        let create_mode = 0o666u32;
+        copy_data_large_buf(src, dst, src_meta.len(), create_mode)?;
         preserve_attributes_from_meta(src_meta, dst, config)?;
         Ok(())
     }
@@ -702,18 +763,49 @@ pub fn run_cp(
     let copy_into_dir = copy_into_dir && !config.no_target_directory;
 
     for source in sources {
-        let src = Path::new(source);
-        let dst = if copy_into_dir {
+        let src_str = if config.strip_trailing_slashes {
+            source.trim_end_matches('/')
+        } else {
+            source.as_str()
+        };
+        let src = Path::new(src_str);
+
+        let dst = if config.parents {
+            // --parents: preserve source path structure under destination
+            // Strip leading '/' so Path::join doesn't replace the base (GNU compat)
+            let rel = src_str.trim_start_matches('/');
+            dest_dir.join(rel)
+        } else if copy_into_dir {
             let name = src.file_name().unwrap_or(src.as_ref());
             dest_dir.join(name)
         } else {
             dest_dir.clone()
         };
 
+        if config.parents {
+            // Create parent directories under destination
+            if let Some(parent) = dst.parent() {
+                if !parent.exists() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        let inner = strip_os_error(&e);
+                        errors.push(format!(
+                            "cp: cannot create directory '{}': {}",
+                            parent.display(),
+                            inner
+                        ));
+                        had_error = true;
+                        continue;
+                    }
+                }
+            }
+        }
+
         if let Err(e) = do_copy(src, &dst, config) {
             let inner = strip_os_error(&e);
             let msg = if inner.contains("are the same file") {
                 // GNU cp: "cp: 'X' and 'Y' are the same file" (no "cannot copy" prefix)
+                format!("cp: {}", inner)
+            } else if inner.contains("omitting directory") {
                 format!("cp: {}", inner)
             } else {
                 format!(
@@ -726,8 +818,8 @@ pub fn run_cp(
             errors.push(msg);
             had_error = true;
         } else if config.verbose {
-            // Verbose output goes to stderr to match GNU behavior when piped.
-            eprintln!("'{}' -> '{}'", src.display(), dst.display());
+            // GNU cp -v outputs to stdout
+            println!("'{}' -> '{}'", src.display(), dst.display());
         }
     }
 

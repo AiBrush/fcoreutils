@@ -362,6 +362,7 @@ pub fn cat_with_options(
     data: &[u8],
     config: &CatConfig,
     line_num: &mut u64,
+    pending_cr: &mut bool,
     out: &mut impl Write,
 ) -> io::Result<()> {
     if data.is_empty() {
@@ -382,6 +383,23 @@ pub fn cat_with_options(
     let mut prev_blank = false;
     let mut pos = 0;
     let mut itoa_buf = itoa::Buffer::new();
+
+    // Handle pending CR from previous file (only relevant for show_ends without show_nonprinting)
+    if *pending_cr {
+        *pending_cr = false;
+        if config.show_ends
+            && !(config.show_nonprinting || config.show_tabs)
+            && !data.is_empty()
+            && data[0] == b'\n'
+        {
+            // CR from previous file + this LF = CRLF line ending → ^M$\n
+            buf.extend_from_slice(b"^M$\n");
+            pos = 1;
+        } else {
+            // CR not followed by LF, emit literally
+            buf.push(b'\r');
+        }
+    }
 
     while pos < data.len() {
         // Find end of this line
@@ -459,6 +477,12 @@ pub fn cat_with_options(
                     // Content ends with \r (which is right before \n) → show as ^M$
                     buf.extend_from_slice(&content[..content.len() - 1]);
                     buf.extend_from_slice(b"^M");
+                } else if !has_newline && !content.is_empty() && content[content.len() - 1] == b'\r'
+                {
+                    // Trailing CR at end of data without following LF — hold as pending.
+                    // It might pair with next file's LF to form CRLF line ending.
+                    buf.extend_from_slice(&content[..content.len() - 1]);
+                    *pending_cr = true;
                 } else {
                     buf.extend_from_slice(content);
                 }
@@ -492,6 +516,7 @@ pub fn cat_file(
     filename: &str,
     config: &CatConfig,
     line_num: &mut u64,
+    pending_cr: &mut bool,
     out: &mut impl Write,
     tool_name: &str,
 ) -> io::Result<bool> {
@@ -514,7 +539,7 @@ pub fn cat_file(
         }
         match read_stdin() {
             Ok(data) => {
-                cat_with_options(&data, config, line_num, out)?;
+                cat_with_options(&data, config, line_num, pending_cr, out)?;
                 Ok(true)
             }
             Err(e) => {
@@ -575,7 +600,7 @@ pub fn cat_file(
 
         match read_file(path) {
             Ok(data) => {
-                cat_with_options(&data, config, line_num, out)?;
+                cat_with_options(&data, config, line_num, pending_cr, out)?;
                 Ok(true)
             }
             Err(e) => {

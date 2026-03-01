@@ -106,6 +106,13 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // GNU who allows 0, 1, or 2 operands but rejects 3+
+    if cli.args.len() > 2 {
+        eprintln!("who: extra operand '{}'", cli.args[2]);
+        eprintln!("Try 'who --help' for more information.");
+        process::exit(1);
+    }
+
     let mut config = who::WhoConfig::default();
 
     // Check for "who am i" / "who am I" pattern (exactly 2 extra args)

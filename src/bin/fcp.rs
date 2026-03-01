@@ -11,7 +11,8 @@ use std::process;
 use coreutils_rs::common::reset_sigpipe;
 #[cfg(unix)]
 use coreutils_rs::cp::{
-    CpConfig, DerefMode, apply_preserve, parse_backup_mode, parse_reflink_mode,
+    CpConfig, DerefMode, apply_no_preserve, apply_preserve, parse_backup_mode, parse_reflink_mode,
+    parse_sparse_mode,
 };
 
 #[cfg(unix)]
@@ -43,8 +44,12 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
   -p                         same as --preserve=mode,ownership,timestamps
       --preserve[=ATTR_LIST] preserve the specified attributes (default:
                                mode,ownership,timestamps)
+      --no-preserve=ATTR_LIST do not preserve the specified attributes
+      --parents              use full source file name under DIRECTORY
   -R, -r, --recursive        copy directories recursively
       --reflink[=WHEN]       control clone/CoW copies (auto, always, never)
+      --sparse=WHEN          control creation of sparse files (auto, always, never)
+      --strip-trailing-slashes remove any trailing slashes from each SOURCE
   -s, --symbolic-link        make symbolic links instead of copying
   -S, --suffix=SUFFIX        override the usual backup suffix
   -t, --target-directory=DIR copy all SOURCE arguments into DIRECTORY
@@ -52,6 +57,7 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
   -u, --update               copy only when the SOURCE file is newer
   -v, --verbose              explain what is being done
   -x, --one-file-system      stay on this file system
+      --attributes-only      don't copy the file data, just the attributes
       --help                 display this help and exit
       --version              output version information and exit
 "
@@ -98,8 +104,16 @@ fn main() {
                         }
                     },
                     "--preserve" => apply_preserve(val, &mut config),
+                    "--no-preserve" => apply_no_preserve(val, &mut config),
                     "--reflink" => match parse_reflink_mode(val) {
                         Ok(m) => config.reflink = m,
+                        Err(e) => {
+                            eprintln!("cp: {}", e);
+                            process::exit(1);
+                        }
+                    },
+                    "--sparse" => match parse_sparse_mode(val) {
+                        Ok(m) => config.sparse = m,
                         Err(e) => {
                             eprintln!("cp: {}", e);
                             process::exit(1);
@@ -147,11 +161,15 @@ fn main() {
                 }
                 "--recursive" => config.recursive = true,
                 "--reflink" => config.reflink = coreutils_rs::cp::ReflinkMode::Auto,
+                "--sparse" => config.sparse = coreutils_rs::cp::SparseMode::Auto,
                 "--symbolic-link" => config.symbolic_link = true,
                 "--no-target-directory" => config.no_target_directory = true,
                 "--update" => config.update = true,
                 "--verbose" => config.verbose = true,
                 "--one-file-system" => config.one_file_system = true,
+                "--strip-trailing-slashes" => config.strip_trailing_slashes = true,
+                "--attributes-only" => config.attributes_only = true,
+                "--parents" => config.parents = true,
                 _ => {
                     eprintln!("cp: unrecognized option '{}'", arg);
                     eprintln!("Try 'cp --help' for more information.");

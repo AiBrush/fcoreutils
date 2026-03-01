@@ -210,6 +210,77 @@ fn find_match(lines: &[String], regex: &Regex, start: usize) -> Option<usize> {
     None
 }
 
+/// Apply a single regex or skip-to pattern. Returns Ok(true) if matched,
+/// Ok(false) if no match (only used for repeat-forever graceful stop).
+/// For non-repeat patterns, no match is always an error.
+fn apply_regex_pattern(
+    lines: &[String],
+    total_lines: usize,
+    regex: &str,
+    offset: i64,
+    is_skip: bool,
+    current_line: &mut usize,
+    skip_current: &mut bool,
+    sizes: &mut Vec<u64>,
+    created_files: &mut Vec<String>,
+    file_index: &mut usize,
+    config: &CsplitConfig,
+    graceful_no_match: bool,
+) -> Result<bool, String> {
+    let re = Regex::new(regex).map_err(|e| format!("invalid regex: {}", e))?;
+
+    // When skip_current is set, the line at current_line was the match boundary
+    // from a previous regex split — skip it to find the NEXT occurrence.
+    let search_start =
+        if *skip_current && *current_line < total_lines && re.is_match(&lines[*current_line]) {
+            *current_line + 1
+        } else {
+            *current_line
+        };
+
+    let match_idx = match find_match(lines, &re, search_start) {
+        Some(idx) => idx,
+        None => {
+            if graceful_no_match {
+                return Ok(false);
+            }
+            return Err(format!("{}: no match", regex));
+        }
+    };
+
+    let target = match_idx as i64 + offset;
+    let split_at = if target < *current_line as i64 {
+        *current_line
+    } else if target as usize > total_lines {
+        total_lines
+    } else {
+        target as usize
+    };
+
+    if is_skip {
+        // SkipTo: discard lines from current_line to split_at
+        *current_line = split_at;
+        *skip_current = false;
+    } else {
+        // Regex: write chunk from current_line to split_at
+        let chunk_lines = &lines[*current_line..split_at];
+        let filename = output_filename(config, *file_index);
+        let bytes = write_chunk(chunk_lines, &filename, config)?;
+
+        if !(config.elide_empty && chunk_lines.is_empty()) {
+            created_files.push(filename);
+            sizes.push(bytes);
+            *file_index += 1;
+        }
+
+        *current_line = split_at;
+        // After a regex match with offset 0, current_line is AT the match line
+        *skip_current = offset == 0;
+    }
+
+    Ok(true)
+}
+
 /// Split a file based on patterns.
 ///
 /// Returns the sizes (in bytes) of each created output file.
@@ -221,13 +292,11 @@ pub fn csplit_file(
     let lines: Vec<String> = input.lines().map(|l| l.to_string()).collect();
     let total_lines = lines.len();
 
-    // Expand patterns: resolve Repeat and RepeatForever
-    let expanded = expand_patterns(patterns)?;
-
     let mut sizes: Vec<u64> = Vec::new();
     let mut created_files: Vec<String> = Vec::new();
     let mut file_index: usize = 0;
     let mut current_line: usize = 0; // 0-based index into lines
+    let mut skip_current = false; // true when current_line is a regex match boundary
 
     let do_cleanup = |files: &[String], config: &CsplitConfig| {
         if !config.keep_files {
@@ -237,12 +306,12 @@ pub fn csplit_file(
         }
     };
 
-    for pat in &expanded {
-        match pat {
+    let mut pat_idx = 0;
+    while pat_idx < patterns.len() {
+        match &patterns[pat_idx] {
             Pattern::LineNumber(n) => {
                 // Split at line number n (1-based).
-                // Everything from current_line to line n-1 goes in this chunk.
-                let split_at = *n; // 1-based line number
+                let split_at = *n;
                 if split_at <= current_line {
                     let msg = format!("{}: line number out of range", split_at);
                     do_cleanup(&created_files, config);
@@ -252,7 +321,7 @@ pub fn csplit_file(
                 let end = if split_at > total_lines {
                     total_lines
                 } else {
-                    split_at - 1 // Convert to 0-based exclusive end
+                    split_at - 1
                 };
 
                 let chunk_lines = &lines[current_line..end];
@@ -269,86 +338,206 @@ pub fn csplit_file(
                 }
 
                 current_line = end;
+                skip_current = false;
+                pat_idx += 1;
             }
             Pattern::Regex { regex, offset } => {
-                // Find first line matching regex starting from current_line
-                let re = Regex::new(regex).map_err(|e| {
+                let regex = regex.clone();
+                let offset = *offset;
+                if let Err(e) = apply_regex_pattern(
+                    &lines,
+                    total_lines,
+                    &regex,
+                    offset,
+                    false,
+                    &mut current_line,
+                    &mut skip_current,
+                    &mut sizes,
+                    &mut created_files,
+                    &mut file_index,
+                    config,
+                    false,
+                ) {
                     do_cleanup(&created_files, config);
-                    format!("invalid regex: {}", e)
-                })?;
-
-                // Start searching from current_line, but if the line at
-                // current_line itself matches (which happens after a previous
-                // regex split placed us here), skip it so we find the NEXT
-                // occurrence rather than re-matching the boundary line.
-                let search_start = if current_line > 0
-                    && current_line < total_lines
-                    && re.is_match(&lines[current_line])
-                {
-                    current_line + 1
-                } else {
-                    current_line
-                };
-
-                if let Some(match_idx) = find_match(&lines, &re, search_start) {
-                    // Apply offset
-                    let target = match_idx as i64 + *offset;
-                    let split_at = if target < current_line as i64 {
-                        current_line
-                    } else if target as usize > total_lines {
-                        total_lines
-                    } else {
-                        target as usize
-                    };
-
-                    let chunk_lines = &lines[current_line..split_at];
-                    let filename = output_filename(config, file_index);
-
-                    let bytes = write_chunk(chunk_lines, &filename, config).inspect_err(|_| {
-                        do_cleanup(&created_files, config);
-                    })?;
-
-                    if !(config.elide_empty && chunk_lines.is_empty()) {
-                        created_files.push(filename);
-                        sizes.push(bytes);
-                        file_index += 1;
-                    }
-
-                    current_line = split_at;
-                } else {
-                    let msg = format!("{}: no match", regex);
-                    do_cleanup(&created_files, config);
-                    return Err(msg);
+                    return Err(e);
                 }
+                pat_idx += 1;
             }
             Pattern::SkipTo { regex, offset } => {
-                // Skip to matching line, discarding lines
-                let re = Regex::new(regex).map_err(|e| {
+                let regex = regex.clone();
+                let offset = *offset;
+                if let Err(e) = apply_regex_pattern(
+                    &lines,
+                    total_lines,
+                    &regex,
+                    offset,
+                    true,
+                    &mut current_line,
+                    &mut skip_current,
+                    &mut sizes,
+                    &mut created_files,
+                    &mut file_index,
+                    config,
+                    false,
+                ) {
                     do_cleanup(&created_files, config);
-                    format!("invalid regex: {}", e)
-                })?;
-
-                if let Some(match_idx) = find_match(&lines, &re, current_line) {
-                    let target = match_idx as i64 + *offset;
-                    let skip_to = if target < current_line as i64 {
-                        current_line
-                    } else if target as usize > total_lines {
-                        total_lines
-                    } else {
-                        target as usize
-                    };
-
-                    // Lines from current_line to skip_to are discarded
-                    current_line = skip_to;
-                } else {
-                    let msg = format!("{}: no match", regex);
-                    do_cleanup(&created_files, config);
-                    return Err(msg);
+                    return Err(e);
                 }
+                pat_idx += 1;
             }
-            Pattern::Repeat(_) | Pattern::RepeatForever => {
-                // These should have been expanded already
-                unreachable!("Repeat patterns should be expanded before processing");
+            Pattern::Repeat(n) => {
+                let n = *n;
+                if pat_idx == 0 {
+                    do_cleanup(&created_files, config);
+                    return Err("{N}: no preceding pattern to repeat".to_string());
+                }
+                // Find the preceding non-repeat pattern
+                let prev_pat = find_prev_pattern(patterns, pat_idx);
+                let prev_pat = match prev_pat {
+                    Some(p) => p.clone(),
+                    None => {
+                        do_cleanup(&created_files, config);
+                        return Err("{N}: no preceding pattern to repeat".to_string());
+                    }
+                };
+                for _ in 0..n {
+                    match &prev_pat {
+                        Pattern::LineNumber(ln) => {
+                            // For repeated line numbers, this doesn't make much sense
+                            // but follow the same logic
+                            let end = if *ln > total_lines {
+                                total_lines
+                            } else {
+                                *ln - 1
+                            };
+                            if end <= current_line {
+                                let msg = format!("{}: line number out of range", ln);
+                                do_cleanup(&created_files, config);
+                                return Err(msg);
+                            }
+                            let chunk_lines = &lines[current_line..end];
+                            let filename = output_filename(config, file_index);
+                            let bytes =
+                                write_chunk(chunk_lines, &filename, config).inspect_err(|_| {
+                                    do_cleanup(&created_files, config);
+                                })?;
+                            if !(config.elide_empty && chunk_lines.is_empty()) {
+                                created_files.push(filename);
+                                sizes.push(bytes);
+                                file_index += 1;
+                            }
+                            current_line = end;
+                            skip_current = false;
+                        }
+                        Pattern::Regex { regex, offset } => {
+                            if let Err(e) = apply_regex_pattern(
+                                &lines,
+                                total_lines,
+                                regex,
+                                *offset,
+                                false,
+                                &mut current_line,
+                                &mut skip_current,
+                                &mut sizes,
+                                &mut created_files,
+                                &mut file_index,
+                                config,
+                                false,
+                            ) {
+                                do_cleanup(&created_files, config);
+                                return Err(e);
+                            }
+                        }
+                        Pattern::SkipTo { regex, offset } => {
+                            if let Err(e) = apply_regex_pattern(
+                                &lines,
+                                total_lines,
+                                regex,
+                                *offset,
+                                true,
+                                &mut current_line,
+                                &mut skip_current,
+                                &mut sizes,
+                                &mut created_files,
+                                &mut file_index,
+                                config,
+                                false,
+                            ) {
+                                do_cleanup(&created_files, config);
+                                return Err(e);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                pat_idx += 1;
+            }
+            Pattern::RepeatForever => {
+                if pat_idx == 0 {
+                    do_cleanup(&created_files, config);
+                    return Err("{*}: no preceding pattern to repeat".to_string());
+                }
+                let prev_pat = find_prev_pattern(patterns, pat_idx);
+                let prev_pat = match prev_pat {
+                    Some(p) => p.clone(),
+                    None => {
+                        do_cleanup(&created_files, config);
+                        return Err("{*}: no preceding pattern to repeat".to_string());
+                    }
+                };
+                // Repeat until the pattern fails to match (graceful stop)
+                loop {
+                    match &prev_pat {
+                        Pattern::Regex { regex, offset } => {
+                            match apply_regex_pattern(
+                                &lines,
+                                total_lines,
+                                regex,
+                                *offset,
+                                false,
+                                &mut current_line,
+                                &mut skip_current,
+                                &mut sizes,
+                                &mut created_files,
+                                &mut file_index,
+                                config,
+                                true, // graceful no-match
+                            ) {
+                                Ok(true) => continue,
+                                Ok(false) => break,
+                                Err(e) => {
+                                    do_cleanup(&created_files, config);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        Pattern::SkipTo { regex, offset } => {
+                            match apply_regex_pattern(
+                                &lines,
+                                total_lines,
+                                regex,
+                                *offset,
+                                true,
+                                &mut current_line,
+                                &mut skip_current,
+                                &mut sizes,
+                                &mut created_files,
+                                &mut file_index,
+                                config,
+                                true,
+                            ) {
+                                Ok(true) => continue,
+                                Ok(false) => break,
+                                Err(e) => {
+                                    do_cleanup(&created_files, config);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                pat_idx += 1;
             }
         }
     }
@@ -379,45 +568,17 @@ pub fn csplit_file(
     Ok(sizes)
 }
 
-/// Expand repeat patterns into the underlying patterns they repeat.
-/// Returns a flat list of non-repeat patterns.
-fn expand_patterns(patterns: &[Pattern]) -> Result<Vec<Pattern>, String> {
-    let mut expanded: Vec<Pattern> = Vec::new();
-    let mut i = 0;
-
-    while i < patterns.len() {
+/// Find the preceding non-repeat pattern.
+fn find_prev_pattern(patterns: &[Pattern], idx: usize) -> Option<&Pattern> {
+    let mut i = idx;
+    while i > 0 {
+        i -= 1;
         match &patterns[i] {
-            Pattern::Repeat(n) => {
-                if expanded.is_empty() {
-                    return Err("{N}: no preceding pattern to repeat".to_string());
-                }
-                let prev = expanded.last().unwrap().clone();
-                for _ in 0..*n {
-                    expanded.push(prev.clone());
-                }
-                i += 1;
-            }
-            Pattern::RepeatForever => {
-                if expanded.is_empty() {
-                    return Err("{*}: no preceding pattern to repeat".to_string());
-                }
-                // We can't actually expand forever at parse time.
-                // Mark with a sentinel: we'll repeat the previous pattern
-                // up to a reasonable limit (10000) to prevent infinite loops.
-                let prev = expanded.last().unwrap().clone();
-                for _ in 0..10000 {
-                    expanded.push(prev.clone());
-                }
-                i += 1;
-            }
-            other => {
-                expanded.push(other.clone());
-                i += 1;
-            }
+            Pattern::Repeat(_) | Pattern::RepeatForever => continue,
+            other => return Some(other),
         }
     }
-
-    Ok(expanded)
+    None
 }
 
 /// Split a file by reading from a path or stdin ("-").

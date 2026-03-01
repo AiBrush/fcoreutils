@@ -530,7 +530,7 @@ pub fn run_ls(flavor: LsFlavor) {
 
     match ls_main(&file_args, &config) {
         Ok(true) => {}
-        Ok(false) => std::process::exit(2),
+        Ok(false) => std::process::exit(1),
         Err(e) => {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 std::process::exit(141);

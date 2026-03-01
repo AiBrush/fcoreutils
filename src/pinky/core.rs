@@ -277,6 +277,8 @@ pub fn format_long_entry(username: &str, config: &PinkyConfig) -> String {
     let _ = write!(out, "Login name: {:<28}", username);
     if let Some(ref info) = info {
         let _ = write!(out, "In real life:  {}", info.fullname);
+    } else {
+        let _ = write!(out, "In real life:  ???");
     }
     let _ = writeln!(out);
 
@@ -284,9 +286,8 @@ pub fn format_long_entry(username: &str, config: &PinkyConfig) -> String {
         if let Some(ref info) = info {
             let _ = write!(out, "Directory: {:<29}", info.home_dir);
             let _ = writeln!(out, "Shell:  {}", info.shell);
-        } else {
-            let _ = writeln!(out, "Directory: ???");
         }
+        // For nonexistent users, GNU pinky does not show Directory/Shell lines
     }
 
     // Project file
@@ -349,7 +350,10 @@ pub fn run_pinky(config: &PinkyConfig) -> String {
             config.users.clone()
         };
 
-        for user in users.iter() {
+        for (i, user) in users.iter().enumerate() {
+            if i > 0 {
+                let _ = writeln!(output); // blank line separator between entries (GNU compat)
+            }
             // Write entry then blank line (GNU pinky separates entries with blank lines)
             let _ = writeln!(output, "{}", format_long_entry(user, config));
         }

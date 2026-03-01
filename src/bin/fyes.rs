@@ -28,9 +28,12 @@ fn main() {
     // Restore default SIGPIPE handling: die silently on broken pipe.
     // GNU yes uses SIG_DFL — the process is killed by the signal with no error
     // message on stderr. Rust sets SIG_IGN by default, so we override it.
+    // Use sigaction (not signal) for reliable behavior across platforms.
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = libc::SIG_DFL;
+        libc::sigaction(libc::SIGPIPE, &sa, std::ptr::null_mut());
     }
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
@@ -142,6 +145,11 @@ fn main() {
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
+                }
+                // Exit silently on EPIPE — match GNU yes (SIG_DFL kills on SIGPIPE)
+                #[cfg(unix)]
+                if err.raw_os_error() == Some(libc::EPIPE) {
+                    process::exit(0);
                 }
                 write_error_exit(err);
             }
