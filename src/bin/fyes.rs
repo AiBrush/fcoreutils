@@ -151,10 +151,12 @@ fn main() {
             } else {
                 // Read errno directly from thread-local storage before any
                 // Rust runtime code can clobber it.
-                #[cfg(unix)]
+                #[cfg(target_os = "linux")]
                 let raw_errno = unsafe { *libc::__errno_location() };
-                #[cfg(not(unix))]
-                let raw_errno = 0i32;
+                #[cfg(target_os = "macos")]
+                let raw_errno = unsafe { *libc::__error() };
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                let raw_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
 
                 if raw_errno == libc::EINTR {
                     continue;
