@@ -1049,11 +1049,7 @@ pub fn run_numfmt<R: std::io::BufRead, W: Write>(
         } else {
             &buf[..]
         };
-        // Use from_utf8 first (zero-alloc for valid UTF-8), fallback to lossy.
-        let line_str = match std::str::from_utf8(line) {
-            Ok(s) => std::borrow::Cow::Borrowed(s),
-            Err(_) => String::from_utf8_lossy(line),
-        };
+        let line_str = String::from_utf8_lossy(line);
 
         if header_remaining > 0 {
             header_remaining -= 1;
