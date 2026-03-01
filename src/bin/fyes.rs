@@ -16,11 +16,17 @@ const BUF_SIZE: usize = 8192;
 fn main() {
     // Restore SIGPIPE to default (SIG_DFL) so that writing to a closed pipe
     // kills us with SIGPIPE, exactly like GNU yes. Rust sets SIG_IGN by default.
+    // Use sigaction() for explicit control over flags (no SA_RESTART).
     // Also unblock SIGPIPE from the process signal mask — parent processes
     // (e.g. CI runners like Node.js) may have blocked it via sigprocmask.
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = libc::SIG_DFL;
+        sa.sa_flags = 0;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGPIPE, &sa, std::ptr::null_mut());
+
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
         libc::sigaddset(&mut set, libc::SIGPIPE);
@@ -143,21 +149,36 @@ fn main() {
                 // happen, but exit cleanly to avoid spinning.
                 process::exit(1);
             } else {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
+                // Read errno directly from thread-local storage before any
+                // Rust runtime code can clobber it.
+                #[cfg(unix)]
+                let raw_errno = unsafe { *libc::__errno_location() };
+                #[cfg(not(unix))]
+                let raw_errno = 0i32;
+
+                if raw_errno == libc::EINTR {
                     continue;
                 }
                 // EPIPE: pipe closed — exit silently, matching GNU yes behavior.
-                // GNU yes is killed by SIGPIPE (no stderr output). Even though
-                // we set SIG_DFL + unblocked SIGPIPE, Rust's runtime may catch
-                // the signal before the default handler runs. Exit silently.
-                if err.raw_os_error() == Some(libc::EPIPE) {
+                // GNU yes is killed by SIGPIPE (no stderr output). Check both
+                // raw errno and Rust ErrorKind for maximum robustness across
+                // different environments (CI runners, signal configurations).
+                if raw_errno == libc::EPIPE {
                     #[cfg(unix)]
                     unsafe {
                         libc::_exit(128 + libc::SIGPIPE)
                     };
                     #[cfg(not(unix))]
-                    process::exit(141); // 128 + 13 (SIGPIPE value on most POSIX)
+                    process::exit(141);
+                }
+                let err = std::io::Error::from_raw_os_error(raw_errno);
+                if err.kind() == std::io::ErrorKind::BrokenPipe {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::_exit(128 + libc::SIGPIPE)
+                    };
+                    #[cfg(not(unix))]
+                    process::exit(141);
                 }
                 // For other errors (ENOSPC, EIO, etc.), print diagnostic.
                 let msg = coreutils_rs::common::io_error_msg(&err);
