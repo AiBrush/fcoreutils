@@ -414,13 +414,7 @@ fn main() {
             repeat,
         );
     } else if let Some((lo, hi)) = input_range {
-        let mut lines: Vec<String> = (lo..=hi).map(|n| n.to_string()).collect();
-        if lines.is_empty() && !repeat {
-            return;
-        }
-        run_string_shuffle(
-            &mut lines, &mut rng, &mut out, delimiter, head_count, repeat,
-        );
+        run_range_shuffle(lo, hi, &mut rng, &mut out, delimiter, head_count, repeat);
     } else {
         // File/stdin mode: use zero-copy byte-slice shuffle for performance
         let filename = positional.first().map(|s| s.as_str());
@@ -465,6 +459,68 @@ fn run_string_shuffle(
         let count = head_count.unwrap_or(lines.len()).min(lines.len());
         for line in lines.iter().take(count) {
             let _ = out.write_all(line.as_bytes());
+            let _ = out.write_all(&[delimiter]);
+        }
+    }
+}
+
+fn run_range_shuffle(
+    lo: u64,
+    hi: u64,
+    rng: &mut RandGen,
+    out: &mut dyn Write,
+    delimiter: u8,
+    head_count: Option<usize>,
+    repeat: bool,
+) {
+    let range_size = hi - lo + 1;
+    let mut ibuf = itoa::Buffer::new();
+
+    if repeat {
+        let count = head_count.unwrap_or(usize::MAX);
+        if count == 0 || range_size == 0 {
+            return;
+        }
+        for _ in 0..count {
+            let val = lo + rng.gen_max(range_size - 1);
+            let _ = out.write_all(ibuf.format(val).as_bytes());
+            let _ = out.write_all(&[delimiter]);
+        }
+        return;
+    }
+
+    if range_size == 0 {
+        return;
+    }
+
+    let count = head_count
+        .unwrap_or(range_size as usize)
+        .min(range_size as usize);
+    if count == 0 {
+        return;
+    }
+
+    // Sparse path: when count is small relative to range, pick random values directly
+    // using a HashSet for deduplication. O(count) expected time and space.
+    if (count as u64) < range_size / 10 || (count < 10000 && range_size > 1_000_000) {
+        let mut picked = std::collections::HashSet::with_capacity(count);
+        let mut result = Vec::with_capacity(count);
+        while picked.len() < count {
+            let val = lo + rng.gen_max(range_size - 1);
+            if picked.insert(val) {
+                result.push(val);
+            }
+        }
+        for val in result {
+            let _ = out.write_all(ibuf.format(val).as_bytes());
+            let _ = out.write_all(&[delimiter]);
+        }
+    } else {
+        // Dense path: generate all values and Fisher-Yates shuffle
+        let mut values: Vec<u64> = (lo..=hi).collect();
+        shuffle(&mut values, rng);
+        for &val in values.iter().take(count) {
+            let _ = out.write_all(ibuf.format(val).as_bytes());
             let _ = out.write_all(&[delimiter]);
         }
     }
