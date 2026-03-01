@@ -17,8 +17,10 @@ fn main() {
     // Restore SIGPIPE to default (SIG_DFL) so that writing to a closed pipe
     // kills us with SIGPIPE, exactly like GNU yes. Rust sets SIG_IGN by default.
     // Use sigaction() for explicit control over flags (no SA_RESTART).
-    // Also unblock SIGPIPE from the process signal mask — parent processes
-    // (e.g. CI runners like Node.js) may have blocked it via sigprocmask.
+    // NOTE: We intentionally do NOT call sigprocmask(SIG_UNBLOCK) here.
+    // If the parent process blocked SIGPIPE (e.g. Node.js CI runners),
+    // GNU yes inherits that blocked mask and falls through to its error path.
+    // We must do the same to match GNU's output exactly.
     #[cfg(unix)]
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -26,11 +28,6 @@ fn main() {
         sa.sa_flags = 0;
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(libc::SIGPIPE, &sa, std::ptr::null_mut());
-
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGPIPE);
-        libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
     }
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
@@ -149,25 +146,23 @@ fn main() {
                 // happen, but exit cleanly to avoid spinning.
                 process::exit(1);
             } else {
-                // GNU yes never prints errors — it is killed by SIGPIPE.
-                // If SIGPIPE delivery fails (blocked by parent/runtime),
-                // write() returns -1 with EPIPE. Exit silently in that case.
-                // Capture errno immediately — must precede any further syscall or
-                // Rust I/O that could overwrite it.
+                // Capture errno immediately — must precede any further syscall
+                // or Rust I/O that could overwrite it.
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                if err.kind() == std::io::ErrorKind::BrokenPipe {
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::_exit(128 + libc::SIGPIPE)
-                    };
-                    #[cfg(not(unix))]
-                    process::exit(141);
-                }
+                // Match GNU yes exactly: print the error and _exit(1).
+                // Normally SIGPIPE (SIG_DFL) kills us before we reach here.
+                // But if the parent blocked SIGPIPE in the signal mask,
+                // write() returns -1/EPIPE and GNU yes prints the error too.
                 let msg = coreutils_rs::common::io_error_msg(&err);
                 eprintln!("{}: standard output: {}", TOOL_NAME, msg);
+                #[cfg(unix)]
+                unsafe {
+                    libc::_exit(1)
+                };
+                #[cfg(not(unix))]
                 process::exit(1);
             }
         }
@@ -365,15 +360,13 @@ mod tests {
         assert_eq!(text.trim(), "y");
 
         // With SIGPIPE=SIG_DFL, yes is killed by SIGPIPE (no exit code on Unix).
-        // If SIGPIPE delivery is blocked, the EPIPE fallback calls _exit(141).
+        // If SIGPIPE is blocked by the parent, EPIPE fallback prints error and exits 1.
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
             assert!(
-                status.signal() == Some(13)
-                    || status.code() == Some(0)
-                    || status.code() == Some(141),
-                "yes should be killed by SIGPIPE or exit 141, got status: {:?}",
+                status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(1),
+                "yes should be killed by SIGPIPE or exit 0/1, got status: {:?}",
                 status
             );
         }
@@ -399,8 +392,8 @@ mod tests {
 
         use std::os::unix::process::ExitStatusExt;
         assert!(
-            status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(141),
-            "yes should be killed by SIGPIPE or exit 141, got status: {:?}",
+            status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(1),
+            "yes should be killed by SIGPIPE or exit 0/1, got status: {:?}",
             status
         );
     }
@@ -528,8 +521,8 @@ mod tests {
 
         use std::os::unix::process::ExitStatusExt;
         assert!(
-            status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(141),
-            "yes should be killed by SIGPIPE or exit 141, got status: {:?}",
+            status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(1),
+            "yes should be killed by SIGPIPE or exit 0/1, got status: {:?}",
             status
         );
     }
