@@ -43,6 +43,54 @@ pub enum InvalidMode {
     Ignore,
 }
 
+/// Bitset for O(1) field membership testing.
+/// Fields are 1-based. Supports fields 1..=128 via u128.
+/// If `all` is true, all fields match.
+/// If a field > 128 is needed, we fall back to the `overflow` Vec.
+struct FieldSet {
+    bits: u128,
+    all: bool,
+    overflow: Vec<usize>,
+}
+
+impl FieldSet {
+    fn from_config(field: &[usize]) -> Self {
+        if field.is_empty() {
+            return FieldSet {
+                bits: 0,
+                all: true,
+                overflow: Vec::new(),
+            };
+        }
+        let mut bits: u128 = 0;
+        let mut overflow = Vec::new();
+        for &f in field {
+            if f >= 1 && f <= 128 {
+                bits |= 1u128 << (f - 1);
+            } else if f > 128 {
+                overflow.push(f);
+            }
+        }
+        FieldSet {
+            bits,
+            all: false,
+            overflow,
+        }
+    }
+
+    #[inline(always)]
+    fn contains(&self, field_num: usize) -> bool {
+        if self.all {
+            return true;
+        }
+        if field_num >= 1 && field_num <= 128 {
+            (self.bits & (1u128 << (field_num - 1))) != 0
+        } else {
+            self.overflow.contains(&field_num)
+        }
+    }
+}
+
 /// Configuration for the numfmt command.
 pub struct NumfmtConfig {
     pub from: ScaleUnit,
@@ -257,11 +305,11 @@ fn parse_number_with_suffix(s: &str, unit: ScaleUnit) -> Result<f64, String> {
     let multiplier = if suffix_str.is_empty() {
         1.0
     } else {
-        let suffix_upper = suffix_str.chars().next().unwrap().to_ascii_uppercase();
+        let suffix_upper = suffix_str.as_bytes()[0].to_ascii_uppercase() as char;
         match unit {
             ScaleUnit::Auto => {
                 // Auto-detect: if suffix ends with 'i', use IEC; otherwise SI.
-                if suffix_str.len() >= 2 && suffix_str.ends_with('i') {
+                if suffix_str.len() >= 2 && suffix_str.as_bytes()[suffix_str.len() - 1] == b'i' {
                     find_iec_multiplier(suffix_upper)?
                 } else {
                     find_si_multiplier(suffix_upper)?
@@ -278,6 +326,7 @@ fn parse_number_with_suffix(s: &str, unit: ScaleUnit) -> Result<f64, String> {
     Ok(value * multiplier)
 }
 
+#[inline(always)]
 fn is_scale_suffix(c: char) -> bool {
     matches!(c, 'K' | 'M' | 'G' | 'T' | 'P' | 'E' | 'Z' | 'Y' | 'R' | 'Q')
 }
@@ -315,6 +364,7 @@ fn find_iec_multiplier(c: char) -> Result<f64, String> {
 }
 
 /// Apply rounding according to the specified method.
+#[inline(always)]
 fn apply_round(value: f64, method: RoundMethod) -> f64 {
     match method {
         RoundMethod::Up => value.ceil(),
@@ -354,11 +404,121 @@ fn format_scaled(value: f64, unit: ScaleUnit, round: RoundMethod) -> String {
     }
 }
 
+/// Write a scaled number directly to a byte buffer, avoiding String allocation.
+fn write_scaled_to_buf(buf: &mut Vec<u8>, value: f64, unit: ScaleUnit, round: RoundMethod) {
+    match unit {
+        ScaleUnit::None => {
+            write_plain_number_to_buf(buf, value);
+        }
+        ScaleUnit::Si => write_with_scale_to_buf(buf, value, SI_SUFFIXES, b"", round),
+        ScaleUnit::Iec => write_with_scale_to_buf(buf, value, IEC_SUFFIXES, b"", round),
+        ScaleUnit::IecI => write_with_scale_to_buf(buf, value, IEC_SUFFIXES, b"i", round),
+        ScaleUnit::Auto => write_with_scale_to_buf(buf, value, SI_SUFFIXES, b"", round),
+    }
+}
+
+/// Write a plain number to a byte buffer using itoa for integers.
+#[inline]
+fn write_plain_number_to_buf(buf: &mut Vec<u8>, value: f64) {
+    let int_val = value as i64;
+    if value == (int_val as f64) {
+        let mut itoa_buf = itoa::Buffer::new();
+        buf.extend_from_slice(itoa_buf.format(int_val).as_bytes());
+    } else {
+        // Use enough precision to avoid loss.
+        use std::io::Write;
+        let _ = write!(buf, "{:.1}", value);
+    }
+}
+
+/// Write a scaled number with suffix directly to a byte buffer.
+fn write_with_scale_to_buf(
+    buf: &mut Vec<u8>,
+    value: f64,
+    suffixes: &[(char, f64)],
+    i_suffix: &[u8],
+    round: RoundMethod,
+) {
+    let abs_value = value.abs();
+    let negative = value < 0.0;
+
+    // Find the largest suffix that applies.
+    let mut chosen_idx: Option<usize> = None;
+    for (idx, &(_suffix, mult)) in suffixes.iter().enumerate().rev() {
+        if abs_value >= mult {
+            chosen_idx = Some(idx);
+            break;
+        }
+    }
+
+    let Some(mut idx) = chosen_idx else {
+        // Value is smaller than the smallest suffix, output as-is.
+        write_plain_number_to_buf(buf, value);
+        return;
+    };
+
+    loop {
+        let (suffix, mult) = suffixes[idx];
+        let scaled = value / mult;
+        let abs_scaled = scaled.abs();
+
+        if abs_scaled < 10.0 {
+            let rounded = apply_round_for_display(scaled, round);
+            if rounded.abs() >= 10.0 {
+                let int_val = rounded as i64;
+                if int_val.unsigned_abs() >= 1000 && idx + 1 < suffixes.len() {
+                    idx += 1;
+                    continue;
+                }
+                if negative {
+                    buf.push(b'-');
+                }
+                let mut itoa_buf = itoa::Buffer::new();
+                buf.extend_from_slice(itoa_buf.format(int_val.unsigned_abs()).as_bytes());
+                buf.push(suffix as u8);
+                buf.extend_from_slice(i_suffix);
+                return;
+            }
+            if negative {
+                buf.push(b'-');
+            }
+            // Write N.N format manually
+            let abs_rounded = rounded.abs();
+            let int_part = abs_rounded as u64;
+            let frac_part = ((abs_rounded - int_part as f64) * 10.0).round() as u8;
+            let mut itoa_buf = itoa::Buffer::new();
+            buf.extend_from_slice(itoa_buf.format(int_part).as_bytes());
+            buf.push(b'.');
+            buf.push(b'0' + frac_part);
+            buf.push(suffix as u8);
+            buf.extend_from_slice(i_suffix);
+            return;
+        } else {
+            let int_val = apply_round_int(scaled, round);
+            if int_val.unsigned_abs() >= 1000 {
+                if idx + 1 < suffixes.len() {
+                    idx += 1;
+                    continue;
+                }
+            }
+            if negative {
+                buf.push(b'-');
+            }
+            let mut itoa_buf = itoa::Buffer::new();
+            buf.extend_from_slice(itoa_buf.format(int_val.unsigned_abs()).as_bytes());
+            buf.push(suffix as u8);
+            buf.extend_from_slice(i_suffix);
+            return;
+        }
+    }
+}
+
 /// Format a plain number, removing unnecessary trailing zeros and decimal point.
 fn format_plain_number(value: f64) -> String {
     let int_val = value as i64;
     if value == (int_val as f64) {
-        format!("{}", int_val)
+        let mut buf = itoa::Buffer::new();
+        buf.format(int_val).to_string()
     } else {
         // Use enough precision to avoid loss.
         format!("{:.1}", value)
@@ -404,15 +564,14 @@ fn format_with_scale(
             let rounded = apply_round_for_display(scaled, round);
             if rounded.abs() >= 10.0 {
                 // Rounding pushed it past 10, switch to integer display.
-                // apply_round_for_display rounds to 1 decimal, so the only
-                // value crossing this boundary is exactly 10.0 — truncation
-                // and rounding agree. Use `as i64` (truncation) which is safe.
                 let int_val = rounded as i64;
                 if int_val.unsigned_abs() >= 1000 && idx + 1 < suffixes.len() {
                     idx += 1;
                     continue;
                 }
-                return format!("{sign}{}{}{}", int_val.unsigned_abs(), suffix, i_suffix);
+                let mut itoa_buf = itoa::Buffer::new();
+                let digits = itoa_buf.format(int_val.unsigned_abs());
+                return format!("{sign}{}{}{}", digits, suffix, i_suffix);
             }
             return format!("{sign}{:.1}{}{}", rounded.abs(), suffix, i_suffix);
         } else {
@@ -425,13 +584,16 @@ fn format_with_scale(
                 }
                 // No next suffix, just output what we have.
             }
-            return format!("{sign}{}{}{}", int_val.unsigned_abs(), suffix, i_suffix);
+            let mut itoa_buf = itoa::Buffer::new();
+            let digits = itoa_buf.format(int_val.unsigned_abs());
+            return format!("{sign}{}{}{}", digits, suffix, i_suffix);
         }
     }
 }
 
 /// Apply rounding for display purposes (when formatting scaled output).
 /// Rounds to 1 decimal place.
+#[inline(always)]
 fn apply_round_for_display(value: f64, method: RoundMethod) -> f64 {
     let factor = 10.0;
     let shifted = value * factor;
@@ -458,6 +620,7 @@ fn apply_round_for_display(value: f64, method: RoundMethod) -> f64 {
 }
 
 /// Apply rounding to get an integer value for display.
+#[inline(always)]
 fn apply_round_int(value: f64, method: RoundMethod) -> i64 {
     match method {
         RoundMethod::Up => value.ceil() as i64,
@@ -867,6 +1030,80 @@ fn convert_number(
     Ok(result)
 }
 
+/// Convert a numeric token and write result directly to a byte buffer.
+/// Returns Ok(true) if conversion succeeded, Ok(false) if the original token
+/// should be written instead (for non-abort error modes).
+fn convert_number_to_buf(
+    token: &str,
+    config: &NumfmtConfig,
+    parsed_fmt: Option<&ParsedFormat>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    // Parse the input number (with optional suffix).
+    let raw_value = parse_number_with_suffix(token, config.from)?;
+
+    // Apply from-unit and to-unit scaling.
+    let value = raw_value * config.from_unit / config.to_unit;
+
+    // Check if we can use the fast path: no format, no grouping, no padding, no suffix.
+    let use_fast = parsed_fmt.is_none()
+        && !config.grouping
+        && config.suffix.is_none()
+        && config.padding.is_none();
+
+    if use_fast && config.to != ScaleUnit::None {
+        write_scaled_to_buf(out, value, config.to, config.round);
+        return Ok(());
+    }
+
+    if use_fast && config.to == ScaleUnit::None {
+        let rounded = apply_round(value, config.round);
+        write_plain_number_to_buf(out, rounded);
+        return Ok(());
+    }
+
+    // Slow path: use String-based convert_number for complex formatting.
+    let result = if let Some(pf) = parsed_fmt {
+        if config.to != ScaleUnit::None {
+            let scaled = format_scaled(value, config.to, config.round);
+            apply_format_padding(&scaled, config.format.as_deref().unwrap_or("%f"))
+        } else {
+            let rounded = apply_round(value, config.round);
+            apply_parsed_format(rounded, pf)?
+        }
+    } else if config.to != ScaleUnit::None {
+        format_scaled(value, config.to, config.round)
+    } else {
+        let rounded = apply_round(value, config.round);
+        format_plain_number(rounded)
+    };
+
+    let mut result = result;
+
+    if config.grouping {
+        result = group_thousands(&result);
+    }
+
+    if let Some(ref suffix) = config.suffix {
+        result.push_str(suffix);
+    }
+
+    if let Some(pad) = config.padding {
+        let pad_width = pad.unsigned_abs() as usize;
+        if result.len() < pad_width {
+            let deficit = pad_width - result.len();
+            if pad < 0 {
+                result = format!("{}{}", result, " ".repeat(deficit));
+            } else {
+                result = format!("{}{}", " ".repeat(deficit), result);
+            }
+        }
+    }
+
+    out.extend_from_slice(result.as_bytes());
+    Ok(())
+}
+
 /// Split a line into fields based on the delimiter.
 fn split_fields<'a>(line: &'a str, delimiter: Option<char>) -> Vec<&'a str> {
     match delimiter {
@@ -875,25 +1112,28 @@ fn split_fields<'a>(line: &'a str, delimiter: Option<char>) -> Vec<&'a str> {
             // Whitespace splitting: split on runs of whitespace, but preserve
             // leading whitespace as empty fields.
             let mut fields = Vec::new();
-            let mut chars = line.char_indices().peekable();
+            let bytes = line.as_bytes();
+            let len = bytes.len();
+            let mut i = 0;
             let mut field_start = 0;
             let mut in_space = true;
             let mut first = true;
 
-            while let Some(&(i, c)) = chars.peek() {
-                if c.is_whitespace() {
+            while i < len {
+                let c = bytes[i];
+                if c == b' ' || c == b'\t' || c == b'\r' || c == b'\x0b' || c == b'\x0c' {
                     if !in_space && !first {
                         fields.push(&line[field_start..i]);
                     }
                     in_space = true;
-                    chars.next();
+                    i += 1;
                 } else {
                     if in_space {
                         field_start = i;
                         in_space = false;
                         first = false;
                     }
-                    chars.next();
+                    i += 1;
                 }
             }
             if !in_space {
@@ -1015,6 +1255,131 @@ fn process_line_with_fmt(
     ))
 }
 
+/// Fast path: process a delimiter-separated line by writing directly to output buffer.
+/// Scans for delimiter byte positions, writes non-target fields as raw bytes,
+/// converts only target fields. No intermediate String allocations.
+fn process_line_fast_delim(
+    line: &[u8],
+    delim: u8,
+    field_set: &FieldSet,
+    config: &NumfmtConfig,
+    parsed_fmt: Option<&ParsedFormat>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let mut field_num: usize = 1;
+    let mut start = 0;
+    let len = line.len();
+
+    loop {
+        // Find next delimiter or end of line.
+        let end = memchr::memchr(delim, &line[start..])
+            .map(|pos| start + pos)
+            .unwrap_or(len);
+
+        if field_set.contains(field_num) {
+            // This field needs conversion.
+            // Safety: we treat the bytes as str. For ASCII numeric fields this is fine.
+            // If non-UTF8, the parse will fail gracefully.
+            let field_str = std::str::from_utf8(&line[start..end])
+                .map_err(|_| "invalid number: '<non-utf8>'".to_string())?;
+
+            match convert_number_to_buf(field_str, config, parsed_fmt, out) {
+                Ok(()) => {}
+                Err(e) => match config.invalid {
+                    InvalidMode::Abort => return Err(e),
+                    InvalidMode::Fail | InvalidMode::Warn => {
+                        eprintln!("numfmt: {}", e);
+                        out.extend_from_slice(&line[start..end]);
+                    }
+                    InvalidMode::Ignore => {
+                        out.extend_from_slice(&line[start..end]);
+                    }
+                },
+            }
+        } else {
+            // Write field bytes directly without conversion.
+            out.extend_from_slice(&line[start..end]);
+        }
+
+        if end >= len {
+            break;
+        }
+
+        // Write delimiter.
+        out.push(delim);
+        start = end + 1;
+        field_num += 1;
+    }
+
+    Ok(())
+}
+
+/// Fast path: process a whitespace-separated line by writing directly to output buffer.
+/// Preserves original whitespace. Converts only target fields.
+fn process_line_fast_ws(
+    line: &[u8],
+    field_set: &FieldSet,
+    config: &NumfmtConfig,
+    parsed_fmt: Option<&ParsedFormat>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let len = line.len();
+    let mut i = 0;
+    let mut field_num: usize = 0;
+
+    // State machine: alternate between whitespace and field content.
+    while i < len {
+        let c = line[i];
+        if c == b' ' || c == b'\t' || c == b'\r' || c == b'\x0b' || c == b'\x0c' {
+            // Whitespace: write directly.
+            out.push(c);
+            i += 1;
+        } else {
+            // Start of a field.
+            field_num += 1;
+            let field_start = i;
+
+            // Find end of field.
+            while i < len {
+                let fc = line[i];
+                if fc == b' ' || fc == b'\t' || fc == b'\r' || fc == b'\x0b' || fc == b'\x0c' {
+                    break;
+                }
+                i += 1;
+            }
+            let field_end = i;
+
+            if field_set.contains(field_num) {
+                let field_str = std::str::from_utf8(&line[field_start..field_end])
+                    .map_err(|_| "invalid number: '<non-utf8>'".to_string())?;
+
+                match convert_number_to_buf(field_str, config, parsed_fmt, out) {
+                    Ok(()) => {}
+                    Err(e) => match config.invalid {
+                        InvalidMode::Abort => return Err(e),
+                        InvalidMode::Fail | InvalidMode::Warn => {
+                            eprintln!("numfmt: {}", e);
+                            out.extend_from_slice(&line[field_start..field_end]);
+                        }
+                        InvalidMode::Ignore => {
+                            out.extend_from_slice(&line[field_start..field_end]);
+                        }
+                    },
+                }
+            } else {
+                out.extend_from_slice(&line[field_start..field_end]);
+            }
+        }
+    }
+
+    // Handle completely blank / empty lines.
+    if field_num == 0 {
+        out.extend_from_slice(line);
+    }
+
+    Ok(())
+}
+
 /// Run the numfmt command with the given configuration and input.
 pub fn run_numfmt<R: std::io::BufRead, W: Write>(
     input: R,
@@ -1028,11 +1393,23 @@ pub fn run_numfmt<R: std::io::BufRead, W: Write>(
         None
     };
 
+    // Pre-compute field membership as a bitset.
+    let field_set = FieldSet::from_config(&config.field);
+
     let terminator = if config.zero_terminated { b'\0' } else { b'\n' };
     let mut header_remaining = config.header;
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(4096);
+    let mut out_buf = Vec::with_capacity(4096);
     let mut reader = input;
     let mut had_error = false;
+
+    // Determine delimiter byte for fast path.
+    let delim_byte = config.delimiter.map(|c| {
+        // Only supports single-byte delimiters for fast path.
+        if c.is_ascii() { Some(c as u8) } else { None }
+    });
+    // Flatten Option<Option<u8>> to Option<u8>
+    let delim_byte = delim_byte.and_then(|x| x);
 
     loop {
         buf.clear();
@@ -1049,12 +1426,11 @@ pub fn run_numfmt<R: std::io::BufRead, W: Write>(
         } else {
             &buf[..]
         };
-        let line_str = String::from_utf8_lossy(line);
 
         if header_remaining > 0 {
             header_remaining -= 1;
             output
-                .write_all(line_str.as_bytes())
+                .write_all(line)
                 .map_err(|e| format!("write error: {}", e))?;
             output
                 .write_all(&[terminator])
@@ -1062,51 +1438,75 @@ pub fn run_numfmt<R: std::io::BufRead, W: Write>(
             continue;
         }
 
-        match process_line_with_fmt(&line_str, config, parsed_fmt.as_ref()) {
-            Ok(result) => {
+        out_buf.clear();
+
+        // Use fast path: process directly on byte slices.
+        let result = if let Some(db) = delim_byte {
+            process_line_fast_delim(
+                line,
+                db,
+                &field_set,
+                config,
+                parsed_fmt.as_ref(),
+                &mut out_buf,
+            )
+        } else if config.delimiter.is_some() {
+            // Non-ASCII delimiter: fall back to String path.
+            let line_str = String::from_utf8_lossy(line);
+            match process_line_with_fmt(&line_str, config, parsed_fmt.as_ref()) {
+                Ok(result) => {
+                    out_buf.extend_from_slice(result.as_bytes());
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            // Whitespace-delimited fast path.
+            process_line_fast_ws(line, &field_set, config, parsed_fmt.as_ref(), &mut out_buf)
+        };
+
+        match result {
+            Ok(()) => {
                 output
-                    .write_all(result.as_bytes())
+                    .write_all(&out_buf)
                     .map_err(|e| format!("write error: {}", e))?;
                 output
                     .write_all(&[terminator])
                     .map_err(|e| format!("write error: {}", e))?;
             }
-            Err(e) => {
-                match config.invalid {
-                    InvalidMode::Abort => {
-                        eprintln!("numfmt: {}", e);
-                        return Err(e);
-                    }
-                    InvalidMode::Fail => {
-                        eprintln!("numfmt: {}", e);
-                        // Output original line.
-                        output
-                            .write_all(line_str.as_bytes())
-                            .map_err(|e| format!("write error: {}", e))?;
-                        output
-                            .write_all(&[terminator])
-                            .map_err(|e| format!("write error: {}", e))?;
-                        had_error = true;
-                    }
-                    InvalidMode::Warn => {
-                        eprintln!("numfmt: {}", e);
-                        output
-                            .write_all(line_str.as_bytes())
-                            .map_err(|e| format!("write error: {}", e))?;
-                        output
-                            .write_all(&[terminator])
-                            .map_err(|e| format!("write error: {}", e))?;
-                    }
-                    InvalidMode::Ignore => {
-                        output
-                            .write_all(line_str.as_bytes())
-                            .map_err(|e| format!("write error: {}", e))?;
-                        output
-                            .write_all(&[terminator])
-                            .map_err(|e| format!("write error: {}", e))?;
-                    }
+            Err(e) => match config.invalid {
+                InvalidMode::Abort => {
+                    eprintln!("numfmt: {}", e);
+                    return Err(e);
                 }
-            }
+                InvalidMode::Fail => {
+                    eprintln!("numfmt: {}", e);
+                    output
+                        .write_all(line)
+                        .map_err(|e| format!("write error: {}", e))?;
+                    output
+                        .write_all(&[terminator])
+                        .map_err(|e| format!("write error: {}", e))?;
+                    had_error = true;
+                }
+                InvalidMode::Warn => {
+                    eprintln!("numfmt: {}", e);
+                    output
+                        .write_all(line)
+                        .map_err(|e| format!("write error: {}", e))?;
+                    output
+                        .write_all(&[terminator])
+                        .map_err(|e| format!("write error: {}", e))?;
+                }
+                InvalidMode::Ignore => {
+                    output
+                        .write_all(line)
+                        .map_err(|e| format!("write error: {}", e))?;
+                    output
+                        .write_all(&[terminator])
+                        .map_err(|e| format!("write error: {}", e))?;
+                }
+            },
         }
     }
 
