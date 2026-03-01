@@ -283,21 +283,35 @@ fn is_scale_suffix(c: char) -> bool {
 }
 
 fn find_si_multiplier(c: char) -> Result<f64, String> {
-    for &(suffix, mult) in SI_SUFFIXES {
-        if suffix.eq_ignore_ascii_case(&c) {
-            return Ok(mult);
-        }
+    match c.to_ascii_uppercase() {
+        'K' => Ok(1e3),
+        'M' => Ok(1e6),
+        'G' => Ok(1e9),
+        'T' => Ok(1e12),
+        'P' => Ok(1e15),
+        'E' => Ok(1e18),
+        'Z' => Ok(1e21),
+        'Y' => Ok(1e24),
+        'R' => Ok(1e27),
+        'Q' => Ok(1e30),
+        _ => Err(format!("invalid suffix: '{}'", c)),
     }
-    Err(format!("invalid suffix: '{}'", c))
 }
 
 fn find_iec_multiplier(c: char) -> Result<f64, String> {
-    for &(suffix, mult) in IEC_SUFFIXES {
-        if suffix == c {
-            return Ok(mult);
-        }
+    match c {
+        'K' => Ok(1024.0),
+        'M' => Ok(1_048_576.0),
+        'G' => Ok(1_073_741_824.0),
+        'T' => Ok(1_099_511_627_776.0),
+        'P' => Ok(1_125_899_906_842_624.0),
+        'E' => Ok(1_152_921_504_606_846_976.0),
+        'Z' => Ok(1_180_591_620_717_411_303_424.0),
+        'Y' => Ok(1_208_925_819_614_629_174_706_176.0),
+        'R' => Ok(1_237_940_039_285_380_274_899_124_224.0),
+        'Q' => Ok(1_267_650_600_228_229_401_496_703_205_376.0),
+        _ => Err(format!("invalid suffix: '{}'", c)),
     }
-    Err(format!("invalid suffix: '{}'", c))
 }
 
 /// Apply rounding according to the specified method.
@@ -560,32 +574,53 @@ fn apply_format_padding(scaled: &str, fmt: &str) -> String {
     format!("{}{}{}", prefix, padded, suffix)
 }
 
-/// Apply printf-style format to a number.
-fn apply_format(value: f64, fmt: &str) -> Result<String, String> {
-    // Parse format: %[flags][width][.precision]f
+/// Pre-parsed format specification for fast repeated formatting.
+struct ParsedFormat {
+    prefix: String,
+    suffix: String,
+    zero_pad: bool,
+    left_align: bool,
+    plus_sign: bool,
+    space_sign: bool,
+    width: usize,
+    precision: Option<usize>,
+    conv: char,
+    is_percent: bool,
+}
+
+/// Parse a printf-style format string once, for reuse across many values.
+fn parse_format_spec(fmt: &str) -> Result<ParsedFormat, String> {
     let bytes = fmt.as_bytes();
     let mut i = 0;
 
-    // Find '%'.
     while i < bytes.len() && bytes[i] != b'%' {
         i += 1;
     }
-    let prefix = &fmt[..i];
+    let prefix = fmt[..i].to_string();
     if i >= bytes.len() {
         return Err(format!("invalid format: '{}'", fmt));
     }
-    i += 1; // skip '%'
+    i += 1;
 
     if i >= bytes.len() {
         return Err(format!("invalid format: '{}'", fmt));
     }
 
-    // Handle %%
     if bytes[i] == b'%' {
-        return Ok(format!("{}%", prefix));
+        return Ok(ParsedFormat {
+            prefix,
+            suffix: String::new(),
+            zero_pad: false,
+            left_align: false,
+            plus_sign: false,
+            space_sign: false,
+            width: 0,
+            precision: None,
+            conv: '%',
+            is_percent: true,
+        });
     }
 
-    // Parse flags.
     let mut zero_pad = false;
     let mut left_align = false;
     let mut plus_sign = false;
@@ -596,14 +631,12 @@ fn apply_format(value: f64, fmt: &str) -> Result<String, String> {
             b'-' => left_align = true,
             b'+' => plus_sign = true,
             b' ' => space_sign = true,
-            b'#' => {}
-            b'\'' => {} // grouping flag, handled separately
+            b'#' | b'\'' => {}
             _ => break,
         }
         i += 1;
     }
 
-    // Parse width.
     let mut width: usize = 0;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
         width = width
@@ -612,7 +645,6 @@ fn apply_format(value: f64, fmt: &str) -> Result<String, String> {
         i += 1;
     }
 
-    // Parse precision.
     let mut precision: Option<usize> = None;
     if i < bytes.len() && bytes[i] == b'.' {
         i += 1;
@@ -626,30 +658,48 @@ fn apply_format(value: f64, fmt: &str) -> Result<String, String> {
         precision = Some(prec);
     }
 
-    // Parse conversion type.
     if i >= bytes.len() {
         return Err(format!("invalid format: '{}'", fmt));
     }
     let conv = bytes[i] as char;
     i += 1;
-    let suffix = &fmt[i..];
+    let suffix = fmt[i..].to_string();
 
-    let prec = precision.unwrap_or(6);
-    let formatted = match conv {
+    Ok(ParsedFormat {
+        prefix,
+        suffix,
+        zero_pad,
+        left_align,
+        plus_sign,
+        space_sign,
+        width,
+        precision,
+        conv,
+        is_percent: false,
+    })
+}
+
+/// Apply a pre-parsed format specification to a number value.
+fn apply_parsed_format(value: f64, pf: &ParsedFormat) -> Result<String, String> {
+    if pf.is_percent {
+        return Ok(format!("{}%", pf.prefix));
+    }
+
+    let prec = pf.precision.unwrap_or(6);
+    let formatted = match pf.conv {
         'f' => format!("{:.prec$}", value, prec = prec),
         'e' => format_scientific(value, prec, 'e'),
         'E' => format_scientific(value, prec, 'E'),
         'g' => format_g(value, prec, false),
         'G' => format_g(value, prec, true),
-        _ => return Err(format!("invalid format character: '{}'", conv)),
+        _ => return Err(format!("invalid format character: '{}'", pf.conv)),
     };
 
-    // Apply sign prefix.
     let sign_str = if value < 0.0 {
         ""
-    } else if plus_sign {
+    } else if pf.plus_sign {
         "+"
-    } else if space_sign {
+    } else if pf.space_sign {
         " "
     } else {
         ""
@@ -661,12 +711,11 @@ fn apply_format(value: f64, fmt: &str) -> Result<String, String> {
         formatted
     };
 
-    // Apply width and padding.
-    let padded = if width > 0 && num_str.len() < width {
-        let pad_len = width - num_str.len();
-        if left_align {
+    let padded = if pf.width > 0 && num_str.len() < pf.width {
+        let pad_len = pf.width - num_str.len();
+        if pf.left_align {
             format!("{}{}", num_str, " ".repeat(pad_len))
-        } else if zero_pad {
+        } else if pf.zero_pad {
             if num_str.starts_with('-') || num_str.starts_with('+') || num_str.starts_with(' ') {
                 let (sign, rest) = num_str.split_at(1);
                 format!("{}{}{}", sign, "0".repeat(pad_len), rest)
@@ -680,7 +729,7 @@ fn apply_format(value: f64, fmt: &str) -> Result<String, String> {
         num_str
     };
 
-    Ok(format!("{}{}{}", prefix, padded, suffix))
+    Ok(format!("{}{}{}", pf.prefix, padded, pf.suffix))
 }
 
 /// Format in scientific notation.
@@ -759,7 +808,11 @@ fn trim_g_zeros(s: &str) -> String {
 }
 
 /// Convert a single numeric token according to the config.
-fn convert_number(token: &str, config: &NumfmtConfig) -> Result<String, String> {
+fn convert_number(
+    token: &str,
+    config: &NumfmtConfig,
+    parsed_fmt: Option<&ParsedFormat>,
+) -> Result<String, String> {
     // Parse the input number (with optional suffix).
     let raw_value = parse_number_with_suffix(token, config.from)?;
 
@@ -770,15 +823,14 @@ fn convert_number(token: &str, config: &NumfmtConfig) -> Result<String, String> 
     let value = value / config.to_unit;
 
     // Format the output.
-    let mut result = if let Some(ref fmt) = config.format {
+    let mut result = if let Some(pf) = parsed_fmt {
         // If --to is also specified, first scale, then apply format padding.
         if config.to != ScaleUnit::None {
             let scaled = format_scaled(value, config.to, config.round);
-            // Extract width from the format string and apply padding.
-            apply_format_padding(&scaled, fmt)
+            apply_format_padding(&scaled, config.format.as_deref().unwrap_or("%f"))
         } else {
             let rounded = apply_round(value, config.round);
-            apply_format(rounded, fmt)?
+            apply_parsed_format(rounded, pf)?
         }
     } else if config.to != ScaleUnit::None {
         format_scaled(value, config.to, config.round)
@@ -910,6 +962,15 @@ fn reassemble_fields(
 
 /// Process a single line according to the numfmt configuration.
 pub fn process_line(line: &str, config: &NumfmtConfig) -> Result<String, String> {
+    process_line_with_fmt(line, config, None)
+}
+
+/// Process a single line with a pre-parsed format specification.
+fn process_line_with_fmt(
+    line: &str,
+    config: &NumfmtConfig,
+    parsed_fmt: Option<&ParsedFormat>,
+) -> Result<String, String> {
     let fields = split_fields(line, config.delimiter);
 
     if fields.is_empty() {
@@ -924,7 +985,7 @@ pub fn process_line(line: &str, config: &NumfmtConfig) -> Result<String, String>
         let should_convert = all_fields || config.field.contains(&field_num);
 
         if should_convert {
-            match convert_number(field, config) {
+            match convert_number(field, config, parsed_fmt) {
                 Ok(s) => converted.push(s),
                 Err(e) => match config.invalid {
                     InvalidMode::Abort => return Err(e),
@@ -960,6 +1021,13 @@ pub fn run_numfmt<R: std::io::BufRead, W: Write>(
     mut output: W,
     config: &NumfmtConfig,
 ) -> Result<(), String> {
+    // Pre-parse format spec once for all lines.
+    let parsed_fmt = if let Some(ref fmt) = config.format {
+        Some(parse_format_spec(fmt)?)
+    } else {
+        None
+    };
+
     let terminator = if config.zero_terminated { b'\0' } else { b'\n' };
     let mut header_remaining = config.header;
     let mut buf = Vec::new();
@@ -994,7 +1062,7 @@ pub fn run_numfmt<R: std::io::BufRead, W: Write>(
             continue;
         }
 
-        match process_line(&line_str, config) {
+        match process_line_with_fmt(&line_str, config, parsed_fmt.as_ref()) {
             Ok(result) => {
                 output
                     .write_all(result.as_bytes())

@@ -510,6 +510,11 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         return Some(Err(io::Error::last_os_error()));
     }
 
+    // Hint kernel for sequential readahead on input
+    unsafe {
+        libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    }
+
     // Handle skip (seek input) — use checked_mul to prevent overflow
     if config.skip > 0 {
         let offset = match (config.skip as u64).checked_mul(config.ibs as u64) {
@@ -740,6 +745,14 @@ fn try_copy_file_range_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         Err(e) => return Some(Err(e)),
     };
 
+    // Hint kernel for sequential readahead
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::posix_fadvise(in_file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        }
+    }
+
     let mut out_opts = OpenOptions::new();
     out_opts.write(true);
     if config.conv.excl {
@@ -872,6 +885,14 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
     let mut input: Box<dyn Read> = if let Some(ref path) = config.input {
         let file = File::open(path)
             .map_err(|e| io::Error::new(e.kind(), format!("failed to open '{}': {}", path, e)))?;
+        // Hint kernel for sequential readahead
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+            }
+        }
         if needs_input_seek {
             input_file = Some(file.try_clone()?);
         }
