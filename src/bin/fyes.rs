@@ -173,16 +173,8 @@ fn main() {
                     #[cfg(not(unix))]
                     process::exit(141);
                 }
-                let err = std::io::Error::from_raw_os_error(raw_errno);
-                if err.kind() == std::io::ErrorKind::BrokenPipe {
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::_exit(128 + libc::SIGPIPE)
-                    };
-                    #[cfg(not(unix))]
-                    process::exit(141);
-                }
                 // For other errors (ENOSPC, EIO, etc.), print diagnostic.
+                let err = std::io::Error::from_raw_os_error(raw_errno);
                 let msg = coreutils_rs::common::io_error_msg(&err);
                 eprintln!("{}: standard output: {}", TOOL_NAME, msg);
                 process::exit(1);
@@ -381,14 +373,16 @@ mod tests {
         let text = String::from_utf8_lossy(&head.stdout);
         assert_eq!(text.trim(), "y");
 
-        // With SIGPIPE=SIG_DFL, yes is killed by SIGPIPE (no exit code on Unix)
+        // With SIGPIPE=SIG_DFL, yes is killed by SIGPIPE (no exit code on Unix).
+        // If SIGPIPE delivery is blocked, the EPIPE fallback calls _exit(141).
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
-            // Killed by SIGPIPE (signal 13) or exits cleanly
             assert!(
-                status.signal() == Some(13) || status.code() == Some(0),
-                "yes should be killed by SIGPIPE, got status: {:?}",
+                status.signal() == Some(13)
+                    || status.code() == Some(0)
+                    || status.code() == Some(141),
+                "yes should be killed by SIGPIPE or exit 141, got status: {:?}",
                 status
             );
         }
@@ -413,10 +407,9 @@ mod tests {
         let status = child.wait().unwrap();
 
         use std::os::unix::process::ExitStatusExt;
-        // Killed by SIGPIPE (signal 13)
         assert!(
-            status.signal() == Some(13) || status.code() == Some(0),
-            "yes should be killed by SIGPIPE, got status: {:?}",
+            status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(141),
+            "yes should be killed by SIGPIPE or exit 141, got status: {:?}",
             status
         );
     }
@@ -543,10 +536,9 @@ mod tests {
         assert_eq!(head.status.code(), Some(0));
 
         use std::os::unix::process::ExitStatusExt;
-        // Killed by SIGPIPE (signal 13)
         assert!(
-            status.signal() == Some(13) || status.code() == Some(0),
-            "yes should be killed by SIGPIPE, got status: {:?}",
+            status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(141),
+            "yes should be killed by SIGPIPE or exit 141, got status: {:?}",
             status
         );
     }

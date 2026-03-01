@@ -1379,8 +1379,8 @@ fn process_line_fast_ws(
             match convert_number_to_buf("", config, parsed_fmt, out) {
                 Ok(()) => {}
                 Err(e) => match config.invalid {
-                    InvalidMode::Abort => return Err(e),
-                    InvalidMode::Fail | InvalidMode::Warn => {
+                    InvalidMode::Abort | InvalidMode::Fail => return Err(e),
+                    InvalidMode::Warn => {
                         eprintln!("numfmt: {}", e);
                     }
                     InvalidMode::Ignore => {}
