@@ -12,8 +12,14 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUF_SIZE: usize = 1024 * 1024;
 
 /// Handle write error: print diagnostic to stderr and exit with code 1.
-/// GNU yes 9.4 prints "yes: standard output: Broken pipe" on EPIPE.
+/// GNU yes prints "yes: standard output: Broken pipe" on EPIPE.
+/// Close stdout first (like GNU's close_stdout()) to let downstream pipeline
+/// processes (wc, uniq, etc.) finish and produce their output before our
+/// diagnostic message, matching GNU's stderr ordering.
 fn write_error_exit(err: std::io::Error) -> ! {
+    unsafe {
+        libc::close(1);
+    }
     let msg = coreutils_rs::common::io_error_msg(&err);
     let errmsg = format!("{}: standard output: {}\n", TOOL_NAME, msg);
     unsafe {
@@ -78,10 +84,9 @@ fn main() {
         }
     }
 
-    // GNU yes argument processing:
-    // - The first "--" terminates option scanning; remaining args are literal strings
-    // - ALL other arguments (including --unknown, -x) are treated as literal output strings
-    // - Bare "-" is treated as a literal string (not an option)
+    // Build output from remaining args (unknown options already rejected above).
+    // The first "--" terminates option scanning; subsequent args are literal.
+    // Bare "-" is treated as a literal string (not an option).
     let mut end_of_opts = false;
     let mut output_args: Vec<&str> = Vec::new();
 
@@ -92,12 +97,10 @@ fn main() {
         }
 
         if arg == "--" {
-            // First "--" is consumed; subsequent args are literal
             end_of_opts = true;
             continue;
         }
 
-        // Regular argument (including bare "-", --unknown, -x)
         output_args.push(arg.as_str());
     }
 
