@@ -1338,16 +1338,21 @@ fn main() {
         }
     } else if let Err(e) = encode_streaming(&data, encoding, cli.wrap, &mut out) {
         if e.kind() == io::ErrorKind::BrokenPipe {
-            eprintln!("{}: write error: Broken pipe", TOOL_NAME);
+            // Use write_all for atomic stderr output — eprintln! can split
+            // format arguments across multiple write() syscalls, causing
+            // interleaving with other pipeline processes' output.
+            let msg = format!("{}: write error: Broken pipe\n", TOOL_NAME);
+            let _ = io::stderr().write_all(msg.as_bytes());
             process::exit(1);
         }
-        let msg = e.to_string();
-        eprintln!("{}: {}", TOOL_NAME, msg);
+        let msg = format!("{}: {}\n", TOOL_NAME, e);
+        let _ = io::stderr().write_all(msg.as_bytes());
         process::exit(1);
     }
 
     if let Err(e) = out.flush() {
-        eprintln!("{}: write error: {}", TOOL_NAME, e);
+        let msg = format!("{}: write error: {}\n", TOOL_NAME, e);
+        let _ = io::stderr().write_all(msg.as_bytes());
         process::exit(1);
     }
 }

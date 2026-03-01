@@ -395,20 +395,12 @@ fn collect_words_line(bytes: &[u8], ls: usize, le: usize, ctx: &mut FmtCtx) {
         }
         let space_count = i - space_start;
 
-        // Compute all flags in one pass
+        // Compute all flags in one pass (single backward scan for punctuation)
         let wb = unsafe { std::slice::from_raw_parts(ptr.add(word_start), wlen) };
         let mut flags = 0u32;
 
-        let (has_sent_punct, has_np_punct) = analyze_word_punct(wb);
-        if has_sent_punct {
-            flags |= PERIOD_FLAG;
-            // Check sentence-end context: at end of line or followed by 2+ spaces
-            if (i >= le || space_count >= 2) && is_sentence_end_contextual(wb) {
-                flags |= SENT_FLAG;
-            }
-        } else if has_np_punct {
-            flags |= PUNCT_FLAG;
-        }
+        let in_sent_ctx = i >= le || space_count >= 2;
+        flags |= classify_word_punct(wb, in_sent_ctx);
         if wlen > 0 && matches!(wb[0], b'(' | b'[' | b'{') {
             flags |= PAREN_FLAG;
         }
@@ -418,43 +410,40 @@ fn collect_words_line(bytes: &[u8], ls: usize, le: usize, ctx: &mut FmtCtx) {
     }
 }
 
-/// Analyze the trailing punctuation of a word in a single pass.
-/// Returns (has_sentence_punct, has_non_period_punct).
+/// Classify a word's trailing punctuation in a single backward scan.
+/// Combines what was previously two separate functions (analyze_word_punct +
+/// is_sentence_end_contextual) into one pass, avoiding redundant byte scanning.
+/// Returns the appropriate flag bits (PERIOD_FLAG, SENT_FLAG, PUNCT_FLAG).
 #[inline(always)]
-fn analyze_word_punct(bytes: &[u8]) -> (bool, bool) {
+fn classify_word_punct(bytes: &[u8], in_sentence_context: bool) -> u32 {
     let mut i = bytes.len();
+    // Strip trailing quotes/parens
     while i > 0 && matches!(bytes[i - 1], b'"' | b'\'' | b')' | b']') {
         i -= 1;
     }
     if i == 0 {
-        return (false, false);
+        return 0;
     }
     let c = bytes[i - 1];
-    (
-        c == b'.' || c == b'!' || c == b'?',
-        c == b',' || c == b';' || c == b':',
-    )
-}
-
-/// Check if a word ends a sentence (assuming it has sentence-ending punctuation).
-/// Strips trailing punctuation to find the core word; single uppercase letters
-/// are treated as abbreviations, not sentence ends.
-#[inline(always)]
-fn is_sentence_end_contextual(word_bytes: &[u8]) -> bool {
-    let mut end = word_bytes.len();
-    while end > 0
-        && matches!(
-            word_bytes[end - 1],
-            b'.' | b'!' | b'?' | b'"' | b'\'' | b')' | b']'
-        )
-    {
-        end -= 1;
+    if c == b'.' || c == b'!' || c == b'?' {
+        let mut flags = PERIOD_FLAG;
+        if in_sentence_context {
+            // Strip sentence-ending punctuation to find core word
+            let mut end = i;
+            while end > 0 && matches!(bytes[end - 1], b'.' | b'!' | b'?') {
+                end -= 1;
+            }
+            // Single uppercase letter = abbreviation, not sentence end
+            if !(end == 1 && bytes[0].is_ascii_uppercase()) && end > 0 {
+                flags |= SENT_FLAG;
+            }
+        }
+        flags
+    } else if c == b',' || c == b';' || c == b':' {
+        PUNCT_FLAG
+    } else {
+        0
     }
-    // Single uppercase letter followed by '.' is abbreviation
-    if end == 1 && word_bytes[0].is_ascii_uppercase() {
-        return false;
-    }
-    end > 0
 }
 
 /// Reflow words into lines that fit within the configured width.
@@ -512,6 +501,29 @@ fn reflow_paragraph<W: Write>(
     let best_ptr = ctx.best.as_mut_ptr();
     let line_len_ptr = ctx.line_len.as_mut_ptr();
 
+    // Precomputed division tables to avoid expensive integer division in the inner loop.
+    // div40k[len] = 40000 / (len + 2), div22k[len] = 22500 / (len + 2).
+    // Word lengths above 126 are clamped (extremely rare, cost difference negligible).
+    const LUT_SIZE: usize = 128;
+    let div40k: [i64; LUT_SIZE] = {
+        let mut t = [0i64; LUT_SIZE];
+        let mut k = 0;
+        while k < LUT_SIZE {
+            t[k] = 40000 / (k as i64 + 2);
+            k += 1;
+        }
+        t
+    };
+    let div22k: [i64; LUT_SIZE] = {
+        let mut t = [0i64; LUT_SIZE];
+        let mut k = 0;
+        while k < LUT_SIZE {
+            t[k] = 22500 / (k as i64 + 2);
+            k += 1;
+        }
+        t
+    };
+
     for i in (0..n).rev() {
         let base = if i == 0 { first_base } else { cont_base };
         let mut len = base + unsafe { (*winfo_ptr.add(i) & 0xFFFF) as usize };
@@ -563,16 +575,16 @@ fn reflow_paragraph<W: Write>(
                         } else if j > 0 {
                             let wjm1 = unsafe { *winfo_ptr.add(j - 1) };
                             if wjm1 & SENT_FLAG != 0 {
-                                let word_len = (wj & 0xFFFF) as i64;
-                                cost += 40000 / (word_len + 2);
+                                let wl = ((wj & 0xFFFF) as usize).min(LUT_SIZE - 1);
+                                cost += div40k[wl];
                             }
                         }
 
                         if wj1 & PAREN_FLAG != 0 {
                             cost -= PAREN_BONUS;
                         } else if wj1 & SENT_FLAG != 0 {
-                            let word_len = (wj1 & 0xFFFF) as i64;
-                            cost += 22500 / (word_len + 2);
+                            let wl = ((wj1 & 0xFFFF) as usize).min(LUT_SIZE - 1);
+                            cost += div22k[wl];
                         }
 
                         cost

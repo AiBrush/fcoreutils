@@ -333,10 +333,25 @@ fn read_full_block(reader: &mut dyn Read, buf: &mut [u8]) -> io::Result<usize> {
 /// Apply conversion options to a data block in-place.
 pub fn apply_conversions(data: &mut [u8], conv: &DdConv) {
     if conv.swab {
-        // Swap every pair of bytes
-        let pairs = data.len() / 2;
-        for i in 0..pairs {
-            data.swap(i * 2, i * 2 + 1);
+        // Swap every pair of bytes using u64 word-at-a-time processing.
+        // Process 8 bytes at a time: rotate each u16 pair within the u64.
+        let (prefix, chunks, suffix) = unsafe { data.align_to_mut::<u64>() };
+        // Handle unaligned prefix bytes
+        let pairs_pre = prefix.len() / 2;
+        for i in 0..pairs_pre {
+            prefix.swap(i * 2, i * 2 + 1);
+        }
+        // Process aligned u64 chunks: swap adjacent bytes in each pair
+        // For each u64 AABBCCDD_EEFFGGHH, we want BBAADDCC_FFEEHHGG
+        // This is: ((x & 0xFF00FF00FF00FF00) >> 8) | ((x & 0x00FF00FF00FF00FF) << 8)
+        for w in chunks.iter_mut() {
+            let x = *w;
+            *w = ((x & 0xFF00FF00FF00FF00) >> 8) | ((x & 0x00FF00FF00FF00FF) << 8);
+        }
+        // Handle remaining suffix bytes
+        let pairs_suf = suffix.len() / 2;
+        for i in 0..pairs_suf {
+            suffix.swap(i * 2, i * 2 + 1);
         }
     }
 
@@ -1093,21 +1108,43 @@ pub fn dd_copy(config: &DdConfig) -> io::Result<DdStats> {
             continue;
         }
 
-        obuf.extend_from_slice(write_data);
-        let mut consumed = 0;
-        while obuf.len() - consumed >= config.obs {
-            output.write_all(&obuf[consumed..consumed + config.obs])?;
-            stats.records_out_full += 1;
-            stats.bytes_copied += config.obs as u64;
-            consumed += config.obs;
-        }
-        if consumed > 0 {
-            // Shift remaining bytes to front (more efficient than drain for large buffers)
-            let remaining = obuf.len() - consumed;
-            if remaining > 0 {
-                obuf.copy_within(consumed.., 0);
+        // Append write_data to obuf and drain full output blocks.
+        // We write directly from write_data when possible to avoid copying
+        // through obuf. Only buffer the remainder that doesn't fill a block.
+        let obs = config.obs;
+        let mut wd_off = 0;
+
+        // If obuf has leftover bytes, try to complete a full block
+        if !obuf.is_empty() {
+            let need = obs - obuf.len();
+            if write_data.len() >= need {
+                obuf.extend_from_slice(&write_data[..need]);
+                output.write_all(&obuf)?;
+                stats.records_out_full += 1;
+                stats.bytes_copied += obs as u64;
+                obuf.clear();
+                wd_off = need;
+            } else {
+                obuf.extend_from_slice(write_data);
+                wd_off = write_data.len();
             }
-            obuf.truncate(remaining);
+        }
+
+        // Write full blocks directly from write_data (zero-copy)
+        let remaining_wd = &write_data[wd_off..];
+        let full_blocks = remaining_wd.len() / obs;
+        if full_blocks > 0 {
+            let full_len = full_blocks * obs;
+            output.write_all(&remaining_wd[..full_len])?;
+            stats.records_out_full += full_blocks as u64;
+            stats.bytes_copied += full_len as u64;
+            wd_off += full_len;
+        }
+
+        // Buffer any remaining partial block
+        let leftover = &write_data[wd_off..];
+        if !leftover.is_empty() {
+            obuf.extend_from_slice(leftover);
         }
     }
 
