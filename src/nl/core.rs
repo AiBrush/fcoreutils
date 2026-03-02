@@ -180,6 +180,125 @@ pub fn nl_to_vec(data: &[u8], config: &NlConfig) -> Vec<u8> {
     nl_to_vec_with_state(data, config, &mut line_number)
 }
 
+/// Check if config is the simple "number all lines" case suitable for fast path.
+#[inline]
+fn is_simple_number_all(config: &NlConfig) -> bool {
+    matches!(config.body_style, NumberingStyle::All)
+        && matches!(config.header_style, NumberingStyle::None)
+        && matches!(config.footer_style, NumberingStyle::None)
+        && config.join_blank_lines == 1
+        && config.line_increment == 1
+        && !config.no_renumber
+}
+
+/// Ultra-fast path for nl -b a: eliminates section delimiter checks and uses raw
+/// buffer writes. Handles all three number formats (Rn, Rz, Ln) in a single
+/// function to avoid code duplication.
+fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> Vec<u8> {
+    let alloc = (data.len() * 2 + 256).min(128 * 1024 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(alloc);
+
+    let width = config.number_width;
+    let sep = &config.number_separator;
+    let fmt = config.number_format;
+    let mut num = *line_number;
+    let mut pos: usize = 0;
+
+    // Inner write helper: formats number prefix + line content + newline.
+    // SAFETY: caller ensures output has capacity for total_len bytes at start_pos.
+    #[inline(always)]
+    unsafe fn write_numbered_line(
+        output: &mut Vec<u8>,
+        fmt: NumberFormat,
+        num_str: &str,
+        pad: usize,
+        sep: &[u8],
+        line_data: *const u8,
+        line_len: usize,
+    ) {
+        unsafe {
+            let prefix_len = pad + num_str.len() + sep.len();
+            let total_len = prefix_len + line_len + 1;
+            let start_pos = output.len();
+            let dst = output.as_mut_ptr().add(start_pos);
+
+            match fmt {
+                NumberFormat::Rn => {
+                    std::ptr::write_bytes(dst, b' ', pad);
+                    std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
+                }
+                NumberFormat::Rz => {
+                    std::ptr::write_bytes(dst, b'0', pad);
+                    std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
+                }
+                NumberFormat::Ln => {
+                    std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst, num_str.len());
+                    std::ptr::write_bytes(dst.add(num_str.len()), b' ', pad);
+                }
+            }
+            std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(pad + num_str.len()), sep.len());
+            std::ptr::copy_nonoverlapping(line_data, dst.add(prefix_len), line_len);
+            *dst.add(prefix_len + line_len) = b'\n';
+            output.set_len(start_pos + total_len);
+        }
+    }
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line_len = nl_pos - pos;
+        let needed = output.len() + line_len + width + sep.len() + 22;
+        if needed > output.capacity() {
+            output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
+        }
+
+        let mut num_buf = itoa::Buffer::new();
+        let num_str = num_buf.format(num);
+        let pad = width.saturating_sub(num_str.len());
+
+        unsafe {
+            write_numbered_line(
+                &mut output,
+                fmt,
+                num_str,
+                pad,
+                sep,
+                data.as_ptr().add(pos),
+                line_len,
+            );
+        }
+
+        num += 1;
+        pos = nl_pos + 1;
+    }
+
+    // Handle final line without trailing newline
+    if pos < data.len() {
+        let remaining = data.len() - pos;
+        let needed = output.len() + remaining + width + sep.len() + 22;
+        if needed > output.capacity() {
+            output.reserve(needed - output.capacity() + 1024);
+        }
+        let mut num_buf = itoa::Buffer::new();
+        let num_str = num_buf.format(num);
+        let pad = width.saturating_sub(num_str.len());
+
+        unsafe {
+            write_numbered_line(
+                &mut output,
+                fmt,
+                num_str,
+                pad,
+                sep,
+                data.as_ptr().add(pos),
+                remaining,
+            );
+        }
+        num += 1;
+    }
+
+    *line_number = num;
+    output
+}
+
 /// Build the nl output into a Vec, continuing numbering from `line_number`.
 /// Updates `line_number` in place so callers can continue across multiple files.
 pub fn nl_to_vec_with_state(data: &[u8], config: &NlConfig, line_number: &mut i64) -> Vec<u8> {
@@ -187,9 +306,17 @@ pub fn nl_to_vec_with_state(data: &[u8], config: &NlConfig, line_number: &mut i6
         return Vec::new();
     }
 
-    let estimated_lines = memchr::memchr_iter(b'\n', data).count() + 1;
-    let prefix_size = config.number_width + config.number_separator.len() + 2;
-    let mut output = Vec::with_capacity(data.len() + estimated_lines * prefix_size);
+    // Fast paths for common benchmark cases.
+    // Guard: skip fast path if data contains section delimiters (rare in practice).
+    let has_section_delims = !config.section_delimiter.is_empty()
+        && memchr::memmem::find(data, &config.section_delimiter).is_some();
+    if is_simple_number_all(config) && !has_section_delims {
+        return nl_number_all_fast(data, config, line_number);
+    }
+
+    // Generic path: pre-allocate generously instead of counting newlines
+    let alloc = (data.len() * 2 + 256).min(128 * 1024 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(alloc);
 
     let mut current_section = Section::Body;
     let mut consecutive_blanks: usize = 0;

@@ -48,7 +48,7 @@ pub struct CommResult {
 }
 
 /// Compare two byte slices, optionally case-insensitive (ASCII).
-#[inline]
+#[inline(always)]
 fn compare_lines(a: &[u8], b: &[u8], case_insensitive: bool) -> Ordering {
     if case_insensitive {
         for (&ca, &cb) in a.iter().zip(b.iter()) {
@@ -63,25 +63,43 @@ fn compare_lines(a: &[u8], b: &[u8], case_insensitive: bool) -> Ordering {
     }
 }
 
-/// Split data into lines by delimiter, using SIMD-accelerated scanning.
-/// Does NOT include a trailing empty line if data ends with the delimiter.
-fn split_lines<'a>(data: &'a [u8], delim: u8) -> Vec<&'a [u8]> {
-    if data.is_empty() {
-        return Vec::new();
+/// Find the next line from data starting at `pos`, delimited by `delim`.
+/// Returns (line_slice, next_pos). If no delimiter found, returns remaining data.
+#[inline(always)]
+fn next_line(data: &[u8], pos: usize, delim: u8) -> (&[u8], usize) {
+    let remaining = &data[pos..];
+    match memchr::memchr(delim, remaining) {
+        Some(offset) => (&data[pos..pos + offset], pos + offset + 1),
+        std::option::Option::None => (remaining, data.len()),
     }
-    let count = memchr::memchr_iter(delim, data).count();
-    let has_trailing = data.last() == Some(&delim);
-    let cap = if has_trailing { count } else { count + 1 };
-    let mut lines = Vec::with_capacity(cap);
-    let mut start = 0;
-    for pos in memchr::memchr_iter(delim, data) {
-        lines.push(&data[start..pos]);
-        start = pos + 1;
+}
+
+/// Write prefix + line + delimiter to buf using unsafe raw pointer writes.
+/// Caller must ensure buf has sufficient capacity.
+#[inline(always)]
+unsafe fn write_line(buf: &mut Vec<u8>, prefix: &[u8], line: &[u8], delim: u8) {
+    unsafe {
+        let start = buf.len();
+        let total = prefix.len() + line.len() + 1;
+        let dst = buf.as_mut_ptr().add(start);
+        if !prefix.is_empty() {
+            std::ptr::copy_nonoverlapping(prefix.as_ptr(), dst, prefix.len());
+        }
+        if !line.is_empty() {
+            std::ptr::copy_nonoverlapping(line.as_ptr(), dst.add(prefix.len()), line.len());
+        }
+        *dst.add(prefix.len() + line.len()) = delim;
+        buf.set_len(start + total);
     }
-    if start < data.len() {
-        lines.push(&data[start..]);
+}
+
+/// Ensure buf has at least `needed` bytes of spare capacity.
+#[inline(always)]
+fn ensure_capacity(buf: &mut Vec<u8>, needed: usize) {
+    let avail = buf.capacity() - buf.len();
+    if avail < needed {
+        buf.reserve(needed + 4 * 1024 * 1024);
     }
-    lines
 }
 
 /// Run the comm merge algorithm on two sorted inputs.
@@ -95,99 +113,148 @@ pub fn comm(
     let delim = if config.zero_terminated { b'\0' } else { b'\n' };
     let sep = config.output_delimiter.as_deref().unwrap_or(b"\t");
 
-    // Build column prefixes. Each shown column before the current one
-    // contributes one copy of the separator.
-    // Column 1: always empty prefix.
-    let prefix2: Vec<u8> = if !config.suppress_col1 {
+    // Build column prefixes.
+    let prefix1: &[u8] = &[];
+    let prefix2_owned: Vec<u8> = if !config.suppress_col1 {
         sep.to_vec()
     } else {
         Vec::new()
     };
-    let mut prefix3: Vec<u8> = Vec::new();
+    let mut prefix3_owned: Vec<u8> = Vec::new();
     if !config.suppress_col1 {
-        prefix3.extend_from_slice(sep);
+        prefix3_owned.extend_from_slice(sep);
     }
     if !config.suppress_col2 {
-        prefix3.extend_from_slice(sep);
+        prefix3_owned.extend_from_slice(sep);
     }
 
-    let lines1 = split_lines(data1, delim);
-    let lines2 = split_lines(data2, delim);
+    let show1 = !config.suppress_col1;
+    let show2 = !config.suppress_col2;
+    let show3 = !config.suppress_col3;
+    let ci = config.case_insensitive;
+    let check_order = config.order_check != OrderCheck::None;
+    let strict = config.order_check == OrderCheck::Strict;
 
-    let mut i1 = 0usize;
-    let mut i2 = 0usize;
+    // Pre-allocate output buffer generously
+    let total_input = data1.len() + data2.len();
+    let buf_cap = total_input.min(8 * 1024 * 1024);
+    let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
+    let flush_threshold = 4 * 1024 * 1024;
+
     let mut count1 = 0usize;
     let mut count2 = 0usize;
     let mut count3 = 0usize;
     let mut had_order_error = false;
     let mut warned1 = false;
     let mut warned2 = false;
-    let ci = config.case_insensitive;
 
-    let mut buf = Vec::with_capacity((data1.len() + data2.len()).min(4 * 1024 * 1024));
-    let flush_threshold = 4 * 1024 * 1024; // Flush output buffer at 4MB to limit memory
+    // Streaming merge: track position and previous line for each file
+    let mut pos1 = 0usize;
+    let mut pos2 = 0usize;
 
-    // Macro to check sort order of a file and handle warnings/errors.
-    macro_rules! check_order {
-        ($warned:ident, $lines:ident, $idx:ident, $file_num:expr) => {
-            if config.order_check != OrderCheck::None
-                && !$warned
-                && $idx > 0
-                && compare_lines($lines[$idx], $lines[$idx - 1], ci) == Ordering::Less
-            {
-                had_order_error = true;
-                $warned = true;
-                eprintln!("{}: file {} is not in sorted order", tool_name, $file_num);
-                if config.order_check == OrderCheck::Strict {
-                    out.write_all(&buf)?;
-                    return Ok(CommResult {
-                        count1,
-                        count2,
-                        count3,
-                        had_order_error,
-                    });
-                }
-            }
-        };
-    }
+    // Strip trailing delimiter to avoid empty final line
+    let len1 = if !data1.is_empty() && data1.last() == Some(&delim) {
+        data1.len() - 1
+    } else {
+        data1.len()
+    };
+    let len2 = if !data2.is_empty() && data2.last() == Some(&delim) {
+        data2.len() - 1
+    } else {
+        data2.len()
+    };
 
-    while i1 < lines1.len() && i2 < lines2.len() {
-        match compare_lines(lines1[i1], lines2[i2], ci) {
+    // Previous line tracking for order checking
+    let mut prev1: &[u8] = &[];
+    let mut has_prev1 = false;
+    let mut prev2: &[u8] = &[];
+    let mut has_prev2 = false;
+
+    // Main merge loop: both files have remaining lines
+    while pos1 < len1 && pos2 < len2 {
+        let (line1, next1) = next_line(&data1[..len1], pos1, delim);
+        let (line2, next2) = next_line(&data2[..len2], pos2, delim);
+
+        match compare_lines(line1, line2, ci) {
             Ordering::Less => {
-                // File1 line is unique — check file1 sort order before consuming
-                check_order!(warned1, lines1, i1, 1);
-                if !config.suppress_col1 {
-                    buf.extend_from_slice(lines1[i1]);
-                    buf.push(delim);
+                // Check file1 order
+                if check_order
+                    && !warned1
+                    && has_prev1
+                    && compare_lines(line1, prev1, ci) == Ordering::Less
+                {
+                    had_order_error = true;
+                    warned1 = true;
+                    eprintln!("{}: file {} is not in sorted order", tool_name, 1);
+                    if strict {
+                        out.write_all(&buf)?;
+                        return Ok(CommResult {
+                            count1,
+                            count2,
+                            count3,
+                            had_order_error,
+                        });
+                    }
+                }
+                if show1 {
+                    ensure_capacity(&mut buf, prefix1.len() + line1.len() + 1);
+                    unsafe {
+                        write_line(&mut buf, prefix1, line1, delim);
+                    }
                 }
                 count1 += 1;
-                i1 += 1;
+                prev1 = line1;
+                has_prev1 = true;
+                pos1 = next1;
             }
             Ordering::Greater => {
-                // File2 line is unique — check file2 sort order before consuming
-                check_order!(warned2, lines2, i2, 2);
-                if !config.suppress_col2 {
-                    buf.extend_from_slice(&prefix2);
-                    buf.extend_from_slice(lines2[i2]);
-                    buf.push(delim);
+                // Check file2 order
+                if check_order
+                    && !warned2
+                    && has_prev2
+                    && compare_lines(line2, prev2, ci) == Ordering::Less
+                {
+                    had_order_error = true;
+                    warned2 = true;
+                    eprintln!("{}: file {} is not in sorted order", tool_name, 2);
+                    if strict {
+                        out.write_all(&buf)?;
+                        return Ok(CommResult {
+                            count1,
+                            count2,
+                            count3,
+                            had_order_error,
+                        });
+                    }
+                }
+                if show2 {
+                    ensure_capacity(&mut buf, prefix2_owned.len() + line2.len() + 1);
+                    unsafe {
+                        write_line(&mut buf, &prefix2_owned, line2, delim);
+                    }
                 }
                 count2 += 1;
-                i2 += 1;
+                prev2 = line2;
+                has_prev2 = true;
+                pos2 = next2;
             }
             Ordering::Equal => {
-                // Lines match — no sort check needed (GNU comm behavior)
-                if !config.suppress_col3 {
-                    buf.extend_from_slice(&prefix3);
-                    buf.extend_from_slice(lines1[i1]);
-                    buf.push(delim);
+                if show3 {
+                    ensure_capacity(&mut buf, prefix3_owned.len() + line1.len() + 1);
+                    unsafe {
+                        write_line(&mut buf, &prefix3_owned, line1, delim);
+                    }
                 }
                 count3 += 1;
-                i1 += 1;
-                i2 += 1;
+                prev1 = line1;
+                has_prev1 = true;
+                prev2 = line2;
+                has_prev2 = true;
+                pos1 = next1;
+                pos2 = next2;
             }
         }
 
-        // Periodic flush to limit memory usage for large files
         if buf.len() >= flush_threshold {
             out.write_all(&buf)?;
             buf.clear();
@@ -195,16 +262,14 @@ pub fn comm(
     }
 
     // Drain remaining from file 1
-    while i1 < lines1.len() {
-        if config.order_check != OrderCheck::None
-            && !warned1
-            && i1 > 0
-            && compare_lines(lines1[i1], lines1[i1 - 1], ci) == Ordering::Less
+    while pos1 < len1 {
+        let (line1, next1) = next_line(&data1[..len1], pos1, delim);
+        if check_order && !warned1 && has_prev1 && compare_lines(line1, prev1, ci) == Ordering::Less
         {
             had_order_error = true;
             warned1 = true;
             eprintln!("{}: file 1 is not in sorted order", tool_name);
-            if config.order_check == OrderCheck::Strict {
+            if strict {
                 out.write_all(&buf)?;
                 return Ok(CommResult {
                     count1,
@@ -214,25 +279,31 @@ pub fn comm(
                 });
             }
         }
-        if !config.suppress_col1 {
-            buf.extend_from_slice(lines1[i1]);
-            buf.push(delim);
+        if show1 {
+            ensure_capacity(&mut buf, line1.len() + 1);
+            unsafe {
+                write_line(&mut buf, prefix1, line1, delim);
+            }
         }
         count1 += 1;
-        i1 += 1;
+        prev1 = line1;
+        has_prev1 = true;
+        pos1 = next1;
+        if buf.len() >= flush_threshold {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
     }
 
     // Drain remaining from file 2
-    while i2 < lines2.len() {
-        if config.order_check != OrderCheck::None
-            && !warned2
-            && i2 > 0
-            && compare_lines(lines2[i2], lines2[i2 - 1], ci) == Ordering::Less
+    while pos2 < len2 {
+        let (line2, next2) = next_line(&data2[..len2], pos2, delim);
+        if check_order && !warned2 && has_prev2 && compare_lines(line2, prev2, ci) == Ordering::Less
         {
             had_order_error = true;
             warned2 = true;
             eprintln!("{}: file 2 is not in sorted order", tool_name);
-            if config.order_check == OrderCheck::Strict {
+            if strict {
                 out.write_all(&buf)?;
                 return Ok(CommResult {
                     count1,
@@ -242,16 +313,23 @@ pub fn comm(
                 });
             }
         }
-        if !config.suppress_col2 {
-            buf.extend_from_slice(&prefix2);
-            buf.extend_from_slice(lines2[i2]);
-            buf.push(delim);
+        if show2 {
+            ensure_capacity(&mut buf, prefix2_owned.len() + line2.len() + 1);
+            unsafe {
+                write_line(&mut buf, &prefix2_owned, line2, delim);
+            }
         }
         count2 += 1;
-        i2 += 1;
+        prev2 = line2;
+        has_prev2 = true;
+        pos2 = next2;
+        if buf.len() >= flush_threshold {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
     }
 
-    // Total summary line — use itoa for fast integer formatting
+    // Total summary line
     if config.total {
         let mut itoa_buf = itoa::Buffer::new();
         buf.extend_from_slice(itoa_buf.format(count1).as_bytes());
@@ -264,7 +342,6 @@ pub fn comm(
         buf.push(delim);
     }
 
-    // In Default mode, print a final summary message (matches GNU comm behavior)
     if had_order_error && config.order_check == OrderCheck::Default {
         eprintln!("{}: input is not in sorted order", tool_name);
     }

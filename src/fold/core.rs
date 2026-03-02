@@ -43,28 +43,91 @@ fn fold_width_zero(data: &[u8], out: &mut impl Write) -> std::io::Result<()> {
 }
 
 /// Fast fold by byte count without -s flag.
-/// Uses memchr to find newlines, bulk-copies runs, inserts breaks at exact positions.
+/// Single-pass stream: copies data with newlines inserted every `width` bytes,
+/// resetting the counter at each existing newline. Uses unsafe pointer writes.
 fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
-    // Each line can have at most one extra newline inserted
-    let mut output = Vec::with_capacity(data.len() + data.len() / width + 1);
-    let mut pos: usize = 0;
+    // Pre-compute output size: count newlines to know how many breaks we add
+    let nl_count = memchr::memchr_iter(b'\n', data).count();
+    let content_bytes = data.len() - nl_count; // bytes that aren't newlines
+    // Worst case: every width bytes needs a new newline
+    let max_breaks = content_bytes / width;
+    let mut output: Vec<u8> = Vec::with_capacity(data.len() + max_breaks + 1);
 
-    while pos < data.len() {
-        // Find the next newline within the remaining data
-        let remaining = &data[pos..];
+    let mut col = 0usize;
+    let mut seg_start = 0usize;
 
-        match memchr::memchr(b'\n', remaining) {
-            Some(nl_offset) => {
-                // Process the segment up to (and including) the newline
-                let segment = &data[pos..pos + nl_offset + 1];
-                fold_segment_bytes(&mut output, segment, width);
-                pos += nl_offset + 1;
+    // Process using memchr to find newlines, then insert breaks within each segment
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let segment = &data[seg_start..nl_pos];
+        // Insert breaks every `width` bytes within this segment
+        let mut start = 0;
+        while start + width - col < segment.len() {
+            let chunk = width - col;
+            let needed = output.len() + chunk + 1;
+            if needed > output.capacity() {
+                output.reserve(needed - output.len() + 2 * 1024 * 1024);
             }
-            None => {
-                // No more newlines: process the rest
-                fold_segment_bytes(&mut output, &data[pos..], width);
-                break;
+            unsafe {
+                let wp = output.len();
+                std::ptr::copy_nonoverlapping(
+                    segment.as_ptr().add(start),
+                    output.as_mut_ptr().add(wp),
+                    chunk,
+                );
+                *output.as_mut_ptr().add(wp + chunk) = b'\n';
+                output.set_len(wp + chunk + 1);
             }
+            start += chunk;
+            col = 0;
+        }
+        // Copy remaining segment bytes + newline
+        let tail = segment.len() - start;
+        let needed = output.len() + tail + 1;
+        if needed > output.capacity() {
+            output.reserve(needed - output.len() + 1024 * 1024);
+        }
+        unsafe {
+            let wp = output.len();
+            if tail > 0 {
+                std::ptr::copy_nonoverlapping(
+                    segment.as_ptr().add(start),
+                    output.as_mut_ptr().add(wp),
+                    tail,
+                );
+            }
+            *output.as_mut_ptr().add(wp + tail) = b'\n';
+            output.set_len(wp + tail + 1);
+        }
+        col = 0;
+        seg_start = nl_pos + 1;
+    }
+
+    // Handle final segment without trailing newline
+    if seg_start < data.len() {
+        let segment = &data[seg_start..];
+        let mut start = 0;
+        while start + width - col < segment.len() {
+            let chunk = width - col;
+            let needed = output.len() + chunk + 1;
+            if needed > output.capacity() {
+                output.reserve(needed - output.len() + 1024 * 1024);
+            }
+            unsafe {
+                let wp = output.len();
+                std::ptr::copy_nonoverlapping(
+                    segment.as_ptr().add(start),
+                    output.as_mut_ptr().add(wp),
+                    chunk,
+                );
+                *output.as_mut_ptr().add(wp + chunk) = b'\n';
+                output.set_len(wp + chunk + 1);
+            }
+            start += chunk;
+            col = 0;
+        }
+        let tail = segment.len() - start;
+        if tail > 0 {
+            output.extend_from_slice(&segment[start..]);
         }
     }
 
@@ -136,26 +199,58 @@ fn fold_segment_bytes_spaces(output: &mut Vec<u8>, segment: &[u8], width: usize)
 }
 
 /// Fold a single line segment (no internal newlines except possibly trailing) by bytes.
+/// Uses unsafe raw pointer writes to eliminate per-chunk bounds checking.
 #[inline]
 fn fold_segment_bytes(output: &mut Vec<u8>, segment: &[u8], width: usize) {
     debug_assert!(
         !segment[..segment.len().saturating_sub(1)].contains(&b'\n'),
         "fold_segment_bytes: invariant violated — internal newline in segment"
     );
-    let mut start = 0;
-    while start + width < segment.len() {
-        // SAFETY: loop guard ensures start + width < segment.len()
-        if segment[start + width] == b'\n' {
-            output.extend_from_slice(&segment[start..start + width + 1]);
-            return;
+    // Pre-compute output size: each width-byte chunk gets a newline appended
+    let breaks = if segment.last() == Some(&b'\n') {
+        // Trailing newline: don't count it in break calculation
+        let content_len = segment.len() - 1;
+        if content_len > width {
+            (content_len - 1) / width
+        } else {
+            0
         }
-        output.extend_from_slice(&segment[start..start + width]);
-        output.push(b'\n');
-        start += width;
+    } else if segment.len() > width {
+        (segment.len() - 1) / width
+    } else {
+        0
+    };
+    let needed = output.len() + segment.len() + breaks;
+    if needed > output.capacity() {
+        output.reserve(needed - output.len() + 1024 * 1024);
     }
-    // Remaining bytes
-    if start < segment.len() {
-        output.extend_from_slice(&segment[start..]);
+
+    let mut start = 0;
+    unsafe {
+        let base = output.as_mut_ptr();
+        let mut wp = output.len();
+        let src = segment.as_ptr();
+
+        while start + width < segment.len() {
+            if *src.add(start + width) == b'\n' {
+                std::ptr::copy_nonoverlapping(src.add(start), base.add(wp), width + 1);
+                wp += width + 1;
+                output.set_len(wp);
+                return;
+            }
+            std::ptr::copy_nonoverlapping(src.add(start), base.add(wp), width);
+            wp += width;
+            *base.add(wp) = b'\n';
+            wp += 1;
+            start += width;
+        }
+        // Remaining bytes
+        let tail = segment.len() - start;
+        if tail > 0 {
+            std::ptr::copy_nonoverlapping(src.add(start), base.add(wp), tail);
+            wp += tail;
+        }
+        output.set_len(wp);
     }
 }
 
@@ -169,33 +264,46 @@ fn fold_column_mode(data: &[u8], width: usize, break_at_spaces: bool, output: &m
 
     let mut pos = 0;
 
-    while pos < data.len() {
-        // Find the next newline using SIMD
-        let remaining = &data[pos..];
-        let line_end = memchr::memchr(b'\n', remaining).map(|p| pos + p);
-        let line_data = match line_end {
-            Some(nl) => &data[pos..nl],
-            None => &data[pos..],
-        };
+    // Batch consecutive short lines that fit within width for bulk copy.
+    // Only check is_ascii_simple when a line exceeds width.
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line_data = &data[pos..nl_pos];
 
-        // Fast path: pure ASCII, no tabs/backspaces — column == byte count
-        if is_ascii_simple(line_data) {
-            if line_data.len() <= width {
-                // Short line: no wrapping needed
-                output.extend_from_slice(line_data);
-            } else {
-                fold_segment_bytes(output, line_data, width);
+        if line_data.len() <= width {
+            // Short line: no wrapping needed, copy as-is + newline
+            let needed = output.len() + line_data.len() + 1;
+            if needed > output.capacity() {
+                output.reserve(needed - output.len() + 2 * 1024 * 1024);
             }
+            unsafe {
+                let wp = output.len();
+                let base = output.as_mut_ptr();
+                std::ptr::copy_nonoverlapping(line_data.as_ptr(), base.add(wp), line_data.len());
+                *base.add(wp + line_data.len()) = b'\n';
+                output.set_len(wp + line_data.len() + 1);
+            }
+        } else if is_ascii_simple(line_data) {
+            // Long ASCII-simple line: byte count == column count
+            fold_segment_bytes(output, line_data, width);
+            output.push(b'\n');
         } else {
             // Slow path: process character by character for this line
             fold_one_line_column(line_data, width, false, output);
+            output.push(b'\n');
         }
 
-        if let Some(nl) = line_end {
-            output.push(b'\n');
-            pos = nl + 1;
+        pos = nl_pos + 1;
+    }
+
+    // Handle final line without trailing newline
+    if pos < data.len() {
+        let line_data = &data[pos..];
+        if line_data.len() <= width {
+            output.extend_from_slice(line_data);
+        } else if is_ascii_simple(line_data) {
+            fold_segment_bytes(output, line_data, width);
         } else {
-            break;
+            fold_one_line_column(line_data, width, false, output);
         }
     }
 }
