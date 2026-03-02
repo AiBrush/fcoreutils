@@ -225,30 +225,18 @@ fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> 
             match fmt {
                 NumberFormat::Rn => {
                     std::ptr::write_bytes(dst, b' ', pad);
-                    std::ptr::copy_nonoverlapping(
-                        num_str.as_ptr(),
-                        dst.add(pad),
-                        num_str.len(),
-                    );
+                    std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
                 }
                 NumberFormat::Rz => {
                     std::ptr::write_bytes(dst, b'0', pad);
-                    std::ptr::copy_nonoverlapping(
-                        num_str.as_ptr(),
-                        dst.add(pad),
-                        num_str.len(),
-                    );
+                    std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
                 }
                 NumberFormat::Ln => {
                     std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst, num_str.len());
                     std::ptr::write_bytes(dst.add(num_str.len()), b' ', pad);
                 }
             }
-            std::ptr::copy_nonoverlapping(
-                sep.as_ptr(),
-                dst.add(pad + num_str.len()),
-                sep.len(),
-            );
+            std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(pad + num_str.len()), sep.len());
             std::ptr::copy_nonoverlapping(line_data, dst.add(prefix_len), line_len);
             *dst.add(prefix_len + line_len) = b'\n';
             output.set_len(start_pos + total_len);
