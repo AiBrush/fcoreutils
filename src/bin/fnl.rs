@@ -441,8 +441,7 @@ fn main() {
             }
         };
 
-        let output = nl::nl_to_vec_with_state(&data, &cli.config, &mut line_number);
-        if let Err(e) = write_all_raw(&output) {
+        if let Err(e) = write_nl_output(&data, &cli.config, &mut line_number) {
             if e.kind() == std::io::ErrorKind::BrokenPipe {
                 process::exit(0);
             }
@@ -456,42 +455,30 @@ fn main() {
     }
 }
 
-/// Write the full buffer to stdout, retrying on partial/interrupted writes.
+/// Stream nl output to stdout. On unix, uses the batched streaming path that
+/// writes ~1MB chunks directly via raw write() syscalls, avoiding both huge
+/// memory allocation and per-line syscall overhead. On non-unix, falls back
+/// to building the full Vec then writing through BufWriter.
 #[cfg(unix)]
-fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
-    let mut written = 0;
-    while written < data.len() {
-        let ret = unsafe {
-            libc::write(
-                1,
-                data[written..].as_ptr() as *const libc::c_void,
-                (data.len() - written) as _,
-            )
-        };
-        if ret > 0 {
-            written += ret as usize;
-        } else if ret == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "write returned 0",
-            ));
-        } else {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-    }
-    Ok(())
+fn write_nl_output(
+    data: &[u8],
+    config: &nl::NlConfig,
+    line_number: &mut i64,
+) -> std::io::Result<()> {
+    nl::nl_stream_with_state(data, config, line_number, 1)
 }
 
 #[cfg(not(unix))]
-fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
+fn write_nl_output(
+    data: &[u8],
+    config: &nl::NlConfig,
+    line_number: &mut i64,
+) -> std::io::Result<()> {
     use std::io::Write;
+    let output = nl::nl_to_vec_with_state(data, config, line_number);
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::with_capacity(256 * 1024, stdout.lock());
-    out.write_all(data)?;
+    out.write_all(&output)?;
     out.flush()
 }
 
