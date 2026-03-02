@@ -510,8 +510,13 @@ fn unexpand_regular_fast(
                 pos += 1;
                 continue;
             }
-            // Non-blank: exit initial-blank loop → body mode
-            break;
+            // Non-blank: fall through to body mode.
+            // Value is used by control flow (skips re-entry on same iteration)
+            // but body code always resets to true, so clippy sees it as dead.
+            #[allow(unused_assignments)]
+            {
+                in_initial = false;
+            }
         }
 
         // Body of line: bulk copy until newline (default mode)
