@@ -322,49 +322,6 @@ fn leading_indent(line: &str) -> &str {
     &line[..line.len() - trimmed.len()]
 }
 
-/// Collect words from all lines in a paragraph region, computing all flags in one pass.
-/// Stores byte offsets + packed winfo in ctx. No intermediate Vec<&str> or Vec<bool>.
-fn collect_words_from_region(
-    bytes: &[u8],
-    region: &[u8],
-    start: usize,
-    prefix: Option<&str>,
-    ctx: &mut FmtCtx,
-) {
-    let rlen = region.len();
-    let mut pos = 0;
-    let pfx_len = prefix.map_or(0, |p| p.len());
-
-    while pos < rlen {
-        let nl = memchr::memchr(b'\n', &region[pos..])
-            .map(|p| pos + p)
-            .unwrap_or(rlen);
-        let mut le = nl;
-        if le > pos && region[le - 1] == b'\r' {
-            le -= 1;
-        }
-        if le > pos {
-            let line_start = start + pos;
-            let line_end = start + le;
-
-            // Strip prefix
-            let ls = if pfx_len > 0 && le - pos >= pfx_len {
-                let pfx_bytes = prefix.unwrap().as_bytes();
-                if &bytes[line_start..line_start + pfx_len] == pfx_bytes {
-                    line_start + pfx_len
-                } else {
-                    line_start
-                }
-            } else {
-                line_start
-            };
-
-            collect_words_line(bytes, ls, line_end, ctx);
-        }
-        pos = nl + 1;
-    }
-}
-
 /// Collect words from a single line [ls..le) in the source bytes.
 /// Computes all flags (SENT, PERIOD, PUNCT, PAREN) during collection.
 /// Uses SIMD memchr for space scanning when possible, falling back to

@@ -216,29 +216,43 @@ fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> 
         line_data: *const u8,
         line_len: usize,
     ) {
-        let prefix_len = pad + num_str.len() + sep.len();
-        let total_len = prefix_len + line_len + 1;
-        let start_pos = output.len();
-        let dst = output.as_mut_ptr().add(start_pos);
+        unsafe {
+            let prefix_len = pad + num_str.len() + sep.len();
+            let total_len = prefix_len + line_len + 1;
+            let start_pos = output.len();
+            let dst = output.as_mut_ptr().add(start_pos);
 
-        match fmt {
-            NumberFormat::Rn => {
-                std::ptr::write_bytes(dst, b' ', pad);
-                std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
+            match fmt {
+                NumberFormat::Rn => {
+                    std::ptr::write_bytes(dst, b' ', pad);
+                    std::ptr::copy_nonoverlapping(
+                        num_str.as_ptr(),
+                        dst.add(pad),
+                        num_str.len(),
+                    );
+                }
+                NumberFormat::Rz => {
+                    std::ptr::write_bytes(dst, b'0', pad);
+                    std::ptr::copy_nonoverlapping(
+                        num_str.as_ptr(),
+                        dst.add(pad),
+                        num_str.len(),
+                    );
+                }
+                NumberFormat::Ln => {
+                    std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst, num_str.len());
+                    std::ptr::write_bytes(dst.add(num_str.len()), b' ', pad);
+                }
             }
-            NumberFormat::Rz => {
-                std::ptr::write_bytes(dst, b'0', pad);
-                std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
-            }
-            NumberFormat::Ln => {
-                std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst, num_str.len());
-                std::ptr::write_bytes(dst.add(num_str.len()), b' ', pad);
-            }
+            std::ptr::copy_nonoverlapping(
+                sep.as_ptr(),
+                dst.add(pad + num_str.len()),
+                sep.len(),
+            );
+            std::ptr::copy_nonoverlapping(line_data, dst.add(prefix_len), line_len);
+            *dst.add(prefix_len + line_len) = b'\n';
+            output.set_len(start_pos + total_len);
         }
-        std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(pad + num_str.len()), sep.len());
-        std::ptr::copy_nonoverlapping(line_data, dst.add(prefix_len), line_len);
-        *dst.add(prefix_len + line_len) = b'\n';
-        output.set_len(start_pos + total_len);
     }
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
