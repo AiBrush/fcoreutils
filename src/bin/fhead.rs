@@ -347,12 +347,8 @@ mod tests {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"line1\nline2\n")
-            .unwrap();
+        // write may fail with BrokenPipe since -n 0 causes immediate exit
+        let _ = child.stdin.take().unwrap().write_all(b"line1\nline2\n");
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         assert!(output.stdout.is_empty());
