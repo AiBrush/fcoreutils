@@ -3,6 +3,26 @@ use std::path::Path;
 
 use crate::common::io::{read_file, read_stdin};
 
+/// Errors specific to the plain-file fast path on Linux.
+/// Separates directory/same-file detection from I/O errors so callers
+/// can emit GNU-compatible diagnostics without redundant syscalls.
+#[cfg(target_os = "linux")]
+pub enum CatPlainError {
+    /// The path is a directory
+    IsDirectory,
+    /// Input file is the same as stdout (e.g. `cat file >> file`)
+    InputIsOutput,
+    /// Regular I/O error
+    Io(io::Error),
+}
+
+#[cfg(target_os = "linux")]
+impl From<io::Error> for CatPlainError {
+    fn from(e: io::Error) -> Self {
+        CatPlainError::Io(e)
+    }
+}
+
 /// Configuration for cat
 #[derive(Clone, Debug, Default)]
 pub struct CatConfig {
@@ -27,8 +47,17 @@ impl CatConfig {
 }
 
 /// Zero-copy file→stdout on Linux using splice, copy_file_range, or fast read/write.
+/// Also performs directory check and input==output detection using the fstat results
+/// to avoid redundant syscalls in the caller.
+///
+/// Returns:
+///   Ok(true)  — file was fully handled
+///   Ok(false) — caller should fall back to generic path
+///   Err(CatPlainError::IsDirectory)    — path is a directory
+///   Err(CatPlainError::InputIsOutput)  — input file is the same as stdout
+///   Err(CatPlainError::Io(e))          — I/O error
 #[cfg(target_os = "linux")]
-pub fn cat_plain_file_linux(path: &Path) -> io::Result<bool> {
+pub fn cat_plain_file_linux(path: &Path) -> Result<bool, CatPlainError> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
@@ -39,17 +68,42 @@ pub fn cat_plain_file_linux(path: &Path) -> io::Result<bool> {
         .or_else(|_| std::fs::File::open(path))?;
 
     let in_fd = file.as_raw_fd();
-    let metadata = file.metadata()?;
-    let file_size = metadata.len() as usize;
+
+    // Single fstat(file_fd) — replaces both stat(path) calls in the caller
+    let mut in_stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(in_fd, &mut in_stat) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+
+    let in_mode = in_stat.st_mode & libc::S_IFMT;
+
+    // Directory check (replaces stat(path).is_dir() in caller)
+    if in_mode == libc::S_IFDIR {
+        return Err(CatPlainError::IsDirectory);
+    }
+
+    // Single fstat(stdout) — replaces the fstat(1) in caller AND the one we did below
+    let stdout = io::stdout();
+    let out_fd = stdout.as_raw_fd();
+    let mut out_stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(out_fd, &mut out_stat) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+
+    // Same-file detection (replaces dev/ino comparison in caller)
+    if in_stat.st_dev == out_stat.st_dev && in_stat.st_ino == out_stat.st_ino {
+        return Err(CatPlainError::InputIsOutput);
+    }
+
+    let file_size = in_stat.st_size as usize;
 
     if file_size == 0 {
         // May be a virtual file (e.g. /proc/*) with size 0 but actual content
-        if !metadata.file_type().is_file() {
+        if in_mode != libc::S_IFREG {
             return Ok(false); // let generic path handle devices/special files
         }
         // Try reading — virtual files report size 0
         let mut buf = [0u8; 65536];
-        let stdout = io::stdout();
         let mut out = stdout.lock();
         loop {
             let n = match nix_read(in_fd, &mut buf) {
@@ -68,13 +122,7 @@ pub fn cat_plain_file_linux(path: &Path) -> io::Result<bool> {
         libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
     }
 
-    let stdout = io::stdout();
-    let out_fd = stdout.as_raw_fd();
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(out_fd, &mut stat) } != 0 {
-        return Ok(false);
-    }
-    let stdout_mode = stat.st_mode & libc::S_IFMT;
+    let stdout_mode = out_stat.st_mode & libc::S_IFMT;
 
     if stdout_mode == libc::S_IFIFO {
         // stdout is a pipe → splice (zero-copy file→pipe)
@@ -101,7 +149,7 @@ pub fn cat_plain_file_linux(path: &Path) -> io::Result<bool> {
                     continue;
                 }
                 // splice not supported — fall through to read/write
-                return cat_readwrite(in_fd, stdout.lock());
+                return Ok(cat_readwrite(in_fd, stdout.lock())?);
             }
         }
         return Ok(true);
@@ -127,14 +175,14 @@ pub fn cat_plain_file_linux(path: &Path) -> io::Result<bool> {
                     continue;
                 }
                 // copy_file_range not supported — fall through to read/write
-                return cat_readwrite(in_fd, stdout.lock());
+                return Ok(cat_readwrite(in_fd, stdout.lock())?);
             }
         }
         return Ok(true);
     }
 
     // stdout is /dev/null, socket, or other — use fast read/write loop
-    cat_readwrite(in_fd, stdout.lock())
+    Ok(cat_readwrite(in_fd, stdout.lock())?)
 }
 
 /// Fast read/write loop using raw fds and a 256KB page-aligned buffer.
@@ -165,15 +213,19 @@ fn nix_read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     }
 }
 
-/// Plain cat for a single file — tries zero-copy, then falls back to read/write loop
+/// Plain cat for a single file — tries zero-copy, then falls back to read/write loop.
+/// Note: On Linux, callers that need directory/same-file detection should call
+/// cat_plain_file_linux directly to avoid redundant syscalls.
 pub fn cat_plain_file(path: &Path, out: &mut impl Write) -> io::Result<bool> {
     #[cfg(target_os = "linux")]
     {
         match cat_plain_file_linux(path) {
             Ok(true) => return Ok(true),
             Ok(false) => {}
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Err(e),
-            Err(_) => {} // fall through to generic path
+            Err(CatPlainError::Io(e)) if e.kind() == io::ErrorKind::BrokenPipe => {
+                return Err(e);
+            }
+            Err(_) => {} // fall through to generic path (includes IsDirectory, InputIsOutput)
         }
     }
 
@@ -863,6 +915,86 @@ pub fn cat_file(
     } else {
         let path = Path::new(filename);
 
+        if config.is_plain() {
+            // On Linux, cat_plain_file_linux handles directory check and same-file
+            // detection inside its own fstat calls, avoiding redundant syscalls.
+            #[cfg(target_os = "linux")]
+            {
+                match cat_plain_file_linux(path) {
+                    Ok(true) => return Ok(true),
+                    Ok(false) => {
+                        // Fallback to generic path — still need dir/same-file checks
+                        // since the generic path doesn't do them.
+                    }
+                    Err(CatPlainError::IsDirectory) => {
+                        eprintln!("{}: {}: Is a directory", tool_name, filename);
+                        return Ok(false);
+                    }
+                    Err(CatPlainError::InputIsOutput) => {
+                        eprintln!("{}: {}: input file is output file", tool_name, filename);
+                        return Ok(false);
+                    }
+                    Err(CatPlainError::Io(e)) if e.kind() == io::ErrorKind::BrokenPipe => {
+                        std::process::exit(0);
+                    }
+                    Err(CatPlainError::Io(e)) => {
+                        eprintln!(
+                            "{}: {}: {}",
+                            tool_name,
+                            filename,
+                            crate::common::io_error_msg(&e)
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+
+            // Non-Linux plain path or Linux fallback (Ok(false) from above)
+            // Need to do directory/same-file checks here for the generic fallback
+            match std::fs::metadata(path) {
+                Ok(meta) if meta.is_dir() => {
+                    eprintln!("{}: {}: Is a directory", tool_name, filename);
+                    return Ok(false);
+                }
+                _ => {}
+            }
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if let Ok(file_meta) = std::fs::metadata(path) {
+                    let mut stdout_stat: libc::stat = unsafe { std::mem::zeroed() };
+                    if unsafe { libc::fstat(1, &mut stdout_stat) } == 0
+                        && file_meta.dev() == stdout_stat.st_dev as u64
+                        && file_meta.ino() == stdout_stat.st_ino as u64
+                    {
+                        eprintln!("{}: {}: input file is output file", tool_name, filename);
+                        return Ok(false);
+                    }
+                }
+            }
+
+            // Generic fallback: read file + write
+            match read_file(path) {
+                Ok(data) => {
+                    if !data.is_empty() {
+                        out.write_all(&data)?;
+                    }
+                    return Ok(true);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{}: {}: {}",
+                        tool_name,
+                        filename,
+                        crate::common::io_error_msg(&e)
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Non-plain path: need directory check and same-file detection before processing
         // Check if it's a directory
         match std::fs::metadata(path) {
             Ok(meta) if meta.is_dir() => {
@@ -883,25 +1015,6 @@ pub fn cat_file(
                     && file_meta.ino() == stdout_stat.st_ino as u64
                 {
                     eprintln!("{}: {}: input file is output file", tool_name, filename);
-                    return Ok(false);
-                }
-            }
-        }
-
-        if config.is_plain() {
-            match cat_plain_file(path, out) {
-                Ok(true) => return Ok(true),
-                Ok(false) => {} // fall through
-                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "{}: {}: {}",
-                        tool_name,
-                        filename,
-                        crate::common::io_error_msg(&e)
-                    );
                     return Ok(false);
                 }
             }
