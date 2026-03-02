@@ -45,6 +45,7 @@ mod openssl_evp {
         evp_sha256: FnEvpMdGetter,
         evp_sha384: FnEvpMdGetter,
         evp_sha512: FnEvpMdGetter,
+        evp_blake2b512: Option<FnEvpMdGetter>, // OpenSSL 3.0+ only
         evp_md_ctx_new: FnEvpMdCtxNew,
         evp_digest_init_ex: FnEvpDigestInitEx,
         evp_digest_update: FnEvpDigestUpdate,
@@ -113,6 +114,9 @@ mod openssl_evp {
                 std::mem::transmute(dlsym_checked(handle, c"EVP_sha384")?);
             let evp_sha512: FnEvpMdGetter =
                 std::mem::transmute(dlsym_checked(handle, c"EVP_sha512")?);
+            // BLAKE2b512 is optional — only available in OpenSSL 3.0+
+            let evp_blake2b512: Option<FnEvpMdGetter> =
+                dlsym_checked(handle, c"EVP_blake2b512").map(|p| std::mem::transmute(p));
             let evp_md_ctx_new: FnEvpMdCtxNew =
                 std::mem::transmute(dlsym_checked(handle, c"EVP_MD_CTX_new")?);
             let evp_digest_init_ex: FnEvpDigestInitEx =
@@ -134,6 +138,7 @@ mod openssl_evp {
                 evp_sha256,
                 evp_sha384,
                 evp_sha512,
+                evp_blake2b512,
                 evp_md_ctx_new,
                 evp_digest_init_ex,
                 evp_digest_update,
@@ -178,6 +183,7 @@ mod openssl_evp {
         Sha256,
         Sha384,
         Sha512,
+        Blake2b512,
     }
 
     impl EvpAlgorithm {
@@ -188,7 +194,7 @@ mod openssl_evp {
                 EvpAlgorithm::Sha224 => 28,
                 EvpAlgorithm::Sha256 => 32,
                 EvpAlgorithm::Sha384 => 48,
-                EvpAlgorithm::Sha512 => 64,
+                EvpAlgorithm::Sha512 | EvpAlgorithm::Blake2b512 => 64,
             }
         }
 
@@ -201,9 +207,15 @@ mod openssl_evp {
                     EvpAlgorithm::Sha256 => (fns.evp_sha256)(),
                     EvpAlgorithm::Sha384 => (fns.evp_sha384)(),
                     EvpAlgorithm::Sha512 => (fns.evp_sha512)(),
+                    EvpAlgorithm::Blake2b512 => (fns.evp_blake2b512.unwrap())(),
                 }
             }
         }
+    }
+
+    /// Check if BLAKE2b512 is available via OpenSSL EVP.
+    pub fn has_blake2b512() -> bool {
+        get_fns().map_or(false, |fns| fns.evp_blake2b512.is_some())
     }
 
     /// Single-shot hash of a byte slice using OpenSSL EVP.
@@ -724,6 +736,12 @@ pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> io::Result<String> {
         HashAlgorithm::Sha512 => sha512_bytes(data),
         HashAlgorithm::Md5 => md5_bytes(data),
         HashAlgorithm::Blake2b => {
+            // Try OpenSSL EVP BLAKE2b512 first (available in OpenSSL 3.0+)
+            #[cfg(target_os = "linux")]
+            if openssl_evp::has_blake2b512() {
+                let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Blake2b512, data)?;
+                return Ok(hex_encode(&digest));
+            }
             let hash = blake2b_simd::blake2b(data);
             Ok(hex_encode(hash.as_bytes()))
         }
@@ -778,6 +796,12 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io
             Ok(128)
         }
         HashAlgorithm::Blake2b => {
+            #[cfg(target_os = "linux")]
+            if openssl_evp::has_blake2b512() {
+                let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Blake2b512, data)?;
+                hex_encode_to_slice(&digest, out);
+                return Ok(128);
+            }
             let hash = blake2b_simd::blake2b(data);
             let bytes = hash.as_bytes();
             hex_encode_to_slice(bytes, out);
@@ -931,7 +955,15 @@ pub fn hash_reader<R: Read>(algo: HashAlgorithm, reader: R) -> io::Result<String
         HashAlgorithm::Sha384 => sha384_reader(reader),
         HashAlgorithm::Sha512 => sha512_reader(reader),
         HashAlgorithm::Md5 => md5_reader(reader),
-        HashAlgorithm::Blake2b => blake2b_hash_reader(reader, 64),
+        HashAlgorithm::Blake2b => {
+            #[cfg(target_os = "linux")]
+            if openssl_evp::has_blake2b512() {
+                let digest =
+                    openssl_evp::hash_reader(openssl_evp::EvpAlgorithm::Blake2b512, reader)?;
+                return Ok(hex_encode(&digest));
+            }
+            blake2b_hash_reader(reader, 64)
+        }
     }
 }
 
@@ -1120,7 +1152,13 @@ fn hash_file_pipelined_read(
         HashAlgorithm::Sha256 => Some(openssl_evp::EvpAlgorithm::Sha256),
         HashAlgorithm::Sha384 => Some(openssl_evp::EvpAlgorithm::Sha384),
         HashAlgorithm::Sha512 => Some(openssl_evp::EvpAlgorithm::Sha512),
-        HashAlgorithm::Blake2b => None,
+        HashAlgorithm::Blake2b => {
+            if openssl_evp::has_blake2b512() {
+                Some(openssl_evp::EvpAlgorithm::Blake2b512)
+            } else {
+                None
+            }
+        }
     };
 
     let hash_result: io::Result<String> = if let Some(evp) =
@@ -2323,22 +2361,35 @@ fn hash_stream_with_prefix(
     prefix: &[u8],
     mut file: File,
 ) -> io::Result<String> {
-    // Blake2b uses its own hasher on all platforms
+    // Blake2b: use blake2b_simd unless OpenSSL BLAKE2b512 is available (Linux only)
     if matches!(algo, HashAlgorithm::Blake2b) {
-        let mut state = blake2b_simd::Params::new().to_state();
-        state.update(prefix);
-        return STREAM_BUF.with(|cell| {
-            let mut buf = cell.borrow_mut();
-            ensure_stream_buf(&mut buf);
-            loop {
-                let n = read_full(&mut file, &mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                state.update(&buf[..n]);
+        let use_openssl = {
+            #[cfg(target_os = "linux")]
+            {
+                openssl_evp::has_blake2b512() && openssl_evp::is_available()
             }
-            Ok(hex_encode(state.finalize().as_bytes()))
-        });
+            #[cfg(not(target_os = "linux"))]
+            {
+                false
+            }
+        };
+        if !use_openssl {
+            let mut state = blake2b_simd::Params::new().to_state();
+            state.update(prefix);
+            return STREAM_BUF.with(|cell| {
+                let mut buf = cell.borrow_mut();
+                ensure_stream_buf(&mut buf);
+                loop {
+                    let n = read_full(&mut file, &mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    state.update(&buf[..n]);
+                }
+                Ok(hex_encode(state.finalize().as_bytes()))
+            });
+        }
+        // Fall through to OpenSSL dispatch below
     }
 
     // On Linux, try OpenSSL for all supported algorithms
@@ -2351,7 +2402,13 @@ fn hash_stream_with_prefix(
             HashAlgorithm::Sha256 => Some(openssl_evp::EvpAlgorithm::Sha256),
             HashAlgorithm::Sha384 => Some(openssl_evp::EvpAlgorithm::Sha384),
             HashAlgorithm::Sha512 => Some(openssl_evp::EvpAlgorithm::Sha512),
-            HashAlgorithm::Blake2b => None,
+            HashAlgorithm::Blake2b => {
+                if openssl_evp::has_blake2b512() {
+                    Some(openssl_evp::EvpAlgorithm::Blake2b512)
+                } else {
+                    None
+                }
+            }
         };
         if let Some(evp) = evp_algo.filter(|_| openssl_evp::is_available()) {
             let digest = openssl_evp::hash_reader_with_prefix(evp, prefix, file)?;
@@ -2377,7 +2434,23 @@ fn hash_stream_with_prefix(
         HashAlgorithm::Sha512 => hash_stream_with_prefix_ring(&ring::digest::SHA512, prefix, file),
         #[cfg(target_vendor = "apple")]
         HashAlgorithm::Sha512 => hash_stream_with_prefix_digest::<sha2::Sha512>(prefix, file),
-        HashAlgorithm::Blake2b => unreachable!(),
+        HashAlgorithm::Blake2b => {
+            // Fallback to blake2b_simd if OpenSSL path was not taken
+            let mut state = blake2b_simd::Params::new().to_state();
+            state.update(prefix);
+            STREAM_BUF.with(|cell| {
+                let mut buf = cell.borrow_mut();
+                ensure_stream_buf(&mut buf);
+                loop {
+                    let n = read_full(&mut file, &mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    state.update(&buf[..n]);
+                }
+                Ok(hex_encode(state.finalize().as_bytes()))
+            })
+        }
     }
 }
 
