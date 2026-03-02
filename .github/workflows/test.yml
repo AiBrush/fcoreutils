@@ -276,7 +276,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         if: matrix.tool != 'yes-arm64'
         with:
           name: assembly-binaries
