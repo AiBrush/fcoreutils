@@ -171,130 +171,111 @@ pub fn expand_bytes(
 }
 
 /// Fast expand for regular tab stops without -i flag.
-/// Line-at-a-time approach: one memchr call per line (not per tab), then
-/// tight inner scalar loop for tab expansion within each line.
-/// Uses unsafe raw pointer writes to eliminate bounds-checking overhead.
+/// Processes data in fixed-size input chunks. Each chunk is pre-allocated to
+/// worst-case output size, allowing the inner loop to use raw pointer writes
+/// with ZERO capacity checks or Vec::len() updates. The inner loop uses
+/// memchr2_iter (SIMD) to find tabs and newlines, bulk-copying segments between
+/// them via memcpy. A local write pointer (`wp`) tracks position — Vec::set_len
+/// is called only once per chunk.
 fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
     debug_assert!(tab_size > 0, "tab_size must be > 0");
-    const FLUSH_THRESHOLD: usize = 256 * 1024;
-
-    // Pre-allocate: tabs expand to multiple spaces (worst case tab_size× expansion)
-    let alloc = (data.len() * 2 + 1024).min(8 * 1024 * 1024);
-    let mut output: Vec<u8> = Vec::with_capacity(alloc);
-    let mut pos: usize = 0;
 
     // For power-of-2 tab sizes, use bitwise AND instead of modulo
     let is_pow2 = tab_size.is_power_of_two();
-    let mask = tab_size - 1;
+    let mask = tab_size.wrapping_sub(1);
 
-    // Process line by line — one memchr per line instead of per tab
-    for nl_pos in memchr::memchr_iter(b'\n', data) {
-        let line = &data[pos..nl_pos];
+    // Process in fixed-size input chunks. Each chunk is pre-allocated to worst-case
+    // so the inner loop needs NO capacity checks, NO Vec::len() reads, NO set_len()
+    // calls — just raw pointer arithmetic.
+    const INPUT_CHUNK: usize = 256 * 1024;
 
-        // Ensure capacity: worst case each byte becomes tab_size spaces + newline
-        let max_expansion = line.len() * tab_size + 1;
-        let needed = output.len() + max_expansion;
-        if needed > output.capacity() {
-            output.reserve(needed - output.len() + 2 * 1024 * 1024);
-        }
+    // Worst-case output size for one chunk (every byte is a tab)
+    let worst_output = INPUT_CHUNK * tab_size + tab_size;
+    let mut output: Vec<u8> = Vec::with_capacity(worst_output);
 
-        // Fast check: if no tabs in this line, bulk copy
-        if memchr::memchr(b'\t', line).is_none() {
-            output.extend_from_slice(line);
-        } else {
-            // Expand tabs within this line using tight scalar loop
-            expand_line_scalar(&mut output, line, tab_size, is_pow2, mask);
-        }
-        output.push(b'\n');
-        pos = nl_pos + 1;
-
-        if output.len() >= FLUSH_THRESHOLD {
-            out.write_all(&output)?;
-            output.clear();
-        }
-    }
-
-    // Handle final line without trailing newline
-    if pos < data.len() {
-        let line = &data[pos..];
-        if memchr::memchr(b'\t', line).is_none() {
-            output.extend_from_slice(line);
-        } else {
-            let max_expansion = line.len() * tab_size;
-            let needed = output.len() + max_expansion;
-            if needed > output.capacity() {
-                output.reserve(needed - output.len() + 1024);
-            }
-            expand_line_scalar(&mut output, line, tab_size, is_pow2, mask);
-        }
-    }
-
-    if !output.is_empty() {
-        out.write_all(&output)?;
-    }
-    Ok(())
-}
-
-/// Expand tabs within a single line using a tight inner loop.
-/// Segments between tabs are bulk-copied, tabs are replaced by spaces.
-/// Uses unsafe pointer writes for both copy and space-fill.
-#[inline(always)]
-fn expand_line_scalar(
-    output: &mut Vec<u8>,
-    line: &[u8],
-    tab_size: usize,
-    is_pow2: bool,
-    mask: usize,
-) {
     let mut column: usize = 0;
-    let mut seg_start: usize = 0;
+    let mut data_pos: usize = 0;
 
-    for (i, &byte) in line.iter().enumerate() {
-        if byte == b'\t' {
-            // Copy segment before tab
-            if i > seg_start {
-                let seg_len = i - seg_start;
+    while data_pos < data.len() {
+        // Find chunk boundary — prefer newline boundary for clean column tracking
+        let chunk_end = if data_pos + INPUT_CHUNK >= data.len() {
+            data.len()
+        } else {
+            let search_end = data_pos + INPUT_CHUNK;
+            match memchr::memrchr(b'\n', &data[data_pos..search_end]) {
+                Some(off) => data_pos + off + 1,
+                None => search_end,
+            }
+        };
+
+        let chunk = &data[data_pos..chunk_end];
+        output.clear();
+
+        // Raw pointer inner loop — `wp` is a local register variable.
+        // No Vec method calls until set_len at the end.
+        let out_ptr = output.as_mut_ptr();
+        let src = chunk.as_ptr();
+        let mut wp: usize = 0;
+        let mut pos: usize = 0;
+
+        for hit in memchr::memchr2_iter(b'\t', b'\n', chunk) {
+            // Bulk-copy segment before this hit
+            let seg_len = hit - pos;
+            if seg_len > 0 {
                 unsafe {
-                    let wp = output.len();
-                    std::ptr::copy_nonoverlapping(
-                        line.as_ptr().add(seg_start),
-                        output.as_mut_ptr().add(wp),
-                        seg_len,
-                    );
-                    output.set_len(wp + seg_len);
+                    std::ptr::copy_nonoverlapping(src.add(pos), out_ptr.add(wp), seg_len);
                 }
+                wp += seg_len;
                 column += seg_len;
             }
-            // Write spaces for tab
-            let rem = if is_pow2 {
-                column & mask
+
+            if unsafe { *src.add(hit) } == b'\n' {
+                unsafe {
+                    *out_ptr.add(wp) = b'\n';
+                }
+                wp += 1;
+                column = 0;
             } else {
-                column % tab_size
-            };
-            let spaces = tab_size - rem;
-            unsafe {
-                let wp = output.len();
-                std::ptr::write_bytes(output.as_mut_ptr().add(wp), b' ', spaces);
-                output.set_len(wp + spaces);
+                // Tab: compute spaces
+                let rem = if is_pow2 {
+                    column & mask
+                } else {
+                    column % tab_size
+                };
+                let spaces = tab_size - rem;
+                unsafe {
+                    std::ptr::write_bytes(out_ptr.add(wp), b' ', spaces);
+                }
+                wp += spaces;
+                column += spaces;
             }
-            column += spaces;
-            seg_start = i + 1;
+
+            pos = hit + 1;
         }
+
+        // Copy tail after last hit
+        if pos < chunk.len() {
+            let tail = chunk.len() - pos;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(pos), out_ptr.add(wp), tail);
+            }
+            wp += tail;
+            column += tail;
+        }
+
+        // Single set_len for the entire chunk
+        unsafe {
+            output.set_len(wp);
+        }
+
+        if wp > 0 {
+            out.write_all(&output)?;
+        }
+
+        data_pos = chunk_end;
     }
 
-    // Copy remaining segment after last tab
-    if seg_start < line.len() {
-        let seg_len = line.len() - seg_start;
-        unsafe {
-            let wp = output.len();
-            std::ptr::copy_nonoverlapping(
-                line.as_ptr().add(seg_start),
-                output.as_mut_ptr().add(wp),
-                seg_len,
-            );
-            output.set_len(wp + seg_len);
-        }
-    }
+    Ok(())
 }
 
 /// Fast expand for --initial mode with regular tab stops.

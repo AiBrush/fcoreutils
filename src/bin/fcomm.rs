@@ -4,7 +4,7 @@ use std::process;
 
 use coreutils_rs::comm::{self, CommConfig, OrderCheck};
 use coreutils_rs::common::io::{read_file, read_stdin};
-use coreutils_rs::common::io_error_msg;
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 
 struct Cli {
     config: CommConfig,
@@ -129,6 +129,7 @@ fn read_input(filename: &str, tool_name: &str) -> coreutils_rs::common::io::File
 
 fn main() {
     coreutils_rs::common::reset_sigpipe();
+    enlarge_stdout_pipe();
 
     let cli = parse_args();
     let tool_name = "comm";
@@ -152,8 +153,18 @@ fn main() {
     let data1 = read_input(&cli.files[0], tool_name);
     let data2 = read_input(&cli.files[1], tool_name);
 
+    // Use raw fd on Unix to bypass stdout lock, 1MB BufWriter for large writes
+    #[cfg(unix)]
+    let stdout_raw = unsafe {
+        use std::os::unix::io::FromRawFd;
+        std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(1))
+    };
+    #[cfg(unix)]
+    let mut out = BufWriter::with_capacity(1024 * 1024, &*stdout_raw);
+    #[cfg(not(unix))]
     let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    #[cfg(not(unix))]
+    let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
 
     match comm::comm(&data1, &data2, &cli.config, tool_name, &mut out) {
         Ok(result) => {
