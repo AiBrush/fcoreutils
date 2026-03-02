@@ -156,10 +156,8 @@ fn main() {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                // Match GNU yes exactly: print the error and _exit(1).
-                // Normally SIGPIPE (SIG_DFL) kills us before we reach here.
-                // But if the parent blocked SIGPIPE in the signal mask,
-                // write() returns -1/EPIPE and GNU yes prints the error too.
+                // SIGPIPE (SIG_DFL + unblocked) normally kills us before we
+                // reach here. This fallback handles non-SIGPIPE write errors.
                 let msg = coreutils_rs::common::io_error_msg(&err);
                 eprintln!("{}: standard output: {}", TOOL_NAME, msg);
                 #[cfg(unix)]
@@ -363,8 +361,7 @@ mod tests {
         let text = String::from_utf8_lossy(&head.stdout);
         assert_eq!(text.trim(), "y");
 
-        // With SIGPIPE=SIG_DFL, yes is killed by SIGPIPE (no exit code on Unix).
-        // If SIGPIPE is blocked by the parent, EPIPE fallback prints error and exits 1.
+        // With SIGPIPE=SIG_DFL and unblocked, yes is killed by SIGPIPE (no exit code on Unix).
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
