@@ -357,6 +357,240 @@ fn cat_show_all_fast(
     Ok(())
 }
 
+/// Write right-aligned line number (6-char field) + tab directly into buffer.
+/// Uses pre-computed digit tables to avoid itoa overhead per line.
+/// Returns the number of bytes written (always 7 for numbers up to 999999).
+#[inline(always)]
+unsafe fn write_line_number_raw(dst: *mut u8, num: u64) -> usize {
+    // GNU cat format: "%6d\t" — right-aligned in 6-char field + tab
+    if num <= 999999 {
+        // Fast path: fits in 6 digits (covers 99.99% of cases)
+        // Pre-compute all 6 digits at once using division
+        let mut n = num as u32;
+        let d5 = n / 100000;
+        n -= d5 * 100000;
+        let d4 = n / 10000;
+        n -= d4 * 10000;
+        let d3 = n / 1000;
+        n -= d3 * 1000;
+        let d2 = n / 100;
+        n -= d2 * 100;
+        let d1 = n / 10;
+        let d0 = n - d1 * 10;
+
+        // Determine leading spaces
+        let width = if num >= 100000 {
+            6
+        } else if num >= 10000 {
+            5
+        } else if num >= 1000 {
+            4
+        } else if num >= 100 {
+            3
+        } else if num >= 10 {
+            2
+        } else {
+            1
+        };
+        let pad = 6 - width;
+
+        // Write padding spaces
+        unsafe {
+            for i in 0..pad {
+                *dst.add(i) = b' ';
+            }
+        }
+
+        // Write digits (only the significant ones)
+        let digits = [
+            d5 as u8 + b'0',
+            d4 as u8 + b'0',
+            d3 as u8 + b'0',
+            d2 as u8 + b'0',
+            d1 as u8 + b'0',
+            d0 as u8 + b'0',
+        ];
+        unsafe {
+            std::ptr::copy_nonoverlapping(digits[6 - width..].as_ptr(), dst.add(pad), width);
+            *dst.add(6) = b'\t';
+        }
+        7
+    } else {
+        // Slow path: number > 999999 (use itoa)
+        let mut buf = itoa::Buffer::new();
+        let s = buf.format(num);
+        let pad = if s.len() < 6 { 6 - s.len() } else { 0 };
+        unsafe {
+            for i in 0..pad {
+                *dst.add(i) = b' ';
+            }
+            std::ptr::copy_nonoverlapping(s.as_ptr(), dst.add(pad), s.len());
+            *dst.add(pad + s.len()) = b'\t';
+        }
+        pad + s.len() + 1
+    }
+}
+
+/// Ultra-fast path for cat -n (number all lines, no other options).
+/// Uses pre-formatted numbers with raw buffer writes to minimize per-line overhead.
+/// Single pass through data with memchr_iter for batched SIMD newline scanning.
+/// Pre-allocates generously (2x input) to avoid any capacity checks or reallocation.
+fn cat_number_all_fast(data: &[u8], line_num: &mut u64, out: &mut impl Write) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    // Pre-allocate ~2x input (each line gets ~8 byte number prefix).
+    // Average line ~80 chars → 8/80 = 10% overhead. 2x is very conservative.
+    // Use min with 64MB to avoid excessive allocation for huge files.
+    let alloc = (data.len() * 2 + 256).min(64 * 1024 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(alloc);
+    let mut out_ptr = output.as_mut_ptr();
+    let mut out_pos: usize = 0;
+
+    let mut num = *line_num;
+    let mut pos: usize = 0;
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        // Ensure capacity for number prefix + line content
+        let line_len = nl_pos + 1 - pos;
+        let needed = out_pos + line_len + 20; // 20 bytes max for number prefix
+        if needed > output.capacity() {
+            unsafe { output.set_len(out_pos) };
+            output.reserve(needed - output.capacity() + 8 * 1024 * 1024);
+            out_ptr = output.as_mut_ptr();
+        }
+
+        // Write line number directly to output buffer
+        unsafe {
+            out_pos += write_line_number_raw(out_ptr.add(out_pos), num);
+        }
+        num += 1;
+
+        // Copy line content including newline
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), out_ptr.add(out_pos), line_len);
+        }
+        out_pos += line_len;
+        pos = nl_pos + 1;
+
+        // Flush periodically for very large files (keep working set in cache)
+        if out_pos >= 8 * 1024 * 1024 {
+            unsafe { output.set_len(out_pos) };
+            out.write_all(&output)?;
+            output.clear();
+            out_pos = 0;
+            out_ptr = output.as_mut_ptr();
+        }
+    }
+
+    // Handle final line without trailing newline
+    if pos < data.len() {
+        let remaining = data.len() - pos;
+        let needed = out_pos + remaining + 20;
+        if needed > output.capacity() {
+            unsafe { output.set_len(out_pos) };
+            output.reserve(needed - output.capacity() + 1024);
+            out_ptr = output.as_mut_ptr();
+        }
+        unsafe {
+            out_pos += write_line_number_raw(out_ptr.add(out_pos), num);
+        }
+        num += 1;
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), out_ptr.add(out_pos), remaining);
+        }
+        out_pos += remaining;
+    }
+
+    *line_num = num;
+
+    unsafe { output.set_len(out_pos) };
+    if !output.is_empty() {
+        out.write_all(&output)?;
+    }
+
+    Ok(())
+}
+
+/// Ultra-fast path for cat -b (number non-blank lines, no other options).
+fn cat_number_nonblank_fast(
+    data: &[u8],
+    line_num: &mut u64,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let alloc = (data.len() * 2 + 256).min(64 * 1024 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(alloc);
+    let mut out_ptr = output.as_mut_ptr();
+    let mut out_pos: usize = 0;
+
+    let mut num = *line_num;
+    let mut pos: usize = 0;
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line_len = nl_pos + 1 - pos;
+        let needed = out_pos + line_len + 20;
+        if needed > output.capacity() {
+            unsafe { output.set_len(out_pos) };
+            output.reserve(needed - output.capacity() + 8 * 1024 * 1024);
+            out_ptr = output.as_mut_ptr();
+        }
+
+        let is_blank = nl_pos == pos;
+        if !is_blank {
+            unsafe {
+                out_pos += write_line_number_raw(out_ptr.add(out_pos), num);
+            }
+            num += 1;
+        }
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), out_ptr.add(out_pos), line_len);
+        }
+        out_pos += line_len;
+        pos = nl_pos + 1;
+
+        if out_pos >= 8 * 1024 * 1024 {
+            unsafe { output.set_len(out_pos) };
+            out.write_all(&output)?;
+            output.clear();
+            out_pos = 0;
+            out_ptr = output.as_mut_ptr();
+        }
+    }
+
+    if pos < data.len() {
+        let remaining = data.len() - pos;
+        let needed = out_pos + remaining + 20;
+        if needed > output.capacity() {
+            unsafe { output.set_len(out_pos) };
+            output.reserve(needed - output.capacity() + 1024);
+            out_ptr = output.as_mut_ptr();
+        }
+        unsafe {
+            out_pos += write_line_number_raw(out_ptr.add(out_pos), num);
+        }
+        num += 1;
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), out_ptr.add(out_pos), remaining);
+        }
+        out_pos += remaining;
+    }
+
+    *line_num = num;
+
+    unsafe { output.set_len(out_pos) };
+    if !output.is_empty() {
+        out.write_all(&output)?;
+    }
+
+    Ok(())
+}
+
 /// Cat with options (numbering, show-ends, show-tabs, show-nonprinting, squeeze)
 pub fn cat_with_options(
     data: &[u8],
@@ -373,6 +607,30 @@ pub fn cat_with_options(
     if config.show_nonprinting && !config.number && !config.number_nonblank && !config.squeeze_blank
     {
         return cat_show_all_fast(data, config.show_tabs, config.show_ends, out);
+    }
+
+    // Fast path: -n only (number all lines, no other processing)
+    if config.number
+        && !config.number_nonblank
+        && !config.show_ends
+        && !config.show_tabs
+        && !config.show_nonprinting
+        && !config.squeeze_blank
+        && !*pending_cr
+    {
+        return cat_number_all_fast(data, line_num, out);
+    }
+
+    // Fast path: -b only (number non-blank lines, no other processing)
+    if config.number_nonblank
+        && !config.number
+        && !config.show_ends
+        && !config.show_tabs
+        && !config.show_nonprinting
+        && !config.squeeze_blank
+        && !*pending_cr
+    {
+        return cat_number_nonblank_fast(data, line_num, out);
     }
 
     // Pre-allocate output buffer (worst case: every byte expands to 4 chars for M-^X)

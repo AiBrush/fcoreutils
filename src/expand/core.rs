@@ -477,12 +477,16 @@ fn unexpand_regular_fast(
     all: bool,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
+    if all {
+        return unexpand_regular_fast_all(data, tab_size, out);
+    }
+
     let mut column: usize = 0;
     let mut pos: usize = 0;
     let mut in_initial = true;
 
     while pos < data.len() {
-        if in_initial || all {
+        if in_initial {
             // Check for blanks to convert
             if data[pos] == b' ' || data[pos] == b'\t' {
                 // Count consecutive blanks, tracking column advancement
@@ -506,44 +510,152 @@ fn unexpand_regular_fast(
                 pos += 1;
                 continue;
             }
-            // Non-blank: switch to body mode
-            in_initial = false;
+            // Non-blank: exit initial-blank loop → body mode
+            break;
         }
 
-        // Body of line: bulk copy until next interesting byte
-        if !all {
-            // Default mode: copy everything until newline
-            match memchr::memchr(b'\n', &data[pos..]) {
-                Some(offset) => {
-                    out.write_all(&data[pos..pos + offset + 1])?;
-                    column = 0;
-                    in_initial = true;
-                    pos += offset + 1;
-                }
-                None => {
-                    out.write_all(&data[pos..])?;
-                    return Ok(());
-                }
+        // Body of line: bulk copy until newline (default mode)
+        match memchr::memchr(b'\n', &data[pos..]) {
+            Some(offset) => {
+                out.write_all(&data[pos..pos + offset + 1])?;
+                column = 0;
+                in_initial = true;
+                pos += offset + 1;
             }
-        } else {
-            // all=true: copy until next space, tab, or newline
-            match memchr::memchr3(b' ', b'\t', b'\n', &data[pos..]) {
-                Some(offset) => {
-                    if offset > 0 {
-                        out.write_all(&data[pos..pos + offset])?;
-                        column += offset;
-                    }
-                    pos += offset;
-                }
-                None => {
-                    out.write_all(&data[pos..])?;
-                    return Ok(());
-                }
+            None => {
+                out.write_all(&data[pos..])?;
+                return Ok(());
             }
         }
     }
 
     Ok(())
+}
+
+/// Fast unexpand -a for regular tab stops without backspaces.
+/// Buffers output into a Vec to avoid per-call write_all overhead.
+/// Handles single spaces efficiently (most common case: no tab conversion needed).
+fn unexpand_regular_fast_all(
+    data: &[u8],
+    tab_size: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    // Line-level fast path: process the file line by line.
+    // Lines with only single spaces (no tabs, no double spaces) don't need
+    // any conversion and can be copied as-is — this covers most natural text.
+    let mut output: Vec<u8> = Vec::with_capacity(data.len());
+    let mut pos: usize = 0;
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line = &data[pos..nl_pos];
+
+        // Fast check: does this line have any tabs or consecutive spaces?
+        let has_tab = memchr::memchr(b'\t', line).is_some();
+        let has_double_space = memchr::memmem::find(line, b"  ").is_some();
+
+        if !has_tab && !has_double_space {
+            // No conversion needed: copy line as-is
+            output.extend_from_slice(line);
+        } else {
+            // Process this line through the blank-conversion logic
+            unexpand_line_all(line, tab_size, &mut output);
+        }
+        output.push(b'\n');
+
+        // Flush periodically
+        if output.len() >= 256 * 1024 {
+            out.write_all(&output)?;
+            output.clear();
+        }
+        pos = nl_pos + 1;
+    }
+
+    // Handle final line without trailing newline
+    if pos < data.len() {
+        let line = &data[pos..];
+        let has_tab = memchr::memchr(b'\t', line).is_some();
+        let has_double_space = memchr::memmem::find(line, b"  ").is_some();
+        if !has_tab && !has_double_space {
+            output.extend_from_slice(line);
+        } else {
+            unexpand_line_all(line, tab_size, &mut output);
+        }
+    }
+
+    if !output.is_empty() {
+        out.write_all(&output)?;
+    }
+    Ok(())
+}
+
+/// Process a single line for unexpand -a, converting blank runs to tabs+spaces.
+#[inline]
+fn unexpand_line_all(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
+    let mut column: usize = 0;
+    let mut pos: usize = 0;
+
+    while pos < line.len() {
+        // Check for blanks to convert
+        if line[pos] == b' ' || line[pos] == b'\t' {
+            // Count consecutive blanks, tracking column advancement
+            let blank_start_col = column;
+            while pos < line.len() && (line[pos] == b' ' || line[pos] == b'\t') {
+                if line[pos] == b'\t' {
+                    column += tab_size - column % tab_size;
+                } else {
+                    column += 1;
+                }
+                pos += 1;
+            }
+            emit_blanks_to_vec(output, blank_start_col, column - blank_start_col, tab_size);
+            continue;
+        }
+
+        // Non-blank: copy until next space or tab
+        match memchr::memchr2(b' ', b'\t', &line[pos..]) {
+            Some(offset) => {
+                output.extend_from_slice(&line[pos..pos + offset]);
+                column += offset;
+                pos += offset;
+            }
+            None => {
+                output.extend_from_slice(&line[pos..]);
+                break;
+            }
+        }
+    }
+}
+
+/// Emit blanks (tabs + spaces) into a Vec instead of a writer.
+/// Avoids per-call write_all overhead for the common case.
+#[inline]
+fn emit_blanks_to_vec(output: &mut Vec<u8>, start_col: usize, count: usize, tab_size: usize) {
+    if count == 0 {
+        return;
+    }
+    let end_col = start_col + count;
+    let mut col = start_col;
+
+    // Emit tabs for each tab stop we can reach
+    loop {
+        let next_tab = col + (tab_size - col % tab_size);
+        if next_tab > end_col {
+            break;
+        }
+        let blanks_consumed = next_tab - col;
+        if blanks_consumed >= 2 || next_tab < end_col {
+            output.push(b'\t');
+            col = next_tab;
+        } else {
+            break;
+        }
+    }
+
+    // Emit remaining spaces
+    let remaining = end_col - col;
+    for _ in 0..remaining {
+        output.push(b' ');
+    }
 }
 
 /// Generic unexpand with support for tab lists and backspaces.

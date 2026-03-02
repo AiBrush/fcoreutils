@@ -238,7 +238,48 @@ fn main() {
         }
     }
 
-    // With options, use BufWriter
+    // With options — use raw fd for number-only modes (fast path builds full output),
+    // BufWriter for modes that produce incremental output
+    let number_only = (cli.config.number || cli.config.number_nonblank)
+        && !cli.config.show_ends
+        && !cli.config.show_tabs
+        && !cli.config.show_nonprinting
+        && !cli.config.squeeze_blank;
+
+    #[cfg(unix)]
+    if number_only {
+        use std::mem::ManuallyDrop;
+        use std::os::unix::io::FromRawFd;
+        let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        let mut had_error = false;
+        let mut line_num = 1u64;
+        let mut pending_cr = false;
+        for filename in &files {
+            match cat::cat_file(
+                filename,
+                &cli.config,
+                &mut line_num,
+                &mut pending_cr,
+                &mut *raw_out,
+                tool_name,
+            ) {
+                Ok(true) => {}
+                Ok(false) => had_error = true,
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::BrokenPipe {
+                        process::exit(0);
+                    }
+                    eprintln!("{}: write error: {}", tool_name, io_error_msg(&e));
+                    had_error = true;
+                }
+            }
+        }
+        if had_error {
+            process::exit(1);
+        }
+        return;
+    }
+
     let stdout = io::stdout();
     let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
     let mut had_error = false;
