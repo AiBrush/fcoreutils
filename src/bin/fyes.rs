@@ -4,6 +4,8 @@
 // Repeatedly output a line with all specified STRING(s), or 'y'.
 
 use std::process;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const TOOL_NAME: &str = "yes";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -13,33 +15,61 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// large enough to amortize syscall overhead.
 const BUF_SIZE: usize = 8192;
 
+/// True if the inherited SIGPIPE handler (before Rust's runtime overwrites it)
+/// was SIG_IGN. Captured by a pre-main() constructor.
+#[cfg(unix)]
+static INHERITED_SIGPIPE_IGN: AtomicBool = AtomicBool::new(false);
+
+/// Pre-main() constructor that captures the inherited SIGPIPE handler before
+/// Rust's runtime sets it to SIG_IGN in `reset_sigpipe()`.
+///
+/// .init_array / __mod_init_func constructors run after the dynamic linker
+/// but before `main()` (and thus before Rust's `lang_start()` → `init()` →
+/// `reset_sigpipe()`), so the handler at this point is whatever the parent
+/// process (usually bash) set up via exec().
+///
+/// GNU yes (a C binary) inherits its SIGPIPE handler directly. In normal
+/// shells, bash passes SIG_DFL → SIGPIPE kills silently. Under Node.js CI
+/// runners, bash inherits and preserves SIG_IGN (POSIX requirement for
+/// terminating signals) → write() returns EPIPE → error message printed.
+#[cfg(unix)]
+unsafe extern "C" fn sigpipe_check_init() {
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut old) == 0
+            && old.sa_sigaction == libc::SIG_IGN
+        {
+            INHERITED_SIGPIPE_IGN.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static SIGPIPE_INIT: unsafe extern "C" fn() = sigpipe_check_init;
+
+#[cfg(target_os = "macos")]
+#[used]
+#[unsafe(link_section = "__DATA,__mod_init_func")]
+static SIGPIPE_INIT: unsafe extern "C" fn() = sigpipe_check_init;
+
 fn main() {
-    // Match GNU yes's SIGPIPE behavior exactly. GNU yes (C binary) inherits
-    // SIG_DFL from the kernel and the parent's signal mask. Two cases:
+    // Match GNU yes's SIGPIPE behavior exactly. The pre-main() constructor
+    // captured the inherited SIGPIPE handler before Rust changed it.
     //
-    // 1. SIGPIPE unblocked (normal shell): SIG_DFL → SIGPIPE kills process silently.
-    //    We must do the same: set SIG_DFL so we're killed silently.
-    //
-    // 2. SIGPIPE blocked (Node.js CI runners, systemd): SIG_DFL but signal can't
-    //    be delivered → write() returns EPIPE → GNU yes prints error and exits 1.
-    //    We keep Rust's SIG_IGN so write() also returns EPIPE, then print the error.
-    //
-    // We check the inherited signal mask to decide which path to take.
+    // If inherited SIG_DFL: restore it so SIGPIPE kills us silently.
+    // If inherited SIG_IGN: keep Rust's SIG_IGN, write() returns EPIPE,
+    // and our error handler prints the message (matching GNU yes).
     #[cfg(unix)]
     unsafe {
-        let mut oldmask: libc::sigset_t = std::mem::zeroed();
-        libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut oldmask);
-
-        if libc::sigismember(&oldmask, libc::SIGPIPE) != 1 {
-            // SIGPIPE is unblocked: set SIG_DFL so we're killed by the signal
+        if !INHERITED_SIGPIPE_IGN.load(Ordering::Relaxed) {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = libc::SIG_DFL;
             sa.sa_flags = 0;
             libc::sigemptyset(&mut sa.sa_mask);
             libc::sigaction(libc::SIGPIPE, &sa, std::ptr::null_mut());
         }
-        // If SIGPIPE is blocked: keep Rust's SIG_IGN, write() returns EPIPE,
-        // and our error handler prints the message (matching GNU yes).
     }
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
@@ -164,11 +194,19 @@ fn main() {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                // With SIGPIPE unblocked + SIG_DFL: we're killed before reaching here.
-                // With SIGPIPE blocked + SIG_IGN: write returns EPIPE, we print
-                // the error to match GNU yes behavior in blocked environments.
+                // Write the error in a single atomic write(2) call.
+                // Rust's eprintln! uses multiple write() calls internally
+                // (one per format arg piece), which can interleave with
+                // stdout when both point to the same fd (e.g., 2>&1).
                 let msg = coreutils_rs::common::io_error_msg(&err);
-                eprintln!("{}: standard output: {}", TOOL_NAME, msg);
+                let error_line = format!("{}: standard output: {}\n", TOOL_NAME, msg);
+                let _ = unsafe {
+                    libc::write(
+                        2,
+                        error_line.as_ptr() as *const libc::c_void,
+                        error_line.len() as _,
+                    )
+                };
                 #[cfg(unix)]
                 unsafe {
                     libc::_exit(1)
