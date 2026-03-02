@@ -229,7 +229,7 @@ fn write_loop(ptr: *const u8, total: usize) -> ! {
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     loop {
         let ret = unsafe { libc::write(1, ptr as *const libc::c_void, total as _) };
-        if ret == total_isize {
+        if ret as isize == total_isize {
             continue;
         }
         if ret > 0 {
