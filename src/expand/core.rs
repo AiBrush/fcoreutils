@@ -577,13 +577,7 @@ fn unexpand_regular_fast(
                 pos += 1;
                 continue;
             }
-            // Non-blank: fall through to body mode.
-            // Value is used by control flow (skips re-entry on same iteration)
-            // but body code always resets to true, so clippy sees it as dead.
-            #[allow(unused_assignments)]
-            {
-                in_initial = false;
-            }
+            // Non-blank: fall through to body mode below.
         }
 
         // Body of line: bulk copy until newline (default mode)
@@ -621,11 +615,13 @@ fn unexpand_regular_fast_all(
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line = &data[pos..nl_pos];
 
-        // Fast check: does this line have any tabs or consecutive spaces?
-        let has_tab = memchr::memchr(b'\t', line).is_some();
-        let has_double_space = memchr::memmem::find(line, b"  ").is_some();
+        // Fast check: single SIMD scan for tab or space; if space, peek for double-space.
+        let needs_processing = match memchr::memchr2(b'\t', b' ', line) {
+            None => false,
+            Some(i) => line[i] == b'\t' || line.get(i + 1) == Some(&b' '),
+        };
 
-        if !has_tab && !has_double_space {
+        if !needs_processing {
             // No conversion needed: copy line as-is
             output.extend_from_slice(line);
         } else {
@@ -645,9 +641,11 @@ fn unexpand_regular_fast_all(
     // Handle final line without trailing newline
     if pos < data.len() {
         let line = &data[pos..];
-        let has_tab = memchr::memchr(b'\t', line).is_some();
-        let has_double_space = memchr::memmem::find(line, b"  ").is_some();
-        if !has_tab && !has_double_space {
+        let needs_processing = match memchr::memchr2(b'\t', b' ', line) {
+            None => false,
+            Some(i) => line[i] == b'\t' || line.get(i + 1) == Some(&b' '),
+        };
+        if !needs_processing {
             output.extend_from_slice(line);
         } else {
             unexpand_line_all(line, tab_size, &mut output);
@@ -679,7 +677,8 @@ fn unexpand_line_all(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
                 }
                 pos += 1;
             }
-            emit_blanks_to_vec(output, blank_start_col, column - blank_start_col, tab_size);
+            // Vec<u8> implements Write, so we can use emit_blanks directly.
+            emit_blanks(output, blank_start_col, column - blank_start_col, tab_size).unwrap();
             continue;
         }
 
@@ -695,38 +694,6 @@ fn unexpand_line_all(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
                 break;
             }
         }
-    }
-}
-
-/// Emit blanks (tabs + spaces) into a Vec instead of a writer.
-/// Avoids per-call write_all overhead for the common case.
-#[inline]
-fn emit_blanks_to_vec(output: &mut Vec<u8>, start_col: usize, count: usize, tab_size: usize) {
-    if count == 0 {
-        return;
-    }
-    let end_col = start_col + count;
-    let mut col = start_col;
-
-    // Emit tabs for each tab stop we can reach
-    loop {
-        let next_tab = col + (tab_size - col % tab_size);
-        if next_tab > end_col {
-            break;
-        }
-        let blanks_consumed = next_tab - col;
-        if blanks_consumed >= 2 || next_tab < end_col {
-            output.push(b'\t');
-            col = next_tab;
-        } else {
-            break;
-        }
-    }
-
-    // Emit remaining spaces
-    let remaining = end_col - col;
-    for _ in 0..remaining {
-        output.push(b' ');
     }
 }
 

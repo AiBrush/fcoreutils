@@ -69,7 +69,7 @@ fn presplit_lines(data: &[u8], terminator: u8) -> Vec<(u32, u32)> {
     if data.is_empty() {
         return Vec::new();
     }
-    debug_assert!(
+    assert!(
         data.len() <= u32::MAX as usize,
         "presplit_lines: data exceeds 4 GiB"
     );
@@ -159,7 +159,7 @@ pub fn paste_parallel_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u
             pos += 1;
         }
 
-        debug_assert!(pos <= exact_size);
+        assert_eq!(pos, exact_size, "exact_size miscalculated");
         output.set_len(pos);
     }
 

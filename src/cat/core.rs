@@ -457,7 +457,7 @@ fn cat_number_all_fast(data: &[u8], line_num: &mut u64, out: &mut impl Write) ->
         let needed = out_pos + line_len + 22; // max: 20 digits + 1 tab + 1 safety
         if needed > output.capacity() {
             unsafe { output.set_len(out_pos) };
-            output.reserve(needed - output.capacity() + 8 * 1024 * 1024);
+            output.reserve(needed.saturating_sub(output.len()));
             out_ptr = output.as_mut_ptr();
         }
 
@@ -490,7 +490,7 @@ fn cat_number_all_fast(data: &[u8], line_num: &mut u64, out: &mut impl Write) ->
         let needed = out_pos + remaining + 22;
         if needed > output.capacity() {
             unsafe { output.set_len(out_pos) };
-            output.reserve(needed - output.capacity() + 1024);
+            output.reserve(needed.saturating_sub(output.len()));
             out_ptr = output.as_mut_ptr();
         }
         unsafe {
@@ -536,7 +536,7 @@ fn cat_number_nonblank_fast(
         let needed = out_pos + line_len + 22;
         if needed > output.capacity() {
             unsafe { output.set_len(out_pos) };
-            output.reserve(needed - output.capacity() + 8 * 1024 * 1024);
+            output.reserve(needed.saturating_sub(output.len()));
             out_ptr = output.as_mut_ptr();
         }
 
@@ -568,7 +568,7 @@ fn cat_number_nonblank_fast(
         let needed = out_pos + remaining + 22;
         if needed > output.capacity() {
             unsafe { output.set_len(out_pos) };
-            output.reserve(needed - output.capacity() + 1024);
+            output.reserve(needed.saturating_sub(output.len()));
             out_ptr = output.as_mut_ptr();
         }
         unsafe {

@@ -294,9 +294,8 @@ fn format_paragraph(
 
     let pfx = prefix_str.unwrap_or("");
 
-    // GNU fmt limits paragraphs to MAXWORDS (~1000) words per DP chunk.
-    // This keeps the DP working set in L1 cache instead of thrashing main memory.
-    const MAXWORDS: usize = 1000;
+    // GNU fmt's MAXWORDS is 1,000,000 — process the entire paragraph in one shot.
+    const MAXWORDS: usize = 1_000_000;
 
     // Streaming word collection + chunked DP: collect words in MAXWORDS-sized
     // batches and process each chunk immediately. This avoids allocating a
@@ -339,16 +338,16 @@ fn collect_words_line(bytes: &[u8], ls: usize, le: usize, ctx: &mut FmtCtx) {
     while i < le {
         let word_start = i;
 
-        // Find end of word: scan for space (covers 99%+ of cases)
-        // Using memchr for SIMD-accelerated space detection
+        // Find end of word: scan for space or tab (covers 99%+ of cases)
+        // Using memchr2 for SIMD-accelerated whitespace detection
         let line_slice = unsafe { std::slice::from_raw_parts(ptr.add(i), le - i) };
-        match memchr::memchr(b' ', line_slice) {
+        match memchr::memchr2(b' ', b'\t', line_slice) {
             Some(offset) => {
                 i += offset;
             }
             None => {
-                // No space found — word extends to end of line
-                // But check for other whitespace (tab, etc.) byte-at-a-time
+                // No space/tab found — word extends to end of line
+                // Check for other whitespace byte-at-a-time
                 while i < le && unsafe { !is_ws(*ptr.add(i)) } {
                     i += 1;
                 }
