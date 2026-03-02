@@ -844,6 +844,14 @@ fn run_dp(
         }
 
         if best_total < i64::MAX {
+            // All valid DP costs are non-negative because the minimum break cost
+            // is LINE_COST - SENTENCE_BONUS = 4900 - 2500 = 2400 > 0. The sentinel
+            // value -1 (0xFFFFFFFF_FFFFFFFF) is used to mark uninitialized entries,
+            // so this invariant must hold for the sentinel check `cj1 >= 0` to work.
+            debug_assert!(
+                best_total >= 0,
+                "DP cost negative: sentinel invariant broken"
+            );
             unsafe {
                 *dp_cost_ptr.add(i) = best_total;
                 *best_ptr.add(i) = best_j;

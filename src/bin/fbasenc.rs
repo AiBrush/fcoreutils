@@ -1284,31 +1284,12 @@ fn read_input(filename: &str) -> InputData {
     }
 }
 
-/// Enlarge stdout pipe buffer on Linux for higher throughput.
-/// Only enlarges stdout (fd 1) when it is actually a pipe.
-#[cfg(target_os = "linux")]
-fn enlarge_stdout_pipe() {
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(1, &mut stat) } != 0 {
-        return;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO {
-        return;
-    }
-    for &size in &[1024 * 1024i32, 256 * 1024] {
-        if unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, size) } > 0 {
-            break;
-        }
-    }
-}
-
 fn main() {
     // Do NOT reset SIGPIPE to SIG_DFL here — keep Rust's default SIG_IGN so that
     // writes to a broken pipe return BrokenPipe error instead of killing the process.
     // This lets us print "basenc: write error: Broken pipe" to stderr (GNU compat).
 
-    #[cfg(target_os = "linux")]
-    enlarge_stdout_pipe();
+    coreutils_rs::common::enlarge_stdout_pipe();
 
     let cli = parse_args();
 

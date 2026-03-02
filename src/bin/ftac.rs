@@ -10,7 +10,7 @@ use std::process;
 use memmap2::MmapOptions;
 
 use coreutils_rs::common::io::{FileData, read_file_mmap, read_stdin};
-use coreutils_rs::common::io_error_msg;
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::tac;
 
 struct Cli {
@@ -251,28 +251,9 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
     had_error
 }
 
-/// Enlarge stdout pipe buffer on Linux for higher throughput.
-/// Only enlarges stdout (fd 1) when it is actually a pipe.
-#[cfg(target_os = "linux")]
-fn enlarge_stdout_pipe() {
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(1, &mut stat) } != 0 {
-        return;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO {
-        return;
-    }
-    for &size in &[1024 * 1024i32, 256 * 1024] {
-        if unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, size) } > 0 {
-            break;
-        }
-    }
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    #[cfg(target_os = "linux")]
     enlarge_stdout_pipe();
 
     let mut cli = parse_args();

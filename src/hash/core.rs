@@ -64,6 +64,16 @@ mod openssl_sha512 {
         if ptr.is_null() { None } else { Some(ptr) }
     }
 
+    /// Guard that ensures dlclose is called if we fail to resolve all symbols.
+    struct DlopenHandle(*mut libc::c_void);
+    impl Drop for DlopenHandle {
+        fn drop(&mut self) {
+            unsafe {
+                libc::dlclose(self.0);
+            }
+        }
+    }
+
     fn try_load() -> Option<OpenSslFns> {
         // Try OpenSSL 3.x first, then 1.1.x
         let handle = unsafe {
@@ -85,6 +95,9 @@ mod openssl_sha512 {
             }
         };
 
+        // Guard ensures dlclose on early return (any dlsym failure).
+        let guard = DlopenHandle(handle);
+
         unsafe {
             let evp_sha384: FnEvpSha384 =
                 std::mem::transmute(dlsym_checked(handle, c"EVP_sha384")?);
@@ -100,6 +113,9 @@ mod openssl_sha512 {
                 std::mem::transmute(dlsym_checked(handle, c"EVP_DigestFinal_ex")?);
             let evp_md_ctx_free: FnEvpMdCtxFree =
                 std::mem::transmute(dlsym_checked(handle, c"EVP_MD_CTX_free")?);
+
+            // All symbols resolved — prevent dlclose by forgetting the guard.
+            std::mem::forget(guard);
 
             Some(OpenSslFns {
                 evp_sha384,

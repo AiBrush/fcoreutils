@@ -177,21 +177,6 @@ unsafe fn buf_push(buf: &mut Vec<u8>, b: u8) {
     }
 }
 
-/// Append a slice + a single trailing byte to buf without capacity checks.
-/// Fused operation saves one len load/store vs separate buf_extend + buf_push.
-/// Caller MUST ensure buf has enough remaining capacity.
-#[inline(always)]
-#[allow(dead_code)]
-unsafe fn buf_extend_byte(buf: &mut Vec<u8>, data: &[u8], b: u8) {
-    unsafe {
-        let len = buf.len();
-        let ptr = buf.as_mut_ptr().add(len);
-        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
-        *ptr.add(data.len()) = b;
-        buf.set_len(len + data.len() + 1);
-    }
-}
-
 /// Write multiple IoSlice buffers using write_vectored (writev syscall).
 /// Batches into MAX_IOV-sized groups. Hot path: single write_vectored succeeds.
 /// Cold path (partial write) is out-of-line to keep the hot loop tight.
@@ -410,104 +395,6 @@ fn multi_select_line_fast(
         return;
     }
 
-    let total_fields = num_delims + 1;
-    let mut first_output = true;
-
-    for r in ranges {
-        let range_start = r.start;
-        let range_end = r.end.min(total_fields);
-        if range_start > total_fields {
-            break;
-        }
-        for field_num in range_start..=range_end {
-            if field_num > total_fields {
-                break;
-            }
-
-            let field_start = if field_num == 1 {
-                0
-            } else if field_num - 2 < num_delims {
-                delim_pos[field_num - 2] + 1
-            } else {
-                continue;
-            };
-            let field_end = if field_num <= num_delims {
-                delim_pos[field_num - 1]
-            } else {
-                len
-            };
-
-            if !first_output {
-                unsafe { buf_push(buf, delim) };
-            }
-            unsafe {
-                buf_extend(
-                    buf,
-                    std::slice::from_raw_parts(base.add(field_start), field_end - field_start),
-                );
-            }
-            first_output = false;
-        }
-    }
-
-    unsafe { buf_push(buf, line_delim) };
-}
-
-/// Extract selected fields from a single line using delimiter position scanning.
-/// Scans delimiters only up to max_field (early exit), then extracts selected fields
-/// by indexing directly into the collected positions. Since ranges are pre-sorted and
-/// non-overlapping, every field within a range is selected — no is_selected check needed.
-#[inline(always)]
-#[allow(dead_code)]
-fn multi_select_line(
-    line: &[u8],
-    delim: u8,
-    line_delim: u8,
-    ranges: &[Range],
-    max_field: usize,
-    suppress: bool,
-    buf: &mut Vec<u8>,
-) {
-    let len = line.len();
-    if len == 0 {
-        if !suppress {
-            unsafe { buf_push(buf, line_delim) };
-        }
-        return;
-    }
-
-    // Note: no per-line buf.reserve — multi_select_chunk already reserves data.len()
-    let base = line.as_ptr();
-
-    // Collect delimiter positions up to max_field (early exit).
-    // Stack array for up to 64 delimiter positions.
-    let mut delim_pos = [0usize; 64];
-    let mut num_delims: usize = 0;
-    let max_delims = max_field.min(64);
-
-    for pos in memchr_iter(delim, line) {
-        if num_delims < max_delims {
-            delim_pos[num_delims] = pos;
-            num_delims += 1;
-            if num_delims >= max_delims {
-                break;
-            }
-        }
-    }
-
-    if num_delims == 0 {
-        if !suppress {
-            unsafe {
-                buf_extend(buf, line);
-                buf_push(buf, line_delim);
-            }
-        }
-        return;
-    }
-
-    // Extract selected fields using delimiter positions.
-    // Ranges are pre-sorted and non-overlapping, so every field_num within a range
-    // is selected — skip the is_selected check entirely (saves 1 function call per field).
     let total_fields = num_delims + 1;
     let mut first_output = true;
 

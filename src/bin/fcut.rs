@@ -12,7 +12,7 @@ use std::process;
 use memmap2::MmapOptions;
 
 use coreutils_rs::common::io::read_file_mmap;
-use coreutils_rs::common::io_error_msg;
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::cut::{self, CutMode};
 
 /// Writer that uses vmsplice(2) for zero-copy pipe output on Linux.
@@ -345,28 +345,9 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     mmap
 }
 
-/// Enlarge stdout pipe buffer on Linux for higher throughput.
-/// Only enlarges stdout (fd 1) when it is actually a pipe.
-#[cfg(target_os = "linux")]
-fn enlarge_stdout_pipe() {
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(1, &mut stat) } != 0 {
-        return;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO {
-        return;
-    }
-    for &size in &[1024 * 1024i32, 256 * 1024] {
-        if unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, size) } > 0 {
-            break;
-        }
-    }
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    #[cfg(target_os = "linux")]
     enlarge_stdout_pipe();
 
     let cli = parse_args();

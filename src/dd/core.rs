@@ -620,6 +620,7 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         v.set_len(bs);
         v
     };
+    debug_assert_eq!(ibuf.len(), bs);
     let count_limit = config.count;
 
     loop {
@@ -680,7 +681,9 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
 
         // Raw write — retry on EINTR, treat write(0) as error
         let mut written = 0usize;
+        debug_assert!(total_read <= ibuf.len());
         while written < total_read {
+            debug_assert!(written <= ibuf.len());
             let ret = unsafe {
                 libc::write(
                     out_fd,

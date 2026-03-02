@@ -148,10 +148,19 @@ fn main() {
 
     // Try to increase stdout pipe buffer to 1MB for fewer context switches.
     // Best-effort — fails silently on non-pipes or restricted environments.
+    // Read back actual pipe size to clamp write buffer accordingly.
     #[cfg(target_os = "linux")]
-    unsafe {
+    let actual_pipe_sz = unsafe {
         libc::fcntl(1, libc::F_SETPIPE_SZ, 1024 * 1024);
-    }
+        let sz = libc::fcntl(1, libc::F_GETPIPE_SZ);
+        if sz > 0 { sz as usize } else { BUF_SIZE }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let actual_pipe_sz = BUF_SIZE;
+
+    // Clamp write buffer to actual pipe size to avoid stalling on smaller pipes.
+    // On default 64KB pipes (when F_SETPIPE_SZ fails), this uses 64KB instead of 128KB.
+    let buf_target = BUF_SIZE.min(actual_pipe_sz);
 
     // Build a buffer filled with repeated copies of the line.
     // The buffer length is always an exact multiple of line_len so that
@@ -159,14 +168,14 @@ fn main() {
     // partial lines from appearing when downstream consumers (e.g.,
     // `head -n 2 | uniq`) read at write boundaries.
     //
-    // When a single line is already >= BUF_SIZE, use exactly one copy
+    // When a single line is already >= buf_target, use exactly one copy
     // to avoid allocating a needlessly huge buffer.
-    let buf = if line_len >= BUF_SIZE {
+    let buf = if line_len >= buf_target {
         line_bytes.to_vec()
     } else {
-        // Number of copies that fills at least BUF_SIZE bytes,
+        // Number of copies that fills at least buf_target bytes,
         // rounded up to a full line.
-        let copies = BUF_SIZE.div_ceil(line_len);
+        let copies = buf_target.div_ceil(line_len);
         let mut v = Vec::with_capacity(copies * line_len);
         for _ in 0..copies {
             v.extend_from_slice(line_bytes);
@@ -212,10 +221,14 @@ fn write_loop(ptr: *const u8, total: usize) -> ! {
         if ret == total_isize {
             continue; // fast path: full write
         }
-        if ret >= 0 {
+        if ret > 0 {
             // Partial write — drain remainder via libc (rare path)
             drain_partial(ptr, total, ret as usize);
             continue;
+        }
+        if ret == 0 {
+            // write(2) returned 0 for non-zero count — exit to avoid spin.
+            process::exit(1);
         }
         // Negative return = -errno
         let errno = (-ret) as i32;

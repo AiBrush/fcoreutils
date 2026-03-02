@@ -1,7 +1,7 @@
 use std::io::{self, BufWriter, Write};
 use std::process;
 
-use coreutils_rs::common::{io_error_msg, reset_sigpipe};
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg, reset_sigpipe};
 use coreutils_rs::tail::{self, FollowMode, TailConfig, TailMode};
 
 struct Cli {
@@ -199,7 +199,7 @@ fn parse_args() -> Cli {
                         break;
                     }
                     _ => {
-                        eprintln!("tail: invalid option -- '{}'", bytes[i] as char);
+                        eprintln!("tail: invalid option -- '{}'", char::from(bytes[i]));
                         eprintln!("Try 'tail --help' for more information.");
                         process::exit(1);
                     }
@@ -314,24 +314,6 @@ fn print_help() {
     );
 }
 
-/// Enlarge stdout pipe buffer on Linux for higher throughput.
-/// Only enlarges stdout (fd 1) when it is actually a pipe.
-#[cfg(target_os = "linux")]
-fn enlarge_stdout_pipe() {
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(1, &mut stat) } != 0 {
-        return;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO {
-        return;
-    }
-    for &size in &[1024 * 1024i32, 256 * 1024] {
-        if unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, size) } > 0 {
-            break;
-        }
-    }
-}
-
 /// Ultra-fast path for single-file tail on Linux.
 /// For small files (<=64KB), reads into a stack buffer and writes directly
 /// via raw write(2), bypassing BufWriter entirely. For larger files,
@@ -379,6 +361,7 @@ fn try_fast_single_file(cli: &Cli) -> Option<i32> {
 
 fn main() {
     reset_sigpipe();
+    enlarge_stdout_pipe();
 
     let cli = parse_args();
 
@@ -390,10 +373,6 @@ fn main() {
     {
         process::exit(code);
     }
-
-    // General path: multiple files, stdin, follow mode, etc.
-    #[cfg(target_os = "linux")]
-    enlarge_stdout_pipe();
 
     let files: Vec<&str> = if cli.files.is_empty() {
         vec!["-"]

@@ -950,19 +950,17 @@ pub fn cat_file(
             }
 
             // Non-Linux plain path or Linux fallback (Ok(false) from above)
-            // Need to do directory/same-file checks here for the generic fallback
-            match std::fs::metadata(path) {
-                Ok(meta) if meta.is_dir() => {
+            // Need to do directory/same-file checks here for the generic fallback.
+            // Hoist single metadata call for both directory check and same-file detection.
+            if let Ok(file_meta) = std::fs::metadata(path) {
+                if file_meta.is_dir() {
                     eprintln!("{}: {}: Is a directory", tool_name, filename);
                     return Ok(false);
                 }
-                _ => {}
-            }
 
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if let Ok(file_meta) = std::fs::metadata(path) {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
                     let mut stdout_stat: libc::stat = unsafe { std::mem::zeroed() };
                     if unsafe { libc::fstat(1, &mut stdout_stat) } == 0
                         && file_meta.dev() == stdout_stat.st_dev as u64
