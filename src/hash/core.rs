@@ -1803,12 +1803,21 @@ fn hash_stream_with_prefix(
         HashAlgorithm::Sha224 => hash_stream_with_prefix_digest::<sha2::Sha224>(prefix, file),
         HashAlgorithm::Sha256 => hash_stream_with_prefix_digest::<sha2::Sha256>(prefix, file),
         HashAlgorithm::Md5 => hash_stream_with_prefix_digest::<md5::Md5>(prefix, file),
-        // SHA-1/384/512: use ring's BoringSSL assembly for throughput
+        // SHA-1/384/512: use ring's BoringSSL assembly on non-Apple, sha2 crate on Apple
+        #[cfg(not(target_vendor = "apple"))]
         HashAlgorithm::Sha1 => {
             hash_stream_with_prefix_ring(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, prefix, file)
         }
+        #[cfg(target_vendor = "apple")]
+        HashAlgorithm::Sha1 => hash_stream_with_prefix_digest::<sha1::Sha1>(prefix, file),
+        #[cfg(not(target_vendor = "apple"))]
         HashAlgorithm::Sha384 => hash_stream_with_prefix_ring(&ring::digest::SHA384, prefix, file),
+        #[cfg(target_vendor = "apple")]
+        HashAlgorithm::Sha384 => hash_stream_with_prefix_digest::<sha2::Sha384>(prefix, file),
+        #[cfg(not(target_vendor = "apple"))]
         HashAlgorithm::Sha512 => hash_stream_with_prefix_ring(&ring::digest::SHA512, prefix, file),
+        #[cfg(target_vendor = "apple")]
+        HashAlgorithm::Sha512 => hash_stream_with_prefix_digest::<sha2::Sha512>(prefix, file),
         HashAlgorithm::Blake2b => unreachable!(),
     }
 }
