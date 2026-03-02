@@ -62,8 +62,32 @@ pub fn parse_delimiters(s: &str) -> Vec<u8> {
     result
 }
 
+/// Pre-split a file into line offset pairs using a single SIMD memchr_iter pass.
+/// Returns a Vec of (start, end) byte offsets — one per line.
+#[inline]
+fn presplit_lines(data: &[u8], terminator: u8) -> Vec<(u32, u32)> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let count = memchr::memchr_iter(terminator, data).count();
+    let has_trailing = data.last() == Some(&terminator);
+    let cap = if has_trailing { count } else { count + 1 };
+    let mut offsets = Vec::with_capacity(cap);
+    let mut start = 0u32;
+    for pos in memchr::memchr_iter(terminator, data) {
+        offsets.push((start, pos as u32));
+        start = pos as u32 + 1;
+    }
+    if !has_trailing && (start as usize) < data.len() {
+        offsets.push((start, data.len() as u32));
+    }
+    offsets
+}
+
 /// Paste files in normal (parallel) mode and return the output buffer.
-/// Uses cursor-based scanning — no offset arrays, minimal allocation.
+/// Pre-splits files into line offsets (one SIMD pass each), then the main
+/// loop uses O(1) array indexing instead of per-line memchr calls.
+/// Uses unsafe raw pointer writes to eliminate bounds-check overhead.
 pub fn paste_parallel_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8> {
     let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
     let delims = &config.delimiters;
@@ -72,55 +96,68 @@ pub fn paste_parallel_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u
         return Vec::new();
     }
 
-    // Count max lines using SIMD memchr (fast count pass, no allocation)
-    let max_lines = file_data
+    // Pre-split each file into line offsets — single SIMD pass per file.
+    let file_lines: Vec<Vec<(u32, u32)>> = file_data
         .iter()
-        .map(|data| {
-            if data.is_empty() {
-                return 0;
-            }
-            let count = memchr::memchr_iter(terminator, data).count();
-            if data.last() != Some(&terminator) {
-                count + 1
-            } else {
-                count
-            }
-        })
-        .max()
-        .unwrap_or(0);
+        .map(|data| presplit_lines(data, terminator))
+        .collect();
 
+    let max_lines = file_lines.iter().map(|l| l.len()).max().unwrap_or(0);
     if max_lines == 0 {
         return Vec::new();
     }
 
-    // Estimate output size
-    let total_input: usize = file_data.iter().map(|d| d.len()).sum();
-    let delim_overhead = max_lines * file_data.len();
-    let mut output = Vec::with_capacity(total_input + delim_overhead);
+    // Compute exact output size to avoid reallocation.
+    let nfiles = file_data.len();
+    let has_delims = !delims.is_empty();
+    let delims_per_line = if has_delims && nfiles > 1 {
+        nfiles - 1
+    } else {
+        0
+    };
 
-    // Cursors track current position in each file (no offset arrays needed)
-    let mut cursors = vec![0usize; file_data.len()];
+    let mut exact_size = max_lines * (delims_per_line + 1); // delimiters + terminators
+    for fl in &file_lines {
+        for &(s, e) in fl.iter() {
+            exact_size += (e - s) as usize;
+        }
+    }
+    // Empty-file lines contribute nothing but delimiter slots are already counted
 
-    for _ in 0..max_lines {
-        for (file_idx, data) in file_data.iter().enumerate() {
-            if file_idx > 0 && !delims.is_empty() {
-                output.push(delims[(file_idx - 1) % delims.len()]);
-            }
-            let cursor = &mut cursors[file_idx];
-            if *cursor < data.len() {
-                match memchr::memchr(terminator, &data[*cursor..]) {
-                    Some(pos) => {
-                        output.extend_from_slice(&data[*cursor..*cursor + pos]);
-                        *cursor += pos + 1;
-                    }
-                    None => {
-                        output.extend_from_slice(&data[*cursor..]);
-                        *cursor = data.len();
+    let mut output = Vec::with_capacity(exact_size);
+
+    // SAFETY: We computed exact_size above. All writes go through raw pointers
+    // with total bytes written == exact_size. We set_len at the end.
+    unsafe {
+        let base: *mut u8 = output.as_mut_ptr();
+        let mut pos = 0usize;
+
+        for line_idx in 0..max_lines {
+            for file_idx in 0..nfiles {
+                if file_idx > 0 && has_delims {
+                    *base.add(pos) = delims[(file_idx - 1) % delims.len()];
+                    pos += 1;
+                }
+                let lines = &file_lines[file_idx];
+                if line_idx < lines.len() {
+                    let (s, e) = *lines.get_unchecked(line_idx);
+                    let len = (e - s) as usize;
+                    if len > 0 {
+                        std::ptr::copy_nonoverlapping(
+                            file_data.get_unchecked(file_idx).as_ptr().add(s as usize),
+                            base.add(pos),
+                            len,
+                        );
+                        pos += len;
                     }
                 }
             }
+            *base.add(pos) = terminator;
+            pos += 1;
         }
-        output.push(terminator);
+
+        debug_assert!(pos <= exact_size);
+        output.set_len(pos);
     }
 
     output
@@ -128,10 +165,11 @@ pub fn paste_parallel_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u
 
 /// Paste files in serial mode and return the output buffer.
 /// For each file, join all lines with the delimiter list (cycling).
-/// Uses inline memchr scanning — no offset arrays needed.
+/// Pre-splits lines using SIMD memchr, then iterates offset pairs.
 pub fn paste_serial_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8> {
     let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
     let delims = &config.delimiters;
+    let has_delims = !delims.is_empty();
 
     // Estimate output size
     let total_input: usize = file_data.iter().map(|d| d.len()).sum();
@@ -142,30 +180,20 @@ pub fn paste_serial_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8>
             output.push(terminator);
             continue;
         }
-        // Strip trailing terminator if present (we add our own at the end)
-        let effective = if data.last() == Some(&terminator) {
-            &data[..data.len() - 1]
-        } else {
-            *data
-        };
-        // Scan through data, replacing terminators with cycling delimiters
-        let mut cursor = 0;
-        let mut delim_idx = 0;
-        while cursor < effective.len() {
-            match memchr::memchr(terminator, &effective[cursor..]) {
-                Some(pos) => {
-                    output.extend_from_slice(&effective[cursor..cursor + pos]);
-                    if !delims.is_empty() {
-                        output.push(delims[delim_idx % delims.len()]);
-                        delim_idx += 1;
-                    }
-                    cursor += pos + 1;
-                }
-                None => {
-                    output.extend_from_slice(&effective[cursor..]);
-                    break;
-                }
+        let lines = presplit_lines(data, terminator);
+        if lines.is_empty() {
+            output.push(terminator);
+            continue;
+        }
+        // First line: no leading delimiter
+        let (s, e) = lines[0];
+        output.extend_from_slice(&data[s as usize..e as usize]);
+        // Subsequent lines: prepend cycling delimiter
+        for (i, &(s, e)) in lines[1..].iter().enumerate() {
+            if has_delims {
+                output.push(delims[i % delims.len()]);
             }
+            output.extend_from_slice(&data[s as usize..e as usize]);
         }
         output.push(terminator);
     }
