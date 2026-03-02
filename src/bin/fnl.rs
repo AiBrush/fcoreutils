@@ -404,14 +404,20 @@ fn print_help() {
     );
 }
 
-/// Enlarge pipe buffers on Linux for higher throughput.
+/// Enlarge stdout pipe buffer on Linux for higher throughput.
+/// Only enlarges stdout (fd 1) when it is actually a pipe.
 #[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    for &fd in &[0i32, 1] {
-        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
-                break;
-            }
+fn enlarge_stdout_pipe() {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(1, &mut stat) } != 0 {
+        return;
+    }
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO {
+        return;
+    }
+    for &size in &[1024 * 1024i32, 256 * 1024] {
+        if unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, size) } > 0 {
+            break;
         }
     }
 }
@@ -420,7 +426,7 @@ fn main() {
     coreutils_rs::common::reset_sigpipe();
 
     #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    enlarge_stdout_pipe();
 
     let cli = parse_args();
 
