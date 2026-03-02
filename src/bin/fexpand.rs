@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process;
 
 use coreutils_rs::common::io::{read_file, read_stdin};
-use coreutils_rs::common::io_error_msg;
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::expand::{TabStops, expand_bytes, parse_tab_stops};
 
 struct Cli {
@@ -136,23 +136,10 @@ fn parse_args() -> Cli {
     cli
 }
 
-/// Enlarge pipe buffers on Linux.
-#[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    for &fd in &[0i32, 1] {
-        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
-                break;
-            }
-        }
-    }
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    enlarge_stdout_pipe();
 
     let cli = parse_args();
 

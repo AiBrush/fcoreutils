@@ -9,7 +9,7 @@ use std::process;
 use clap::Parser;
 use memmap2::MmapOptions;
 
-use coreutils_rs::common::io_error_msg;
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::uniq::{
     AllRepeatedMethod, GroupMethod, OutputMode, UniqConfig, process_uniq_bytes,
 };
@@ -97,22 +97,10 @@ struct Cli {
     output: Option<String>,
 }
 
-/// Enlarge pipe buffers on Linux for higher throughput.
-/// 8MB matches other tools (ftac, fbase64, ftr, fcut) for consistent syscall reduction.
-#[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    const PIPE_SIZE: i32 = 8 * 1024 * 1024;
-    unsafe {
-        libc::fcntl(0, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdin
-        libc::fcntl(1, libc::F_SETPIPE_SZ, PIPE_SIZE); // stdout
-    }
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    enlarge_stdout_pipe();
 
     let cli = Cli::parse();
 

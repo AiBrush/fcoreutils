@@ -1,7 +1,7 @@
 use std::io::{self, BufWriter, Write};
 use std::process;
 
-use coreutils_rs::common::{io_error_msg, reset_sigpipe};
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg, reset_sigpipe};
 use coreutils_rs::head::{self, HeadConfig, HeadMode};
 
 struct Cli {
@@ -75,15 +75,13 @@ fn parse_args() -> Cli {
                 }
             }
         } else if bytes.len() > 1 && bytes[0] == b'-' {
-            // Short options
-            let s = arg.to_string_lossy();
-            let chars: Vec<char> = s[1..].chars().collect();
-            let mut i = 0;
-            while i < chars.len() {
-                match chars[i] {
-                    'n' => {
-                        let val = if i + 1 < chars.len() {
-                            s[1 + i + 1..].to_string()
+            // Short options — parse directly from bytes to avoid Vec<char> allocation
+            let mut i = 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'n' => {
+                        let val = if i + 1 < bytes.len() {
+                            String::from_utf8_lossy(&bytes[i + 1..]).into_owned()
                         } else {
                             args.next()
                                 .unwrap_or_else(|| {
@@ -94,12 +92,11 @@ fn parse_args() -> Cli {
                                 .into_owned()
                         };
                         parse_lines_value(&val, &mut cli.config);
-                        // mode set
-                        break; // consumed rest of arg
+                        break;
                     }
-                    'c' => {
-                        let val = if i + 1 < chars.len() {
-                            s[1 + i + 1..].to_string()
+                    b'c' => {
+                        let val = if i + 1 < bytes.len() {
+                            String::from_utf8_lossy(&bytes[i + 1..]).into_owned()
                         } else {
                             args.next()
                                 .unwrap_or_else(|| {
@@ -110,21 +107,19 @@ fn parse_args() -> Cli {
                                 .into_owned()
                         };
                         parse_bytes_value(&val, &mut cli.config);
-                        // mode set
                         break;
                     }
-                    'q' => cli.quiet = true,
-                    'v' => cli.verbose = true,
-                    'z' => cli.config.zero_terminated = true,
-                    '0'..='9' => {
+                    b'q' => cli.quiet = true,
+                    b'v' => cli.verbose = true,
+                    b'z' => cli.config.zero_terminated = true,
+                    b'0'..=b'9' => {
                         // Legacy: head -N means head -n N
-                        let num_str: String = chars[i..].iter().collect();
+                        let num_str = String::from_utf8_lossy(&bytes[i..]);
                         parse_lines_value(&num_str, &mut cli.config);
-                        // mode set
                         break;
                     }
                     _ => {
-                        eprintln!("head: invalid option -- '{}'", chars[i]);
+                        eprintln!("head: invalid option -- '{}'", char::from(bytes[i]));
                         eprintln!("Try 'head --help' for more information.");
                         process::exit(1);
                     }
@@ -204,30 +199,84 @@ fn print_help() {
     );
 }
 
-/// Enlarge pipe buffers on Linux for higher throughput.
-#[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    for &fd in &[0i32, 1] {
-        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
-                break;
+/// Ultra-fast path for the dominant case: single file, positive line/byte count,
+/// no headers. Bypasses BufWriter allocation entirely by writing directly via
+/// raw fd on Linux, or a minimal stack-buffered writer elsewhere.
+/// Returns Ok(Some(exit_code)) if handled, Ok(None) to fall through to general path.
+fn try_fast_single_file(cli: &Cli) -> Option<i32> {
+    // Only applies to single-file, no-header cases
+    if cli.files.len() != 1 || cli.verbose {
+        return None;
+    }
+    let filename = &cli.files[0];
+    if filename == "-" {
+        return None;
+    }
+
+    // Only for positive-count modes (no from-end) and standard newline delimiter
+    if cli.config.zero_terminated {
+        return None;
+    }
+    match &cli.config.mode {
+        HeadMode::Lines(n) => match head::head_file_direct(filename, *n, b'\n') {
+            Ok(true) => Some(0),
+            Ok(false) => Some(1),
+            Err(e) => {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    Some(0)
+                } else {
+                    eprintln!("head: write error: {}", io_error_msg(&e));
+                    Some(1)
+                }
             }
+        },
+        HeadMode::Bytes(n) => {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::io::AsRawFd;
+                let stdout = io::stdout();
+                let out_fd = stdout.as_raw_fd();
+                match head::sendfile_bytes(std::path::Path::new(filename), *n, out_fd) {
+                    Ok(true) => return Some(0),
+                    Ok(false) => {}
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::BrokenPipe {
+                            return Some(0);
+                        }
+                        eprintln!(
+                            "head: cannot open '{}' for reading: {}",
+                            filename,
+                            io_error_msg(&e)
+                        );
+                        return Some(1);
+                    }
+                }
+            }
+            let _ = n;
+            None
         }
+        _ => None,
     }
 }
 
 fn main() {
     reset_sigpipe();
-
-    #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    enlarge_stdout_pipe();
 
     let cli = parse_args();
 
-    let files: Vec<String> = if cli.files.is_empty() {
-        vec!["-".to_string()]
+    // Fast path: single file, positive count, no headers -- bypass BufWriter entirely
+    if !cli.quiet
+        && cli.files.len() <= 1
+        && let Some(code) = try_fast_single_file(&cli)
+    {
+        process::exit(code);
+    }
+
+    let files: Vec<&str> = if cli.files.is_empty() {
+        vec!["-"]
     } else {
-        cli.files
+        cli.files.iter().map(|s| s.as_str()).collect()
     };
 
     let tool_name = "head";
@@ -240,7 +289,7 @@ fn main() {
     };
 
     let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(8 * 1024, stdout.lock());
     let mut had_error = false;
     let mut first = true;
 
@@ -249,10 +298,10 @@ fn main() {
             if !first {
                 let _ = out.write_all(b"\n");
             }
-            let display_name = if filename == "-" {
+            let display_name = if *filename == "-" {
                 "standard input"
             } else {
-                filename.as_str()
+                filename
             };
             let _ = writeln!(out, "==> {} <==", display_name);
         }

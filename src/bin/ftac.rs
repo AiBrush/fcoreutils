@@ -10,7 +10,7 @@ use std::process;
 use memmap2::MmapOptions;
 
 use coreutils_rs::common::io::{FileData, read_file_mmap, read_stdin};
-use coreutils_rs::common::io_error_msg;
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::tac;
 
 struct Cli {
@@ -251,24 +251,10 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
     had_error
 }
 
-/// Enlarge pipe buffers on Linux for higher throughput.
-/// Skips /proc read (~50µs) — directly tries decreasing sizes via fcntl.
-#[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    for &fd in &[0i32, 1] {
-        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
-                break;
-            }
-        }
-    }
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    enlarge_stdout_pipe();
 
     let mut cli = parse_args();
 

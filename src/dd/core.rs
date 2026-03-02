@@ -483,7 +483,8 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         }
     };
 
-    // Open input (O_CLOEXEC prevents FD inheritance in child processes)
+    // Open input: try O_NOATIME first (avoids atime updates, saves ~1 syscall on owned files).
+    // If EPERM (file not owned by us, common for /dev/* nodes), retry without O_NOATIME.
     let in_fd = unsafe {
         libc::open(
             in_cstr.as_ptr(),
@@ -493,7 +494,6 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
     let in_fd = if in_fd < 0 {
         let first_err = io::Error::last_os_error();
         if first_err.raw_os_error() == Some(libc::EPERM) {
-            // Retry without O_NOATIME — only EPERM means "file not owned by us"
             let fd = unsafe { libc::open(in_cstr.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
             if fd < 0 {
                 return Some(Err(io::Error::last_os_error()));
@@ -525,9 +525,17 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
         return Some(Err(io::Error::last_os_error()));
     }
 
-    // Hint kernel for sequential readahead on input
-    unsafe {
-        libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    // Hint kernel for sequential readahead — only for regular files.
+    // fadvise on char devices (e.g. /dev/zero) returns ESPIPE and wastes a syscall.
+    {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(in_fd, &mut stat) } == 0
+            && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+        {
+            unsafe {
+                libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+            }
+        }
     }
 
     // Handle skip (seek input) — use checked_mul to prevent overflow
@@ -603,7 +611,16 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
 
     let mut stats = DdStats::default();
     let bs = config.ibs;
-    let mut ibuf = vec![0u8; bs];
+    #[allow(clippy::uninit_vec)]
+    // SAFETY: The buffer is filled by libc::read before being passed to libc::write.
+    // No uninitialized data is ever consumed by user code or written to output —
+    // only `total_read` bytes are written, which are the bytes that libc::read populated.
+    let mut ibuf = unsafe {
+        let mut v = Vec::with_capacity(bs);
+        v.set_len(bs);
+        v
+    };
+    debug_assert_eq!(ibuf.len(), bs);
     let count_limit = config.count;
 
     loop {
@@ -664,7 +681,9 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
 
         // Raw write — retry on EINTR, treat write(0) as error
         let mut written = 0usize;
+        debug_assert!(total_read <= ibuf.len());
         while written < total_read {
+            debug_assert!(written <= ibuf.len());
             let ret = unsafe {
                 libc::write(
                     out_fd,

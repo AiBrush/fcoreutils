@@ -1284,25 +1284,12 @@ fn read_input(filename: &str) -> InputData {
     }
 }
 
-/// Enlarge stdin/stdout pipe buffers on Linux to reduce syscall count.
-#[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    for &fd in &[0i32, 1] {
-        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } >= 0 {
-                break;
-            }
-        }
-    }
-}
-
 fn main() {
     // Do NOT reset SIGPIPE to SIG_DFL here — keep Rust's default SIG_IGN so that
     // writes to a broken pipe return BrokenPipe error instead of killing the process.
     // This lets us print "basenc: write error: Broken pipe" to stderr (GNU compat).
 
-    #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    coreutils_rs::common::enlarge_stdout_pipe();
 
     let cli = parse_args();
 

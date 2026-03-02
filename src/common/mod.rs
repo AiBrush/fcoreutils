@@ -18,6 +18,29 @@ pub fn reset_sigpipe() {
     }
 }
 
+/// Enlarge stdout pipe buffer on Linux for higher throughput.
+/// Only enlarges stdout (fd 1) when it is actually a pipe.
+/// Tries 8MB first (best for large data), falls back to 1MB then 256KB.
+/// Silently no-ops on non-pipes, non-Linux, or restricted environments.
+#[cfg(target_os = "linux")]
+pub fn enlarge_stdout_pipe() {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(1, &mut stat) } != 0 {
+        return;
+    }
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO {
+        return;
+    }
+    for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
+        if unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, size) } > 0 {
+            break;
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn enlarge_stdout_pipe() {}
+
 /// Format an IO error message without the "(os error N)" suffix.
 /// GNU coreutils prints e.g. "No such file or directory" while Rust's
 /// Display impl adds " (os error 2)". This strips the suffix for compat.

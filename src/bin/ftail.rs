@@ -1,7 +1,7 @@
 use std::io::{self, BufWriter, Write};
 use std::process;
 
-use coreutils_rs::common::{io_error_msg, reset_sigpipe};
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg, reset_sigpipe};
 use coreutils_rs::tail::{self, FollowMode, TailConfig, TailMode};
 
 struct Cli {
@@ -132,14 +132,13 @@ fn parse_args() -> Cli {
                 }
             }
         } else if bytes.len() > 1 && bytes[0] == b'-' {
-            let s = arg.to_string_lossy();
-            let chars: Vec<char> = s[1..].chars().collect();
-            let mut i = 0;
-            while i < chars.len() {
-                match chars[i] {
-                    'n' => {
-                        let val = if i + 1 < chars.len() {
-                            s[1 + i + 1..].to_string()
+            // Short options — parse directly from bytes to avoid Vec<char> allocation
+            let mut i = 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'n' => {
+                        let val = if i + 1 < bytes.len() {
+                            String::from_utf8_lossy(&bytes[i + 1..]).into_owned()
                         } else {
                             args.next()
                                 .unwrap_or_else(|| {
@@ -152,9 +151,9 @@ fn parse_args() -> Cli {
                         parse_lines_value(&val, &mut cli.config);
                         break;
                     }
-                    'c' => {
-                        let val = if i + 1 < chars.len() {
-                            s[1 + i + 1..].to_string()
+                    b'c' => {
+                        let val = if i + 1 < bytes.len() {
+                            String::from_utf8_lossy(&bytes[i + 1..]).into_owned()
                         } else {
                             args.next()
                                 .unwrap_or_else(|| {
@@ -167,17 +166,17 @@ fn parse_args() -> Cli {
                         parse_bytes_value(&val, &mut cli.config);
                         break;
                     }
-                    'f' => cli.config.follow = FollowMode::Descriptor,
-                    'F' => {
+                    b'f' => cli.config.follow = FollowMode::Descriptor,
+                    b'F' => {
                         cli.config.follow = FollowMode::Name;
                         cli.config.retry = true;
                     }
-                    'q' => cli.quiet = true,
-                    'v' => cli.verbose = true,
-                    'z' => cli.config.zero_terminated = true,
-                    's' => {
-                        let val = if i + 1 < chars.len() {
-                            s[1 + i + 1..].to_string()
+                    b'q' => cli.quiet = true,
+                    b'v' => cli.verbose = true,
+                    b'z' => cli.config.zero_terminated = true,
+                    b's' => {
+                        let val = if i + 1 < bytes.len() {
+                            String::from_utf8_lossy(&bytes[i + 1..]).into_owned()
                         } else {
                             args.next()
                                 .unwrap_or_else(|| {
@@ -193,14 +192,14 @@ fn parse_args() -> Cli {
                         });
                         break;
                     }
-                    '0'..='9' | '+' => {
+                    b'0'..=b'9' | b'+' => {
                         // Legacy: tail -N means tail -n N, tail +N means tail -n +N
-                        let num_str: String = chars[i..].iter().collect();
+                        let num_str = String::from_utf8_lossy(&bytes[i..]);
                         parse_lines_value(&num_str, &mut cli.config);
                         break;
                     }
                     _ => {
-                        eprintln!("tail: invalid option -- '{}'", chars[i]);
+                        eprintln!("tail: invalid option -- '{}'", char::from(bytes[i]));
                         eprintln!("Try 'tail --help' for more information.");
                         process::exit(1);
                     }
@@ -315,30 +314,70 @@ fn print_help() {
     );
 }
 
-/// Enlarge pipe buffers on Linux.
+/// Ultra-fast path for single-file tail on Linux.
+/// For small files (<=64KB), reads into a stack buffer and writes directly
+/// via raw write(2), bypassing BufWriter entirely. For larger files,
+/// uses sendfile with automatic terminal fallback.
+/// Returns Some(exit_code) if handled, None to fall through to general path.
 #[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    for &fd in &[0i32, 1] {
-        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
-                break;
+fn try_fast_single_file(cli: &Cli) -> Option<i32> {
+    // Only applies to single-file, no-header, no-follow cases
+    if cli.files.len() != 1 || cli.verbose || cli.config.follow != FollowMode::None {
+        return None;
+    }
+    let filename = &cli.files[0];
+    if filename == "-" || cli.config.zero_terminated {
+        return None;
+    }
+
+    match &cli.config.mode {
+        TailMode::Lines(n) => match tail::tail_file_direct(filename, *n, b'\n') {
+            Ok(true) => Some(0),
+            Ok(false) => Some(1),
+            Err(e) => {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    Some(0)
+                } else {
+                    eprintln!("tail: error reading '{}': {}", filename, io_error_msg(&e));
+                    Some(1)
+                }
             }
-        }
+        },
+        TailMode::Bytes(n) => match tail::tail_file_bytes_direct(filename, *n) {
+            Ok(true) => Some(0),
+            Ok(false) => Some(1),
+            Err(e) => {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    Some(0)
+                } else {
+                    eprintln!("tail: error reading '{}': {}", filename, io_error_msg(&e));
+                    Some(1)
+                }
+            }
+        },
+        _ => None,
     }
 }
 
 fn main() {
     reset_sigpipe();
-
-    #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    enlarge_stdout_pipe();
 
     let cli = parse_args();
 
-    let files: Vec<String> = if cli.files.is_empty() {
-        vec!["-".to_string()]
+    // Fast path: single file, no headers, no follow — bypass BufWriter entirely
+    #[cfg(target_os = "linux")]
+    if !cli.quiet
+        && cli.files.len() <= 1
+        && let Some(code) = try_fast_single_file(&cli)
+    {
+        process::exit(code);
+    }
+
+    let files: Vec<&str> = if cli.files.is_empty() {
+        vec!["-"]
     } else {
-        cli.files
+        cli.files.iter().map(|s| s.as_str()).collect()
     };
 
     let tool_name = "tail";
@@ -351,7 +390,7 @@ fn main() {
     };
 
     let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(8 * 1024, stdout.lock());
     let mut had_error = false;
     let mut first = true;
 
@@ -360,10 +399,10 @@ fn main() {
             if !first {
                 let _ = out.write_all(b"\n");
             }
-            let display_name = if filename == "-" {
+            let display_name = if *filename == "-" {
                 "standard input"
             } else {
-                filename.as_str()
+                filename
             };
             let _ = writeln!(out, "==> {} <==", display_name);
         }
@@ -388,7 +427,7 @@ fn main() {
     // Follow mode
     if cli.config.follow != FollowMode::None {
         for filename in &files {
-            if filename != "-" {
+            if *filename != "-" {
                 let _ = tail::follow_file(filename, &cli.config, &mut out);
             }
         }

@@ -180,7 +180,109 @@ pub fn head_bytes_from_end(data: &[u8], n: u64, out: &mut impl Write) -> io::Res
     Ok(())
 }
 
-/// Use sendfile for zero-copy byte output on Linux
+/// Raw write(2) to stdout, bypassing all Rust I/O layers.
+/// Avoids stdout.lock(), BufWriter allocation, and Write trait overhead.
+#[cfg(target_os = "linux")]
+fn write_all_raw(mut data: &[u8]) -> io::Result<()> {
+    while !data.is_empty() {
+        let ret = unsafe { libc::write(1, data.as_ptr() as *const libc::c_void, data.len()) };
+        if ret > 0 {
+            data = &data[ret as usize..];
+        } else if ret == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Ultra-fast direct path: single file, positive line count, writes directly
+/// to stdout fd without BufWriter overhead. Uses raw write(2) on Linux;
+/// on other platforms uses a small stack-buffered stdout.
+/// Returns Ok(true) on success, Ok(false) on file error (already printed).
+pub fn head_file_direct(filename: &str, n: u64, delimiter: u8) -> io::Result<bool> {
+    if n == 0 {
+        return Ok(true);
+    }
+
+    let path = Path::new(filename);
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOATIME)
+            .open(path)
+            .or_else(|_| std::fs::File::open(path));
+        let mut file = match file {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "head: cannot open '{}' for reading: {}",
+                    filename,
+                    crate::common::io_error_msg(&e)
+                );
+                return Ok(false);
+            }
+        };
+
+        let mut buf = [0u8; 8192];
+        let mut count = 0u64;
+
+        loop {
+            let bytes_read = match file.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+
+            let chunk = &buf[..bytes_read];
+
+            for pos in memchr_iter(delimiter, chunk) {
+                count += 1;
+                if count == n {
+                    write_all_raw(&chunk[..=pos])?;
+                    return Ok(true);
+                }
+            }
+
+            write_all_raw(chunk)?;
+        }
+
+        return Ok(true);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::with_capacity(8192, stdout.lock());
+        match head_lines_streaming_file(path, n, delimiter, &mut out) {
+            Ok(true) => {
+                out.flush()?;
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(e) => {
+                eprintln!(
+                    "head: cannot open '{}' for reading: {}",
+                    filename,
+                    crate::common::io_error_msg(&e)
+                );
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// Use sendfile for zero-copy byte output on Linux.
+/// Falls back to read+write if sendfile fails (e.g., stdout is a terminal).
 #[cfg(target_os = "linux")]
 pub fn sendfile_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -203,6 +305,7 @@ pub fn sendfile_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool> {
     let in_fd = file.as_raw_fd();
     let mut offset: libc::off_t = 0;
     let mut remaining = to_send;
+    let total = to_send;
 
     while remaining > 0 {
         let chunk = remaining.min(0x7ffff000); // sendfile max per call
@@ -215,6 +318,24 @@ pub fn sendfile_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool> {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {
                 continue;
+            }
+            // sendfile fails with EINVAL for terminal fds; fall back to read+write
+            if err.raw_os_error() == Some(libc::EINVAL) && remaining == total {
+                let mut file = file;
+                let mut buf = [0u8; 65536];
+                let mut left = to_send;
+                while left > 0 {
+                    let to_read = left.min(buf.len());
+                    let nr = match file.read(&mut buf[..to_read]) {
+                        Ok(0) => break,
+                        Ok(nr) => nr,
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(e),
+                    };
+                    write_all_raw(&buf[..nr])?;
+                    left -= nr;
+                }
+                return Ok(true);
             }
             return Err(err);
         }
@@ -250,7 +371,9 @@ fn head_lines_streaming_file(
     let file = std::fs::File::open(path)?;
 
     let mut file = file;
-    let mut buf = [0u8; 65536];
+    // Use 8KB buffer: default 10 lines almost always fits in one read.
+    // Avoids reading 65KB just to extract the first few lines.
+    let mut buf = [0u8; 8192];
     let mut count = 0u64;
 
     loop {

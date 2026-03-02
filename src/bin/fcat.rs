@@ -2,7 +2,7 @@ use std::io::{self, BufWriter, Write};
 use std::process;
 
 use coreutils_rs::cat::{self, CatConfig};
-use coreutils_rs::common::{io_error_msg, reset_sigpipe};
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg, reset_sigpipe};
 
 struct Cli {
     config: CatConfig,
@@ -143,23 +143,10 @@ fn print_help() {
     );
 }
 
-/// Enlarge pipe buffers on Linux for higher throughput.
-#[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    for &fd in &[0i32, 1] {
-        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
-                break;
-            }
-        }
-    }
-}
-
 fn main() {
     reset_sigpipe();
 
-    #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    enlarge_stdout_pipe();
 
     let cli = parse_args();
 

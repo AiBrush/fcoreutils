@@ -11,7 +11,7 @@ use memmap2::MmapOptions;
 
 use coreutils_rs::base64::core as b64;
 use coreutils_rs::common::io::read_file_mmap;
-use coreutils_rs::common::io_error_msg;
+use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 
 /// Raw stdin reader for zero-overhead pipe reads on Linux.
 /// Bypasses Rust's StdinLock (mutex + 8KB BufReader) for direct libc::read(0).
@@ -170,25 +170,10 @@ fn raw_stdout() -> ManuallyDrop<std::fs::File> {
     unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) }
 }
 
-/// Enlarge pipe buffers on Linux for higher throughput.
-/// Skips /proc read — directly tries decreasing sizes via fcntl.
-/// Saves ~50µs startup vs reading /proc/sys/fs/pipe-max-size.
-#[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    for &fd in &[0i32, 1] {
-        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
-                break;
-            }
-        }
-    }
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    enlarge_stdout_pipe();
 
     let cli = parse_args();
 
