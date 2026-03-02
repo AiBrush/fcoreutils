@@ -171,56 +171,61 @@ pub fn expand_bytes(
 }
 
 /// Fast expand for regular tab stops without -i flag.
-/// Accumulates output into a buffer and flushes periodically (every 256KB) to bound memory.
-/// Uses memchr2 SIMD scanning to skip non-tab/non-newline runs in bulk.
+/// Line-at-a-time approach: one memchr call per line (not per tab), then
+/// tight inner scalar loop for tab expansion within each line.
+/// Uses unsafe raw pointer writes to eliminate bounds-checking overhead.
 fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
     debug_assert!(tab_size > 0, "tab_size must be > 0");
     const FLUSH_THRESHOLD: usize = 256 * 1024;
-    let cap = data.len().min(FLUSH_THRESHOLD) + data.len().min(FLUSH_THRESHOLD) / 8;
-    let mut output = Vec::with_capacity(cap);
-    let mut column: usize = 0;
+
+    // Pre-allocate: tabs expand to multiple spaces (worst case tab_size× expansion)
+    let alloc = (data.len() * 2 + 1024).min(8 * 1024 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(alloc);
     let mut pos: usize = 0;
 
-    // For power-of-2 tab sizes, use bitwise AND instead of modulo (avoids DIV instruction)
+    // For power-of-2 tab sizes, use bitwise AND instead of modulo
     let is_pow2 = tab_size.is_power_of_two();
-    let mask = tab_size - 1; // only valid when is_pow2
+    let mask = tab_size - 1;
 
-    while pos < data.len() {
-        match memchr::memchr2(b'\t', b'\n', &data[pos..]) {
-            Some(offset) => {
-                // Copy non-special bytes in bulk
-                if offset > 0 {
-                    output.extend_from_slice(&data[pos..pos + offset]);
-                    column += offset;
-                }
-                let byte = data[pos + offset];
-                pos += offset + 1;
+    // Process line by line — one memchr per line instead of per tab
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line = &data[pos..nl_pos];
 
-                if byte == b'\n' {
-                    output.push(b'\n');
-                    column = 0;
-                } else {
-                    // Tab: append spaces to buffer
-                    let rem = if is_pow2 {
-                        column & mask
-                    } else {
-                        column % tab_size
-                    };
-                    let spaces = tab_size - rem;
-                    push_spaces(&mut output, spaces);
-                    column += spaces;
-                }
+        // Ensure capacity: worst case each byte becomes tab_size spaces + newline
+        let max_expansion = line.len() * tab_size + 1;
+        let needed = output.len() + max_expansion;
+        if needed > output.capacity() {
+            output.reserve(needed - output.len() + 2 * 1024 * 1024);
+        }
 
-                // Flush periodically to bound memory usage
-                if output.len() >= FLUSH_THRESHOLD {
-                    out.write_all(&output)?;
-                    output.clear();
-                }
+        // Fast check: if no tabs in this line, bulk copy
+        if memchr::memchr(b'\t', line).is_none() {
+            output.extend_from_slice(line);
+        } else {
+            // Expand tabs within this line using tight scalar loop
+            expand_line_scalar(&mut output, line, tab_size, is_pow2, mask);
+        }
+        output.push(b'\n');
+        pos = nl_pos + 1;
+
+        if output.len() >= FLUSH_THRESHOLD {
+            out.write_all(&output)?;
+            output.clear();
+        }
+    }
+
+    // Handle final line without trailing newline
+    if pos < data.len() {
+        let line = &data[pos..];
+        if memchr::memchr(b'\t', line).is_none() {
+            output.extend_from_slice(line);
+        } else {
+            let max_expansion = line.len() * tab_size;
+            let needed = output.len() + max_expansion;
+            if needed > output.capacity() {
+                output.reserve(needed - output.len() + 1024);
             }
-            None => {
-                output.extend_from_slice(&data[pos..]);
-                break;
-            }
+            expand_line_scalar(&mut output, line, tab_size, is_pow2, mask);
         }
     }
 
@@ -228,6 +233,68 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
         out.write_all(&output)?;
     }
     Ok(())
+}
+
+/// Expand tabs within a single line using a tight inner loop.
+/// Segments between tabs are bulk-copied, tabs are replaced by spaces.
+/// Uses unsafe pointer writes for both copy and space-fill.
+#[inline(always)]
+fn expand_line_scalar(
+    output: &mut Vec<u8>,
+    line: &[u8],
+    tab_size: usize,
+    is_pow2: bool,
+    mask: usize,
+) {
+    let mut column: usize = 0;
+    let mut seg_start: usize = 0;
+
+    for (i, &byte) in line.iter().enumerate() {
+        if byte == b'\t' {
+            // Copy segment before tab
+            if i > seg_start {
+                let seg_len = i - seg_start;
+                unsafe {
+                    let wp = output.len();
+                    std::ptr::copy_nonoverlapping(
+                        line.as_ptr().add(seg_start),
+                        output.as_mut_ptr().add(wp),
+                        seg_len,
+                    );
+                    output.set_len(wp + seg_len);
+                }
+                column += seg_len;
+            }
+            // Write spaces for tab
+            let rem = if is_pow2 {
+                column & mask
+            } else {
+                column % tab_size
+            };
+            let spaces = tab_size - rem;
+            unsafe {
+                let wp = output.len();
+                std::ptr::write_bytes(output.as_mut_ptr().add(wp), b' ', spaces);
+                output.set_len(wp + spaces);
+            }
+            column += spaces;
+            seg_start = i + 1;
+        }
+    }
+
+    // Copy remaining segment after last tab
+    if seg_start < line.len() {
+        let seg_len = line.len() - seg_start;
+        unsafe {
+            let wp = output.len();
+            std::ptr::copy_nonoverlapping(
+                line.as_ptr().add(seg_start),
+                output.as_mut_ptr().add(wp),
+                seg_len,
+            );
+            output.set_len(wp + seg_len);
+        }
+    }
 }
 
 /// Fast expand for --initial mode with regular tab stops.
