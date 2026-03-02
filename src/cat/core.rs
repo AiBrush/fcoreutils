@@ -26,20 +26,11 @@ impl CatConfig {
     }
 }
 
-/// Use splice for zero-copy file→stdout on Linux (file → pipe)
+/// Zero-copy file→stdout on Linux using splice, copy_file_range, or fast read/write.
 #[cfg(target_os = "linux")]
-pub fn splice_file_to_stdout(path: &Path) -> io::Result<bool> {
+pub fn cat_plain_file_linux(path: &Path) -> io::Result<bool> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
-
-    // Check if stdout is a pipe (splice only works with pipes)
-    let stdout = io::stdout();
-    let out_fd = stdout.as_raw_fd();
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(out_fd, &mut stat) } != 0 {
-        return Ok(false);
-    }
-    let stdout_is_pipe = (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO;
 
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -52,11 +43,41 @@ pub fn splice_file_to_stdout(path: &Path) -> io::Result<bool> {
     let file_size = metadata.len() as usize;
 
     if file_size == 0 {
+        // May be a virtual file (e.g. /proc/*) with size 0 but actual content
+        if !metadata.file_type().is_file() {
+            return Ok(false); // let generic path handle devices/special files
+        }
+        // Try reading — virtual files report size 0
+        let mut buf = [0u8; 65536];
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        loop {
+            let n = match nix_read(in_fd, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            out.write_all(&buf[..n])?;
+        }
         return Ok(true);
     }
 
-    if stdout_is_pipe {
-        // splice: zero-copy file→pipe
+    // Hint kernel for sequential access
+    unsafe {
+        libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    }
+
+    let stdout = io::stdout();
+    let out_fd = stdout.as_raw_fd();
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(out_fd, &mut stat) } != 0 {
+        return Ok(false);
+    }
+    let stdout_mode = stat.st_mode & libc::S_IFMT;
+
+    if stdout_mode == libc::S_IFIFO {
+        // stdout is a pipe → splice (zero-copy file→pipe)
         let mut remaining = file_size;
         while remaining > 0 {
             let chunk = remaining.min(1024 * 1024 * 1024);
@@ -79,54 +100,84 @@ pub fn splice_file_to_stdout(path: &Path) -> io::Result<bool> {
                 if err.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                // splice not supported — fall through to sendfile
-                return sendfile_to_stdout(in_fd, file_size, out_fd);
+                // splice not supported — fall through to read/write
+                return cat_readwrite(in_fd, stdout.lock());
             }
         }
-        Ok(true)
-    } else {
-        // sendfile: zero-copy file→socket/file
-        sendfile_to_stdout(in_fd, file_size, out_fd)
+        return Ok(true);
     }
+
+    if stdout_mode == libc::S_IFREG {
+        // stdout is a regular file → copy_file_range (zero-copy in-kernel)
+        let mut off_in: libc::off64_t = 0;
+        let mut off_out: libc::off64_t = unsafe { libc::lseek(out_fd, 0, libc::SEEK_CUR) };
+        let mut remaining = file_size;
+        while remaining > 0 {
+            let chunk = remaining.min(0x7ffff000);
+            let ret = unsafe {
+                libc::copy_file_range(in_fd, &mut off_in, out_fd, &mut off_out, chunk, 0)
+            };
+            if ret > 0 {
+                remaining -= ret as usize;
+            } else if ret == 0 {
+                break;
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                // copy_file_range not supported — fall through to read/write
+                return cat_readwrite(in_fd, stdout.lock());
+            }
+        }
+        return Ok(true);
+    }
+
+    // stdout is /dev/null, socket, or other — use fast read/write loop
+    cat_readwrite(in_fd, stdout.lock())
 }
 
+/// Fast read/write loop using raw fds and a 256KB page-aligned buffer.
 #[cfg(target_os = "linux")]
-fn sendfile_to_stdout(in_fd: i32, file_size: usize, out_fd: i32) -> io::Result<bool> {
-    let mut offset: libc::off_t = 0;
-    let mut remaining = file_size;
-
-    while remaining > 0 {
-        let chunk = remaining.min(0x7ffff000);
-        let ret = unsafe { libc::sendfile(out_fd, in_fd, &mut offset, chunk) };
-        if ret > 0 {
-            remaining -= ret as usize;
-        } else if ret == 0 {
-            break;
-        } else {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
+fn cat_readwrite(in_fd: i32, mut out: impl Write) -> io::Result<bool> {
+    // 256KB matches GNU cat's empirically-optimal buffer size
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = match nix_read(in_fd, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        out.write_all(&buf[..n])?;
     }
-
     Ok(true)
 }
 
-/// Plain cat for a single file — tries splice/sendfile, then falls back to mmap+write
+/// Wrapper around libc::read returning io::Result
+#[cfg(target_os = "linux")]
+fn nix_read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+    let ret = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Plain cat for a single file — tries zero-copy, then falls back to read/write loop
 pub fn cat_plain_file(path: &Path, out: &mut impl Write) -> io::Result<bool> {
-    // Try zero-copy first on Linux
     #[cfg(target_os = "linux")]
     {
-        match splice_file_to_stdout(path) {
+        match cat_plain_file_linux(path) {
             Ok(true) => return Ok(true),
             Ok(false) => {}
-            Err(_) => {} // fall through
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Err(e),
+            Err(_) => {} // fall through to generic path
         }
     }
 
-    // Fallback: mmap + write
+    // Fallback: read file + write (non-Linux or special files)
     let data = read_file(path)?;
     if !data.is_empty() {
         out.write_all(&data)?;
@@ -172,10 +223,10 @@ pub fn cat_plain_stdin(out: &mut impl Write) -> io::Result<()> {
         }
     }
 
-    // Fallback: read+write loop
+    // Fallback: read+write loop (256KB matches GNU cat's optimal buffer)
     let stdin = io::stdin();
     let mut reader = stdin.lock();
-    let mut buf = [0u8; 131072]; // 128KB buffer
+    let mut buf = [0u8; 262144]; // 256KB buffer
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) => break,
