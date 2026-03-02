@@ -384,10 +384,11 @@ fn main() {
 
     // Fast path: single file, no headers, no follow — bypass BufWriter entirely
     #[cfg(target_os = "linux")]
-    if !cli.quiet && cli.files.len() <= 1 {
-        if let Some(code) = try_fast_single_file(&cli) {
-            process::exit(code);
-        }
+    if !cli.quiet
+        && cli.files.len() <= 1
+        && let Some(code) = try_fast_single_file(&cli)
+    {
+        process::exit(code);
     }
 
     // General path: multiple files, stdin, follow mode, etc.

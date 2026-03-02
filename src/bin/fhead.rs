@@ -284,10 +284,11 @@ fn main() {
     let cli = parse_args();
 
     // Fast path: single file, positive count, no headers -- bypass BufWriter entirely
-    if !cli.quiet && cli.files.len() <= 1 {
-        if let Some(code) = try_fast_single_file(&cli) {
-            process::exit(code);
-        }
+    if !cli.quiet
+        && cli.files.len() <= 1
+        && let Some(code) = try_fast_single_file(&cli)
+    {
+        process::exit(code);
     }
 
     // General path: multiple files, stdin, from-end modes, etc.
