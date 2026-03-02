@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::fmt::Write as FmtWrite;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
@@ -404,164 +405,191 @@ fn format_file_specifiers(
     dereference: bool,
 ) -> String {
     let mut result = String::new();
-    let chars: Vec<char> = fmt.chars().collect();
+    let bytes = fmt.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
 
-    while i < chars.len() {
-        if chars[i] == '%' && i + 1 < chars.len() {
+    while i < len {
+        if bytes[i] == b'%' && i + 1 < len {
             i += 1;
 
             // Handle H/L modifiers: %Hd = major(dev), %Ld = minor(dev),
             // %Hr = major(rdev), %Lr = minor(rdev)
-            if chars[i] == 'H' || chars[i] == 'L' {
-                if i + 1 >= chars.len() {
-                    // %H or %L at end of format string: GNU outputs '?'
+            if bytes[i] == b'H' || bytes[i] == b'L' {
+                if i + 1 >= len {
                     result.push('?');
                     i += 1;
                     continue;
                 }
-                let modifier = chars[i];
-                let spec = chars[i + 1];
+                let modifier = bytes[i];
+                let spec = bytes[i + 1];
                 match (modifier, spec) {
-                    ('H', 'd') => {
-                        result.push_str(&major(meta.dev()).to_string());
+                    (b'H', b'd') => {
+                        let _ = write!(result, "{}", major(meta.dev()));
                         i += 2;
                         continue;
                     }
-                    ('L', 'd') => {
-                        result.push_str(&minor(meta.dev()).to_string());
+                    (b'L', b'd') => {
+                        let _ = write!(result, "{}", minor(meta.dev()));
                         i += 2;
                         continue;
                     }
-                    ('H', 'r') => {
-                        result.push_str(&major(meta.rdev()).to_string());
+                    (b'H', b'r') => {
+                        let _ = write!(result, "{}", major(meta.rdev()));
                         i += 2;
                         continue;
                     }
-                    ('L', 'r') => {
-                        result.push_str(&minor(meta.rdev()).to_string());
+                    (b'L', b'r') => {
+                        let _ = write!(result, "{}", minor(meta.rdev()));
                         i += 2;
                         continue;
                     }
                     (_, _) => {
-                        // Unknown H/L combination: GNU outputs ?<spec>
                         result.push('?');
-                        result.push(spec);
+                        result.push(spec as char);
                         i += 2;
                         continue;
                     }
                 }
             }
 
-            match chars[i] {
-                'a' => {
-                    result.push_str(&format!("{:o}", meta.mode() & 0o7777));
+            match bytes[i] {
+                b'a' => {
+                    let _ = write!(result, "{:o}", meta.mode() & 0o7777);
                 }
-                'A' => {
+                b'A' => {
                     result.push_str(&mode_to_human(meta.mode()));
                 }
-                'b' => {
-                    result.push_str(&meta.blocks().to_string());
+                b'b' => {
+                    let _ = write!(result, "{}", meta.blocks());
                 }
-                'B' => {
+                b'B' => {
                     result.push_str("512");
                 }
-                'd' => {
-                    result.push_str(&meta.dev().to_string());
+                b'd' => {
+                    let _ = write!(result, "{}", meta.dev());
                 }
-                'D' => {
-                    result.push_str(&format!("{:x}", meta.dev()));
+                b'D' => {
+                    let _ = write!(result, "{:x}", meta.dev());
                 }
-                'f' => {
-                    result.push_str(&format!("{:x}", meta.mode()));
+                b'f' => {
+                    let _ = write!(result, "{:x}", meta.mode());
                 }
-                'F' => {
+                b'F' => {
                     result.push_str(file_type_label(meta.mode()));
                 }
-                'g' => {
-                    result.push_str(&meta.gid().to_string());
+                b'g' => {
+                    let _ = write!(result, "{}", meta.gid());
                 }
-                'G' => {
+                b'G' => {
                     result.push_str(&lookup_groupname(meta.gid()));
                 }
-                'h' => {
-                    result.push_str(&meta.nlink().to_string());
+                b'h' => {
+                    let _ = write!(result, "{}", meta.nlink());
                 }
-                'i' => {
-                    result.push_str(&meta.ino().to_string());
+                b'i' => {
+                    let _ = write!(result, "{}", meta.ino());
                 }
-                'm' => {
+                b'm' => {
                     result.push_str(&find_mount_point(path));
                 }
-                'n' => {
+                b'n' => {
                     result.push_str(path);
                 }
-                'N' => {
+                b'N' => {
                     if meta.file_type().is_symlink() {
                         match std::fs::read_link(path) {
                             Ok(target) => {
-                                result.push_str(&format!("'{}' -> '{}'", path, target.display()));
+                                result.push('\'');
+                                result.push_str(path);
+                                result.push_str("' -> '");
+                                let _ = write!(result, "{}", target.display());
+                                result.push('\'');
                             }
                             Err(_) => {
-                                result.push_str(&format!("'{}'", path));
+                                result.push('\'');
+                                result.push_str(path);
+                                result.push('\'');
                             }
                         }
                     } else {
-                        result.push_str(&format!("'{}'", path));
+                        result.push('\'');
+                        result.push_str(path);
+                        result.push('\'');
                     }
                 }
-                'o' => {
-                    result.push_str(&meta.blksize().to_string());
+                b'o' => {
+                    let _ = write!(result, "{}", meta.blksize());
                 }
-                's' => {
-                    result.push_str(&meta.size().to_string());
+                b's' => {
+                    let _ = write!(result, "{}", meta.size());
                 }
-                't' => {
-                    result.push_str(&format!("{:x}", major(meta.rdev())));
+                b't' => {
+                    let _ = write!(result, "{:x}", major(meta.rdev()));
                 }
-                'T' => {
-                    result.push_str(&format!("{:x}", minor(meta.rdev())));
+                b'T' => {
+                    let _ = write!(result, "{:x}", minor(meta.rdev()));
                 }
-                'u' => {
-                    result.push_str(&meta.uid().to_string());
+                b'u' => {
+                    let _ = write!(result, "{}", meta.uid());
                 }
-                'U' => {
+                b'U' => {
                     result.push_str(&lookup_username(meta.uid()));
                 }
-                'w' => {
+                b'w' => {
                     result.push_str(&format_birth_time_for_path(path, dereference));
                 }
-                'W' => {
+                b'W' => {
                     result.push_str(&format_birth_seconds_for_path(path, dereference));
                 }
-                'x' => {
+                b'x' => {
                     result.push_str(&format_timestamp(st.st_atime, st.st_atime_nsec));
                 }
-                'X' => {
-                    result.push_str(&st.st_atime.to_string());
+                b'X' => {
+                    let _ = write!(result, "{}", st.st_atime);
                 }
-                'y' => {
+                b'y' => {
                     result.push_str(&format_timestamp(st.st_mtime, st.st_mtime_nsec));
                 }
-                'Y' => {
-                    result.push_str(&st.st_mtime.to_string());
+                b'Y' => {
+                    let _ = write!(result, "{}", st.st_mtime);
                 }
-                'z' => {
+                b'z' => {
                     result.push_str(&format_timestamp(st.st_ctime, st.st_ctime_nsec));
                 }
-                'Z' => {
-                    result.push_str(&st.st_ctime.to_string());
+                b'Z' => {
+                    let _ = write!(result, "{}", st.st_ctime);
                 }
-                '%' => {
+                b'%' => {
                     result.push('%');
                 }
                 other => {
                     result.push('%');
-                    result.push(other);
+                    result.push(other as char);
                 }
             }
         } else {
-            result.push(chars[i]);
+            // Preserve full UTF-8 characters, not individual bytes
+            let b = bytes[i];
+            if b < 0x80 {
+                result.push(b as char);
+            } else {
+                let char_len = if b < 0xE0 {
+                    2
+                } else if b < 0xF0 {
+                    3
+                } else {
+                    4
+                };
+                let end = (i + char_len).min(len);
+                if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
+                    result.push_str(s);
+                    i = end;
+                    continue;
+                } else {
+                    result.push(b as char);
+                }
+            }
         }
         i += 1;
     }
@@ -575,73 +603,93 @@ fn format_file_specifiers(
 
 fn format_fs_specifiers(fmt: &str, path: &str, sfs: &libc::statfs) -> String {
     let mut result = String::new();
-    let chars: Vec<char> = fmt.chars().collect();
+    let bytes = fmt.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
-    let fsid = sfs.f_fsid;
-    let fsid_val = extract_fsid(&fsid);
+    let fsid_val = extract_fsid(&sfs.f_fsid);
 
-    while i < chars.len() {
-        if chars[i] == '%' && i + 1 < chars.len() {
+    while i < len {
+        if bytes[i] == b'%' && i + 1 < len {
             i += 1;
-            match chars[i] {
-                'a' => {
-                    result.push_str(&sfs.f_bavail.to_string());
+            match bytes[i] {
+                b'a' => {
+                    let _ = write!(result, "{}", sfs.f_bavail);
                 }
-                'b' => {
-                    result.push_str(&sfs.f_blocks.to_string());
+                b'b' => {
+                    let _ = write!(result, "{}", sfs.f_blocks);
                 }
-                'c' => {
-                    result.push_str(&sfs.f_files.to_string());
+                b'c' => {
+                    let _ = write!(result, "{}", sfs.f_files);
                 }
-                'd' => {
-                    result.push_str(&sfs.f_ffree.to_string());
+                b'd' => {
+                    let _ = write!(result, "{}", sfs.f_ffree);
                 }
-                'f' => {
-                    result.push_str(&sfs.f_bfree.to_string());
+                b'f' => {
+                    let _ = write!(result, "{}", sfs.f_bfree);
                 }
-                'i' => {
-                    result.push_str(&format!("{:x}", fsid_val));
+                b'i' => {
+                    let _ = write!(result, "{:x}", fsid_val);
                 }
-                'l' => {
+                b'l' => {
                     #[cfg(target_os = "linux")]
-                    result.push_str(&sfs.f_namelen.to_string());
+                    let _ = write!(result, "{}", sfs.f_namelen);
                     #[cfg(not(target_os = "linux"))]
                     result.push_str("255");
                 }
-                'n' => {
+                b'n' => {
                     result.push_str(path);
                 }
-                's' => {
-                    result.push_str(&sfs.f_bsize.to_string());
+                b's' => {
+                    let _ = write!(result, "{}", sfs.f_bsize);
                 }
-                'S' => {
+                b'S' => {
                     #[cfg(target_os = "linux")]
-                    result.push_str(&sfs.f_frsize.to_string());
+                    let _ = write!(result, "{}", sfs.f_frsize);
                     #[cfg(not(target_os = "linux"))]
-                    result.push_str(&sfs.f_bsize.to_string());
+                    let _ = write!(result, "{}", sfs.f_bsize);
                 }
-                't' => {
+                b't' => {
                     #[cfg(target_os = "linux")]
-                    result.push_str(&format!("{:x}", sfs.f_type));
+                    let _ = write!(result, "{:x}", sfs.f_type);
                     #[cfg(not(target_os = "linux"))]
                     result.push('0');
                 }
-                'T' => {
+                b'T' => {
                     #[cfg(target_os = "linux")]
                     result.push_str(fs_type_name(sfs.f_type as u64));
                     #[cfg(not(target_os = "linux"))]
                     result.push_str("unknown");
                 }
-                '%' => {
+                b'%' => {
                     result.push('%');
                 }
                 other => {
                     result.push('%');
-                    result.push(other);
+                    result.push(other as char);
                 }
             }
         } else {
-            result.push(chars[i]);
+            // Preserve full UTF-8 characters, not individual bytes
+            let b = bytes[i];
+            if b < 0x80 {
+                result.push(b as char);
+            } else {
+                let char_len = if b < 0xE0 {
+                    2
+                } else if b < 0xF0 {
+                    3
+                } else {
+                    4
+                };
+                let end = (i + char_len).min(len);
+                if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
+                    result.push_str(s);
+                    i = end;
+                    continue;
+                } else {
+                    result.push(b as char);
+                }
+            }
         }
         i += 1;
     }
@@ -734,7 +782,10 @@ fn format_timestamp(secs: i64, nsec: i64) -> String {
     let offset_hours = offset_abs / 3600;
     let offset_mins = (offset_abs % 3600) / 60;
 
-    format!(
+    // Pre-allocate exact size: "YYYY-MM-DD HH:MM:SS.NNNNNNNNN +ZZZZ" = 35 chars
+    let mut s = String::with_capacity(36);
+    let _ = write!(
+        s,
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09} {}{:02}{:02}",
         tm.tm_year + 1900,
         tm.tm_mon + 1,
@@ -746,7 +797,8 @@ fn format_timestamp(secs: i64, nsec: i64) -> String {
         offset_sign,
         offset_hours,
         offset_mins
-    )
+    );
+    s
 }
 
 /// Get birth time using statx() syscall. Returns (seconds, nanoseconds) or None.
@@ -878,30 +930,31 @@ fn find_mount_point(path: &str) -> String {
 /// Expand backslash escape sequences in a format string (for --printf).
 pub fn expand_backslash_escapes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let chars: Vec<char> = s.chars().collect();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
 
-    while i < chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() {
+    while i < len {
+        if bytes[i] == b'\\' && i + 1 < len {
             i += 1;
-            match chars[i] {
-                'n' => result.push('\n'),
-                't' => result.push('\t'),
-                'r' => result.push('\r'),
-                'a' => result.push('\x07'),
-                'b' => result.push('\x08'),
-                'f' => result.push('\x0C'),
-                'v' => result.push('\x0B'),
-                '\\' => result.push('\\'),
-                '"' => result.push('"'),
-                '0' => {
+            match bytes[i] {
+                b'n' => result.push('\n'),
+                b't' => result.push('\t'),
+                b'r' => result.push('\r'),
+                b'a' => result.push('\x07'),
+                b'b' => result.push('\x08'),
+                b'f' => result.push('\x0C'),
+                b'v' => result.push('\x0B'),
+                b'\\' => result.push('\\'),
+                b'"' => result.push('"'),
+                b'0' => {
                     // Octal escape: \0NNN (up to 3 octal digits after the leading 0)
                     let mut val: u32 = 0;
                     let mut count = 0;
-                    while i + 1 < chars.len() && count < 3 {
-                        let next = chars[i + 1];
-                        if next >= '0' && next <= '7' {
-                            val = val * 8 + (next as u32 - '0' as u32);
+                    while i + 1 < len && count < 3 {
+                        let next = bytes[i + 1];
+                        if next >= b'0' && next <= b'7' {
+                            val = val * 8 + (next - b'0') as u32;
                             i += 1;
                             count += 1;
                         } else {
@@ -914,11 +967,31 @@ pub fn expand_backslash_escapes(s: &str) -> String {
                 }
                 other => {
                     result.push('\\');
-                    result.push(other);
+                    result.push(other as char);
                 }
             }
         } else {
-            result.push(chars[i]);
+            // Preserve full UTF-8 characters, not individual bytes
+            let b = bytes[i];
+            if b < 0x80 {
+                result.push(b as char);
+            } else {
+                let char_len = if b < 0xE0 {
+                    2
+                } else if b < 0xF0 {
+                    3
+                } else {
+                    4
+                };
+                let end = (i + char_len).min(len);
+                if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
+                    result.push_str(s);
+                    i = end;
+                    continue;
+                } else {
+                    result.push(b as char);
+                }
+            }
         }
         i += 1;
     }

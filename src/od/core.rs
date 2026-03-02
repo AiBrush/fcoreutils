@@ -226,7 +226,87 @@ fn read_u64(bytes: &[u8], endian: Endian) -> u64 {
     }
 }
 
-/// Write a formatted value directly to the output, avoiding String allocation.
+/// Hex digit table.
+static HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Format a u64 as zero-padded octal into a stack buffer.
+/// Returns the number of bytes written (always `digits`).
+#[inline]
+fn fmt_octal(mut v: u64, buf: &mut [u8], digits: usize) -> usize {
+    let mut i = digits;
+    while i > 0 {
+        i -= 1;
+        buf[i] = b'0' + (v & 7) as u8;
+        v >>= 3;
+    }
+    digits
+}
+
+/// Format a u64 as zero-padded hex into a stack buffer.
+/// Returns the number of bytes written (always `digits`).
+#[inline]
+fn fmt_hex(mut v: u64, buf: &mut [u8], digits: usize) -> usize {
+    let mut i = digits;
+    while i > 0 {
+        i -= 1;
+        buf[i] = HEX_DIGITS[(v & 0xF) as usize];
+        v >>= 4;
+    }
+    digits
+}
+
+/// Format a u64 as decimal into a stack buffer (right-aligned, no padding).
+/// Returns the number of bytes written.
+#[inline]
+fn fmt_unsigned(mut v: u64, buf: &mut [u8]) -> usize {
+    if v == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut i = 0;
+    while v > 0 {
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        i += 1;
+    }
+    // Reverse in-place
+    buf[..i].reverse();
+    i
+}
+
+/// Format an i64 as decimal into a stack buffer.
+/// Returns the number of bytes written.
+#[inline]
+fn fmt_signed(v: i64, buf: &mut [u8]) -> usize {
+    if v >= 0 {
+        return fmt_unsigned(v as u64, buf);
+    }
+    buf[0] = b'-';
+    let len = fmt_unsigned((-(v as i128)) as u64, &mut buf[1..]);
+    1 + len
+}
+
+/// Write a left-padded (right-aligned) value to output. `value_buf[..value_len]` contains the
+/// formatted number, and `width` is the total field width (including leading spaces).
+#[inline]
+fn write_padded(
+    out: &mut impl Write,
+    value_buf: &[u8],
+    value_len: usize,
+    width: usize,
+) -> io::Result<()> {
+    const SPACES: [u8; 32] = [b' '; 32];
+    let pad = width.saturating_sub(value_len);
+    let mut remaining = pad;
+    while remaining > 0 {
+        let chunk = remaining.min(SPACES.len());
+        out.write_all(&SPACES[..chunk])?;
+        remaining -= chunk;
+    }
+    out.write_all(&value_buf[..value_len])
+}
+
+/// Write a formatted value directly to the output using stack buffers (zero heap allocation).
 #[inline]
 fn write_value(
     out: &mut impl Write,
@@ -235,106 +315,87 @@ fn write_value(
     width: usize,
     endian: Endian,
 ) -> io::Result<()> {
+    let mut buf = [0u8; 24]; // max: 22 octal digits for u64 + 2 spare
     match fmt {
         OutputFormat::NamedChar => {
             let b = bytes[0];
             if b < 128 {
-                write!(out, "{:>w$}", NAMED_CHARS[b as usize], w = width)
+                let s = NAMED_CHARS[b as usize].as_bytes();
+                write_padded(out, s, s.len(), width)
             } else {
-                write!(out, "{:>w$o}", b, w = width)
+                let len = fmt_octal(b as u64, &mut buf, 3);
+                write_padded(out, &buf, len, width)
             }
         }
         OutputFormat::PrintableChar => {
             let b = bytes[0];
-            let s: &str = match b {
-                0x00 => "\\0",
-                0x07 => "\\a",
-                0x08 => "\\b",
-                0x09 => "\\t",
-                0x0a => "\\n",
-                0x0b => "\\v",
-                0x0c => "\\f",
-                0x0d => "\\r",
-                _ => "",
+            let s: &[u8] = match b {
+                0x00 => b"\\0",
+                0x07 => b"\\a",
+                0x08 => b"\\b",
+                0x09 => b"\\t",
+                0x0a => b"\\n",
+                0x0b => b"\\v",
+                0x0c => b"\\f",
+                0x0d => b"\\r",
+                _ => b"",
             };
             if !s.is_empty() {
-                write!(out, "{:>w$}", s, w = width)
+                write_padded(out, s, s.len(), width)
             } else if (0x20..=0x7e).contains(&b) {
-                write!(out, "{:>w$}", b as char, w = width)
+                buf[0] = b;
+                write_padded(out, &buf, 1, width)
             } else {
-                // Octal for non-printable: format as \ooo within width
-                let mut buf = [0u8; 3];
                 buf[0] = b'0' + (b >> 6);
                 buf[1] = b'0' + ((b >> 3) & 7);
                 buf[2] = b'0' + (b & 7);
-                let s = unsafe { std::str::from_utf8_unchecked(&buf) };
-                write!(out, "{:>w$}", s, w = width)
+                write_padded(out, &buf, 3, width)
             }
         }
-        OutputFormat::Octal(size) => match size {
-            1 => write!(out, "{:>w$}", format!("{:03o}", bytes[0]), w = width),
-            2 => {
-                let v = read_u16(bytes, endian);
-                write!(out, "{:>w$}", format!("{:06o}", v), w = width)
-            }
-            4 => {
-                let v = read_u32(bytes, endian);
-                write!(out, "{:>w$}", format!("{:011o}", v), w = width)
-            }
-            8 => {
-                let v = read_u64(bytes, endian);
-                write!(out, "{:>w$}", format!("{:022o}", v), w = width)
-            }
-            _ => Ok(()),
-        },
-        OutputFormat::Hex(size) => match size {
-            1 => write!(out, "{:>w$}", format!("{:02x}", bytes[0]), w = width),
-            2 => {
-                let v = read_u16(bytes, endian);
-                write!(out, "{:>w$}", format!("{:04x}", v), w = width)
-            }
-            4 => {
-                let v = read_u32(bytes, endian);
-                write!(out, "{:>w$}", format!("{:08x}", v), w = width)
-            }
-            8 => {
-                let v = read_u64(bytes, endian);
-                write!(out, "{:>w$}", format!("{:016x}", v), w = width)
-            }
-            _ => Ok(()),
-        },
-        OutputFormat::UnsignedDec(size) => match size {
-            1 => write!(out, "{:>w$}", bytes[0], w = width),
-            2 => {
-                let v = read_u16(bytes, endian);
-                write!(out, "{:>w$}", v, w = width)
-            }
-            4 => {
-                let v = read_u32(bytes, endian);
-                write!(out, "{:>w$}", v, w = width)
-            }
-            8 => {
-                let v = read_u64(bytes, endian);
-                write!(out, "{:>w$}", v, w = width)
-            }
-            _ => Ok(()),
-        },
-        OutputFormat::SignedDec(size) => match size {
-            1 => write!(out, "{:>w$}", bytes[0] as i8, w = width),
-            2 => {
-                let v = read_u16(bytes, endian) as i16;
-                write!(out, "{:>w$}", v, w = width)
-            }
-            4 => {
-                let v = read_u32(bytes, endian) as i32;
-                write!(out, "{:>w$}", v, w = width)
-            }
-            8 => {
-                let v = read_u64(bytes, endian) as i64;
-                write!(out, "{:>w$}", v, w = width)
-            }
-            _ => Ok(()),
-        },
+        OutputFormat::Octal(size) => {
+            let (v, digits) = match size {
+                1 => (bytes[0] as u64, 3),
+                2 => (read_u16(bytes, endian) as u64, 6),
+                4 => (read_u32(bytes, endian) as u64, 11),
+                8 => (read_u64(bytes, endian), 22),
+                _ => return Ok(()),
+            };
+            let len = fmt_octal(v, &mut buf, digits);
+            write_padded(out, &buf, len, width)
+        }
+        OutputFormat::Hex(size) => {
+            let (v, digits) = match size {
+                1 => (bytes[0] as u64, 2),
+                2 => (read_u16(bytes, endian) as u64, 4),
+                4 => (read_u32(bytes, endian) as u64, 8),
+                8 => (read_u64(bytes, endian), 16),
+                _ => return Ok(()),
+            };
+            let len = fmt_hex(v, &mut buf, digits);
+            write_padded(out, &buf, len, width)
+        }
+        OutputFormat::UnsignedDec(size) => {
+            let v = match size {
+                1 => bytes[0] as u64,
+                2 => read_u16(bytes, endian) as u64,
+                4 => read_u32(bytes, endian) as u64,
+                8 => read_u64(bytes, endian),
+                _ => return Ok(()),
+            };
+            let len = fmt_unsigned(v, &mut buf);
+            write_padded(out, &buf, len, width)
+        }
+        OutputFormat::SignedDec(size) => {
+            let v: i64 = match size {
+                1 => bytes[0] as i8 as i64,
+                2 => read_u16(bytes, endian) as i16 as i64,
+                4 => read_u32(bytes, endian) as i32 as i64,
+                8 => read_u64(bytes, endian) as i64,
+                _ => return Ok(()),
+            };
+            let len = fmt_signed(v, &mut buf);
+            write_padded(out, &buf, len, width)
+        }
         OutputFormat::Float(size) => match size {
             4 => {
                 let v = f32::from_bits(read_u32(bytes, endian));
@@ -396,12 +457,29 @@ fn write_format_line(
     effective_fw: usize,
     endian: Endian,
 ) -> io::Result<()> {
-    // Address prefix
+    // Address prefix — use stack buffer to avoid format!() allocation
     if is_first_format {
+        let mut addr_buf = [0u8; 22];
         match radix {
-            AddressRadix::Octal => write!(out, "{:07o}", offset)?,
-            AddressRadix::Decimal => write!(out, "{:07}", offset)?,
-            AddressRadix::Hex => write!(out, "{:06x}", offset)?,
+            AddressRadix::Octal => {
+                let len = fmt_octal(offset, &mut addr_buf, 7);
+                out.write_all(&addr_buf[..len])?;
+            }
+            AddressRadix::Decimal => {
+                let mut tmp = [0u8; 20];
+                let vlen = fmt_unsigned(offset, &mut tmp);
+                // Zero-pad to 7 digits
+                let pad = 7usize.saturating_sub(vlen);
+                for b in addr_buf.iter_mut().take(pad) {
+                    *b = b'0';
+                }
+                addr_buf[pad..pad + vlen].copy_from_slice(&tmp[..vlen]);
+                out.write_all(&addr_buf[..pad + vlen])?;
+            }
+            AddressRadix::Hex => {
+                let len = fmt_hex(offset, &mut addr_buf, 6);
+                out.write_all(&addr_buf[..len])?;
+            }
             AddressRadix::None => {}
         }
     } else if radix != AddressRadix::None {

@@ -204,14 +204,16 @@ fn process_conversion(
         }
         b'd' | b'i' => {
             let val = parse_integer(arg);
-            let s = format!("{}", val);
-            let formatted = apply_numeric_format(&s, val < 0, &flags, width, precision);
+            let mut buf = itoa::Buffer::new();
+            let s = buf.format(val);
+            let formatted = apply_numeric_format(s, val < 0, &flags, width, precision);
             output.extend_from_slice(formatted.as_bytes());
         }
         b'u' => {
             let val = parse_unsigned(arg);
-            let s = format!("{}", val);
-            let formatted = apply_numeric_format(&s, false, &flags, width, precision);
+            let mut buf = itoa::Buffer::new();
+            let s = buf.format(val);
+            let formatted = apply_numeric_format(s, false, &flags, width, precision);
             output.extend_from_slice(formatted.as_bytes());
         }
         b'o' => {
@@ -807,48 +809,72 @@ fn apply_numeric_format(
     precision: Option<usize>,
 ) -> String {
     // For integers, precision specifies minimum number of digits
-    let digits = if is_negative {
+    let raw_digits = if is_negative {
         &num_str[1..] // strip the minus
     } else {
         num_str
     };
 
-    let digits = if let Some(prec) = precision {
-        if prec > 0 && digits.len() < prec {
-            let padding = "0".repeat(prec - digits.len());
-            format!("{}{}", padding, digits)
-        } else if prec == 0 && digits == "0" {
-            String::new()
-        } else {
-            digits.to_string()
-        }
-    } else {
-        digits.to_string()
-    };
-
-    let sign = if is_negative {
-        "-".to_string()
+    let sign: &str = if is_negative {
+        "-"
     } else if flags.plus_sign {
-        "+".to_string()
+        "+"
     } else if flags.space_sign {
-        " ".to_string()
+        " "
     } else {
-        String::new()
+        ""
     };
 
-    let content = format!("{}{}", sign, digits);
-
-    if width > 0 && content.len() < width {
-        let pad_len = width - content.len();
-        if flags.left_align {
-            format!("{}{}", content, " ".repeat(pad_len))
-        } else if flags.zero_pad && precision.is_none() {
-            format!("{}{}{}", sign, "0".repeat(pad_len), digits)
+    // Build digits with precision zero-padding
+    let mut digits_buf = String::new();
+    let digits: &str = if let Some(prec) = precision {
+        if prec > 0 && raw_digits.len() < prec {
+            let pad = prec - raw_digits.len();
+            digits_buf.reserve(prec);
+            for _ in 0..pad {
+                digits_buf.push('0');
+            }
+            digits_buf.push_str(raw_digits);
+            &digits_buf
+        } else if prec == 0 && raw_digits == "0" {
+            ""
         } else {
-            format!("{}{}", " ".repeat(pad_len), content)
+            raw_digits
         }
     } else {
-        content
+        raw_digits
+    };
+
+    let content_len = sign.len() + digits.len();
+
+    if width > 0 && content_len < width {
+        let pad_len = width - content_len;
+        let mut result = String::with_capacity(width);
+        if flags.left_align {
+            result.push_str(sign);
+            result.push_str(digits);
+            for _ in 0..pad_len {
+                result.push(' ');
+            }
+        } else if flags.zero_pad && precision.is_none() {
+            result.push_str(sign);
+            for _ in 0..pad_len {
+                result.push('0');
+            }
+            result.push_str(digits);
+        } else {
+            for _ in 0..pad_len {
+                result.push(' ');
+            }
+            result.push_str(sign);
+            result.push_str(digits);
+        }
+        result
+    } else {
+        let mut result = String::with_capacity(content_len);
+        result.push_str(sign);
+        result.push_str(digits);
+        result
     }
 }
 
@@ -869,19 +895,36 @@ fn apply_float_format(
         ("", num_str)
     };
 
-    let content = format!("{}{}", sign_prefix, abs_str);
+    let content_len = sign_prefix.len() + abs_str.len();
 
-    if width > 0 && content.len() < width {
-        let pad_len = width - content.len();
+    if width > 0 && content_len < width {
+        let pad_len = width - content_len;
+        let mut result = String::with_capacity(width);
         if flags.left_align {
-            format!("{}{}", content, " ".repeat(pad_len))
+            result.push_str(sign_prefix);
+            result.push_str(abs_str);
+            for _ in 0..pad_len {
+                result.push(' ');
+            }
         } else if flags.zero_pad {
-            format!("{}{}{}", sign_prefix, "0".repeat(pad_len), abs_str)
+            result.push_str(sign_prefix);
+            for _ in 0..pad_len {
+                result.push('0');
+            }
+            result.push_str(abs_str);
         } else {
-            format!("{}{}", " ".repeat(pad_len), content)
+            for _ in 0..pad_len {
+                result.push(' ');
+            }
+            result.push_str(sign_prefix);
+            result.push_str(abs_str);
         }
+        result
     } else {
-        content
+        let mut result = String::with_capacity(content_len);
+        result.push_str(sign_prefix);
+        result.push_str(abs_str);
+        result
     }
 }
 
