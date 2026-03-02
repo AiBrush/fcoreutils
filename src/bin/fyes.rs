@@ -28,7 +28,7 @@ fn main() {
     #[cfg(unix)]
     unsafe {
         let mut oldmask: libc::sigset_t = std::mem::zeroed();
-        libc::sigprocmask(0, std::ptr::null(), &mut oldmask);
+        libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut oldmask);
 
         if libc::sigismember(&oldmask, libc::SIGPIPE) != 1 {
             // SIGPIPE is unblocked: set SIG_DFL so we're killed by the signal
@@ -375,8 +375,8 @@ mod tests {
         {
             use std::os::unix::process::ExitStatusExt;
             assert!(
-                status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(1),
-                "yes should be killed by SIGPIPE or exit 0/1, got status: {:?}",
+                status.signal() == Some(13) || status.code() == Some(1),
+                "yes should be killed by SIGPIPE or exit 1, got status: {:?}",
                 status
             );
         }
@@ -402,7 +402,7 @@ mod tests {
 
         use std::os::unix::process::ExitStatusExt;
         assert!(
-            status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(1),
+            status.signal() == Some(13) || status.code() == Some(1),
             "yes should be killed by SIGPIPE or exit 0/1, got status: {:?}",
             status
         );
@@ -531,7 +531,7 @@ mod tests {
 
         use std::os::unix::process::ExitStatusExt;
         assert!(
-            status.signal() == Some(13) || status.code() == Some(0) || status.code() == Some(1),
+            status.signal() == Some(13) || status.code() == Some(1),
             "yes should be killed by SIGPIPE or exit 0/1, got status: {:?}",
             status
         );
