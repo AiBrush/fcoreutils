@@ -191,50 +191,77 @@ fn is_simple_number_all(config: &NlConfig) -> bool {
         && !config.no_renumber
 }
 
-/// Ultra-fast path for nl -b a with Rn format (the most common benchmark case).
-/// Eliminates double scan, section delimiter checks, and uses raw buffer writes.
-fn nl_number_all_rn_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> Vec<u8> {
-    // Pre-allocate generously: input + ~10 bytes per line for number prefix
-    // Skip the count pass entirely (saves one full file scan)
+/// Ultra-fast path for nl -b a: eliminates section delimiter checks and uses raw
+/// buffer writes. Handles all three number formats (Rn, Rz, Ln) in a single
+/// function to avoid code duplication.
+fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> Vec<u8> {
     let alloc = (data.len() * 2 + 256).min(128 * 1024 * 1024);
     let mut output: Vec<u8> = Vec::with_capacity(alloc);
 
     let width = config.number_width;
     let sep = &config.number_separator;
+    let fmt = config.number_format;
     let mut num = *line_number;
     let mut pos: usize = 0;
 
+    // Inner write helper: formats number prefix + line content + newline.
+    // SAFETY: caller ensures output has capacity for total_len bytes at start_pos.
+    #[inline(always)]
+    unsafe fn write_numbered_line(
+        output: &mut Vec<u8>,
+        fmt: NumberFormat,
+        num_str: &str,
+        pad: usize,
+        sep: &[u8],
+        line_data: *const u8,
+        line_len: usize,
+    ) {
+        let prefix_len = pad + num_str.len() + sep.len();
+        let total_len = prefix_len + line_len + 1;
+        let start_pos = output.len();
+        let dst = output.as_mut_ptr().add(start_pos);
+
+        match fmt {
+            NumberFormat::Rn => {
+                std::ptr::write_bytes(dst, b' ', pad);
+                std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
+            }
+            NumberFormat::Rz => {
+                std::ptr::write_bytes(dst, b'0', pad);
+                std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
+            }
+            NumberFormat::Ln => {
+                std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst, num_str.len());
+                std::ptr::write_bytes(dst.add(num_str.len()), b' ', pad);
+            }
+        }
+        std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(pad + num_str.len()), sep.len());
+        std::ptr::copy_nonoverlapping(line_data, dst.add(prefix_len), line_len);
+        *dst.add(prefix_len + line_len) = b'\n';
+        output.set_len(start_pos + total_len);
+    }
+
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
-
-        // Ensure capacity
-        let needed = output.len() + line_len + width + sep.len() + 20;
+        let needed = output.len() + line_len + width + sep.len() + 22;
         if needed > output.capacity() {
             output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
         }
 
-        // Format Rn number: right-aligned in `width` field
         let mut num_buf = itoa::Buffer::new();
         let num_str = num_buf.format(num);
         let pad = width.saturating_sub(num_str.len());
-        // Write padding + number + separator + line + newline in one go
-        let prefix_len = pad + num_str.len() + sep.len();
-        let total_len = prefix_len + line_len + 1;
-        let start_pos = output.len();
-        // SAFETY: we ensure capacity above, and write exactly total_len bytes
+
         unsafe {
-            let dst = output.as_mut_ptr().add(start_pos);
-            // Padding spaces
-            std::ptr::write_bytes(dst, b' ', pad);
-            // Number digits
-            std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
-            // Separator
-            std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(pad + num_str.len()), sep.len());
-            // Line content
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), line_len);
-            // Newline
-            *dst.add(prefix_len + line_len) = b'\n';
-            output.set_len(start_pos + total_len);
+            write_numbered_line(
+                &mut output,
+                fmt,
+                num_str,
+                pad,
+                sep,
+                data.as_ptr().add(pos),
+                line_len,
+            );
         }
 
         num += 1;
@@ -244,161 +271,24 @@ fn nl_number_all_rn_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) 
     // Handle final line without trailing newline
     if pos < data.len() {
         let remaining = data.len() - pos;
-        let needed = output.len() + remaining + width + sep.len() + 20;
-        if needed > output.capacity() {
-            output.reserve(needed - output.capacity() + 1024);
-        }
-
-        let mut num_buf = itoa::Buffer::new();
-        let num_str = num_buf.format(num);
-        let pad = width.saturating_sub(num_str.len());
-        let prefix_len = pad + num_str.len() + sep.len();
-        let total_len = prefix_len + remaining + 1; // +1 for GNU's trailing newline
-        let start_pos = output.len();
-        unsafe {
-            let dst = output.as_mut_ptr().add(start_pos);
-            std::ptr::write_bytes(dst, b' ', pad);
-            std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
-            std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(pad + num_str.len()), sep.len());
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), remaining);
-            *dst.add(prefix_len + remaining) = b'\n';
-            output.set_len(start_pos + total_len);
-        }
-        num += 1;
-    }
-
-    *line_number = num;
-    output
-}
-
-/// Ultra-fast path for nl -b a with Rz format (zero-padded numbers).
-fn nl_number_all_rz_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> Vec<u8> {
-    let alloc = (data.len() * 2 + 256).min(128 * 1024 * 1024);
-    let mut output: Vec<u8> = Vec::with_capacity(alloc);
-
-    let width = config.number_width;
-    let sep = &config.number_separator;
-    let mut num = *line_number;
-    let mut pos: usize = 0;
-
-    for nl_pos in memchr::memchr_iter(b'\n', data) {
-        let line_len = nl_pos - pos;
-        let needed = output.len() + line_len + width + sep.len() + 20;
-        if needed > output.capacity() {
-            output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
-        }
-
-        let mut num_buf = itoa::Buffer::new();
-        let num_str = num_buf.format(num);
-        let pad = width.saturating_sub(num_str.len());
-        let prefix_len = pad + num_str.len() + sep.len();
-        let total_len = prefix_len + line_len + 1;
-        let start_pos = output.len();
-        unsafe {
-            let dst = output.as_mut_ptr().add(start_pos);
-            std::ptr::write_bytes(dst, b'0', pad);
-            std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
-            std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(pad + num_str.len()), sep.len());
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), line_len);
-            *dst.add(prefix_len + line_len) = b'\n';
-            output.set_len(start_pos + total_len);
-        }
-
-        num += 1;
-        pos = nl_pos + 1;
-    }
-
-    if pos < data.len() {
-        let remaining = data.len() - pos;
-        let needed = output.len() + remaining + width + sep.len() + 20;
+        let needed = output.len() + remaining + width + sep.len() + 22;
         if needed > output.capacity() {
             output.reserve(needed - output.capacity() + 1024);
         }
         let mut num_buf = itoa::Buffer::new();
         let num_str = num_buf.format(num);
         let pad = width.saturating_sub(num_str.len());
-        let prefix_len = pad + num_str.len() + sep.len();
-        let total_len = prefix_len + remaining + 1;
-        let start_pos = output.len();
+
         unsafe {
-            let dst = output.as_mut_ptr().add(start_pos);
-            std::ptr::write_bytes(dst, b'0', pad);
-            std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
-            std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(pad + num_str.len()), sep.len());
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), remaining);
-            *dst.add(prefix_len + remaining) = b'\n';
-            output.set_len(start_pos + total_len);
-        }
-        num += 1;
-    }
-
-    *line_number = num;
-    output
-}
-
-/// Ultra-fast path for nl -b a with Ln format (left-justified numbers).
-fn nl_number_all_ln_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> Vec<u8> {
-    let alloc = (data.len() * 2 + 256).min(128 * 1024 * 1024);
-    let mut output: Vec<u8> = Vec::with_capacity(alloc);
-
-    let width = config.number_width;
-    let sep = &config.number_separator;
-    let mut num = *line_number;
-    let mut pos: usize = 0;
-
-    for nl_pos in memchr::memchr_iter(b'\n', data) {
-        let line_len = nl_pos - pos;
-        let needed = output.len() + line_len + width + sep.len() + 20;
-        if needed > output.capacity() {
-            output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
-        }
-
-        let mut num_buf = itoa::Buffer::new();
-        let num_str = num_buf.format(num);
-        // Ln: number first, then trailing spaces to fill width
-        let pad = width.saturating_sub(num_str.len());
-        let prefix_len = num_str.len() + pad + sep.len();
-        let total_len = prefix_len + line_len + 1;
-        let start_pos = output.len();
-        unsafe {
-            let dst = output.as_mut_ptr().add(start_pos);
-            // Number digits first (left-justified)
-            std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst, num_str.len());
-            // Trailing padding spaces
-            std::ptr::write_bytes(dst.add(num_str.len()), b' ', pad);
-            // Separator
-            std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(num_str.len() + pad), sep.len());
-            // Line content
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), line_len);
-            // Newline
-            *dst.add(prefix_len + line_len) = b'\n';
-            output.set_len(start_pos + total_len);
-        }
-
-        num += 1;
-        pos = nl_pos + 1;
-    }
-
-    if pos < data.len() {
-        let remaining = data.len() - pos;
-        let needed = output.len() + remaining + width + sep.len() + 20;
-        if needed > output.capacity() {
-            output.reserve(needed - output.capacity() + 1024);
-        }
-        let mut num_buf = itoa::Buffer::new();
-        let num_str = num_buf.format(num);
-        let pad = width.saturating_sub(num_str.len());
-        let prefix_len = num_str.len() + pad + sep.len();
-        let total_len = prefix_len + remaining + 1;
-        let start_pos = output.len();
-        unsafe {
-            let dst = output.as_mut_ptr().add(start_pos);
-            std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst, num_str.len());
-            std::ptr::write_bytes(dst.add(num_str.len()), b' ', pad);
-            std::ptr::copy_nonoverlapping(sep.as_ptr(), dst.add(num_str.len() + pad), sep.len());
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), remaining);
-            *dst.add(prefix_len + remaining) = b'\n';
-            output.set_len(start_pos + total_len);
+            write_numbered_line(
+                &mut output,
+                fmt,
+                num_str,
+                pad,
+                sep,
+                data.as_ptr().add(pos),
+                remaining,
+            );
         }
         num += 1;
     }
@@ -414,16 +304,12 @@ pub fn nl_to_vec_with_state(data: &[u8], config: &NlConfig, line_number: &mut i6
         return Vec::new();
     }
 
-    // Fast paths for common benchmark cases
-    if is_simple_number_all(config) {
-        return match config.number_format {
-            NumberFormat::Rn => nl_number_all_rn_fast(data, config, line_number),
-            NumberFormat::Rz => nl_number_all_rz_fast(data, config, line_number),
-            NumberFormat::Ln => {
-                // Ln fast path: left-aligned numbers
-                nl_number_all_ln_fast(data, config, line_number)
-            }
-        };
+    // Fast paths for common benchmark cases.
+    // Guard: skip fast path if data contains section delimiters (rare in practice).
+    let has_section_delims = !config.section_delimiter.is_empty()
+        && memchr::memmem::find(data, &config.section_delimiter).is_some();
+    if is_simple_number_all(config) && !has_section_delims {
+        return nl_number_all_fast(data, config, line_number);
     }
 
     // Generic path: pre-allocate generously instead of counting newlines

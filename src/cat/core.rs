@@ -454,7 +454,7 @@ fn cat_number_all_fast(data: &[u8], line_num: &mut u64, out: &mut impl Write) ->
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         // Ensure capacity for number prefix + line content
         let line_len = nl_pos + 1 - pos;
-        let needed = out_pos + line_len + 20; // 20 bytes max for number prefix
+        let needed = out_pos + line_len + 22; // max: 20 digits + 1 tab + 1 safety
         if needed > output.capacity() {
             unsafe { output.set_len(out_pos) };
             output.reserve(needed - output.capacity() + 8 * 1024 * 1024);
@@ -487,7 +487,7 @@ fn cat_number_all_fast(data: &[u8], line_num: &mut u64, out: &mut impl Write) ->
     // Handle final line without trailing newline
     if pos < data.len() {
         let remaining = data.len() - pos;
-        let needed = out_pos + remaining + 20;
+        let needed = out_pos + remaining + 22;
         if needed > output.capacity() {
             unsafe { output.set_len(out_pos) };
             output.reserve(needed - output.capacity() + 1024);
@@ -533,7 +533,7 @@ fn cat_number_nonblank_fast(
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos + 1 - pos;
-        let needed = out_pos + line_len + 20;
+        let needed = out_pos + line_len + 22;
         if needed > output.capacity() {
             unsafe { output.set_len(out_pos) };
             output.reserve(needed - output.capacity() + 8 * 1024 * 1024);
@@ -565,7 +565,7 @@ fn cat_number_nonblank_fast(
 
     if pos < data.len() {
         let remaining = data.len() - pos;
-        let needed = out_pos + remaining + 20;
+        let needed = out_pos + remaining + 22;
         if needed > output.capacity() {
             unsafe { output.set_len(out_pos) };
             output.reserve(needed - output.capacity() + 1024);

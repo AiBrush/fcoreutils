@@ -69,16 +69,19 @@ fn presplit_lines(data: &[u8], terminator: u8) -> Vec<(u32, u32)> {
     if data.is_empty() {
         return Vec::new();
     }
-    let count = memchr::memchr_iter(terminator, data).count();
-    let has_trailing = data.last() == Some(&terminator);
-    let cap = if has_trailing { count } else { count + 1 };
-    let mut offsets = Vec::with_capacity(cap);
+    debug_assert!(
+        data.len() <= u32::MAX as usize,
+        "presplit_lines: data exceeds 4 GiB"
+    );
+    // Heuristic: assume average line length ~40 bytes to avoid a count pre-scan.
+    let estimated_lines = data.len() / 40 + 1;
+    let mut offsets = Vec::with_capacity(estimated_lines);
     let mut start = 0u32;
     for pos in memchr::memchr_iter(terminator, data) {
         offsets.push((start, pos as u32));
         start = pos as u32 + 1;
     }
-    if !has_trailing && (start as usize) < data.len() {
+    if data.last() != Some(&terminator) && (start as usize) < data.len() {
         offsets.push((start, data.len() as u32));
     }
     offsets
