@@ -527,10 +527,10 @@ inherits = "release"
 debug = true
 strip = false
 
-# ring for SHA-256 on non-Apple, non-Linux targets (Windows/FreeBSD): BoringSSL assembly.
-# Not needed on Linux/Apple: sha2/sha1/md-5 crates use SHA-NI via cpufeatures runtime detection.
+# ring for BoringSSL assembly: SHA-512/384 benefit from ring's hand-tuned asm on x86-64.
+# SHA-NI hardware only accelerates SHA-256, not SHA-512 — so SHA-512/384 need ring.
 # ring 0.17 has compile error on macOS aarch64 / Apple Silicon, so skip Apple entirely.
-[target.'cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))'.dependencies]
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
 ring = "0.17"
 
 # sha1/sha2/md-5 crates for all non-MSVC targets.

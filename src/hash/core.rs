@@ -84,18 +84,18 @@ fn ensure_stream_buf(buf: &mut Vec<u8>) {
     }
 }
 
-// ── Ring-accelerated hash functions (non-Apple, non-Linux targets) ────
-// ring provides BoringSSL assembly with SHA-NI/AVX2/NEON for Windows/FreeBSD.
+// ── Ring-accelerated hash functions (non-Apple targets) ───────────────
+// ring provides BoringSSL assembly with optimized SHA-512/384/256/1 for x86-64/aarch64.
 
-/// Single-shot hash using ring::digest (non-Apple, non-Linux).
-#[cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))]
+/// Single-shot hash using ring::digest (non-Apple).
+#[cfg(not(target_vendor = "apple"))]
 #[inline]
 fn ring_hash_bytes(algo: &'static ring::digest::Algorithm, data: &[u8]) -> io::Result<String> {
     Ok(hex_encode(ring::digest::digest(algo, data).as_ref()))
 }
 
-/// Streaming hash using ring::digest::Context (non-Apple, non-Linux).
-#[cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))]
+/// Streaming hash using ring::digest::Context (non-Apple).
+#[cfg(not(target_vendor = "apple"))]
 fn ring_hash_reader(
     algo: &'static ring::digest::Algorithm,
     mut reader: impl Read,
@@ -140,23 +140,24 @@ fn sha256_reader(reader: impl Read) -> io::Result<String> {
 }
 
 // ── SHA-1 ─────────────────────────────────────────────────────────────
+// ring's BoringSSL assembly for SHA-1 on non-Apple targets.
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 fn sha1_bytes(data: &[u8]) -> io::Result<String> {
     Ok(hash_digest::<sha1::Sha1>(data))
 }
 
-#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+#[cfg(not(target_vendor = "apple"))]
 fn sha1_bytes(data: &[u8]) -> io::Result<String> {
     ring_hash_bytes(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data)
 }
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 fn sha1_reader(reader: impl Read) -> io::Result<String> {
     hash_reader_impl::<sha1::Sha1>(reader)
 }
 
-#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+#[cfg(not(target_vendor = "apple"))]
 fn sha1_reader(reader: impl Read) -> io::Result<String> {
     ring_hash_reader(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, reader)
 }
@@ -173,45 +174,47 @@ fn sha224_reader(reader: impl Read) -> io::Result<String> {
 }
 
 // ── SHA-384 ───────────────────────────────────────────────────────────
+// ring's BoringSSL assembly is significantly faster than sha2 crate for SHA-384/512
+// because SHA-NI hardware only accelerates SHA-256, not SHA-512.
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 fn sha384_bytes(data: &[u8]) -> io::Result<String> {
     Ok(hash_digest::<sha2::Sha384>(data))
 }
 
-#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+#[cfg(not(target_vendor = "apple"))]
 fn sha384_bytes(data: &[u8]) -> io::Result<String> {
     ring_hash_bytes(&ring::digest::SHA384, data)
 }
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 fn sha384_reader(reader: impl Read) -> io::Result<String> {
     hash_reader_impl::<sha2::Sha384>(reader)
 }
 
-#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+#[cfg(not(target_vendor = "apple"))]
 fn sha384_reader(reader: impl Read) -> io::Result<String> {
     ring_hash_reader(&ring::digest::SHA384, reader)
 }
 
 // ── SHA-512 ───────────────────────────────────────────────────────────
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 fn sha512_bytes(data: &[u8]) -> io::Result<String> {
     Ok(hash_digest::<sha2::Sha512>(data))
 }
 
-#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+#[cfg(not(target_vendor = "apple"))]
 fn sha512_bytes(data: &[u8]) -> io::Result<String> {
     ring_hash_bytes(&ring::digest::SHA512, data)
 }
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 fn sha512_reader(reader: impl Read) -> io::Result<String> {
     hash_reader_impl::<sha2::Sha512>(reader)
 }
 
-#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+#[cfg(not(target_vendor = "apple"))]
 fn sha512_reader(reader: impl Read) -> io::Result<String> {
     ring_hash_reader(&ring::digest::SHA512, reader)
 }
@@ -246,8 +249,8 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io
             Ok(32)
         }
         HashAlgorithm::Sha1 => {
-            let digest = sha1::Sha1::digest(data);
-            hex_encode_to_slice(&digest, out);
+            let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
+            hex_encode_to_slice(digest.as_ref(), out);
             Ok(40)
         }
         HashAlgorithm::Sha224 => {
@@ -261,13 +264,13 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io
             Ok(64)
         }
         HashAlgorithm::Sha384 => {
-            let digest = sha2::Sha384::digest(data);
-            hex_encode_to_slice(&digest, out);
+            let digest = ring::digest::digest(&ring::digest::SHA384, data);
+            hex_encode_to_slice(digest.as_ref(), out);
             Ok(96)
         }
         HashAlgorithm::Sha512 => {
-            let digest = sha2::Sha512::digest(data);
-            hex_encode_to_slice(&digest, out);
+            let digest = ring::digest::digest(&ring::digest::SHA512, data);
+            hex_encode_to_slice(digest.as_ref(), out);
             Ok(128)
         }
         HashAlgorithm::Blake2b => {
@@ -594,11 +597,33 @@ fn hash_file_pipelined_read(
             Ok(hex_encode(state.finalize().as_bytes()))
         }
         HashAlgorithm::Md5 => hash_pipelined_digest!(Md5::new()),
-        HashAlgorithm::Sha1 => hash_pipelined_digest!(sha1::Sha1::new()),
         HashAlgorithm::Sha224 => hash_pipelined_digest!(sha2::Sha224::new()),
         HashAlgorithm::Sha256 => hash_pipelined_digest!(sha2::Sha256::new()),
-        HashAlgorithm::Sha384 => hash_pipelined_digest!(sha2::Sha384::new()),
-        HashAlgorithm::Sha512 => hash_pipelined_digest!(sha2::Sha512::new()),
+        // SHA-1/384/512: use ring's BoringSSL assembly for better throughput
+        HashAlgorithm::Sha1 => {
+            let mut ctx = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
+            while let Ok((buf, n)) = rx.recv() {
+                ctx.update(&buf[..n]);
+                let _ = buf_tx.send(buf);
+            }
+            Ok(hex_encode(ctx.finish().as_ref()))
+        }
+        HashAlgorithm::Sha384 => {
+            let mut ctx = ring::digest::Context::new(&ring::digest::SHA384);
+            while let Ok((buf, n)) = rx.recv() {
+                ctx.update(&buf[..n]);
+                let _ = buf_tx.send(buf);
+            }
+            Ok(hex_encode(ctx.finish().as_ref()))
+        }
+        HashAlgorithm::Sha512 => {
+            let mut ctx = ring::digest::Context::new(&ring::digest::SHA512);
+            while let Ok((buf, n)) = rx.recv() {
+                ctx.update(&buf[..n]);
+                let _ = buf_tx.send(buf);
+            }
+            Ok(hex_encode(ctx.finish().as_ref()))
+        }
     };
 
     match reader_handle.join() {
@@ -1775,12 +1800,15 @@ fn hash_stream_with_prefix(
     }
 
     match algo {
-        HashAlgorithm::Sha1 => hash_stream_with_prefix_digest::<sha1::Sha1>(prefix, file),
         HashAlgorithm::Sha224 => hash_stream_with_prefix_digest::<sha2::Sha224>(prefix, file),
         HashAlgorithm::Sha256 => hash_stream_with_prefix_digest::<sha2::Sha256>(prefix, file),
-        HashAlgorithm::Sha384 => hash_stream_with_prefix_digest::<sha2::Sha384>(prefix, file),
-        HashAlgorithm::Sha512 => hash_stream_with_prefix_digest::<sha2::Sha512>(prefix, file),
         HashAlgorithm::Md5 => hash_stream_with_prefix_digest::<md5::Md5>(prefix, file),
+        // SHA-1/384/512: use ring's BoringSSL assembly for throughput
+        HashAlgorithm::Sha1 => {
+            hash_stream_with_prefix_ring(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, prefix, file)
+        }
+        HashAlgorithm::Sha384 => hash_stream_with_prefix_ring(&ring::digest::SHA384, prefix, file),
+        HashAlgorithm::Sha512 => hash_stream_with_prefix_ring(&ring::digest::SHA512, prefix, file),
         HashAlgorithm::Blake2b => unreachable!(),
     }
 }
@@ -1803,6 +1831,29 @@ fn hash_stream_with_prefix_digest<D: digest::Digest>(
             hasher.update(&buf[..n]);
         }
         Ok(hex_encode(&hasher.finalize()))
+    })
+}
+
+/// Stream-hash with prefix using ring's BoringSSL assembly (non-Apple targets).
+#[cfg(not(target_vendor = "apple"))]
+fn hash_stream_with_prefix_ring(
+    algo: &'static ring::digest::Algorithm,
+    prefix: &[u8],
+    mut file: File,
+) -> io::Result<String> {
+    STREAM_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        ensure_stream_buf(&mut buf);
+        let mut ctx = ring::digest::Context::new(algo);
+        ctx.update(prefix);
+        loop {
+            let n = read_full(&mut file, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            ctx.update(&buf[..n]);
+        }
+        Ok(hex_encode(ctx.finish().as_ref()))
     })
 }
 
