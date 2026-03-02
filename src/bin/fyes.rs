@@ -13,32 +13,65 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// large enough to amortize syscall overhead.
 const BUF_SIZE: usize = 8192;
 
+/// Check whether the parent process has SIGPIPE set to SIG_IGN.
+///
+/// Bash preserves SIG_IGN for terminating signals inherited from its parent
+/// (POSIX requirement) and passes the same disposition to child processes
+/// via restore_original_signals(). By reading the parent's SigIgn mask
+/// from /proc, we can determine what handler bash intended for us — which
+/// Rust's runtime overwrites with SIG_IGN before main() runs.
+#[cfg(target_os = "linux")]
+fn parent_ignores_sigpipe() -> bool {
+    let ppid = unsafe { libc::getppid() };
+    let path = format!("/proc/{}/status", ppid);
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        for line in content.lines() {
+            if let Some(hex) = line.strip_prefix("SigIgn:\t")
+                && let Ok(mask) = u64::from_str_radix(hex.trim(), 16)
+            {
+                // SIGPIPE is signal 13 → bit 12 (0-indexed)
+                return mask & (1u64 << 12) != 0;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn parent_ignores_sigpipe() -> bool {
+    // On non-Linux Unix, /proc may not exist. Default to SIG_DFL behavior
+    // (killed by SIGPIPE), which matches GNU yes in normal shell environments.
+    false
+}
+
 fn main() {
     // Match GNU yes's SIGPIPE behavior exactly. GNU yes (C binary) inherits
-    // SIG_DFL from the kernel and the parent's signal mask. Two cases:
+    // its SIGPIPE handler from the parent via bash's restore_original_signals().
+    // Bash preserves SIG_IGN for terminating signals (POSIX requirement).
     //
-    // 1. SIGPIPE unblocked (normal shell): SIG_DFL → SIGPIPE kills process silently.
-    //    We must do the same: set SIG_DFL so we're killed silently.
+    // Two scenarios:
+    // 1. Parent has SIG_DFL (normal shell): bash gives child SIG_DFL → SIGPIPE
+    //    kills process silently on broken pipe. We must set SIG_DFL to match.
     //
-    // 2. SIGPIPE blocked (Node.js CI runners, systemd): SIG_DFL but signal can't
-    //    be delivered → write() returns EPIPE → GNU yes prints error and exits 1.
-    //    We keep Rust's SIG_IGN so write() also returns EPIPE, then print the error.
+    // 2. Parent has SIG_IGN (Node.js CI runners, systemd): bash gives child
+    //    SIG_IGN → write() returns EPIPE → GNU yes prints error and exits 1.
+    //    We keep Rust's SIG_IGN to match.
     //
-    // We check the inherited signal mask to decide which path to take.
+    // Since Rust sets SIGPIPE to SIG_IGN before main(), we can't directly
+    // check what our original handler was. Instead, we check the parent
+    // process's SigIgn mask via /proc to determine what bash would have
+    // passed to us.
     #[cfg(unix)]
     unsafe {
-        let mut oldmask: libc::sigset_t = std::mem::zeroed();
-        libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut oldmask);
-
-        if libc::sigismember(&oldmask, libc::SIGPIPE) != 1 {
-            // SIGPIPE is unblocked: set SIG_DFL so we're killed by the signal
+        if !parent_ignores_sigpipe() {
+            // Parent uses SIG_DFL: set SIG_DFL so we're killed by SIGPIPE
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = libc::SIG_DFL;
             sa.sa_flags = 0;
             libc::sigemptyset(&mut sa.sa_mask);
             libc::sigaction(libc::SIGPIPE, &sa, std::ptr::null_mut());
         }
-        // If SIGPIPE is blocked: keep Rust's SIG_IGN, write() returns EPIPE,
+        // If parent uses SIG_IGN: keep Rust's SIG_IGN, write() returns EPIPE,
         // and our error handler prints the message (matching GNU yes).
     }
 
@@ -164,11 +197,30 @@ fn main() {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                // With SIGPIPE unblocked + SIG_DFL: we're killed before reaching here.
-                // With SIGPIPE blocked + SIG_IGN: write returns EPIPE, we print
-                // the error to match GNU yes behavior in blocked environments.
+                // Mimic GNU yes: if EPIPE, try raise(SIGPIPE). With SIG_DFL +
+                // unblocked mask, this kills us (but we'd already be dead from
+                // write()). With SIG_IGN, the raise is a no-op and we fall
+                // through to print the error message.
+                #[cfg(unix)]
+                if err.raw_os_error() == Some(libc::EPIPE) {
+                    unsafe {
+                        libc::raise(libc::SIGPIPE);
+                    }
+                }
+                // Write the error in a single write(2) call to prevent
+                // interleaving with stdout when both go to the same fd
+                // (e.g., 2>&1 in test harnesses). Rust's eprintln! uses
+                // multiple write() calls (one per format arg), which can
+                // race with pipeline output.
                 let msg = coreutils_rs::common::io_error_msg(&err);
-                eprintln!("{}: standard output: {}", TOOL_NAME, msg);
+                let error_line = format!("{}: standard output: {}\n", TOOL_NAME, msg);
+                let _ = unsafe {
+                    libc::write(
+                        2,
+                        error_line.as_ptr() as *const libc::c_void,
+                        error_line.len() as _,
+                    )
+                };
                 #[cfg(unix)]
                 unsafe {
                     libc::_exit(1)
