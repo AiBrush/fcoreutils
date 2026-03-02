@@ -286,8 +286,8 @@ fn fmt_signed(v: i64, buf: &mut [u8]) -> usize {
     1 + len
 }
 
-/// Write a right-padded value to output. `value_buf[..value_len]` contains the formatted
-/// number, and `width` is the total field width (including leading spaces).
+/// Write a left-padded (right-aligned) value to output. `value_buf[..value_len]` contains the
+/// formatted number, and `width` is the total field width (including leading spaces).
 #[inline]
 fn write_padded(
     out: &mut impl Write,
@@ -471,7 +471,7 @@ fn write_format_line(
                 // Zero-pad to 7 digits
                 let pad = 7usize.saturating_sub(vlen);
                 for b in addr_buf.iter_mut().take(pad) {
-                    *b = b' ';
+                    *b = b'0';
                 }
                 addr_buf[pad..pad + vlen].copy_from_slice(&tmp[..vlen]);
                 out.write_all(&addr_buf[..pad + vlen])?;

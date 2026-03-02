@@ -85,8 +85,8 @@ const WC_PARALLEL_THRESHOLD: usize = 1024 * 1024; // 1MB
 const LINE_PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
 
 /// Lines-only fast path: mmap + parallel SIMD memchr for maximum throughput.
-/// For files > 2MB, splits data across all CPU cores for parallel newline counting.
-/// Uses populate() to pre-fault pages and MADV_HUGEPAGE to reduce TLB misses.
+/// For files >= 32MB, splits data across all CPU cores for parallel newline counting.
+/// Uses MADV_SEQUENTIAL for readahead and MADV_HUGEPAGE (large files) to reduce TLB misses.
 /// Returns (line_count, byte_count).
 fn count_lines_streaming(path: &Path) -> io::Result<(u64, u64)> {
     let file = std::fs::File::open(path)?;
@@ -109,8 +109,8 @@ fn count_lines_streaming(path: &Path) -> io::Result<(u64, u64)> {
                     mmap.len(),
                     libc::MADV_SEQUENTIAL,
                 );
-                // HUGEPAGE reduces TLB misses for large files
-                if mmap.len() >= LINE_PARALLEL_THRESHOLD {
+                // HUGEPAGE reduces TLB misses for files >= 2MB
+                if mmap.len() >= 2 * 1024 * 1024 {
                     libc::madvise(
                         mmap.as_ptr() as *mut libc::c_void,
                         mmap.len(),

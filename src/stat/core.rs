@@ -569,7 +569,27 @@ fn format_file_specifiers(
                 }
             }
         } else {
-            result.push(bytes[i] as char);
+            // Preserve full UTF-8 characters, not individual bytes
+            let b = bytes[i];
+            if b < 0x80 {
+                result.push(b as char);
+            } else {
+                let char_len = if b < 0xE0 {
+                    2
+                } else if b < 0xF0 {
+                    3
+                } else {
+                    4
+                };
+                let end = (i + char_len).min(len);
+                if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
+                    result.push_str(s);
+                    i = end;
+                    continue;
+                } else {
+                    result.push(b as char);
+                }
+            }
         }
         i += 1;
     }
@@ -649,7 +669,27 @@ fn format_fs_specifiers(fmt: &str, path: &str, sfs: &libc::statfs) -> String {
                 }
             }
         } else {
-            result.push(bytes[i] as char);
+            // Preserve full UTF-8 characters, not individual bytes
+            let b = bytes[i];
+            if b < 0x80 {
+                result.push(b as char);
+            } else {
+                let char_len = if b < 0xE0 {
+                    2
+                } else if b < 0xF0 {
+                    3
+                } else {
+                    4
+                };
+                let end = (i + char_len).min(len);
+                if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
+                    result.push_str(s);
+                    i = end;
+                    continue;
+                } else {
+                    result.push(b as char);
+                }
+            }
         }
         i += 1;
     }
@@ -931,7 +971,27 @@ pub fn expand_backslash_escapes(s: &str) -> String {
                 }
             }
         } else {
-            result.push(bytes[i] as char);
+            // Preserve full UTF-8 characters, not individual bytes
+            let b = bytes[i];
+            if b < 0x80 {
+                result.push(b as char);
+            } else {
+                let char_len = if b < 0xE0 {
+                    2
+                } else if b < 0xF0 {
+                    3
+                } else {
+                    4
+                };
+                let end = (i + char_len).min(len);
+                if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
+                    result.push_str(s);
+                    i = end;
+                    continue;
+                } else {
+                    result.push(b as char);
+                }
+            }
         }
         i += 1;
     }
