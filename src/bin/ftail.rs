@@ -332,18 +332,72 @@ fn enlarge_stdout_pipe() {
     }
 }
 
+/// Ultra-fast path for single-file tail on Linux.
+/// For small files (<=64KB), reads into a stack buffer and writes directly
+/// via raw write(2), bypassing BufWriter entirely. For larger files,
+/// uses sendfile with automatic terminal fallback.
+/// Returns Some(exit_code) if handled, None to fall through to general path.
+#[cfg(target_os = "linux")]
+fn try_fast_single_file(cli: &Cli) -> Option<i32> {
+    // Only applies to single-file, no-header, no-follow cases
+    if cli.files.len() != 1 || cli.verbose || cli.config.follow != FollowMode::None {
+        return None;
+    }
+    let filename = &cli.files[0];
+    if filename == "-" || cli.config.zero_terminated {
+        return None;
+    }
+
+    match &cli.config.mode {
+        TailMode::Lines(n) => match tail::tail_file_direct(filename, *n, b'\n') {
+            Ok(true) => Some(0),
+            Ok(false) => Some(1),
+            Err(e) => {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    Some(0)
+                } else {
+                    eprintln!("tail: error reading '{}': {}", filename, io_error_msg(&e));
+                    Some(1)
+                }
+            }
+        },
+        TailMode::Bytes(n) => match tail::tail_file_bytes_direct(filename, *n) {
+            Ok(true) => Some(0),
+            Ok(false) => Some(1),
+            Err(e) => {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    Some(0)
+                } else {
+                    eprintln!("tail: error reading '{}': {}", filename, io_error_msg(&e));
+                    Some(1)
+                }
+            }
+        },
+        _ => None,
+    }
+}
+
 fn main() {
     reset_sigpipe();
 
+    let cli = parse_args();
+
+    // Fast path: single file, no headers, no follow — bypass BufWriter entirely
+    #[cfg(target_os = "linux")]
+    if !cli.quiet && cli.files.len() <= 1 {
+        if let Some(code) = try_fast_single_file(&cli) {
+            process::exit(code);
+        }
+    }
+
+    // General path: multiple files, stdin, follow mode, etc.
     #[cfg(target_os = "linux")]
     enlarge_stdout_pipe();
 
-    let cli = parse_args();
-
-    let files: Vec<String> = if cli.files.is_empty() {
-        vec!["-".to_string()]
+    let files: Vec<&str> = if cli.files.is_empty() {
+        vec!["-"]
     } else {
-        cli.files
+        cli.files.iter().map(|s| s.as_str()).collect()
     };
 
     let tool_name = "tail";
@@ -356,7 +410,7 @@ fn main() {
     };
 
     let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(32 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(8 * 1024, stdout.lock());
     let mut had_error = false;
     let mut first = true;
 
@@ -365,10 +419,10 @@ fn main() {
             if !first {
                 let _ = out.write_all(b"\n");
             }
-            let display_name = if filename == "-" {
+            let display_name = if *filename == "-" {
                 "standard input"
             } else {
-                filename.as_str()
+                filename
             };
             let _ = writeln!(out, "==> {} <==", display_name);
         }
@@ -393,7 +447,7 @@ fn main() {
     // Follow mode
     if cli.config.follow != FollowMode::None {
         for filename in &files {
-            if filename != "-" {
+            if *filename != "-" {
                 let _ = tail::follow_file(filename, &cli.config, &mut out);
             }
         }

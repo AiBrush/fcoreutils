@@ -218,18 +218,87 @@ fn enlarge_stdout_pipe() {
     }
 }
 
+/// Ultra-fast path for the dominant case: single file, positive line/byte count,
+/// no headers. Bypasses BufWriter allocation entirely by writing directly via
+/// raw fd on Linux, or a minimal stack-buffered writer elsewhere.
+/// Returns Ok(Some(exit_code)) if handled, Ok(None) to fall through to general path.
+fn try_fast_single_file(cli: &Cli) -> Option<i32> {
+    // Only applies to single-file, no-header cases
+    if cli.files.len() != 1 || cli.verbose {
+        return None;
+    }
+    let filename = &cli.files[0];
+    if filename == "-" {
+        return None;
+    }
+
+    // Only for positive-count modes (no from-end) and standard newline delimiter
+    if cli.config.zero_terminated {
+        return None;
+    }
+    match &cli.config.mode {
+        HeadMode::Lines(n) => match head::head_file_direct(filename, *n, b'\n') {
+            Ok(true) => Some(0),
+            Ok(false) => Some(1),
+            Err(e) => {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    Some(0)
+                } else {
+                    eprintln!("head: write error: {}", io_error_msg(&e));
+                    Some(1)
+                }
+            }
+        },
+        HeadMode::Bytes(n) => {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::io::AsRawFd;
+                let stdout = io::stdout();
+                let out_fd = stdout.as_raw_fd();
+                match head::sendfile_bytes(std::path::Path::new(filename), *n, out_fd) {
+                    Ok(true) => return Some(0),
+                    Ok(false) => {}
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::BrokenPipe {
+                            return Some(0);
+                        }
+                        eprintln!(
+                            "head: cannot open '{}' for reading: {}",
+                            filename,
+                            io_error_msg(&e)
+                        );
+                        return Some(1);
+                    }
+                }
+            }
+            let _ = n;
+            None
+        }
+        _ => None,
+    }
+}
+
 fn main() {
     reset_sigpipe();
 
+    let cli = parse_args();
+
+    // Fast path: single file, positive count, no headers -- bypass BufWriter entirely
+    if !cli.quiet && cli.files.len() <= 1 {
+        if let Some(code) = try_fast_single_file(&cli) {
+            process::exit(code);
+        }
+    }
+
+    // General path: multiple files, stdin, from-end modes, etc.
+    // Only enlarge pipe buffer when we actually need throughput
     #[cfg(target_os = "linux")]
     enlarge_stdout_pipe();
 
-    let cli = parse_args();
-
-    let files: Vec<String> = if cli.files.is_empty() {
-        vec!["-".to_string()]
+    let files: Vec<&str> = if cli.files.is_empty() {
+        vec!["-"]
     } else {
-        cli.files
+        cli.files.iter().map(|s| s.as_str()).collect()
     };
 
     let tool_name = "head";
@@ -242,7 +311,7 @@ fn main() {
     };
 
     let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(32 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(8 * 1024, stdout.lock());
     let mut had_error = false;
     let mut first = true;
 
@@ -251,10 +320,10 @@ fn main() {
             if !first {
                 let _ = out.write_all(b"\n");
             }
-            let display_name = if filename == "-" {
+            let display_name = if *filename == "-" {
                 "standard input"
             } else {
-                filename.as_str()
+                filename
             };
             let _ = writeln!(out, "==> {} <==", display_name);
         }

@@ -60,6 +60,31 @@ const PERIOD_FLAG: u32 = 1 << 17; // has sentence-ending punct (.!?) regardless 
 const PUNCT_FLAG: u32 = 1 << 18; // ends with non-period punctuation (,;:)
 const PAREN_FLAG: u32 = 1 << 19; // starts with opening paren/bracket
 
+/// Precomputed division tables to avoid expensive integer division in the DP inner loop.
+/// div40k[len] = 40000 / (len + 2), div22k[len] = 22500 / (len + 2).
+/// Word lengths above 126 are clamped (extremely rare, cost difference negligible).
+const LUT_SIZE: usize = 128;
+
+static DIV40K: [i64; LUT_SIZE] = {
+    let mut t = [0i64; LUT_SIZE];
+    let mut k = 0;
+    while k < LUT_SIZE {
+        t[k] = 40000 / (k as i64 + 2);
+        k += 1;
+    }
+    t
+};
+
+static DIV22K: [i64; LUT_SIZE] = {
+    let mut t = [0i64; LUT_SIZE];
+    let mut k = 0;
+    while k < LUT_SIZE {
+        t[k] = 22500 / (k as i64 + 2);
+        k += 1;
+    }
+    t
+};
+
 /// Reusable buffers for the entire formatting session.
 /// All data is offset-based (no borrowed references), enabling reuse across paragraphs.
 struct FmtCtx {
@@ -68,14 +93,6 @@ struct FmtCtx {
     /// Packed word info: bits 0-15 = length, bits 16-19 = flags.
     /// Parallel to word_off. Built once during word collection, used directly in DP.
     winfo: Vec<u32>,
-    /// DP cost array (n+1 elements).
-    dp_cost: Vec<i64>,
-    /// Best break-point for word i (n elements).
-    best: Vec<u32>,
-    /// Line length at break-point i (n+1 elements).
-    line_len: Vec<i32>,
-    /// Output line buffer for batched writes.
-    line_buf: Vec<u8>,
 }
 
 impl FmtCtx {
@@ -83,10 +100,6 @@ impl FmtCtx {
         Self {
             word_off: Vec::with_capacity(256),
             winfo: Vec::with_capacity(256),
-            dp_cost: Vec::with_capacity(257),
-            best: Vec::with_capacity(256),
-            line_len: Vec::with_capacity(257),
-            line_buf: Vec::with_capacity(256),
         }
     }
 
@@ -115,13 +128,10 @@ pub fn fmt_file<R: Read, W: Write>(
 /// Format in-memory data. Works on byte slices directly — no UTF-8 validation pass.
 /// The formatter only inspects ASCII whitespace/punctuation, so raw bytes are fine.
 pub fn fmt_data(data: &[u8], output: &mut impl Write, config: &FmtConfig) -> io::Result<()> {
-    // Treat as UTF-8 without validation — formatting only uses ASCII byte values.
-    // For invalid UTF-8, use lossy conversion to handle edge cases.
-    let text = match std::str::from_utf8(data) {
-        Ok(s) => std::borrow::Cow::Borrowed(s),
-        Err(_) => String::from_utf8_lossy(data),
-    };
-    fmt_str(&text, output, config)
+    // Work directly on bytes — no UTF-8 validation needed.
+    // The formatter only examines ASCII whitespace and punctuation characters.
+    // Non-ASCII bytes are passed through verbatim (zero-copy).
+    fmt_bytes(data, output, config)
 }
 
 /// Check if a byte range is all whitespace using our fast lookup table.
@@ -135,77 +145,82 @@ fn is_blank_bytes(bytes: &[u8]) -> bool {
     true
 }
 
-/// Format a string slice, processing paragraph by paragraph with zero-copy word extraction.
-fn fmt_str(text: &str, output: &mut impl Write, config: &FmtConfig) -> io::Result<()> {
-    let prefix_str = config.prefix.as_deref();
+/// Format raw bytes, processing paragraph by paragraph with zero-copy word extraction.
+/// Operates entirely on &[u8] — no UTF-8 conversion or validation at any point.
+/// Uses memchr_iter for SIMD-accelerated newline scanning across the entire input.
+fn fmt_bytes(data: &[u8], output: &mut impl Write, config: &FmtConfig) -> io::Result<()> {
+    let prefix_bytes = config.prefix.as_deref().map(|s| s.as_bytes());
     let mut para_start = 0;
-    let bytes = text.as_bytes();
-    let blen = bytes.len();
+    let blen = data.len();
     let mut ctx = FmtCtx::new();
+    let mut line_start = 0;
 
-    let mut i = 0;
-
-    while i < blen {
-        // Find end of current line using memchr for SIMD-accelerated newline search
-        let line_end = memchr::memchr(b'\n', &bytes[i..])
-            .map(|p| i + p)
-            .unwrap_or(blen);
+    // Use memchr_iter for SIMD-accelerated bulk newline scanning.
+    // This finds all newlines in one pass, avoiding repeated memchr calls
+    // that each re-scan overlapping regions.
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line_end = nl_pos;
 
         // Effective line end (strip \r)
-        let le = if line_end > i && bytes[line_end - 1] == b'\r' {
+        let le = if line_end > line_start && data[line_end - 1] == b'\r' {
             line_end - 1
         } else {
             line_end
         };
 
         // Handle prefix filter
-        if let Some(pfx) = prefix_str {
-            let line = &text[i..le];
-            if !line.starts_with(pfx) {
+        if let Some(pfx) = prefix_bytes {
+            if !data[line_start..le].starts_with(pfx) {
                 // Flush current paragraph
-                if para_start < i {
-                    format_paragraph(text, bytes, para_start, i, config, output, &mut ctx)?;
+                if para_start < line_start {
+                    format_paragraph(data, para_start, line_start, config, output, &mut ctx)?;
                 }
-                let next = if line_end < blen { line_end + 1 } else { blen };
-                para_start = next;
+                para_start = nl_pos + 1;
                 // Emit verbatim
-                output.write_all(&bytes[i..le])?;
+                output.write_all(&data[line_start..le])?;
                 output.write_all(b"\n")?;
-                i = next;
+                line_start = nl_pos + 1;
                 continue;
             }
         }
 
         // Fast blank-line check using WS lookup table (no allocation)
-        if is_blank_bytes(&bytes[i..le]) {
+        if is_blank_bytes(&data[line_start..le]) {
             // Blank line = paragraph boundary
-            if para_start < i {
-                format_paragraph(text, bytes, para_start, i, config, output, &mut ctx)?;
+            if para_start < line_start {
+                format_paragraph(data, para_start, line_start, config, output, &mut ctx)?;
             }
             output.write_all(b"\n")?;
-            let next = if line_end < blen { line_end + 1 } else { blen };
-            para_start = next;
+            para_start = nl_pos + 1;
         }
 
-        i = if line_end < blen { line_end + 1 } else { blen };
+        line_start = nl_pos + 1;
     }
 
-    // Flush remaining paragraph
+    // Handle last line (no trailing newline) and flush remaining paragraph
+    if line_start < blen {
+        // There's content after the last newline (no trailing newline)
+        // It's part of the current paragraph
+    }
+
     if para_start < blen {
-        let remaining = text[para_start..].trim_end_matches('\n');
-        if !remaining.is_empty() {
-            format_paragraph(text, bytes, para_start, blen, config, output, &mut ctx)?;
+        // Check if remaining content is non-empty (ignoring trailing newlines)
+        let mut end = blen;
+        while end > para_start && data[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if end > para_start {
+            format_paragraph(data, para_start, blen, config, output, &mut ctx)?;
         }
     }
 
     Ok(())
 }
 
-/// Format a paragraph from a region of the source text [start..end).
+/// Format a paragraph from a region of the source bytes [start..end).
 /// Uses single-pass word extraction with offset-based storage.
 /// All flags are computed once during word collection, eliminating double punctuation analysis.
 fn format_paragraph(
-    text: &str,
     bytes: &[u8],
     start: usize,
     end: usize,
@@ -214,12 +229,12 @@ fn format_paragraph(
     ctx: &mut FmtCtx,
 ) -> io::Result<()> {
     let region = &bytes[start..end];
-    let prefix_str = config.prefix.as_deref();
+    let prefix_bytes = config.prefix.as_deref().map(|s| s.as_bytes());
 
     // Single-pass line extraction using memchr for indentation analysis.
     // We need the first two non-empty lines for indent detection.
-    let mut first_line: Option<&str> = None;
-    let mut second_line: Option<&str> = None;
+    let mut first_line: Option<(usize, usize)> = None; // (start_offset, end_offset) relative to `bytes`
+    let mut second_line: Option<(usize, usize)> = None;
     {
         let rlen = region.len();
         let mut pos = 0;
@@ -232,11 +247,11 @@ fn format_paragraph(
                 le -= 1;
             }
             if le > pos {
-                let line = &text[start + pos..start + le];
+                let line_range = (start + pos, start + le);
                 if first_line.is_none() {
-                    first_line = Some(line);
+                    first_line = Some(line_range);
                 } else if second_line.is_none() {
-                    second_line = Some(line);
+                    second_line = Some(line_range);
                     break; // Only need first two lines for indent analysis
                 }
             }
@@ -244,26 +259,32 @@ fn format_paragraph(
         }
     }
 
-    let fl = match first_line {
-        Some(l) => l,
+    let (fl_start, fl_end) = match first_line {
+        Some(r) => r,
         None => return Ok(()),
     };
 
-    let stripped_first = match prefix_str {
-        Some(pfx) => fl.strip_prefix(pfx).unwrap_or(fl),
-        None => fl,
+    // Strip prefix from first line for indent analysis
+    let stripped_first_start = match prefix_bytes {
+        Some(pfx) if bytes[fl_start..fl_end].starts_with(pfx) => fl_start + pfx.len(),
+        _ => fl_start,
     };
 
-    let stripped_second = match second_line {
-        Some(l) => match prefix_str {
-            Some(pfx) => l.strip_prefix(pfx).unwrap_or(l),
-            None => l,
+    // Strip prefix from second line for indent analysis
+    let (stripped_second_start, stripped_second_end) = match second_line {
+        Some((s, e)) => match prefix_bytes {
+            Some(pfx) if bytes[s..e].starts_with(pfx) => (s + pfx.len(), e),
+            _ => (s, e),
         },
-        None => stripped_first,
+        None => (stripped_first_start, fl_end),
     };
 
-    let first_indent = leading_indent(stripped_first);
-    let rest_indent = leading_indent(stripped_second);
+    let first_indent_len = leading_ws_len(&bytes[stripped_first_start..fl_end]);
+    let rest_indent_len = leading_ws_len(&bytes[stripped_second_start..stripped_second_end]);
+
+    // Extract indent bytes (zero-copy slices from source)
+    let first_indent = &bytes[stripped_first_start..stripped_first_start + first_indent_len];
+    let rest_indent = &bytes[stripped_second_start..stripped_second_start + rest_indent_len];
 
     let (first_line_indent, cont_indent) = if config.tagged || config.crown_margin {
         (first_indent, rest_indent)
@@ -284,15 +305,24 @@ fn format_paragraph(
                 le -= 1;
             }
             if le > pos {
-                let line = &text[start + pos..start + le];
-                split_line_optimal(line, config, prefix_str, output)?;
+                let line_start = start + pos;
+                let line_end = start + le;
+                split_line_optimal(
+                    bytes,
+                    line_start,
+                    line_end,
+                    config,
+                    prefix_bytes,
+                    output,
+                    ctx,
+                )?;
             }
             pos = nl + 1;
         }
         return Ok(());
     }
 
-    let pfx = prefix_str.unwrap_or("");
+    let pfx = prefix_bytes.unwrap_or(b"");
 
     // GNU fmt's MAXWORDS is 1,000,000 — process the entire paragraph in one shot.
     const MAXWORDS: usize = 1_000_000;
@@ -304,7 +334,7 @@ fn format_paragraph(
         bytes,
         region,
         start,
-        prefix_str,
+        prefix_bytes,
         pfx,
         first_line_indent,
         cont_indent,
@@ -315,16 +345,23 @@ fn format_paragraph(
     )
 }
 
-/// Determine the leading whitespace (indentation) of a line.
-fn leading_indent(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    &line[..line.len() - trimmed.len()]
+/// Determine the length of leading ASCII whitespace in a byte slice.
+/// Replaces the old `leading_indent(&str) -> &str` — works on raw bytes,
+/// no UTF-8 requirement.
+#[inline(always)]
+fn leading_ws_len(bytes: &[u8]) -> usize {
+    let mut i = 0;
+    while i < bytes.len() && is_ws(bytes[i]) && bytes[i] != b'\n' {
+        i += 1;
+    }
+    i
 }
 
 /// Collect words from a single line [ls..le) in the source bytes.
 /// Computes all flags (SENT, PERIOD, PUNCT, PAREN) during collection.
-/// Uses SIMD memchr for space scanning when possible, falling back to
-/// lookup-table for other whitespace types.
+/// Uses a simple byte loop for word boundary detection — for typical line
+/// lengths (< 200 bytes), this is faster than memchr2's SIMD setup overhead
+/// which dominates for short slices.
 #[inline(always)]
 fn collect_words_line(bytes: &[u8], ls: usize, le: usize, ctx: &mut FmtCtx) {
     let ptr = bytes.as_ptr();
@@ -338,20 +375,11 @@ fn collect_words_line(bytes: &[u8], ls: usize, le: usize, ctx: &mut FmtCtx) {
     while i < le {
         let word_start = i;
 
-        // Find end of word: scan for space or tab (covers 99%+ of cases)
-        // Using memchr2 for SIMD-accelerated whitespace detection
-        let line_slice = unsafe { std::slice::from_raw_parts(ptr.add(i), le - i) };
-        match memchr::memchr2(b' ', b'\t', line_slice) {
-            Some(offset) => {
-                i += offset;
-            }
-            None => {
-                // No space/tab found — word extends to end of line
-                // Check for other whitespace byte-at-a-time
-                while i < le && unsafe { !is_ws(*ptr.add(i)) } {
-                    i += 1;
-                }
-            }
+        // Find end of word using direct byte scan.
+        // For typical line lengths (< 200 bytes), the byte loop is faster than
+        // memchr2 which has per-call SIMD setup overhead (~15ns).
+        while i < le && unsafe { !is_ws(*ptr.add(i)) } {
+            i += 1;
         }
         let wlen = i - word_start;
 
@@ -413,229 +441,6 @@ fn classify_word_punct(bytes: &[u8], in_sentence_context: bool) -> u32 {
     }
 }
 
-/// Reflow words into lines that fit within the configured width.
-///
-/// Uses optimal line breaking with a cost function matching GNU fmt.
-/// Words are referenced by offset (ctx.word_off + ctx.winfo), not by &str slices.
-/// Builds each output line in a buffer and writes once.
-#[allow(clippy::too_many_arguments)]
-fn reflow_paragraph<W: Write>(
-    bytes: &[u8],
-    prefix: &str,
-    first_indent: &str,
-    cont_indent: &str,
-    config: &FmtConfig,
-    output: &mut W,
-    ctx: &mut FmtCtx,
-) -> io::Result<()> {
-    let n = ctx.word_off.len();
-    if n == 0 {
-        return Ok(());
-    }
-
-    let first_base = prefix.len() + first_indent.len();
-    let cont_base = prefix.len() + cont_indent.len();
-    let goal = config.goal as i64;
-    let width = config.width;
-
-    // GNU fmt cost model constants
-    const SHORT_FACTOR: i64 = 100;
-    const RAGGED_FACTOR: i64 = 50;
-    const LINE_COST: i64 = 70 * 70;
-    const SENTENCE_BONUS: i64 = 50 * 50;
-    const NOBREAK_COST: i64 = 600 * 600;
-    const PUNCT_BONUS: i64 = 40 * 40;
-    const PAREN_BONUS: i64 = 40 * 40;
-
-    // Reuse DP buffers
-    ctx.dp_cost.clear();
-    ctx.dp_cost.resize(n + 1, i64::MAX);
-    ctx.dp_cost[n] = 0;
-
-    ctx.best.clear();
-    ctx.best.resize(n, 0);
-
-    ctx.line_len.clear();
-    ctx.line_len.resize(n + 1, 0);
-
-    // SAFETY: All array indices are provably in-bounds:
-    // - winfo has exactly n elements (one per word)
-    // - dp_cost has n+1 elements, accessed with indices 0..=n
-    // - best has n elements, accessed with indices 0..n-1
-    // - line_len has n+1 elements, accessed with indices 0..=n
-    let winfo_ptr = ctx.winfo.as_ptr();
-    let dp_cost_ptr = ctx.dp_cost.as_mut_ptr();
-    let best_ptr = ctx.best.as_mut_ptr();
-    let line_len_ptr = ctx.line_len.as_mut_ptr();
-
-    // Precomputed division tables to avoid expensive integer division in the inner loop.
-    // div40k[len] = 40000 / (len + 2), div22k[len] = 22500 / (len + 2).
-    // Word lengths above 126 are clamped (extremely rare, cost difference negligible).
-    const LUT_SIZE: usize = 128;
-    let div40k: [i64; LUT_SIZE] = {
-        let mut t = [0i64; LUT_SIZE];
-        let mut k = 0;
-        while k < LUT_SIZE {
-            t[k] = 40000 / (k as i64 + 2);
-            k += 1;
-        }
-        t
-    };
-    let div22k: [i64; LUT_SIZE] = {
-        let mut t = [0i64; LUT_SIZE];
-        let mut k = 0;
-        while k < LUT_SIZE {
-            t[k] = 22500 / (k as i64 + 2);
-            k += 1;
-        }
-        t
-    };
-
-    for i in (0..n).rev() {
-        let base = if i == 0 { first_base } else { cont_base };
-        let mut len = base + unsafe { (*winfo_ptr.add(i) & 0xFFFF) as usize };
-        let mut best_total = i64::MAX;
-        let mut best_j = i as u32;
-        let mut best_len = len as i32;
-
-        for j in i..n {
-            if j > i {
-                let sep = if unsafe { *winfo_ptr.add(j - 1) & SENT_FLAG != 0 } {
-                    2
-                } else {
-                    1
-                };
-                len += sep + unsafe { (*winfo_ptr.add(j) & 0xFFFF) as usize };
-            }
-
-            macro_rules! try_candidate {
-                () => {
-                    let lc = if j == n - 1 {
-                        0i64
-                    } else {
-                        let short_n = goal - len as i64;
-                        let short_cost = short_n * short_n * SHORT_FACTOR;
-                        let ragged_cost = if unsafe { *best_ptr.add(j + 1) as usize + 1 < n } {
-                            let ragged_n = len as i64 - unsafe { *line_len_ptr.add(j + 1) } as i64;
-                            ragged_n * ragged_n * RAGGED_FACTOR
-                        } else {
-                            0
-                        };
-                        short_cost + ragged_cost
-                    };
-
-                    let bc = if j == n - 1 {
-                        0i64
-                    } else {
-                        let wj = unsafe { *winfo_ptr.add(j) };
-                        let wj1 = unsafe { *winfo_ptr.add(j + 1) };
-                        let mut cost = LINE_COST;
-
-                        if wj & PERIOD_FLAG != 0 {
-                            if wj & SENT_FLAG != 0 {
-                                cost -= SENTENCE_BONUS;
-                            } else {
-                                cost += NOBREAK_COST;
-                            }
-                        } else if wj & PUNCT_FLAG != 0 {
-                            cost -= PUNCT_BONUS;
-                        } else if j > 0 {
-                            let wjm1 = unsafe { *winfo_ptr.add(j - 1) };
-                            if wjm1 & SENT_FLAG != 0 {
-                                let wl = ((wj & 0xFFFF) as usize).min(LUT_SIZE - 1);
-                                cost += div40k[wl];
-                            }
-                        }
-
-                        if wj1 & PAREN_FLAG != 0 {
-                            cost -= PAREN_BONUS;
-                        } else if wj1 & SENT_FLAG != 0 {
-                            let wl = ((wj1 & 0xFFFF) as usize).min(LUT_SIZE - 1);
-                            cost += div22k[wl];
-                        }
-
-                        cost
-                    };
-
-                    let cj1 = unsafe { *dp_cost_ptr.add(j + 1) };
-                    if cj1 != i64::MAX {
-                        let total = lc + bc + cj1;
-                        if total < best_total {
-                            best_total = total;
-                            best_j = j as u32;
-                            best_len = len as i32;
-                        }
-                    }
-                };
-            }
-
-            if len >= width {
-                if j == i {
-                    try_candidate!();
-                }
-                break;
-            }
-
-            try_candidate!();
-        }
-
-        if best_total < i64::MAX {
-            unsafe {
-                *dp_cost_ptr.add(i) = best_total;
-                *best_ptr.add(i) = best_j;
-                *line_len_ptr.add(i) = best_len;
-            }
-        }
-    }
-
-    // Reconstruct lines from DP solution.
-    // Reference words by byte offset into source, build each line in buffer.
-    let mut i = 0;
-    let mut is_first_line = true;
-    let line_buf = &mut ctx.line_buf;
-    let word_off = &ctx.word_off;
-    let winfo = &ctx.winfo;
-    let best = &ctx.best;
-
-    while i < n {
-        let j = best[i] as usize;
-
-        line_buf.clear();
-
-        line_buf.extend_from_slice(prefix.as_bytes());
-        if is_first_line {
-            line_buf.extend_from_slice(first_indent.as_bytes());
-        } else {
-            line_buf.extend_from_slice(cont_indent.as_bytes());
-        }
-
-        // First word on line
-        let off = word_off[i] as usize;
-        let wlen = (winfo[i] & 0xFFFF) as usize;
-        line_buf.extend_from_slice(&bytes[off..off + wlen]);
-
-        // Subsequent words on line
-        for k in (i + 1)..=j {
-            if winfo[k - 1] & SENT_FLAG != 0 {
-                line_buf.extend_from_slice(b"  ");
-            } else {
-                line_buf.push(b' ');
-            }
-            let off = word_off[k] as usize;
-            let wlen = (winfo[k] & 0xFFFF) as usize;
-            line_buf.extend_from_slice(&bytes[off..off + wlen]);
-        }
-        line_buf.push(b'\n');
-
-        output.write_all(line_buf)?;
-
-        is_first_line = false;
-        i = j + 1;
-    }
-
-    Ok(())
-}
-
 /// Collect words from a paragraph and reflow in MAXWORDS-sized chunks.
 /// Combines word collection with chunked DP processing to avoid allocating
 /// a Vec of millions of words for huge single-paragraph files.
@@ -644,10 +449,10 @@ fn collect_and_reflow_chunked(
     bytes: &[u8],
     region: &[u8],
     start: usize,
-    prefix_filter: Option<&str>,
-    prefix_out: &str,
-    first_indent: &str,
-    cont_indent: &str,
+    prefix_filter: Option<&[u8]>,
+    prefix_out: &[u8],
+    first_indent: &[u8],
+    cont_indent: &[u8],
     config: &FmtConfig,
     output: &mut impl Write,
     ctx: &mut FmtCtx,
@@ -658,8 +463,8 @@ fn collect_and_reflow_chunked(
     let mut pos = 0;
     let mut is_first_chunk = true;
 
-    // Pre-allocate DP buffers once — reused across all chunks (no per-chunk alloc)
-    let mut dp = DpBufs::new(max_words);
+    // DP buffers — lazily grown to actual word count, not pre-allocated to MAXWORDS.
+    let mut dp = DpBufs::new();
 
     ctx.clear_words();
 
@@ -676,7 +481,7 @@ fn collect_and_reflow_chunked(
             let line_end = start + le;
 
             let ls = if pfx_len > 0 && le - pos >= pfx_len {
-                let pfx_bytes = prefix_filter.unwrap().as_bytes();
+                let pfx_bytes = prefix_filter.unwrap();
                 if &bytes[line_start..line_start + pfx_len] == pfx_bytes {
                     line_start + pfx_len
                 } else {
@@ -776,21 +581,46 @@ fn collect_and_reflow_chunked(
     Ok(())
 }
 
-/// DP buffers pre-allocated to MAXWORDS size, reused across chunks.
+/// DP buffers — lazily grown to actual word count.
+/// Avoids the previous ~16MB upfront allocation for MAXWORDS=1,000,000.
+/// Also owns the output buffer for batched writes (avoids borrow conflicts
+/// when word_off/winfo are borrowed from FmtCtx while building output).
 struct DpBufs {
     dp_cost: Vec<i64>,
     best: Vec<u32>,
     line_len: Vec<i32>,
-    line_buf: Vec<u8>,
+    out_buf: Vec<u8>,
 }
 
 impl DpBufs {
-    fn new(max_words: usize) -> Self {
+    fn new() -> Self {
+        // Pre-allocate for typical paragraph sizes (256 words covers most paragraphs).
+        // This avoids repeated small reallocations for the first few paragraphs.
         Self {
-            dp_cost: vec![0i64; max_words + 1],
-            best: vec![0u32; max_words],
-            line_len: vec![0i32; max_words + 1],
-            line_buf: Vec::with_capacity(256),
+            dp_cost: Vec::with_capacity(257),
+            best: Vec::with_capacity(256),
+            line_len: Vec::with_capacity(257),
+            out_buf: Vec::with_capacity(8192),
+        }
+    }
+
+    /// Ensure buffers are large enough for n words.
+    /// Uses unsafe set_len after reserve to avoid zeroing memory — the DP loop
+    /// always writes every element before reading it.
+    #[inline]
+    fn ensure_capacity(&mut self, n: usize) {
+        let needed = n + 1;
+        if self.dp_cost.len() < needed {
+            self.dp_cost.reserve(needed - self.dp_cost.len());
+            self.best.reserve(n.saturating_sub(self.best.len()));
+            self.line_len.reserve(needed - self.line_len.len());
+            // SAFETY: run_dp always writes dp_cost[0..=n], best[0..n-1], line_len[0..=n]
+            // before reading them. The values are all primitive types with no Drop.
+            unsafe {
+                self.dp_cost.set_len(needed);
+                self.best.set_len(n);
+                self.line_len.set_len(needed);
+            }
         }
     }
 }
@@ -799,12 +629,15 @@ impl DpBufs {
 /// Returns the index (within the chunk) of the first word of the last line.
 /// This allows the caller to keep those words as overlap for the next chunk,
 /// ensuring natural line breaks at chunk boundaries (matching GNU fmt behavior).
+///
+/// Avoids allocating a Vec<usize> for line_starts by walking the DP solution twice:
+/// first to find the last line start, then to output all lines before it.
 #[allow(clippy::too_many_arguments)]
 fn reflow_chunk_partial<W: Write>(
     bytes: &[u8],
-    prefix: &str,
-    first_indent: &str,
-    cont_indent: &str,
+    prefix: &[u8],
+    first_indent: &[u8],
+    cont_indent: &[u8],
     config: &FmtConfig,
     output: &mut W,
     word_off: &[u32],
@@ -819,65 +652,77 @@ fn reflow_chunk_partial<W: Write>(
     // Run the full DP
     run_dp(n, prefix, first_indent, cont_indent, config, winfo, dp);
 
-    // Trace the DP solution to find line breaks
-    // Collect all line start indices
-    let mut line_starts = Vec::new();
-    let mut i = 0;
-    while i < n {
-        line_starts.push(i);
-        let j = dp.best[i] as usize;
-        i = j + 1;
+    // First pass: count lines and find the last line start
+    let mut line_count = 0usize;
+    let mut last_line_start = 0usize;
+    {
+        let mut i = 0;
+        while i < n {
+            line_count += 1;
+            last_line_start = i;
+            let j = dp.best[i] as usize;
+            i = j + 1;
+        }
     }
 
-    // Output all lines except the last one
-    let last_line_idx = if line_starts.len() > 1 {
-        line_starts.len() - 1
-    } else {
+    if line_count <= 1 {
         // Only one line in the chunk — output nothing, keep all words
         return Ok(0);
-    };
+    }
 
-    let line_buf = &mut dp.line_buf;
-    for (li, &start_word) in line_starts[..last_line_idx].iter().enumerate() {
-        let j = dp.best[start_word] as usize;
+    // Second pass: output all lines except the last one
+    let out_buf = &mut dp.out_buf;
+    out_buf.clear();
 
-        line_buf.clear();
-        line_buf.extend_from_slice(prefix.as_bytes());
-        if li == 0 {
-            line_buf.extend_from_slice(first_indent.as_bytes());
-        } else {
-            line_buf.extend_from_slice(cont_indent.as_bytes());
+    let mut i = 0;
+    let mut li = 0;
+    while i < n {
+        let j = dp.best[i] as usize;
+        if i == last_line_start {
+            break; // Don't output the last line
         }
 
-        let off = word_off[start_word] as usize;
-        let wlen = (winfo[start_word] & 0xFFFF) as usize;
-        line_buf.extend_from_slice(&bytes[off..off + wlen]);
+        out_buf.extend_from_slice(prefix);
+        if li == 0 {
+            out_buf.extend_from_slice(first_indent);
+        } else {
+            out_buf.extend_from_slice(cont_indent);
+        }
 
-        for k in (start_word + 1)..=j {
+        let off = word_off[i] as usize;
+        let wlen = (winfo[i] & 0xFFFF) as usize;
+        out_buf.extend_from_slice(&bytes[off..off + wlen]);
+
+        for k in (i + 1)..=j {
             if winfo[k - 1] & SENT_FLAG != 0 {
-                line_buf.extend_from_slice(b"  ");
+                out_buf.extend_from_slice(b"  ");
             } else {
-                line_buf.push(b' ');
+                out_buf.push(b' ');
             }
             let off = word_off[k] as usize;
             let wlen = (winfo[k] & 0xFFFF) as usize;
-            line_buf.extend_from_slice(&bytes[off..off + wlen]);
+            out_buf.extend_from_slice(&bytes[off..off + wlen]);
         }
-        line_buf.push(b'\n');
-        output.write_all(line_buf)?;
+        out_buf.push(b'\n');
+
+        li += 1;
+        i = j + 1;
     }
 
+    // Single write for all output lines
+    output.write_all(out_buf)?;
+
     // Return the index of the first word of the last line (for overlap)
-    Ok(line_starts[last_line_idx])
+    Ok(last_line_start)
 }
 
 /// Run the backward DP pass on n words, filling dp.dp_cost, dp.best, dp.line_len.
 #[allow(clippy::too_many_arguments)]
 fn run_dp(
     n: usize,
-    prefix: &str,
-    first_indent: &str,
-    cont_indent: &str,
+    prefix: &[u8],
+    first_indent: &[u8],
+    cont_indent: &[u8],
     config: &FmtConfig,
     winfo: &[u32],
     dp: &mut DpBufs,
@@ -895,30 +740,15 @@ fn run_dp(
     const PUNCT_BONUS: i64 = 40 * 40;
     const PAREN_BONUS: i64 = 40 * 40;
 
-    for i in 0..=n {
-        dp.dp_cost[i] = i64::MAX;
+    dp.ensure_capacity(n);
+    // Use ptr::write_bytes for hardware memset (rep stosb) — 3-4x faster than
+    // fill() for i64::MAX which requires 8-byte stores since 0x7F != any repeated byte.
+    // We use -1 (all 0xFF bytes) as sentinel, then check cost >= 0 to detect valid entries.
+    // All valid DP costs are non-negative, so -1 works as "uninitialized".
+    unsafe {
+        std::ptr::write_bytes(dp.dp_cost.as_mut_ptr(), 0xFF, n + 1);
     }
     dp.dp_cost[n] = 0;
-
-    const LUT_SIZE: usize = 128;
-    let div40k: [i64; LUT_SIZE] = {
-        let mut t = [0i64; LUT_SIZE];
-        let mut k = 0;
-        while k < LUT_SIZE {
-            t[k] = 40000 / (k as i64 + 2);
-            k += 1;
-        }
-        t
-    };
-    let div22k: [i64; LUT_SIZE] = {
-        let mut t = [0i64; LUT_SIZE];
-        let mut k = 0;
-        while k < LUT_SIZE {
-            t[k] = 22500 / (k as i64 + 2);
-            k += 1;
-        }
-        t
-    };
 
     let winfo_ptr = winfo.as_ptr();
     let dp_cost_ptr = dp.dp_cost.as_mut_ptr();
@@ -977,7 +807,7 @@ fn run_dp(
                             let wjm1 = unsafe { *winfo_ptr.add(j - 1) };
                             if wjm1 & SENT_FLAG != 0 {
                                 let wl = ((wj & 0xFFFF) as usize).min(LUT_SIZE - 1);
-                                cost += div40k[wl];
+                                cost += DIV40K[wl];
                             }
                         }
 
@@ -985,14 +815,14 @@ fn run_dp(
                             cost -= PAREN_BONUS;
                         } else if wj1 & SENT_FLAG != 0 {
                             let wl = ((wj1 & 0xFFFF) as usize).min(LUT_SIZE - 1);
-                            cost += div22k[wl];
+                            cost += DIV22K[wl];
                         }
 
                         cost
                     };
 
                     let cj1 = unsafe { *dp_cost_ptr.add(j + 1) };
-                    if cj1 != i64::MAX {
+                    if cj1 >= 0 {
                         let total = lc + bc + cj1;
                         if total < best_total {
                             best_total = total;
@@ -1024,12 +854,14 @@ fn run_dp(
 }
 
 /// Reflow a chunk of words using pre-allocated DP buffers (outputs all lines).
+/// Builds each line in a reusable buffer, writes once per line.
+/// The downstream BufWriter handles batching of small writes into large syscalls.
 #[allow(clippy::too_many_arguments)]
 fn reflow_chunk<W: Write>(
     bytes: &[u8],
-    prefix: &str,
-    first_indent: &str,
-    cont_indent: &str,
+    prefix: &[u8],
+    first_indent: &[u8],
+    cont_indent: &[u8],
     config: &FmtConfig,
     output: &mut W,
     word_off: &[u32],
@@ -1043,17 +875,17 @@ fn reflow_chunk<W: Write>(
 
     run_dp(n, prefix, first_indent, cont_indent, config, winfo, dp);
 
+    let line_buf = &mut dp.out_buf;
     let mut i = 0;
     let mut is_first_line = true;
-    let line_buf = &mut dp.line_buf;
     while i < n {
         let j = dp.best[i] as usize;
         line_buf.clear();
-        line_buf.extend_from_slice(prefix.as_bytes());
+        line_buf.extend_from_slice(prefix);
         if is_first_line {
-            line_buf.extend_from_slice(first_indent.as_bytes());
+            line_buf.extend_from_slice(first_indent);
         } else {
-            line_buf.extend_from_slice(cont_indent.as_bytes());
+            line_buf.extend_from_slice(cont_indent);
         }
         let off = word_off[i] as usize;
         let wlen = (winfo[i] & 0xFFFF) as usize;
@@ -1079,41 +911,43 @@ fn reflow_chunk<W: Write>(
 /// Split a single input line using the optimal paragraph algorithm.
 /// Used in split-only mode (-s): short lines are preserved as-is,
 /// long lines are broken optimally (same algorithm as normal reflow).
+/// Works entirely on &[u8] — no UTF-8 conversion.
+#[allow(clippy::too_many_arguments)]
 fn split_line_optimal<W: Write>(
-    line: &str,
+    bytes: &[u8],
+    line_start: usize,
+    line_end: usize,
     config: &FmtConfig,
-    prefix: Option<&str>,
+    prefix: Option<&[u8]>,
     output: &mut W,
+    ctx: &mut FmtCtx,
 ) -> io::Result<()> {
-    let stripped = match prefix {
-        Some(pfx) => line.strip_prefix(pfx).unwrap_or(line),
-        None => line,
-    };
-    let indent = leading_indent(stripped);
-    let pfx = prefix.unwrap_or("");
+    let line_len = line_end - line_start;
+    let pfx = prefix.unwrap_or(b"");
 
     // Short line: output as-is (no splitting needed).
-    if line.len() < config.width {
-        output.write_all(line.as_bytes())?;
+    if line_len < config.width {
+        output.write_all(&bytes[line_start..line_end])?;
         output.write_all(b"\n")?;
         return Ok(());
     }
 
-    let s = match prefix {
-        Some(pfx) => line.strip_prefix(pfx).unwrap_or(line),
-        None => line,
+    // Strip prefix for word collection
+    let content_start = match prefix {
+        Some(pfx_bytes) if bytes[line_start..line_end].starts_with(pfx_bytes) => {
+            line_start + pfx_bytes.len()
+        }
+        _ => line_start,
     };
 
-    let bytes = line.as_bytes();
-    let mut ctx = FmtCtx::new();
+    let indent_len = leading_ws_len(&bytes[content_start..line_end]);
+    let indent = &bytes[content_start..content_start + indent_len];
 
-    // Find the offset of s within line
-    let s_start = s.as_ptr() as usize - line.as_ptr() as usize;
-    let s_end = s_start + s.len();
-    collect_words_line(bytes, s_start, s_end, &mut ctx);
+    ctx.clear_words();
+    collect_words_line(bytes, content_start, line_end, ctx);
 
     if ctx.word_off.is_empty() {
-        output.write_all(line.as_bytes())?;
+        output.write_all(&bytes[line_start..line_end])?;
         output.write_all(b"\n")?;
         return Ok(());
     }
@@ -1122,5 +956,37 @@ fn split_line_optimal<W: Write>(
     let last = ctx.winfo.len() - 1;
     ctx.winfo[last] |= SENT_FLAG | PERIOD_FLAG;
 
-    reflow_paragraph(bytes, pfx, indent, indent, config, output, &mut ctx)
+    // Use shared DP infrastructure instead of duplicated reflow_paragraph
+    let n = ctx.word_off.len();
+    let mut dp = DpBufs::new();
+
+    run_dp(n, pfx, indent, indent, config, &ctx.winfo, &mut dp);
+
+    // Build and write output line by line
+    let line_buf = &mut dp.out_buf;
+    let mut i = 0;
+    while i < n {
+        let j = dp.best[i] as usize;
+        line_buf.clear();
+        line_buf.extend_from_slice(pfx);
+        line_buf.extend_from_slice(indent);
+        let off = ctx.word_off[i] as usize;
+        let wlen = (ctx.winfo[i] & 0xFFFF) as usize;
+        line_buf.extend_from_slice(&bytes[off..off + wlen]);
+        for k in (i + 1)..=j {
+            if ctx.winfo[k - 1] & SENT_FLAG != 0 {
+                line_buf.extend_from_slice(b"  ");
+            } else {
+                line_buf.push(b' ');
+            }
+            let off = ctx.word_off[k] as usize;
+            let wlen = (ctx.winfo[k] & 0xFFFF) as usize;
+            line_buf.extend_from_slice(&bytes[off..off + wlen]);
+        }
+        line_buf.push(b'\n');
+        output.write_all(line_buf)?;
+        i = j + 1;
+    }
+
+    Ok(())
 }

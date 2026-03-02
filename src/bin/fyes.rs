@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const TOOL_NAME: &str = "yes";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Buffer size for bulk writes. 8KB matches GNU's BUFSIZ and is optimal
-/// for pipe throughput — small enough for fast producer-consumer alternation,
-/// large enough to amortize syscall overhead.
-const BUF_SIZE: usize = 8192;
+/// Buffer size for bulk writes. 128KB is 2x the default Linux pipe buffer
+/// (64KB) and large enough to amortize syscall overhead while staying in
+/// L2 cache. Outperforms GNU yes's 8KB BUFSIZ for both pipe and /dev/null.
+const BUF_SIZE: usize = 128 * 1024;
 
 /// True if the inherited SIGPIPE handler (before Rust's runtime overwrites it)
 /// was SIG_IGN. Captured by a pre-main() constructor.
@@ -146,6 +146,13 @@ fn main() {
     let line_bytes = line.as_bytes();
     let line_len = line_bytes.len();
 
+    // Try to increase stdout pipe buffer to 1MB for fewer context switches.
+    // Best-effort — fails silently on non-pipes or restricted environments.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::fcntl(1, libc::F_SETPIPE_SZ, 1024 * 1024);
+    }
+
     // Build a buffer filled with repeated copies of the line.
     // The buffer length is always an exact multiple of line_len so that
     // every write boundary falls between complete lines. This prevents
@@ -170,52 +177,124 @@ fn main() {
 
     // Raw write(2) loop — with SIGPIPE=SIG_DFL, a write to a closed pipe
     // delivers SIGPIPE which kills the process (matching GNU yes behavior).
+    //
+    // Hot loop optimized: the fast path (full write) is a tight
+    // syscall-compare-jump loop. Error handling is in a cold #[inline(never)]
+    // function to keep the hot path's instruction footprint small.
     let ptr = buf.as_ptr();
+    write_loop(ptr, total);
+}
+
+/// Hot write loop — separated from main() so the compiler can optimize it
+/// independently. Uses inline syscall on x86_64 Linux to bypass libc's
+/// PLT indirection and errno-setting overhead.
+#[inline(never)]
+fn write_loop(ptr: *const u8, total: usize) -> ! {
+    let total_isize = total as isize;
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     loop {
-        let mut written = 0usize;
-        while written < total {
-            let ret = unsafe {
-                libc::write(
-                    1,
-                    ptr.add(written) as *const libc::c_void,
-                    (total - written) as _,
-                )
-            };
-            if ret > 0 {
-                written += ret as usize;
-            } else if ret == 0 {
-                // write(2) returned 0 for a nonzero-length buffer — should not
-                // happen, but exit cleanly to avoid spinning.
-                process::exit(1);
-            } else {
-                // Capture errno immediately — must precede any further syscall
-                // or Rust I/O that could overwrite it.
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                // Write the error in a single atomic write(2) call.
-                // Rust's eprintln! uses multiple write() calls internally
-                // (one per format arg piece), which can interleave with
-                // stdout when both point to the same fd (e.g., 2>&1).
-                let msg = coreutils_rs::common::io_error_msg(&err);
-                let error_line = format!("{}: standard output: {}\n", TOOL_NAME, msg);
-                let _ = unsafe {
-                    libc::write(
-                        2,
-                        error_line.as_ptr() as *const libc::c_void,
-                        error_line.len() as _,
-                    )
-                };
-                #[cfg(unix)]
-                unsafe {
-                    libc::_exit(1)
-                };
-                #[cfg(not(unix))]
-                process::exit(1);
+        // Inline syscall: write(1, ptr, total)
+        let ret: isize;
+        unsafe {
+            std::arch::asm!(
+                "syscall",
+                in("rax") 1_u64,       // SYS_write
+                in("rdi") 1_u64,       // fd = stdout
+                in("rsi") ptr,         // buf
+                in("rdx") total,       // count
+                lateout("rax") ret,
+                lateout("rcx") _,      // clobbered by syscall
+                lateout("r11") _,      // clobbered by syscall
+                options(nostack),
+            );
+        }
+        if ret == total_isize {
+            continue; // fast path: full write
+        }
+        if ret >= 0 {
+            // Partial write — drain remainder via libc (rare path)
+            drain_partial(ptr, total, ret as usize);
+            continue;
+        }
+        // Negative return = -errno
+        let errno = (-ret) as i32;
+        if errno == libc::EINTR {
+            continue;
+        }
+        let err = std::io::Error::from_raw_os_error(errno);
+        write_error_and_exit(&err);
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    loop {
+        let ret = unsafe { libc::write(1, ptr as *const libc::c_void, total as _) };
+        if ret == total_isize {
+            continue;
+        }
+        if ret > 0 {
+            drain_partial(ptr, total, ret as usize);
+            continue;
+        }
+        if ret == 0 {
+            process::exit(1);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        write_error_and_exit(&err);
+    }
+}
+
+/// Drain remaining bytes after a partial write. Rare path — kept out of
+/// the hot loop to reduce instruction cache pressure.
+#[cold]
+#[inline(never)]
+fn drain_partial(ptr: *const u8, total: usize, initial: usize) {
+    let mut written = initial;
+    while written < total {
+        let r = unsafe {
+            libc::write(
+                1,
+                ptr.add(written) as *const libc::c_void,
+                (total - written) as _,
+            )
+        };
+        if r > 0 {
+            written += r as usize;
+        } else if r == 0 {
+            process::exit(1);
+        } else {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
             }
+            write_error_and_exit(&e);
         }
     }
+}
+
+/// Write error diagnostic to stderr and exit. Cold path — never inlined
+/// to keep the hot loop's instruction footprint minimal.
+#[cold]
+#[inline(never)]
+fn write_error_and_exit(err: &std::io::Error) -> ! {
+    let msg = coreutils_rs::common::io_error_msg(err);
+    let error_line = format!("{}: standard output: {}\n", TOOL_NAME, msg);
+    let _ = unsafe {
+        libc::write(
+            2,
+            error_line.as_ptr() as *const libc::c_void,
+            error_line.len() as _,
+        )
+    };
+    #[cfg(unix)]
+    unsafe {
+        libc::_exit(1)
+    };
+    #[cfg(not(unix))]
+    process::exit(1);
 }
 
 #[cfg(test)]
