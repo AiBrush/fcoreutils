@@ -157,13 +157,21 @@ pub fn cat_plain_file_linux(path: &Path) -> Result<bool, CatPlainError> {
 
     if stdout_mode == libc::S_IFREG {
         // stdout is a regular file → copy_file_range (zero-copy in-kernel)
-        let mut off_in: libc::off64_t = 0;
-        let mut off_out: libc::off64_t = unsafe { libc::lseek(out_fd, 0, libc::SEEK_CUR) };
+        // Use NULL offsets so the kernel uses and updates the fd positions directly.
+        // This is critical for multi-file cat: explicit offsets don't update the fd
+        // position, causing the second file to overwrite the first.
         let mut remaining = file_size;
         while remaining > 0 {
             let chunk = remaining.min(0x7ffff000);
             let ret = unsafe {
-                libc::copy_file_range(in_fd, &mut off_in, out_fd, &mut off_out, chunk, 0)
+                libc::copy_file_range(
+                    in_fd,
+                    std::ptr::null_mut(),
+                    out_fd,
+                    std::ptr::null_mut(),
+                    chunk,
+                    0,
+                )
             };
             if ret > 0 {
                 remaining -= ret as usize;

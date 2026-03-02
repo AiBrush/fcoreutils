@@ -6,7 +6,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{read_file, read_stdin};
+use coreutils_rs::common::io::{FileData, read_file, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::fold;
 
@@ -147,6 +147,73 @@ fn parse_args() -> Cli {
     cli
 }
 
+/// Raw write(2) to stdout fd 1, bypassing all Rust I/O layers.
+/// Avoids BufWriter/stdout.lock() overhead for large single-write output.
+#[cfg(target_os = "linux")]
+fn write_all_raw(mut data: &[u8]) -> io::Result<()> {
+    while !data.is_empty() {
+        let ret = unsafe { libc::write(1, data.as_ptr() as *const libc::c_void, data.len()) };
+        if ret > 0 {
+            data = &data[ret as usize..];
+        } else if ret == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Wrapper around raw write(2) that implements std::io::Write.
+/// Used for single-file fast path on Linux to bypass BufWriter entirely.
+#[cfg(target_os = "linux")]
+struct RawStdout;
+
+#[cfg(target_os = "linux")]
+impl Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let ret = unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        write_all_raw(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Apply madvise hints on mmapped file data for optimal sequential read.
+/// Called after read_file() to reinforce sequential + hugepage hints.
+#[cfg(target_os = "linux")]
+fn apply_madvise(data: &FileData) {
+    // Only apply to mmap'd data (not owned Vec)
+    if let FileData::Mmap(_mmap) = data {
+        let ptr = data.as_ptr() as *mut libc::c_void;
+        let len = data.len();
+        if len >= 4 * 1024 * 1024 {
+            unsafe {
+                libc::madvise(ptr, len, libc::MADV_SEQUENTIAL);
+            }
+        }
+        if len >= 2 * 1024 * 1024 {
+            unsafe {
+                libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
+            }
+        }
+    }
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -160,21 +227,59 @@ fn main() {
         cli.files
     };
 
+    let mut had_error = false;
+
+    // Fast path: single file on Linux — use raw write(2) to bypass BufWriter.
+    // fold_bytes builds output in a Vec internally and does a single write_all,
+    // so BufWriter's buffering layer is pure overhead for this case.
+    #[cfg(target_os = "linux")]
+    if files.len() == 1 {
+        let filename = &files[0];
+        let data = if filename == "-" {
+            match read_stdin() {
+                Ok(d) => FileData::Owned(d),
+                Err(e) => {
+                    eprintln!("fold: standard input: {}", io_error_msg(&e));
+                    process::exit(1);
+                }
+            }
+        } else {
+            match read_file(Path::new(filename)) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("fold: {}: {}", filename, io_error_msg(&e));
+                    process::exit(1);
+                }
+            }
+        };
+
+        apply_madvise(&data);
+
+        let mut out = RawStdout;
+        if let Err(e) = fold::fold_bytes(&data, cli.width, cli.bytes, cli.spaces, &mut out) {
+            if e.kind() == io::ErrorKind::BrokenPipe {
+                process::exit(0);
+            }
+            eprintln!("fold: write error: {}", io_error_msg(&e));
+            process::exit(1);
+        }
+        return;
+    }
+
+    // Multi-file path or non-Linux: use 1MB BufWriter for batched output.
     #[cfg(unix)]
     let stdout_raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
     #[cfg(unix)]
-    let mut out = BufWriter::with_capacity(256 * 1024, &*stdout_raw);
+    let mut out = BufWriter::with_capacity(1024 * 1024, &*stdout_raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
-
-    let mut had_error = false;
+    let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
 
     for filename in &files {
         let data = if filename == "-" {
             match read_stdin() {
-                Ok(d) => coreutils_rs::common::io::FileData::Owned(d),
+                Ok(d) => FileData::Owned(d),
                 Err(e) => {
                     eprintln!("fold: standard input: {}", io_error_msg(&e));
                     had_error = true;
@@ -191,6 +296,9 @@ fn main() {
                 }
             }
         };
+
+        #[cfg(target_os = "linux")]
+        apply_madvise(&data);
 
         if let Err(e) = fold::fold_bytes(&data, cli.width, cli.bytes, cli.spaces, &mut out) {
             if e.kind() == io::ErrorKind::BrokenPipe {

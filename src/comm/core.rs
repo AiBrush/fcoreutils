@@ -262,6 +262,25 @@ pub fn comm(
     }
 
     // Drain remaining from file 1
+    // Fast path: if showing col1 and order check is done (or disabled), bulk copy
+    if pos1 < len1 && show1 && (!check_order || warned1) && prefix1.is_empty() {
+        // Bulk copy remainder — no per-line processing needed
+        let remaining = &data1[pos1..len1];
+        let line_count = memchr::memchr_iter(delim, remaining).count();
+        let has_trailing = !remaining.is_empty() && remaining.last() != Some(&delim);
+        count1 += line_count + if has_trailing { 1 } else { 0 };
+
+        // Flush current buffer, then write remainder directly
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
+        out.write_all(remaining)?;
+        if has_trailing {
+            out.write_all(&[delim])?;
+        }
+        pos1 = len1;
+    }
     while pos1 < len1 {
         let (line1, next1) = next_line(&data1[..len1], pos1, delim);
         if check_order && !warned1 && has_prev1 && compare_lines(line1, prev1, ci) == Ordering::Less
@@ -296,6 +315,29 @@ pub fn comm(
     }
 
     // Drain remaining from file 2
+    // Fast path: bulk copy when order check is done and we have lines to drain
+    if pos2 < len2
+        && show2
+        && (!check_order || warned2)
+        && (config.suppress_col1 || prefix2_owned.is_empty())
+    {
+        let remaining = &data2[pos2..len2];
+        // Only bulk if no prefix needed (single column output) — otherwise per-line
+        if prefix2_owned.is_empty() {
+            let line_count = memchr::memchr_iter(delim, remaining).count();
+            let has_trailing = !remaining.is_empty() && remaining.last() != Some(&delim);
+            count2 += line_count + if has_trailing { 1 } else { 0 };
+            if !buf.is_empty() {
+                out.write_all(&buf)?;
+                buf.clear();
+            }
+            out.write_all(remaining)?;
+            if has_trailing {
+                out.write_all(&[delim])?;
+            }
+            pos2 = len2;
+        }
+    }
     while pos2 < len2 {
         let (line2, next2) = next_line(&data2[..len2], pos2, delim);
         if check_order && !warned2 && has_prev2 && compare_lines(line2, prev2, ci) == Ordering::Less

@@ -152,11 +152,11 @@ fn main() {
     #[cfg(unix)]
     let stdout_raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
     #[cfg(unix)]
-    let mut out = BufWriter::with_capacity(256 * 1024, &*stdout_raw);
+    let mut out = BufWriter::with_capacity(1024 * 1024, &*stdout_raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
 
     let mut had_error = false;
 

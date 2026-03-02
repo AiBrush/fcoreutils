@@ -10,13 +10,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use digest::Digest;
 use md5::Md5;
 
-// ── OpenSSL dynamic loading for SHA-384/512 (Linux only) ──────────────
-// GNU coreutils links against OpenSSL which has AVX-512 optimized SHA-512 assembly.
+// ── OpenSSL dynamic loading for all hash algorithms (Linux only) ──────
+// GNU coreutils links against OpenSSL which has hardware-accelerated hash
+// instructions (SHA-NI for SHA-1/SHA-256, AVX-512 for SHA-512 on x86_64).
 // We dynamically load libcrypto at runtime via dlopen/dlsym to get the same
 // performance without requiring a compile-time dependency on libssl-dev.
-// If libcrypto is unavailable, we fall back to ring (BoringSSL AVX2 assembly).
+// If libcrypto is unavailable, we fall back to ring/sha2/md5 crates.
 #[cfg(target_os = "linux")]
-mod openssl_sha512 {
+mod openssl_evp {
     use std::ffi::CStr;
     use std::io;
     use std::ptr;
@@ -28,8 +29,7 @@ mod openssl_sha512 {
     type Engine = *const libc::c_void;
 
     // Function pointer types matching OpenSSL's EVP API
-    type FnEvpSha384 = unsafe extern "C" fn() -> EvpMd;
-    type FnEvpSha512 = unsafe extern "C" fn() -> EvpMd;
+    type FnEvpMdGetter = unsafe extern "C" fn() -> EvpMd;
     type FnEvpMdCtxNew = unsafe extern "C" fn() -> EvpMdCtx;
     type FnEvpDigestInitEx = unsafe extern "C" fn(EvpMdCtx, EvpMd, Engine) -> libc::c_int;
     type FnEvpDigestUpdate =
@@ -39,8 +39,12 @@ mod openssl_sha512 {
     type FnEvpMdCtxFree = unsafe extern "C" fn(EvpMdCtx);
 
     struct OpenSslFns {
-        evp_sha384: FnEvpSha384,
-        evp_sha512: FnEvpSha512,
+        evp_md5: FnEvpMdGetter,
+        evp_sha1: FnEvpMdGetter,
+        evp_sha224: FnEvpMdGetter,
+        evp_sha256: FnEvpMdGetter,
+        evp_sha384: FnEvpMdGetter,
+        evp_sha512: FnEvpMdGetter,
         evp_md_ctx_new: FnEvpMdCtxNew,
         evp_digest_init_ex: FnEvpDigestInitEx,
         evp_digest_update: FnEvpDigestUpdate,
@@ -99,9 +103,15 @@ mod openssl_sha512 {
         let guard = DlopenHandle(handle);
 
         unsafe {
-            let evp_sha384: FnEvpSha384 =
+            let evp_md5: FnEvpMdGetter = std::mem::transmute(dlsym_checked(handle, c"EVP_md5")?);
+            let evp_sha1: FnEvpMdGetter = std::mem::transmute(dlsym_checked(handle, c"EVP_sha1")?);
+            let evp_sha224: FnEvpMdGetter =
+                std::mem::transmute(dlsym_checked(handle, c"EVP_sha224")?);
+            let evp_sha256: FnEvpMdGetter =
+                std::mem::transmute(dlsym_checked(handle, c"EVP_sha256")?);
+            let evp_sha384: FnEvpMdGetter =
                 std::mem::transmute(dlsym_checked(handle, c"EVP_sha384")?);
-            let evp_sha512: FnEvpSha512 =
+            let evp_sha512: FnEvpMdGetter =
                 std::mem::transmute(dlsym_checked(handle, c"EVP_sha512")?);
             let evp_md_ctx_new: FnEvpMdCtxNew =
                 std::mem::transmute(dlsym_checked(handle, c"EVP_MD_CTX_new")?);
@@ -118,6 +128,10 @@ mod openssl_sha512 {
             std::mem::forget(guard);
 
             Some(OpenSslFns {
+                evp_md5,
+                evp_sha1,
+                evp_sha224,
+                evp_sha256,
                 evp_sha384,
                 evp_sha512,
                 evp_md_ctx_new,
@@ -134,7 +148,7 @@ mod openssl_sha512 {
         FNS.get_or_init(try_load).as_ref()
     }
 
-    /// Returns true if OpenSSL's libcrypto is available for SHA-384/512.
+    /// Returns true if OpenSSL's libcrypto is available for hardware-accelerated hashing.
     pub fn is_available() -> bool {
         get_fns().is_some()
     }
@@ -155,33 +169,51 @@ mod openssl_sha512 {
         }
     }
 
-    /// Which SHA-2 variant to use.
+    /// Which EVP hash algorithm to use.
     #[derive(Clone, Copy)]
-    pub enum Sha2Variant {
+    pub enum EvpAlgorithm {
+        Md5,
+        Sha1,
+        Sha224,
+        Sha256,
         Sha384,
         Sha512,
     }
 
-    impl Sha2Variant {
+    impl EvpAlgorithm {
         fn digest_len(self) -> usize {
             match self {
-                Sha2Variant::Sha384 => 48,
-                Sha2Variant::Sha512 => 64,
+                EvpAlgorithm::Md5 => 16,
+                EvpAlgorithm::Sha1 => 20,
+                EvpAlgorithm::Sha224 => 28,
+                EvpAlgorithm::Sha256 => 32,
+                EvpAlgorithm::Sha384 => 48,
+                EvpAlgorithm::Sha512 => 64,
+            }
+        }
+
+        fn get_md(self, fns: &OpenSslFns) -> EvpMd {
+            unsafe {
+                match self {
+                    EvpAlgorithm::Md5 => (fns.evp_md5)(),
+                    EvpAlgorithm::Sha1 => (fns.evp_sha1)(),
+                    EvpAlgorithm::Sha224 => (fns.evp_sha224)(),
+                    EvpAlgorithm::Sha256 => (fns.evp_sha256)(),
+                    EvpAlgorithm::Sha384 => (fns.evp_sha384)(),
+                    EvpAlgorithm::Sha512 => (fns.evp_sha512)(),
+                }
             }
         }
     }
 
     /// Single-shot hash of a byte slice using OpenSSL EVP.
-    pub fn hash_bytes(variant: Sha2Variant, data: &[u8]) -> io::Result<Vec<u8>> {
+    pub fn hash_bytes(algo: EvpAlgorithm, data: &[u8]) -> io::Result<Vec<u8>> {
         let fns = get_fns().ok_or_else(|| io::Error::other("OpenSSL not available"))?;
 
         unsafe {
-            let md = match variant {
-                Sha2Variant::Sha384 => (fns.evp_sha384)(),
-                Sha2Variant::Sha512 => (fns.evp_sha512)(),
-            };
+            let md = algo.get_md(fns);
             if md.is_null() {
-                return Err(io::Error::other("EVP_sha* returned null"));
+                return Err(io::Error::other("EVP_* returned null"));
             }
 
             let ctx = (fns.evp_md_ctx_new)();
@@ -203,7 +235,7 @@ mod openssl_sha512 {
                 return Err(io::Error::other("EVP_DigestUpdate failed"));
             }
 
-            let mut out = vec![0u8; variant.digest_len()];
+            let mut out = vec![0u8; algo.digest_len()];
             let mut out_len: libc::c_uint = 0;
             if (fns.evp_digest_final_ex)(ctx, out.as_mut_ptr(), &mut out_len) != 1 {
                 return Err(io::Error::other("EVP_DigestFinal_ex failed"));
@@ -214,19 +246,13 @@ mod openssl_sha512 {
     }
 
     /// Streaming hash: create context, feed chunks, finalize.
-    pub fn hash_reader(
-        variant: Sha2Variant,
-        mut reader: impl std::io::Read,
-    ) -> io::Result<Vec<u8>> {
+    pub fn hash_reader(algo: EvpAlgorithm, mut reader: impl std::io::Read) -> io::Result<Vec<u8>> {
         let fns = get_fns().ok_or_else(|| io::Error::other("OpenSSL not available"))?;
 
         unsafe {
-            let md = match variant {
-                Sha2Variant::Sha384 => (fns.evp_sha384)(),
-                Sha2Variant::Sha512 => (fns.evp_sha512)(),
-            };
+            let md = algo.get_md(fns);
             if md.is_null() {
-                return Err(io::Error::other("EVP_sha* returned null"));
+                return Err(io::Error::other("EVP_* returned null"));
             }
 
             let ctx = (fns.evp_md_ctx_new)();
@@ -259,7 +285,7 @@ mod openssl_sha512 {
                 Ok(())
             })?;
 
-            let mut out = vec![0u8; variant.digest_len()];
+            let mut out = vec![0u8; algo.digest_len()];
             let mut out_len: libc::c_uint = 0;
             if (fns.evp_digest_final_ex)(ctx, out.as_mut_ptr(), &mut out_len) != 1 {
                 return Err(io::Error::other("EVP_DigestFinal_ex failed"));
@@ -271,19 +297,16 @@ mod openssl_sha512 {
 
     /// Streaming hash with a prefix already read into memory.
     pub fn hash_reader_with_prefix(
-        variant: Sha2Variant,
+        algo: EvpAlgorithm,
         prefix: &[u8],
         mut reader: impl std::io::Read,
     ) -> io::Result<Vec<u8>> {
         let fns = get_fns().ok_or_else(|| io::Error::other("OpenSSL not available"))?;
 
         unsafe {
-            let md = match variant {
-                Sha2Variant::Sha384 => (fns.evp_sha384)(),
-                Sha2Variant::Sha512 => (fns.evp_sha512)(),
-            };
+            let md = algo.get_md(fns);
             if md.is_null() {
-                return Err(io::Error::other("EVP_sha* returned null"));
+                return Err(io::Error::other("EVP_* returned null"));
             }
 
             let ctx = (fns.evp_md_ctx_new)();
@@ -328,7 +351,7 @@ mod openssl_sha512 {
                 Ok(())
             })?;
 
-            let mut out = vec![0u8; variant.digest_len()];
+            let mut out = vec![0u8; algo.digest_len()];
             let mut out_len: libc::c_uint = 0;
             if (fns.evp_digest_final_ex)(ctx, out.as_mut_ptr(), &mut out_len) != 1 {
                 return Err(io::Error::other("EVP_DigestFinal_ex failed"));
@@ -341,19 +364,16 @@ mod openssl_sha512 {
     /// Pipelined hash for the double-buffered reader thread path.
     /// Returns raw digest bytes for the caller to hex-encode.
     pub fn hash_pipelined(
-        variant: Sha2Variant,
+        algo: EvpAlgorithm,
         rx: &std::sync::mpsc::Receiver<(Vec<u8>, usize)>,
         buf_tx: &std::sync::mpsc::SyncSender<Vec<u8>>,
     ) -> io::Result<Vec<u8>> {
         let fns = get_fns().ok_or_else(|| io::Error::other("OpenSSL not available"))?;
 
         unsafe {
-            let md = match variant {
-                Sha2Variant::Sha384 => (fns.evp_sha384)(),
-                Sha2Variant::Sha512 => (fns.evp_sha512)(),
-            };
+            let md = algo.get_md(fns);
             if md.is_null() {
-                return Err(io::Error::other("EVP_sha* returned null"));
+                return Err(io::Error::other("EVP_* returned null"));
             }
 
             let ctx = (fns.evp_md_ctx_new)();
@@ -377,7 +397,7 @@ mod openssl_sha512 {
                 let _ = buf_tx.send(buf);
             }
 
-            let mut out = vec![0u8; variant.digest_len()];
+            let mut out = vec![0u8; algo.digest_len()];
             let mut out_len: libc::c_uint = 0;
             if (fns.evp_digest_final_ex)(ctx, out.as_mut_ptr(), &mut out_len) != 1 {
                 return Err(io::Error::other("EVP_DigestFinal_ex failed"));
@@ -494,11 +514,20 @@ fn ring_hash_reader(
 }
 
 // ── SHA-256 ───────────────────────────────────────────────────────────
-// Linux/Apple: sha2 crate (cpufeatures runtime SHA-NI dispatch, no startup overhead)
-// Windows/FreeBSD: ring (BoringSSL assembly)
+// Linux: OpenSSL libcrypto (SHA-NI accelerated) via dlopen, fallback to sha2 crate.
+// Apple: sha2 crate. Other: ring (BoringSSL assembly).
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 fn sha256_bytes(data: &[u8]) -> io::Result<String> {
+    Ok(hash_digest::<sha2::Sha256>(data))
+}
+
+#[cfg(target_os = "linux")]
+fn sha256_bytes(data: &[u8]) -> io::Result<String> {
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha256, data)?;
+        return Ok(hex_encode(&digest));
+    }
     Ok(hash_digest::<sha2::Sha256>(data))
 }
 
@@ -507,8 +536,17 @@ fn sha256_bytes(data: &[u8]) -> io::Result<String> {
     ring_hash_bytes(&ring::digest::SHA256, data)
 }
 
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 fn sha256_reader(reader: impl Read) -> io::Result<String> {
+    hash_reader_impl::<sha2::Sha256>(reader)
+}
+
+#[cfg(target_os = "linux")]
+fn sha256_reader(reader: impl Read) -> io::Result<String> {
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_reader(openssl_evp::EvpAlgorithm::Sha256, reader)?;
+        return Ok(hex_encode(&digest));
+    }
     hash_reader_impl::<sha2::Sha256>(reader)
 }
 
@@ -518,14 +556,24 @@ fn sha256_reader(reader: impl Read) -> io::Result<String> {
 }
 
 // ── SHA-1 ─────────────────────────────────────────────────────────────
-// ring's BoringSSL assembly for SHA-1 on non-Apple targets.
+// Linux: OpenSSL libcrypto (SHA-NI accelerated) via dlopen, fallback to ring.
+// Apple: sha1 crate. Other: ring (BoringSSL assembly).
 
 #[cfg(target_vendor = "apple")]
 fn sha1_bytes(data: &[u8]) -> io::Result<String> {
     Ok(hash_digest::<sha1::Sha1>(data))
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(target_os = "linux")]
+fn sha1_bytes(data: &[u8]) -> io::Result<String> {
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha1, data)?;
+        return Ok(hex_encode(&digest));
+    }
+    ring_hash_bytes(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data)
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
 fn sha1_bytes(data: &[u8]) -> io::Result<String> {
     ring_hash_bytes(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data)
 }
@@ -535,18 +583,48 @@ fn sha1_reader(reader: impl Read) -> io::Result<String> {
     hash_reader_impl::<sha1::Sha1>(reader)
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(target_os = "linux")]
+fn sha1_reader(reader: impl Read) -> io::Result<String> {
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_reader(openssl_evp::EvpAlgorithm::Sha1, reader)?;
+        return Ok(hex_encode(&digest));
+    }
+    ring_hash_reader(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, reader)
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
 fn sha1_reader(reader: impl Read) -> io::Result<String> {
     ring_hash_reader(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, reader)
 }
 
 // ── SHA-224 ───────────────────────────────────────────────────────────
-// ring does not support SHA-224. Use sha2 crate on all platforms.
+// Linux: OpenSSL libcrypto (SHA-NI accelerated) via dlopen, fallback to sha2 crate.
+// Other: sha2 crate (ring does not support SHA-224).
 
+#[cfg(target_os = "linux")]
+fn sha224_bytes(data: &[u8]) -> io::Result<String> {
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha224, data)?;
+        return Ok(hex_encode(&digest));
+    }
+    Ok(hash_digest::<sha2::Sha224>(data))
+}
+
+#[cfg(not(target_os = "linux"))]
 fn sha224_bytes(data: &[u8]) -> io::Result<String> {
     Ok(hash_digest::<sha2::Sha224>(data))
 }
 
+#[cfg(target_os = "linux")]
+fn sha224_reader(reader: impl Read) -> io::Result<String> {
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_reader(openssl_evp::EvpAlgorithm::Sha224, reader)?;
+        return Ok(hex_encode(&digest));
+    }
+    hash_reader_impl::<sha2::Sha224>(reader)
+}
+
+#[cfg(not(target_os = "linux"))]
 fn sha224_reader(reader: impl Read) -> io::Result<String> {
     hash_reader_impl::<sha2::Sha224>(reader)
 }
@@ -562,8 +640,8 @@ fn sha384_bytes(data: &[u8]) -> io::Result<String> {
 
 #[cfg(target_os = "linux")]
 fn sha384_bytes(data: &[u8]) -> io::Result<String> {
-    if openssl_sha512::is_available() {
-        let digest = openssl_sha512::hash_bytes(openssl_sha512::Sha2Variant::Sha384, data)?;
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha384, data)?;
         return Ok(hex_encode(&digest));
     }
     ring_hash_bytes(&ring::digest::SHA384, data)
@@ -581,8 +659,8 @@ fn sha384_reader(reader: impl Read) -> io::Result<String> {
 
 #[cfg(target_os = "linux")]
 fn sha384_reader(reader: impl Read) -> io::Result<String> {
-    if openssl_sha512::is_available() {
-        let digest = openssl_sha512::hash_reader(openssl_sha512::Sha2Variant::Sha384, reader)?;
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_reader(openssl_evp::EvpAlgorithm::Sha384, reader)?;
         return Ok(hex_encode(&digest));
     }
     ring_hash_reader(&ring::digest::SHA384, reader)
@@ -604,8 +682,8 @@ fn sha512_bytes(data: &[u8]) -> io::Result<String> {
 
 #[cfg(target_os = "linux")]
 fn sha512_bytes(data: &[u8]) -> io::Result<String> {
-    if openssl_sha512::is_available() {
-        let digest = openssl_sha512::hash_bytes(openssl_sha512::Sha2Variant::Sha512, data)?;
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha512, data)?;
         return Ok(hex_encode(&digest));
     }
     ring_hash_bytes(&ring::digest::SHA512, data)
@@ -623,8 +701,8 @@ fn sha512_reader(reader: impl Read) -> io::Result<String> {
 
 #[cfg(target_os = "linux")]
 fn sha512_reader(reader: impl Read) -> io::Result<String> {
-    if openssl_sha512::is_available() {
-        let digest = openssl_sha512::hash_reader(openssl_sha512::Sha2Variant::Sha512, reader)?;
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_reader(openssl_evp::EvpAlgorithm::Sha512, reader)?;
         return Ok(hex_encode(&digest));
     }
     ring_hash_reader(&ring::digest::SHA512, reader)
@@ -680,8 +758,8 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io
             Ok(64)
         }
         HashAlgorithm::Sha384 => {
-            if openssl_sha512::is_available() {
-                let digest = openssl_sha512::hash_bytes(openssl_sha512::Sha2Variant::Sha384, data)?;
+            if openssl_evp::is_available() {
+                let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha384, data)?;
                 hex_encode_to_slice(&digest, out);
                 return Ok(96);
             }
@@ -690,8 +768,8 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io
             Ok(96)
         }
         HashAlgorithm::Sha512 => {
-            if openssl_sha512::is_available() {
-                let digest = openssl_sha512::hash_bytes(openssl_sha512::Sha2Variant::Sha512, data)?;
+            if openssl_evp::is_available() {
+                let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha512, data)?;
                 hex_encode_to_slice(&digest, out);
                 return Ok(128);
             }
@@ -813,12 +891,33 @@ fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::
 }
 
 // ── MD5 ─────────────────────────────────────────────────────────────
-// All platforms: md-5 crate (cpufeatures runtime dispatch on supported CPUs)
+// Linux: OpenSSL libcrypto (hardware-accelerated) via dlopen, fallback to md-5 crate.
+// Other: md-5 crate (cpufeatures runtime dispatch on supported CPUs).
 
+#[cfg(target_os = "linux")]
+fn md5_bytes(data: &[u8]) -> io::Result<String> {
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Md5, data)?;
+        return Ok(hex_encode(&digest));
+    }
+    Ok(hash_digest::<Md5>(data))
+}
+
+#[cfg(not(target_os = "linux"))]
 fn md5_bytes(data: &[u8]) -> io::Result<String> {
     Ok(hash_digest::<Md5>(data))
 }
 
+#[cfg(target_os = "linux")]
+fn md5_reader(reader: impl Read) -> io::Result<String> {
+    if openssl_evp::is_available() {
+        let digest = openssl_evp::hash_reader(openssl_evp::EvpAlgorithm::Md5, reader)?;
+        return Ok(hex_encode(&digest));
+    }
+    hash_reader_impl::<Md5>(reader)
+}
+
+#[cfg(not(target_os = "linux"))]
 fn md5_reader(reader: impl Read) -> io::Result<String> {
     hash_reader_impl::<Md5>(reader)
 }
@@ -1013,36 +1112,44 @@ fn hash_file_pipelined_read(
         }};
     }
 
-    let hash_result: io::Result<String> = match algo {
-        HashAlgorithm::Blake2b => {
-            let mut state = blake2b_simd::Params::new().to_state();
-            while let Ok((buf, n)) = rx.recv() {
-                state.update(&buf[..n]);
-                let _ = buf_tx.send(buf);
+    // Map HashAlgorithm to OpenSSL EvpAlgorithm for pipelined path
+    let evp_algo = match algo {
+        HashAlgorithm::Md5 => Some(openssl_evp::EvpAlgorithm::Md5),
+        HashAlgorithm::Sha1 => Some(openssl_evp::EvpAlgorithm::Sha1),
+        HashAlgorithm::Sha224 => Some(openssl_evp::EvpAlgorithm::Sha224),
+        HashAlgorithm::Sha256 => Some(openssl_evp::EvpAlgorithm::Sha256),
+        HashAlgorithm::Sha384 => Some(openssl_evp::EvpAlgorithm::Sha384),
+        HashAlgorithm::Sha512 => Some(openssl_evp::EvpAlgorithm::Sha512),
+        HashAlgorithm::Blake2b => None,
+    };
+
+    let hash_result: io::Result<String> = if let Some(evp) =
+        evp_algo.filter(|_| openssl_evp::is_available())
+    {
+        let digest = openssl_evp::hash_pipelined(evp, &rx, &buf_tx)?;
+        Ok(hex_encode(&digest))
+    } else {
+        match algo {
+            HashAlgorithm::Blake2b => {
+                let mut state = blake2b_simd::Params::new().to_state();
+                while let Ok((buf, n)) = rx.recv() {
+                    state.update(&buf[..n]);
+                    let _ = buf_tx.send(buf);
+                }
+                Ok(hex_encode(state.finalize().as_bytes()))
             }
-            Ok(hex_encode(state.finalize().as_bytes()))
-        }
-        HashAlgorithm::Md5 => hash_pipelined_digest!(Md5::new()),
-        HashAlgorithm::Sha224 => hash_pipelined_digest!(sha2::Sha224::new()),
-        HashAlgorithm::Sha256 => hash_pipelined_digest!(sha2::Sha256::new()),
-        // SHA-1/384/512: use ring's BoringSSL assembly for better throughput
-        HashAlgorithm::Sha1 => {
-            let mut ctx = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
-            while let Ok((buf, n)) = rx.recv() {
-                ctx.update(&buf[..n]);
-                let _ = buf_tx.send(buf);
+            HashAlgorithm::Md5 => hash_pipelined_digest!(Md5::new()),
+            HashAlgorithm::Sha224 => hash_pipelined_digest!(sha2::Sha224::new()),
+            HashAlgorithm::Sha256 => hash_pipelined_digest!(sha2::Sha256::new()),
+            HashAlgorithm::Sha1 => {
+                let mut ctx = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
+                while let Ok((buf, n)) = rx.recv() {
+                    ctx.update(&buf[..n]);
+                    let _ = buf_tx.send(buf);
+                }
+                Ok(hex_encode(ctx.finish().as_ref()))
             }
-            Ok(hex_encode(ctx.finish().as_ref()))
-        }
-        HashAlgorithm::Sha384 => {
-            if openssl_sha512::is_available() {
-                let digest = openssl_sha512::hash_pipelined(
-                    openssl_sha512::Sha2Variant::Sha384,
-                    &rx,
-                    &buf_tx,
-                )?;
-                Ok(hex_encode(&digest))
-            } else {
+            HashAlgorithm::Sha384 => {
                 let mut ctx = ring::digest::Context::new(&ring::digest::SHA384);
                 while let Ok((buf, n)) = rx.recv() {
                     ctx.update(&buf[..n]);
@@ -1050,16 +1157,7 @@ fn hash_file_pipelined_read(
                 }
                 Ok(hex_encode(ctx.finish().as_ref()))
             }
-        }
-        HashAlgorithm::Sha512 => {
-            if openssl_sha512::is_available() {
-                let digest = openssl_sha512::hash_pipelined(
-                    openssl_sha512::Sha2Variant::Sha512,
-                    &rx,
-                    &buf_tx,
-                )?;
-                Ok(hex_encode(&digest))
-            } else {
+            HashAlgorithm::Sha512 => {
                 let mut ctx = ring::digest::Context::new(&ring::digest::SHA512);
                 while let Ok((buf, n)) = rx.recv() {
                     ctx.update(&buf[..n]);
@@ -2243,48 +2341,39 @@ fn hash_stream_with_prefix(
         });
     }
 
+    // On Linux, try OpenSSL for all supported algorithms
+    #[cfg(target_os = "linux")]
+    {
+        let evp_algo = match algo {
+            HashAlgorithm::Md5 => Some(openssl_evp::EvpAlgorithm::Md5),
+            HashAlgorithm::Sha1 => Some(openssl_evp::EvpAlgorithm::Sha1),
+            HashAlgorithm::Sha224 => Some(openssl_evp::EvpAlgorithm::Sha224),
+            HashAlgorithm::Sha256 => Some(openssl_evp::EvpAlgorithm::Sha256),
+            HashAlgorithm::Sha384 => Some(openssl_evp::EvpAlgorithm::Sha384),
+            HashAlgorithm::Sha512 => Some(openssl_evp::EvpAlgorithm::Sha512),
+            HashAlgorithm::Blake2b => None,
+        };
+        if let Some(evp) = evp_algo.filter(|_| openssl_evp::is_available()) {
+            let digest = openssl_evp::hash_reader_with_prefix(evp, prefix, file)?;
+            return Ok(hex_encode(&digest));
+        }
+    }
+
     match algo {
         HashAlgorithm::Sha224 => hash_stream_with_prefix_digest::<sha2::Sha224>(prefix, file),
         HashAlgorithm::Sha256 => hash_stream_with_prefix_digest::<sha2::Sha256>(prefix, file),
         HashAlgorithm::Md5 => hash_stream_with_prefix_digest::<md5::Md5>(prefix, file),
-        // SHA-1/384/512: use ring's BoringSSL assembly on non-Apple, sha2 crate on Apple
         #[cfg(not(target_vendor = "apple"))]
         HashAlgorithm::Sha1 => {
             hash_stream_with_prefix_ring(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, prefix, file)
         }
         #[cfg(target_vendor = "apple")]
         HashAlgorithm::Sha1 => hash_stream_with_prefix_digest::<sha1::Sha1>(prefix, file),
-        #[cfg(target_os = "linux")]
-        HashAlgorithm::Sha384 => {
-            if openssl_sha512::is_available() {
-                let digest = openssl_sha512::hash_reader_with_prefix(
-                    openssl_sha512::Sha2Variant::Sha384,
-                    prefix,
-                    file,
-                )?;
-                Ok(hex_encode(&digest))
-            } else {
-                hash_stream_with_prefix_ring(&ring::digest::SHA384, prefix, file)
-            }
-        }
-        #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+        #[cfg(not(target_vendor = "apple"))]
         HashAlgorithm::Sha384 => hash_stream_with_prefix_ring(&ring::digest::SHA384, prefix, file),
         #[cfg(target_vendor = "apple")]
         HashAlgorithm::Sha384 => hash_stream_with_prefix_digest::<sha2::Sha384>(prefix, file),
-        #[cfg(target_os = "linux")]
-        HashAlgorithm::Sha512 => {
-            if openssl_sha512::is_available() {
-                let digest = openssl_sha512::hash_reader_with_prefix(
-                    openssl_sha512::Sha2Variant::Sha512,
-                    prefix,
-                    file,
-                )?;
-                Ok(hex_encode(&digest))
-            } else {
-                hash_stream_with_prefix_ring(&ring::digest::SHA512, prefix, file)
-            }
-        }
-        #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+        #[cfg(not(target_vendor = "apple"))]
         HashAlgorithm::Sha512 => hash_stream_with_prefix_ring(&ring::digest::SHA512, prefix, file),
         #[cfg(target_vendor = "apple")]
         HashAlgorithm::Sha512 => hash_stream_with_prefix_digest::<sha2::Sha512>(prefix, file),
