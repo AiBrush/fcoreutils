@@ -250,7 +250,9 @@ fn head_lines_streaming_file(
     let file = std::fs::File::open(path)?;
 
     let mut file = file;
-    let mut buf = [0u8; 65536];
+    // Use 8KB buffer: default 10 lines almost always fits in one read.
+    // Avoids reading 65KB just to extract the first few lines.
+    let mut buf = [0u8; 8192];
     let mut count = 0u64;
 
     loop {

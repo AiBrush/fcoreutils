@@ -75,15 +75,13 @@ fn parse_args() -> Cli {
                 }
             }
         } else if bytes.len() > 1 && bytes[0] == b'-' {
-            // Short options
-            let s = arg.to_string_lossy();
-            let chars: Vec<char> = s[1..].chars().collect();
-            let mut i = 0;
-            while i < chars.len() {
-                match chars[i] {
-                    'n' => {
-                        let val = if i + 1 < chars.len() {
-                            s[1 + i + 1..].to_string()
+            // Short options — parse directly from bytes to avoid Vec<char> allocation
+            let mut i = 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'n' => {
+                        let val = if i + 1 < bytes.len() {
+                            String::from_utf8_lossy(&bytes[i + 1..]).into_owned()
                         } else {
                             args.next()
                                 .unwrap_or_else(|| {
@@ -94,12 +92,11 @@ fn parse_args() -> Cli {
                                 .into_owned()
                         };
                         parse_lines_value(&val, &mut cli.config);
-                        // mode set
-                        break; // consumed rest of arg
+                        break;
                     }
-                    'c' => {
-                        let val = if i + 1 < chars.len() {
-                            s[1 + i + 1..].to_string()
+                    b'c' => {
+                        let val = if i + 1 < bytes.len() {
+                            String::from_utf8_lossy(&bytes[i + 1..]).into_owned()
                         } else {
                             args.next()
                                 .unwrap_or_else(|| {
@@ -110,21 +107,19 @@ fn parse_args() -> Cli {
                                 .into_owned()
                         };
                         parse_bytes_value(&val, &mut cli.config);
-                        // mode set
                         break;
                     }
-                    'q' => cli.quiet = true,
-                    'v' => cli.verbose = true,
-                    'z' => cli.config.zero_terminated = true,
-                    '0'..='9' => {
+                    b'q' => cli.quiet = true,
+                    b'v' => cli.verbose = true,
+                    b'z' => cli.config.zero_terminated = true,
+                    b'0'..=b'9' => {
                         // Legacy: head -N means head -n N
-                        let num_str: String = chars[i..].iter().collect();
+                        let num_str = String::from_utf8_lossy(&bytes[i..]);
                         parse_lines_value(&num_str, &mut cli.config);
-                        // mode set
                         break;
                     }
                     _ => {
-                        eprintln!("head: invalid option -- '{}'", chars[i]);
+                        eprintln!("head: invalid option -- '{}'", bytes[i] as char);
                         eprintln!("Try 'head --help' for more information.");
                         process::exit(1);
                     }
@@ -204,14 +199,21 @@ fn print_help() {
     );
 }
 
-/// Enlarge pipe buffers on Linux for higher throughput.
+/// Enlarge stdout pipe buffer on Linux for higher throughput.
+/// Only enlarges stdout (fd 1) when it is actually a pipe.
 #[cfg(target_os = "linux")]
-fn enlarge_pipes() {
-    for &fd in &[0i32, 1] {
-        for &size in &[8 * 1024 * 1024i32, 1024 * 1024, 256 * 1024] {
-            if unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, size) } > 0 {
-                break;
-            }
+fn enlarge_stdout_pipe() {
+    // Check if stdout is a pipe before attempting fcntl
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(1, &mut stat) } != 0 {
+        return;
+    }
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFIFO {
+        return;
+    }
+    for &size in &[1024 * 1024i32, 256 * 1024] {
+        if unsafe { libc::fcntl(1, libc::F_SETPIPE_SZ, size) } > 0 {
+            break;
         }
     }
 }
@@ -220,7 +222,7 @@ fn main() {
     reset_sigpipe();
 
     #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    enlarge_stdout_pipe();
 
     let cli = parse_args();
 
@@ -240,7 +242,7 @@ fn main() {
     };
 
     let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(32 * 1024, stdout.lock());
     let mut had_error = false;
     let mut first = true;
 

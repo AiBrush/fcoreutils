@@ -603,7 +603,15 @@ fn try_raw_dd(config: &DdConfig) -> Option<io::Result<DdStats>> {
 
     let mut stats = DdStats::default();
     let bs = config.ibs;
-    let mut ibuf = vec![0u8; bs];
+    #[allow(clippy::uninit_vec)]
+    // SAFETY: The buffer is filled by libc::read before being passed to libc::write.
+    // No uninitialized data is ever consumed by user code or written to output —
+    // only `total_read` bytes are written, which are the bytes that libc::read populated.
+    let mut ibuf = unsafe {
+        let mut v = Vec::with_capacity(bs);
+        v.set_len(bs);
+        v
+    };
     let count_limit = config.count;
 
     loop {
