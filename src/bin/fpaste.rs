@@ -187,11 +187,10 @@ fn main() {
     // Build reference slices
     let data_refs: Vec<&[u8]> = file_data.iter().map(|d| &**d).collect();
 
-    // Build output buffer
-    let output = paste::paste_to_vec(&data_refs, &cli.config);
-
-    // Write output using raw write for minimal syscall overhead
-    if let Err(e) = write_all_raw(&output) {
+    // Stream output directly to stdout using raw fd writes with 1MB buffer.
+    // This avoids allocating the full output (~130MB for 2x40MB files) and
+    // instead writes in chunks, reducing page faults and memory pressure.
+    if let Err(e) = paste::paste_stream(&data_refs, &cli.config) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
             process::exit(0);
         }
@@ -224,45 +223,6 @@ fn distribute_stdin_lines(data: &[u8], count: usize, terminator: u8) -> Vec<Vec<
         parts[target].extend_from_slice(&data[start..]);
     }
     parts
-}
-
-/// Write the full buffer to stdout, retrying on partial/interrupted writes.
-#[cfg(unix)]
-fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
-    let mut written = 0;
-    while written < data.len() {
-        let ret = unsafe {
-            libc::write(
-                1,
-                data[written..].as_ptr() as *const libc::c_void,
-                (data.len() - written) as _,
-            )
-        };
-        if ret > 0 {
-            written += ret as usize;
-        } else if ret == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "write returned 0",
-            ));
-        } else {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::with_capacity(256 * 1024, stdout.lock());
-    out.write_all(data)?;
-    out.flush()
 }
 
 #[cfg(test)]

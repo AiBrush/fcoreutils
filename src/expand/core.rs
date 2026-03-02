@@ -132,7 +132,7 @@ fn write_spaces(out: &mut impl Write, n: usize) -> std::io::Result<()> {
 }
 
 /// Expand tabs to spaces using SIMD scanning.
-/// Uses memchr2 to find tabs and newlines, bulk-copying everything between them.
+/// Dispatches to the optimal path based on tab configuration and data content.
 pub fn expand_bytes(
     data: &[u8],
     tabs: &TabStops,
@@ -143,53 +143,66 @@ pub fn expand_bytes(
         return Ok(());
     }
 
-    // Fast path: no tabs in data → just copy through
+    // For regular tab stops, use fast SIMD paths.
+    // We combine the no-tabs and no-backspace checks to minimize full-data scans.
+    if let TabStops::Regular(tab_size) = tabs {
+        if initial_only {
+            // --initial mode: check for tabs first (cheap) to skip processing
+            if memchr::memchr(b'\t', data).is_none() {
+                return out.write_all(data);
+            }
+            return expand_initial_fast(data, *tab_size, out);
+        }
+
+        // Fast path: no tabs → write-through (avoids backspace scan too)
+        if memchr::memchr(b'\t', data).is_none() {
+            return out.write_all(data);
+        }
+
+        // Check for backspaces. If none, use the fast SIMD path.
+        if memchr::memchr(b'\x08', data).is_none() {
+            return expand_regular_fast(data, *tab_size, out);
+        }
+
+        // Has backspaces → fall through to generic
+        return expand_generic(data, tabs, initial_only, true, out);
+    }
+
+    // Tab list path: check for tabs first
     if memchr::memchr(b'\t', data).is_none() {
         return out.write_all(data);
     }
-
-    // For regular tab stops, use fast SIMD paths
-    if let TabStops::Regular(tab_size) = tabs {
-        if initial_only {
-            // --initial mode processes line-by-line anyway, so handle backspace
-            // per-line instead of scanning the whole buffer.
-            return expand_initial_fast(data, *tab_size, out);
-        } else if memchr::memchr(b'\x08', data).is_none() {
-            return expand_regular_fast(data, *tab_size, out);
-        }
-    }
-
-    // Generic path for backspace handling or tab lists.
-    // For Regular tabs, we only reach here when the memchr check at line 157 found
-    // backspaces, so has_backspace=true avoids a redundant O(n) scan.
-    // For List tabs, we haven't scanned yet, so check now.
-    let has_backspace = match tabs {
-        TabStops::Regular(_) => true,
-        TabStops::List(_) => memchr::memchr(b'\x08', data).is_some(),
-    };
+    let has_backspace = memchr::memchr(b'\x08', data).is_some();
     expand_generic(data, tabs, initial_only, has_backspace, out)
 }
 
+/// Parallel threshold: files above this size use multi-threaded expand.
+/// Below this, single-threaded is faster (avoids thread pool overhead).
+const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024; // 4MB
+
 /// Fast expand for regular tab stops without -i flag.
-/// Processes data in fixed-size input chunks. Each chunk is pre-allocated to
-/// worst-case output size, allowing the inner loop to use raw pointer writes
-/// with ZERO capacity checks or Vec::len() updates. The inner loop uses
-/// memchr2_iter (SIMD) to find tabs and newlines, bulk-copying segments between
-/// them via memcpy. A local write pointer (`wp`) tracks position — Vec::set_len
-/// is called only once per chunk.
+/// For large files (>4MB), uses rayon to process chunks in parallel.
+/// For smaller files, uses single-threaded SIMD processing.
 fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
     debug_assert!(tab_size > 0, "tab_size must be > 0");
 
-    // For power-of-2 tab sizes, use bitwise AND instead of modulo
+    if data.len() >= PARALLEL_THRESHOLD {
+        expand_regular_parallel(data, tab_size, out)
+    } else {
+        expand_regular_single(data, tab_size, out)
+    }
+}
+
+/// Single-threaded expand: SIMD memchr2_iter scan of entire data.
+fn expand_regular_single(
+    data: &[u8],
+    tab_size: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
     let is_pow2 = tab_size.is_power_of_two();
     let mask = tab_size.wrapping_sub(1);
 
-    // Process in fixed-size input chunks. Each chunk is pre-allocated to worst-case
-    // so the inner loop needs NO capacity checks, NO Vec::len() reads, NO set_len()
-    // calls — just raw pointer arithmetic.
     const INPUT_CHUNK: usize = 256 * 1024;
-
-    // Worst-case output size for one chunk (every byte is a tab)
     let worst_output = INPUT_CHUNK * tab_size + tab_size;
     let mut output: Vec<u8> = Vec::with_capacity(worst_output);
 
@@ -197,7 +210,6 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
     let mut data_pos: usize = 0;
 
     while data_pos < data.len() {
-        // Find chunk boundary — prefer newline boundary for clean column tracking
         let chunk_end = if data_pos + INPUT_CHUNK >= data.len() {
             data.len()
         } else {
@@ -211,15 +223,12 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
         let chunk = &data[data_pos..chunk_end];
         output.clear();
 
-        // Raw pointer inner loop — `wp` is a local register variable.
-        // No Vec method calls until set_len at the end.
         let out_ptr = output.as_mut_ptr();
         let src = chunk.as_ptr();
         let mut wp: usize = 0;
         let mut pos: usize = 0;
 
         for hit in memchr::memchr2_iter(b'\t', b'\n', chunk) {
-            // Bulk-copy segment before this hit
             let seg_len = hit - pos;
             if seg_len > 0 {
                 unsafe {
@@ -236,7 +245,6 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
                 wp += 1;
                 column = 0;
             } else {
-                // Tab: compute spaces
                 let rem = if is_pow2 {
                     column & mask
                 } else {
@@ -253,7 +261,6 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
             pos = hit + 1;
         }
 
-        // Copy tail after last hit
         if pos < chunk.len() {
             let tail = chunk.len() - pos;
             unsafe {
@@ -263,16 +270,139 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
             column += tail;
         }
 
-        // Single set_len for the entire chunk
         unsafe {
             output.set_len(wp);
         }
-
         if wp > 0 {
             out.write_all(&output)?;
         }
 
         data_pos = chunk_end;
+    }
+
+    Ok(())
+}
+
+/// Expand a chunk of data (must start/end on newline boundaries, except possibly
+/// the last chunk). Column starts at 0 for each chunk since chunks are line-aligned.
+/// Returns the expanded output as a Vec<u8>.
+/// Pre-allocates worst-case output to eliminate all capacity checks in the hot loop.
+fn expand_chunk(chunk: &[u8], tab_size: usize, is_pow2: bool, mask: usize) -> Vec<u8> {
+    // Worst case: every byte is a tab → tab_size× expansion.
+    // For most real data the expansion ratio is ~1.5x, so this over-allocates,
+    // but it eliminates all capacity checks from the hot loop.
+    let worst_case = chunk.len() * tab_size;
+    let mut output: Vec<u8> = Vec::with_capacity(worst_case);
+
+    let out_ptr = output.as_mut_ptr();
+    let src = chunk.as_ptr();
+    let mut wp: usize = 0;
+    let mut column: usize = 0;
+    let mut pos: usize = 0;
+
+    // Inner loop: zero capacity checks, zero Vec::len() reads, zero set_len() calls.
+    // Just raw pointer arithmetic.
+    for hit in memchr::memchr2_iter(b'\t', b'\n', chunk) {
+        let seg_len = hit - pos;
+        if seg_len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(pos), out_ptr.add(wp), seg_len);
+            }
+            wp += seg_len;
+            column += seg_len;
+        }
+
+        if unsafe { *src.add(hit) } == b'\n' {
+            unsafe {
+                *out_ptr.add(wp) = b'\n';
+            }
+            wp += 1;
+            column = 0;
+        } else {
+            let rem = if is_pow2 {
+                column & mask
+            } else {
+                column % tab_size
+            };
+            let spaces = tab_size - rem;
+            unsafe {
+                std::ptr::write_bytes(out_ptr.add(wp), b' ', spaces);
+            }
+            wp += spaces;
+            column += spaces;
+        }
+
+        pos = hit + 1;
+    }
+
+    // Copy tail
+    if pos < chunk.len() {
+        let tail = chunk.len() - pos;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(pos), out_ptr.add(wp), tail);
+        }
+        wp += tail;
+    }
+
+    unsafe {
+        output.set_len(wp);
+    }
+    output
+}
+
+/// Parallel expand for large files (>4MB). Splits data into line-aligned chunks
+/// and processes them concurrently using rayon. Each chunk is expanded independently
+/// (column tracking resets at newline boundaries), then results are written in order.
+fn expand_regular_parallel(
+    data: &[u8],
+    tab_size: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    use rayon::prelude::*;
+
+    let is_pow2 = tab_size.is_power_of_two();
+    let mask = tab_size.wrapping_sub(1);
+
+    // Split data into line-aligned chunks for parallel processing.
+    // Use ~N chunks where N = number of CPUs for optimal load balance.
+    let num_chunks = rayon::current_num_threads().max(2);
+    let target_chunk_size = data.len() / num_chunks;
+    let mut chunks: Vec<&[u8]> = Vec::with_capacity(num_chunks + 1);
+    let mut pos: usize = 0;
+
+    for _ in 0..num_chunks - 1 {
+        if pos >= data.len() {
+            break;
+        }
+        let target_end = (pos + target_chunk_size).min(data.len());
+        // Find the next newline at or after target_end
+        let chunk_end = if target_end >= data.len() {
+            data.len()
+        } else {
+            match memchr::memchr(b'\n', &data[target_end..]) {
+                Some(off) => target_end + off + 1,
+                None => data.len(),
+            }
+        };
+        chunks.push(&data[pos..chunk_end]);
+        pos = chunk_end;
+    }
+    // Last chunk gets everything remaining
+    if pos < data.len() {
+        chunks.push(&data[pos..]);
+    }
+
+    // Process all chunks in parallel
+    let results: Vec<Vec<u8>> = chunks
+        .par_iter()
+        .map(|chunk| expand_chunk(chunk, tab_size, is_pow2, mask))
+        .collect();
+
+    // Write results in order
+    for result in &results {
+        if !result.is_empty() {
+            out.write_all(result)?;
+        }
     }
 
     Ok(())
