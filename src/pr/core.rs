@@ -131,51 +131,73 @@ fn expand_tabs_in_line(line: &str, tab_char: char, tab_width: usize) -> String {
     if tab_width == 0 {
         return line.replace(tab_char, "");
     }
-    let mut result = String::with_capacity(line.len());
+    // Pre-allocate with extra capacity for tab expansion
+    let mut result = String::with_capacity(line.len() + line.len() / 4);
+    let tab_byte = tab_char as u8;
+    let bytes = line.as_bytes();
     let mut col = 0;
-    for ch in line.chars() {
-        if ch == tab_char {
+    let mut seg_start = 0;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == tab_byte {
+            // Copy segment before tab
+            if i > seg_start {
+                result.push_str(&line[seg_start..i]);
+                col += i - seg_start;
+            }
             let spaces = tab_width - (col % tab_width);
-            for _ in 0..spaces {
-                result.push(' ');
+            // Batch push spaces
+            let space_buf = "                                ";
+            let mut remaining = spaces;
+            while remaining > 0 {
+                let chunk = remaining.min(space_buf.len());
+                result.push_str(&space_buf[..chunk]);
+                remaining -= chunk;
             }
             col += spaces;
-        } else {
-            result.push(ch);
-            col += 1;
+            seg_start = i + 1;
         }
+    }
+    // Copy remaining segment after last tab
+    if seg_start < bytes.len() {
+        result.push_str(&line[seg_start..]);
     }
     result
 }
 
-/// Convert a character to hat notation (^X) for control characters.
-fn to_hat_notation(ch: char) -> String {
+/// Push hat notation (^X) for a control character into a String, avoiding allocation.
+#[inline]
+fn push_hat_notation(result: &mut String, ch: char) {
     let b = ch as u32;
     if b < 32 {
-        format!("^{}", (b as u8 + b'@') as char)
+        result.push('^');
+        result.push((b as u8 + b'@') as char);
     } else if b == 127 {
-        "^?".to_string()
+        result.push_str("^?");
     } else {
-        ch.to_string()
+        result.push(ch);
     }
 }
 
-/// Convert a character using -v notation (like cat -v).
-fn to_nonprinting(ch: char) -> String {
+/// Push nonprinting notation (like cat -v) for a character into a String.
+#[inline]
+fn push_nonprinting(result: &mut String, ch: char) {
     let b = ch as u32;
     if b < 32 && b != 9 && b != 10 {
-        // Control chars except TAB and LF
-        format!("^{}", (b as u8 + b'@') as char)
+        result.push('^');
+        result.push((b as u8 + b'@') as char);
     } else if b == 127 {
-        "^?".to_string()
+        result.push_str("^?");
     } else if b >= 128 && b < 160 {
-        format!("M-^{}", (b as u8 - 128 + b'@') as char)
+        result.push_str("M-^");
+        result.push((b as u8 - 128 + b'@') as char);
     } else if b >= 160 && b < 255 {
-        format!("M-{}", (b as u8 - 128) as char)
+        result.push_str("M-");
+        result.push((b as u8 - 128) as char);
     } else if b == 255 {
-        "M-^?".to_string()
+        result.push_str("M-^?");
     } else {
-        ch.to_string()
+        result.push(ch);
     }
 }
 
@@ -184,12 +206,12 @@ fn process_control_chars(line: &str, show_control: bool, show_nonprinting: bool)
     if !show_control && !show_nonprinting {
         return line.to_string();
     }
-    let mut result = String::with_capacity(line.len());
+    let mut result = String::with_capacity(line.len() + line.len() / 4);
     for ch in line.chars() {
         if show_nonprinting {
-            result.push_str(&to_nonprinting(ch));
+            push_nonprinting(&mut result, ch);
         } else if show_control {
-            result.push_str(&to_hat_notation(ch));
+            push_hat_notation(&mut result, ch);
         } else {
             result.push(ch);
         }
@@ -246,13 +268,7 @@ fn write_column_padding<W: Write>(
             pos = next_tab;
         } else {
             let n = target_abs_pos - pos;
-            if n <= SPACES.len() {
-                output.write_all(&SPACES[..n])?;
-            } else {
-                for _ in 0..n {
-                    output.write_all(b" ")?;
-                }
-            }
+            write_spaces(output, n)?;
             pos = target_abs_pos;
         }
     }
