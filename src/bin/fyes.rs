@@ -17,10 +17,9 @@ fn main() {
     // Restore SIGPIPE to default (SIG_DFL) so that writing to a closed pipe
     // kills us with SIGPIPE, exactly like GNU yes. Rust sets SIG_IGN by default.
     // Use sigaction() for explicit control over flags (no SA_RESTART).
-    // NOTE: We intentionally do NOT call sigprocmask(SIG_UNBLOCK) here.
-    // If the parent process blocked SIGPIPE (e.g. Node.js CI runners),
-    // GNU yes inherits that blocked mask and falls through to its error path.
-    // We must do the same to match GNU's output exactly.
+    // Also unblock SIGPIPE in the signal mask — Rust's runtime or the parent
+    // process may have blocked it, preventing delivery even with SIG_DFL handler.
+    // GNU yes (written in C) starts with SIG_DFL and unblocked, so we must match.
     #[cfg(unix)]
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -28,6 +27,11 @@ fn main() {
         sa.sa_flags = 0;
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(libc::SIGPIPE, &sa, std::ptr::null_mut());
+
+        let mut unblock: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut unblock);
+        libc::sigaddset(&mut unblock, libc::SIGPIPE);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &unblock, std::ptr::null_mut());
     }
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
