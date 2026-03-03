@@ -221,9 +221,8 @@ pub fn read_file_direct(path: &Path) -> io::Result<FileData> {
     let len = metadata.len();
 
     if len > 0 && metadata.file_type().is_file() {
-        let mut buf = vec![0u8; len as usize];
-        let n = read_full(&mut &file, &mut buf)?;
-        buf.truncate(n);
+        let mut buf = Vec::with_capacity(len as usize);
+        io::Read::read_to_end(&mut &file, &mut buf)?;
         Ok(FileData::Owned(buf))
     } else if !metadata.file_type().is_file() {
         let mut buf = Vec::new();
