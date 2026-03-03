@@ -893,7 +893,8 @@ fn split_line_bytes_preloaded(data: &[u8], config: &SplitConfig, max_bytes: u64)
         let window = remaining.min(max);
         let slice = &data[offset..offset + window];
 
-        let end = if remaining <= max {
+        let end = if remaining < max {
+            // Final chunk: take everything (matches GNU behavior)
             offset + window
         } else if let Some(pos) = memchr::memrchr(sep, slice) {
             offset + pos + 1
