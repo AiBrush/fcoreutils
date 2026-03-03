@@ -194,73 +194,68 @@ fn tac_bytes_before_contiguous(data: &[u8], sep: u8, out: &mut impl Write) -> io
     Ok(())
 }
 
-/// After-separator mode for small files: backward memrchr scan + streaming output.
-/// Zero extra allocation: scans backward with memrchr, writes records directly.
+/// After-separator mode for small files: forward SIMD scan + direct writes.
+/// Single forward memchr_iter scan replaces N backward memrchr calls.
+/// Writes record slices directly to the BufWriter (no intermediate buffer).
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
 
-    let mut prev_end = data.len();
-    let mut search_end = data.len();
+    // Forward SIMD scan: collect all separator positions in one pass
+    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos);
+    }
 
-    loop {
-        match memchr::memrchr(sep, &data[..search_end]) {
-            Some(pos) => {
-                let rec_start = pos + 1;
-                if rec_start < prev_end {
-                    out.write_all(&data[rec_start..prev_end])?;
-                }
-                prev_end = rec_start;
-                search_end = pos;
-            }
-            None => {
-                if prev_end > 0 {
-                    out.write_all(&data[..prev_end])?;
-                }
-                break;
-            }
+    if positions.is_empty() {
+        return out.write_all(data);
+    }
+
+    // Write records in reverse order directly from the source data
+    let mut end_pos = data.len();
+    for &pos in positions.iter().rev() {
+        let rec_start = pos + 1;
+        if rec_start < end_pos {
+            out.write_all(&data[rec_start..end_pos])?;
         }
-        if search_end == 0 {
-            if prev_end > 0 {
-                out.write_all(&data[..prev_end])?;
-            }
-            break;
-        }
+        end_pos = rec_start;
+    }
+    if end_pos > 0 {
+        out.write_all(&data[..end_pos])?;
     }
 
     Ok(())
 }
 
-/// Before-separator mode for small files: backward memrchr scan + streaming output.
-/// Zero extra allocation: scans backward with memrchr, writes records directly.
+/// Before-separator mode for small files: forward SIMD scan + direct writes.
+/// Single forward memchr_iter scan replaces N backward memrchr calls.
+/// Writes record slices directly to the BufWriter (no intermediate buffer).
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
 
-    let mut prev_end = data.len();
-    let mut search_end = data.len();
+    // Forward SIMD scan: collect all separator positions in one pass
+    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos);
+    }
 
-    loop {
-        match memchr::memrchr(sep, &data[..search_end]) {
-            Some(pos) => {
-                if pos < prev_end {
-                    out.write_all(&data[pos..prev_end])?;
-                }
-                prev_end = pos;
-                if pos == 0 {
-                    break;
-                }
-                search_end = pos;
-            }
-            None => {
-                if prev_end > 0 {
-                    out.write_all(&data[..prev_end])?;
-                }
-                break;
-            }
+    if positions.is_empty() {
+        return out.write_all(data);
+    }
+
+    // Write records in reverse order directly from the source data (before mode)
+    let mut end_pos = data.len();
+    for &pos in positions.iter().rev() {
+        if pos < end_pos {
+            out.write_all(&data[pos..end_pos])?;
         }
+        end_pos = pos;
+    }
+    if end_pos > 0 {
+        out.write_all(&data[..end_pos])?;
     }
 
     Ok(())
