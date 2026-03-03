@@ -292,11 +292,50 @@ fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
 }
 
 fn process_file(filename: &str, cli: &Cli, out: &mut impl Write) -> io::Result<()> {
-    let data = read_file_mmap(Path::new(filename))?;
     if cli.decode {
+        let data = read_file_mmap(Path::new(filename))?;
         b64::decode_to_writer(&data, cli.ignore_garbage, out)
     } else {
-        b64::encode_to_writer(&data, cli.wrap, out)
+        // For encode, use streaming from fd — avoids mmap page fault overhead.
+        // read() handles page faults in-kernel with batched PTE allocation (~0.5ms)
+        // vs mmap's ~2560 user-space minor faults (~2.5-5ms on CI runners).
+        // The streaming encoder (encode_stream_wrapped_fused) uses direct-to-position
+        // encoding with 4-line unrolling, which is faster than encode_wrapped_expand's
+        // backward expansion pass.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let file = coreutils_rs::common::io::open_noatime(Path::new(filename))?;
+            let fd = file.as_raw_fd();
+            unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL) };
+            struct FdReader(i32);
+            impl io::Read for FdReader {
+                #[inline]
+                fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                    loop {
+                        let ret = unsafe {
+                            libc::read(self.0, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                        };
+                        if ret >= 0 {
+                            return Ok(ret as usize);
+                        }
+                        let err = io::Error::last_os_error();
+                        if err.kind() != io::ErrorKind::Interrupted {
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+            // Keep `file` alive so fd remains valid for the duration of encode_stream.
+            let r = b64::encode_stream(&mut FdReader(fd), cli.wrap, out);
+            drop(file);
+            r
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let data = read_file_mmap(Path::new(filename))?;
+            b64::encode_to_writer(&data, cli.wrap, out)
+        }
     }
 }
 

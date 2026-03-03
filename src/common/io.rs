@@ -40,7 +40,7 @@ static NOATIME_SUPPORTED: AtomicBool = AtomicBool::new(true);
 /// Open a file with O_NOATIME on Linux to avoid atime inode writes.
 /// Caches whether O_NOATIME works to avoid double-open on every file.
 #[cfg(target_os = "linux")]
-fn open_noatime(path: &Path) -> io::Result<File> {
+pub fn open_noatime(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     if NOATIME_SUPPORTED.load(Ordering::Relaxed) {
         match fs::OpenOptions::new()
@@ -60,7 +60,7 @@ fn open_noatime(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_noatime(path: &Path) -> io::Result<File> {
+pub fn open_noatime(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 

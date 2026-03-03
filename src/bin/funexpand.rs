@@ -6,7 +6,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::read_file;
+use coreutils_rs::common::io::read_file_direct;
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::expand::{TabStops, parse_tab_stops, unexpand_bytes};
 
@@ -235,7 +235,7 @@ fn main() {
                 None => Ok(()),
             }
         } else {
-            let data = match read_file(Path::new(filename)) {
+            let data = match read_file_direct(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("unexpand: {}: {}", filename, io_error_msg(&e));
