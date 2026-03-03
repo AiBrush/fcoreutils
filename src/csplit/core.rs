@@ -1,5 +1,5 @@
 use memchr::memchr_iter;
-use regex::{Regex, RegexBuilder};
+use regex::Regex;
 use std::fs;
 use std::io;
 
@@ -203,7 +203,8 @@ fn line_content<'a>(data: &'a [u8], offsets: &[usize], idx: usize) -> &'a str {
     if end > start && data[end - 1] == b'\n' {
         end -= 1;
     }
-    // SAFETY: data originated from &str, so all bytes are valid UTF-8
+    // SAFETY: callers pass data from csplit_file which takes &str input,
+    // guaranteeing the bytes are valid UTF-8.
     unsafe { std::str::from_utf8_unchecked(&data[start..end]) }
 }
 
@@ -237,7 +238,7 @@ fn write_chunk_range(
 }
 
 /// Find the first line matching a regex starting from `start`, returning its index.
-/// Uses bulk SIMD search on the raw data instead of per-line matching.
+/// Matches per-line to replicate GNU csplit behavior (regex sees individual lines).
 fn find_match(
     data: &[u8],
     offsets: &[usize],
@@ -245,20 +246,7 @@ fn find_match(
     regex: &Regex,
     start: usize,
 ) -> Option<usize> {
-    if start >= total_lines {
-        return None;
-    }
-    let byte_start = offsets[start];
-    // SAFETY: data originated from &str, so all bytes are valid UTF-8
-    let search_str = unsafe { std::str::from_utf8_unchecked(&data[byte_start..]) };
-    let mat = regex.find(search_str)?;
-    // Convert byte position of match to line number using binary search
-    let abs_pos = byte_start + mat.start();
-    let line = match offsets[..total_lines + 1].binary_search(&abs_pos) {
-        Ok(exact) => exact,  // match starts exactly at a line boundary
-        Err(idx) => idx - 1, // match is within this line
-    };
-    Some(line)
+    (start..total_lines).find(|&idx| regex.is_match(line_content(data, offsets, idx)))
 }
 
 /// Apply a single regex or skip-to pattern. Returns Ok(true) if matched,
@@ -278,10 +266,7 @@ fn apply_regex_pattern(
     config: &CsplitConfig,
     graceful_no_match: bool,
 ) -> Result<bool, String> {
-    let re = RegexBuilder::new(regex)
-        .multi_line(true)
-        .build()
-        .map_err(|e| format!("invalid regex: {}", e))?;
+    let re = Regex::new(regex).map_err(|e| format!("invalid regex: {}", e))?;
 
     // When skip_current is set, the line at current_line was the match boundary
     // from a previous regex split — skip it to find the NEXT occurrence.

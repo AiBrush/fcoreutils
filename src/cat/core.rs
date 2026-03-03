@@ -1162,18 +1162,19 @@ pub fn cat_file(
                 }
 
                 // Other options: read entire file via fd, then process
-                let size = if unsafe { libc::fstat(fd, &mut stat) } == 0 && stat.st_size > 0 {
+                // Reuse stat from fstat above (already populated)
+                let size = if stat.st_size > 0 {
                     stat.st_size as usize
                 } else {
                     0
                 };
                 let mut data = Vec::with_capacity(size);
-                let mut reader = std::io::BufReader::new(&file);
-                if reader.read_to_end(&mut data).is_ok() {
+                use std::io::Read;
+                if (&file).read_to_end(&mut data).is_ok() {
                     cat_with_options(&data, config, line_num, pending_cr, out)?;
                     return Ok(true);
                 }
-                // read failed, fall through to read_file
+                // read failed, fall through to read_file_direct
             }
         }
 
