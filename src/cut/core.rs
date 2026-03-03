@@ -1,10 +1,11 @@
 use memchr::memchr_iter;
 use std::io::{self, BufRead, IoSlice, Write};
 
-/// Minimum file size for parallel processing (4MB).
+/// Minimum file size for parallel processing (32MB).
 /// Files above this threshold use rayon parallel chunked processing.
-/// 4MB balances rayon init overhead against parallel benefits on multi-core.
-const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
+/// 32MB balances rayon init overhead + buffer allocation against parallel benefits.
+/// For 10MB files, sequential is faster due to thread coordination + memory overhead.
+const PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
 
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
@@ -312,11 +313,9 @@ fn process_fields_multi_select(
     Ok(())
 }
 
-/// Process a chunk for multi-field extraction using two-level scanning.
-/// Outer memchr(newline) for line boundaries, inner memchr_iter(delim) for delimiter
-/// positions with early exit at max_field. This is faster than memchr2 single-pass
-/// because memchr (one needle) is ~30-50% faster per byte than memchr2 (two needles),
-/// and the inner scan exits early at max_field instead of processing all delimiters.
+/// Process a chunk for multi-field extraction.
+/// Uses single-pass memchr2 with bitmask field selection when max_field <= 64.
+/// Falls back to two-level scanning for larger field numbers.
 fn multi_select_chunk(
     data: &[u8],
     delim: u8,
@@ -326,6 +325,23 @@ fn multi_select_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
+    // Single-pass bitmask approach for small field numbers (common case).
+    // One memchr2 scan finds both delimiters and newlines simultaneously,
+    // avoiding per-line function call overhead and delimiter position arrays.
+    if max_field <= 64 && delim != line_delim {
+        let mut mask: u64 = 0;
+        for r in ranges {
+            let s = r.start.max(1);
+            let e = r.end.min(64);
+            for f in s..=e {
+                mask |= 1u64 << (f - 1);
+            }
+        }
+        multi_select_chunk_bitmask(data, delim, line_delim, mask, max_field, suppress, buf);
+        return;
+    }
+
+    // Fallback: two-level scanning for large field numbers
     buf.reserve(data.len());
     let base = data.as_ptr();
     let mut start = 0;
@@ -343,6 +359,133 @@ fn multi_select_chunk(
         multi_select_line_fast(
             line, delim, line_delim, ranges, max_delims, suppress, buf, start, base,
         );
+    }
+}
+
+/// Single-pass multi-field extraction using memchr2 + bitmask selection.
+/// Processes the entire data in one SIMD scan, tracking field numbers
+/// and outputting selected fields. Uses raw pointer writes to eliminate
+/// Vec method overhead (no capacity checks, no length updates per field).
+fn multi_select_chunk_bitmask(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    mask: u64,
+    _max_field: usize,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    // Reserve worst case: entire data + one extra byte per field for delimiters
+    buf.reserve(data.len() + 1);
+    let initial_len = buf.len();
+    let out_base = unsafe { buf.as_mut_ptr().add(initial_len) };
+    let src = data.as_ptr();
+    let mut wp: usize = 0;
+
+    let mut field_num: usize = 1; // 1-based
+    let mut field_start: usize = 0;
+    let mut first_on_line = true;
+    let mut line_has_delim = false;
+    let mut line_start: usize = 0;
+
+    for hit in memchr::memchr2_iter(delim, line_delim, data) {
+        if data[hit] == line_delim {
+            // End of line
+            if !line_has_delim {
+                if !suppress {
+                    let len = hit - line_start;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.add(line_start), out_base.add(wp), len);
+                    }
+                    wp += len;
+                    unsafe {
+                        *out_base.add(wp) = line_delim;
+                    }
+                    wp += 1;
+                }
+            } else {
+                if field_num <= 64 && (mask & (1u64 << (field_num - 1))) != 0 {
+                    if !first_on_line {
+                        unsafe {
+                            *out_base.add(wp) = delim;
+                        }
+                        wp += 1;
+                    }
+                    let len = hit - field_start;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.add(field_start), out_base.add(wp), len);
+                    }
+                    wp += len;
+                }
+                unsafe {
+                    *out_base.add(wp) = line_delim;
+                }
+                wp += 1;
+            }
+            field_num = 1;
+            field_start = hit + 1;
+            line_start = hit + 1;
+            first_on_line = true;
+            line_has_delim = false;
+        } else {
+            // Delimiter
+            line_has_delim = true;
+            if field_num <= 64 && (mask & (1u64 << (field_num - 1))) != 0 {
+                if !first_on_line {
+                    unsafe {
+                        *out_base.add(wp) = delim;
+                    }
+                    wp += 1;
+                }
+                let len = hit - field_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(field_start), out_base.add(wp), len);
+                }
+                wp += len;
+                first_on_line = false;
+            }
+            field_num += 1;
+            field_start = hit + 1;
+        }
+    }
+
+    // Handle final segment
+    if field_start < data.len() {
+        if !line_has_delim {
+            if !suppress {
+                let len = data.len() - line_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(line_start), out_base.add(wp), len);
+                }
+                wp += len;
+                unsafe {
+                    *out_base.add(wp) = line_delim;
+                }
+                wp += 1;
+            }
+        } else {
+            if field_num <= 64 && (mask & (1u64 << (field_num - 1))) != 0 {
+                if !first_on_line {
+                    unsafe {
+                        *out_base.add(wp) = delim;
+                    }
+                    wp += 1;
+                }
+                let len = data.len() - field_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(field_start), out_base.add(wp), len);
+                }
+                wp += len;
+            }
+            unsafe {
+                *out_base.add(wp) = line_delim;
+            }
+            wp += 1;
+        }
+    }
+
+    unsafe {
+        buf.set_len(initial_len + wp);
     }
 }
 
