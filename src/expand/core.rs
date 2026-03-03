@@ -857,7 +857,7 @@ fn emit_blank_run_vec(output: &mut Vec<u8>, blanks: &[u8], start_col: usize, tab
             pending_spaces += 1;
             col += 1;
             // Check if we've reached a tab stop
-            if col % tab_size == 0 {
+            if col.is_multiple_of(tab_size) {
                 let more_follow = idx + 1 < blanks.len();
                 if pending_spaces >= 2 || more_follow {
                     output.push(b'\t');

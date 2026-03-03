@@ -473,11 +473,7 @@ fn nl_number_all_stream(
             let start = output.len();
             let dst = output.as_mut_ptr().add(start);
             std::ptr::copy_nonoverlapping(prefix_buf.as_ptr(), dst, prefix_len);
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr().add(pos),
-                dst.add(prefix_len),
-                remaining,
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), remaining);
             *dst.add(prefix_len + remaining) = b'\n';
             output.set_len(start + prefix_len + remaining + 1);
         }
