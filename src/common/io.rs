@@ -207,6 +207,13 @@ pub fn read_file_mmap(path: &Path) -> io::Result<FileData> {
 /// user-space minor faults (~1-2µs each = 2.5-5ms on CI runners).
 pub fn read_file_direct(path: &Path) -> io::Result<FileData> {
     let file = open_noatime(path)?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        }
+    }
     let metadata = file.metadata()?;
     let len = metadata.len();
 
