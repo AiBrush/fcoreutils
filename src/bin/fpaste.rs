@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{read_file_direct, read_stdin};
+use coreutils_rs::common::io::{read_file, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::paste::{self, PasteConfig};
 
@@ -173,7 +173,7 @@ fn main() {
             file_data.push(coreutils_rs::common::io::FileData::Owned(data));
             stdin_idx += 1;
         } else {
-            match read_file_direct(Path::new(filename)) {
+            match read_file(Path::new(filename)) {
                 Ok(d) => file_data.push(d),
                 Err(e) => {
                     eprintln!("paste: {}: {}", filename, io_error_msg(&e));
