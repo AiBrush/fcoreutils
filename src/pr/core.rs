@@ -421,9 +421,8 @@ fn pr_data_contiguous<W: Write>(
 
             // Pad remaining body lines
             if show_header || (!config.omit_header && !config.omit_pagination) {
-                for _ in lines_in_page..body_lines_per_page {
-                    page_buf.push(b'\n');
-                }
+                let pad_lines = body_lines_per_page.saturating_sub(lines_in_page);
+                page_buf.resize(page_buf.len() + pad_lines, b'\n');
             }
 
             if show_header {
