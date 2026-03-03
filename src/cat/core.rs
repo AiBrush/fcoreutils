@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use crate::common::io::{read_file, read_stdin};
+use crate::common::io::{read_file_direct, read_stdin};
 
 /// Errors specific to the plain-file fast path on Linux.
 /// Separates directory/same-file detection from I/O errors so callers
@@ -238,7 +238,7 @@ pub fn cat_plain_file(path: &Path, out: &mut impl Write) -> io::Result<bool> {
     }
 
     // Fallback: read file + write (non-Linux or special files)
-    let data = read_file(path)?;
+    let data = read_file_direct(path)?;
     if !data.is_empty() {
         out.write_all(&data)?;
     }
@@ -1086,7 +1086,7 @@ pub fn cat_file(
             }
 
             // Generic fallback: read file + write
-            match read_file(path) {
+            match read_file_direct(path) {
                 Ok(data) => {
                     if !data.is_empty() {
                         out.write_all(&data)?;
@@ -1205,7 +1205,7 @@ pub fn cat_file(
             }
         }
 
-        match read_file(path) {
+        match read_file_direct(path) {
             Ok(data) => {
                 cat_with_options(&data, config, line_num, pending_cr, out)?;
                 Ok(true)
