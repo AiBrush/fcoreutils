@@ -1111,72 +1111,69 @@ pub fn cat_file(
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::io::AsRawFd;
-            match crate::common::io::open_noatime(path) {
-                Ok(file) => {
-                    let fd = file.as_raw_fd();
-                    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-                    if unsafe { libc::fstat(fd, &mut stat) } == 0 {
-                        // Directory check
-                        if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
-                            eprintln!("{}: {}: Is a directory", tool_name, filename);
-                            return Ok(false);
-                        }
-                        // Same-file detection
-                        let mut stdout_stat: libc::stat = unsafe { std::mem::zeroed() };
-                        if unsafe { libc::fstat(1, &mut stdout_stat) } == 0
-                            && stat.st_dev == stdout_stat.st_dev
-                            && stat.st_ino == stdout_stat.st_ino
-                        {
-                            eprintln!("{}: {}: input file is output file", tool_name, filename);
-                            return Ok(false);
-                        }
+            if let Ok(file) = crate::common::io::open_noatime(path) {
+                let fd = file.as_raw_fd();
+                let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstat(fd, &mut stat) } == 0 {
+                    // Directory check
+                    if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                        eprintln!("{}: {}: Is a directory", tool_name, filename);
+                        return Ok(false);
                     }
-
-                    // Streaming path for cat -n (number all lines only)
-                    if config.number
-                        && !config.number_nonblank
-                        && !config.show_ends
-                        && !config.show_tabs
-                        && !config.show_nonprinting
-                        && !config.squeeze_blank
-                        && !*pending_cr
+                    // Same-file detection
+                    let mut stdout_stat: libc::stat = unsafe { std::mem::zeroed() };
+                    if unsafe { libc::fstat(1, &mut stdout_stat) } == 0
+                        && stat.st_dev == stdout_stat.st_dev
+                        && stat.st_ino == stdout_stat.st_ino
                     {
-                        unsafe {
-                            libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-                        }
-                        return cat_stream_numbered(fd, line_num, false, out);
+                        eprintln!("{}: {}: input file is output file", tool_name, filename);
+                        return Ok(false);
                     }
-
-                    // Streaming path for cat -b (number non-blank only)
-                    if config.number_nonblank
-                        && !config.number
-                        && !config.show_ends
-                        && !config.show_tabs
-                        && !config.show_nonprinting
-                        && !config.squeeze_blank
-                        && !*pending_cr
-                    {
-                        unsafe {
-                            libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-                        }
-                        return cat_stream_numbered(fd, line_num, true, out);
-                    }
-
-                    // Other options: read entire file via fd, then process
-                    let size = if unsafe { libc::fstat(fd, &mut stat) } == 0 && stat.st_size > 0 {
-                        stat.st_size as usize
-                    } else {
-                        0
-                    };
-                    let mut data = Vec::with_capacity(size);
-                    let mut reader = std::io::BufReader::new(&file);
-                    if reader.read_to_end(&mut data).is_ok() {
-                        cat_with_options(&data, config, line_num, pending_cr, out)?;
-                        return Ok(true);
-                    }
-                    // read failed, fall through to read_file
                 }
-                Err(_) => {} // open failed, fall through to read_file
+
+                // Streaming path for cat -n (number all lines only)
+                if config.number
+                    && !config.number_nonblank
+                    && !config.show_ends
+                    && !config.show_tabs
+                    && !config.show_nonprinting
+                    && !config.squeeze_blank
+                    && !*pending_cr
+                {
+                    unsafe {
+                        libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+                    }
+                    return cat_stream_numbered(fd, line_num, false, out);
+                }
+
+                // Streaming path for cat -b (number non-blank only)
+                if config.number_nonblank
+                    && !config.number
+                    && !config.show_ends
+                    && !config.show_tabs
+                    && !config.show_nonprinting
+                    && !config.squeeze_blank
+                    && !*pending_cr
+                {
+                    unsafe {
+                        libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+                    }
+                    return cat_stream_numbered(fd, line_num, true, out);
+                }
+
+                // Other options: read entire file via fd, then process
+                let size = if unsafe { libc::fstat(fd, &mut stat) } == 0 && stat.st_size > 0 {
+                    stat.st_size as usize
+                } else {
+                    0
+                };
+                let mut data = Vec::with_capacity(size);
+                let mut reader = std::io::BufReader::new(&file);
+                if reader.read_to_end(&mut data).is_ok() {
+                    cat_with_options(&data, config, line_num, pending_cr, out)?;
+                    return Ok(true);
+                }
+                // read failed, fall through to read_file
             }
         }
 

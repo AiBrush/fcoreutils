@@ -1,4 +1,5 @@
-use regex::Regex;
+use memchr::memchr_iter;
+use regex::{Regex, RegexBuilder};
 use std::fs;
 use std::io;
 
@@ -178,43 +179,93 @@ pub fn format_suffix(fmt: &str, value: usize) -> String {
     result
 }
 
-/// Write lines to a file, returning the number of bytes written.
-fn write_chunk(lines: &[String], filename: &str, config: &CsplitConfig) -> Result<u64, String> {
-    if config.elide_empty && lines.is_empty() {
+/// Build a line offset table from input bytes using SIMD-accelerated newline scan.
+/// Returns offsets where offsets[i] is the byte position of the start of line i,
+/// and offsets[total_lines] is the byte position past the end of line total_lines-1.
+fn build_line_offsets(data: &[u8]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(data.len() / 40 + 2);
+    offsets.push(0);
+    for pos in memchr_iter(b'\n', data) {
+        offsets.push(pos + 1);
+    }
+    // If data doesn't end with \n, add end sentinel
+    if !data.is_empty() && *data.last().unwrap() != b'\n' {
+        offsets.push(data.len());
+    }
+    offsets
+}
+
+/// Get the content of line `idx` (without trailing newline) as a &str.
+#[inline]
+fn line_content<'a>(data: &'a [u8], offsets: &[usize], idx: usize) -> &'a str {
+    let start = offsets[idx];
+    let mut end = offsets[idx + 1];
+    if end > start && data[end - 1] == b'\n' {
+        end -= 1;
+    }
+    // SAFETY: data originated from &str, so all bytes are valid UTF-8
+    unsafe { std::str::from_utf8_unchecked(&data[start..end]) }
+}
+
+/// Write the byte range for lines [start_line..end_line) to a file.
+/// Returns the number of bytes written.
+fn write_chunk_range(
+    data: &[u8],
+    offsets: &[usize],
+    start_line: usize,
+    end_line: usize,
+    filename: &str,
+    config: &CsplitConfig,
+) -> Result<u64, String> {
+    let is_empty = start_line >= end_line;
+    if config.elide_empty && is_empty {
         return Ok(0);
     }
 
-    let mut content = String::new();
-    for line in lines {
-        content.push_str(line);
-        content.push('\n');
-    }
-    let bytes = content.len() as u64;
-
-    if config.elide_empty && bytes == 0 {
+    if is_empty {
+        fs::write(filename, b"").map_err(|e| format!("cannot write '{}': {}", filename, e))?;
         return Ok(0);
     }
 
-    fs::write(filename, &content).map_err(|e| format!("cannot write '{}': {}", filename, e))?;
+    let byte_start = offsets[start_line];
+    let byte_end = offsets[end_line];
+    let chunk = &data[byte_start..byte_end];
+    let bytes = chunk.len() as u64;
 
+    fs::write(filename, chunk).map_err(|e| format!("cannot write '{}': {}", filename, e))?;
     Ok(bytes)
 }
 
 /// Find the first line matching a regex starting from `start`, returning its index.
-fn find_match(lines: &[String], regex: &Regex, start: usize) -> Option<usize> {
-    for (idx, line) in lines.iter().enumerate().skip(start) {
-        if regex.is_match(line) {
-            return Some(idx);
-        }
+/// Uses bulk SIMD search on the raw data instead of per-line matching.
+fn find_match(
+    data: &[u8],
+    offsets: &[usize],
+    total_lines: usize,
+    regex: &Regex,
+    start: usize,
+) -> Option<usize> {
+    if start >= total_lines {
+        return None;
     }
-    None
+    let byte_start = offsets[start];
+    // SAFETY: data originated from &str, so all bytes are valid UTF-8
+    let search_str = unsafe { std::str::from_utf8_unchecked(&data[byte_start..]) };
+    let mat = regex.find(search_str)?;
+    // Convert byte position of match to line number using binary search
+    let abs_pos = byte_start + mat.start();
+    let line = match offsets[..total_lines + 1].binary_search(&abs_pos) {
+        Ok(exact) => exact,  // match starts exactly at a line boundary
+        Err(idx) => idx - 1, // match is within this line
+    };
+    Some(line)
 }
 
 /// Apply a single regex or skip-to pattern. Returns Ok(true) if matched,
 /// Ok(false) if no match (only used for repeat-forever graceful stop).
-/// For non-repeat patterns, no match is always an error.
 fn apply_regex_pattern(
-    lines: &[String],
+    data: &[u8],
+    offsets: &[usize],
     total_lines: usize,
     regex: &str,
     offset: i64,
@@ -227,18 +278,23 @@ fn apply_regex_pattern(
     config: &CsplitConfig,
     graceful_no_match: bool,
 ) -> Result<bool, String> {
-    let re = Regex::new(regex).map_err(|e| format!("invalid regex: {}", e))?;
+    let re = RegexBuilder::new(regex)
+        .multi_line(true)
+        .build()
+        .map_err(|e| format!("invalid regex: {}", e))?;
 
     // When skip_current is set, the line at current_line was the match boundary
     // from a previous regex split — skip it to find the NEXT occurrence.
-    let search_start =
-        if *skip_current && *current_line < total_lines && re.is_match(&lines[*current_line]) {
-            *current_line + 1
-        } else {
-            *current_line
-        };
+    let search_start = if *skip_current
+        && *current_line < total_lines
+        && re.is_match(line_content(data, offsets, *current_line))
+    {
+        *current_line + 1
+    } else {
+        *current_line
+    };
 
-    let match_idx = match find_match(lines, &re, search_start) {
+    let match_idx = match find_match(data, offsets, total_lines, &re, search_start) {
         Some(idx) => idx,
         None => {
             if graceful_no_match {
@@ -263,11 +319,11 @@ fn apply_regex_pattern(
         *skip_current = false;
     } else {
         // Regex: write chunk from current_line to split_at
-        let chunk_lines = &lines[*current_line..split_at];
+        let is_empty = *current_line >= split_at;
         let filename = output_filename(config, *file_index);
-        let bytes = write_chunk(chunk_lines, &filename, config)?;
+        let bytes = write_chunk_range(data, offsets, *current_line, split_at, &filename, config)?;
 
-        if !(config.elide_empty && chunk_lines.is_empty()) {
+        if !(config.elide_empty && is_empty) {
             created_files.push(filename);
             sizes.push(bytes);
             *file_index += 1;
@@ -289,8 +345,14 @@ pub fn csplit_file(
     patterns: &[Pattern],
     config: &CsplitConfig,
 ) -> Result<Vec<u64>, String> {
-    let lines: Vec<String> = input.lines().map(|l| l.to_string()).collect();
-    let total_lines = lines.len();
+    let data = input.as_bytes();
+    let offsets = build_line_offsets(data);
+    // total_lines = number of lines (offsets has total_lines + 1 entries)
+    let total_lines = if offsets.len() <= 1 {
+        0
+    } else {
+        offsets.len() - 1
+    };
 
     let mut sizes: Vec<u64> = Vec::new();
     let mut created_files: Vec<String> = Vec::new();
@@ -324,14 +386,15 @@ pub fn csplit_file(
                     split_at - 1
                 };
 
-                let chunk_lines = &lines[current_line..end];
+                let is_empty = current_line >= end;
                 let filename = output_filename(config, file_index);
 
-                let bytes = write_chunk(chunk_lines, &filename, config).inspect_err(|_| {
-                    do_cleanup(&created_files, config);
-                })?;
+                let bytes = write_chunk_range(data, &offsets, current_line, end, &filename, config)
+                    .inspect_err(|_| {
+                        do_cleanup(&created_files, config);
+                    })?;
 
-                if !(config.elide_empty && chunk_lines.is_empty()) {
+                if !(config.elide_empty && is_empty) {
                     created_files.push(filename);
                     sizes.push(bytes);
                     file_index += 1;
@@ -345,7 +408,8 @@ pub fn csplit_file(
                 let regex = regex.clone();
                 let offset = *offset;
                 if let Err(e) = apply_regex_pattern(
-                    &lines,
+                    data,
+                    &offsets,
                     total_lines,
                     &regex,
                     offset,
@@ -367,7 +431,8 @@ pub fn csplit_file(
                 let regex = regex.clone();
                 let offset = *offset;
                 if let Err(e) = apply_regex_pattern(
-                    &lines,
+                    data,
+                    &offsets,
                     total_lines,
                     &regex,
                     offset,
@@ -403,8 +468,6 @@ pub fn csplit_file(
                 for _ in 0..n {
                     match &prev_pat {
                         Pattern::LineNumber(ln) => {
-                            // For repeated line numbers, this doesn't make much sense
-                            // but follow the same logic
                             let end = if *ln > total_lines {
                                 total_lines
                             } else {
@@ -415,13 +478,20 @@ pub fn csplit_file(
                                 do_cleanup(&created_files, config);
                                 return Err(msg);
                             }
-                            let chunk_lines = &lines[current_line..end];
+                            let is_empty = current_line >= end;
                             let filename = output_filename(config, file_index);
-                            let bytes =
-                                write_chunk(chunk_lines, &filename, config).inspect_err(|_| {
-                                    do_cleanup(&created_files, config);
-                                })?;
-                            if !(config.elide_empty && chunk_lines.is_empty()) {
+                            let bytes = write_chunk_range(
+                                data,
+                                &offsets,
+                                current_line,
+                                end,
+                                &filename,
+                                config,
+                            )
+                            .inspect_err(|_| {
+                                do_cleanup(&created_files, config);
+                            })?;
+                            if !(config.elide_empty && is_empty) {
                                 created_files.push(filename);
                                 sizes.push(bytes);
                                 file_index += 1;
@@ -431,7 +501,8 @@ pub fn csplit_file(
                         }
                         Pattern::Regex { regex, offset } => {
                             if let Err(e) = apply_regex_pattern(
-                                &lines,
+                                data,
+                                &offsets,
                                 total_lines,
                                 regex,
                                 *offset,
@@ -450,7 +521,8 @@ pub fn csplit_file(
                         }
                         Pattern::SkipTo { regex, offset } => {
                             if let Err(e) = apply_regex_pattern(
-                                &lines,
+                                data,
+                                &offsets,
                                 total_lines,
                                 regex,
                                 *offset,
@@ -490,7 +562,8 @@ pub fn csplit_file(
                     match &prev_pat {
                         Pattern::Regex { regex, offset } => {
                             match apply_regex_pattern(
-                                &lines,
+                                data,
+                                &offsets,
                                 total_lines,
                                 regex,
                                 *offset,
@@ -513,7 +586,8 @@ pub fn csplit_file(
                         }
                         Pattern::SkipTo { regex, offset } => {
                             match apply_regex_pattern(
-                                &lines,
+                                data,
+                                &offsets,
                                 total_lines,
                                 regex,
                                 *offset,
@@ -544,23 +618,24 @@ pub fn csplit_file(
 
     // Write remaining lines as the final chunk
     if current_line < total_lines {
-        let chunk_lines = &lines[current_line..total_lines];
         let filename = output_filename(config, file_index);
 
-        let bytes = write_chunk(chunk_lines, &filename, config).inspect_err(|_| {
-            do_cleanup(&created_files, config);
-        })?;
+        let bytes = write_chunk_range(data, &offsets, current_line, total_lines, &filename, config)
+            .inspect_err(|_| {
+                do_cleanup(&created_files, config);
+            })?;
 
-        if !(config.elide_empty && chunk_lines.is_empty()) {
+        if !(config.elide_empty && current_line >= total_lines) {
             created_files.push(filename);
             sizes.push(bytes);
         }
     } else if !config.elide_empty {
         // Write an empty final file
         let filename = output_filename(config, file_index);
-        let bytes = write_chunk(&[], &filename, config).inspect_err(|_| {
-            do_cleanup(&created_files, config);
-        })?;
+        let bytes =
+            write_chunk_range(data, &offsets, 0, 0, &filename, config).inspect_err(|_| {
+                do_cleanup(&created_files, config);
+            })?;
         created_files.push(filename);
         sizes.push(bytes);
     }
@@ -589,23 +664,11 @@ pub fn csplit_from_path(
 ) -> Result<Vec<u64>, String> {
     let input = if path == "-" {
         let mut buf = String::new();
-        io::stdin()
-            .read_line(&mut buf)
+        io::Read::read_to_string(&mut io::stdin().lock(), &mut buf)
             .map_err(|e| format!("read error: {}", e))?;
-        // Read all remaining
-        let mut all = buf;
-        let mut line = String::new();
-        while io::stdin()
-            .read_line(&mut line)
-            .map_err(|e| format!("read error: {}", e))?
-            > 0
-        {
-            all.push_str(&line);
-            line.clear();
-        }
-        all
+        buf
     } else {
-        fs::read_to_string(path).map_err(|e| format!("cannot open '{}': {}", path, e))?
+        std::fs::read_to_string(path).map_err(|e| format!("cannot open '{}': {}", path, e))?
     };
 
     csplit_file(&input, patterns, config)
