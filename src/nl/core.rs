@@ -299,8 +299,8 @@ fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> 
 }
 
 /// Streaming fast path for nl -b a: writes output in ~1MB batches directly to fd.
-/// Uses pre-formatted prefix buffer with in-place digit increment to avoid
-/// reformatting the number string for every single line.
+/// Uses pre-formatted prefix in a stack-allocated buffer with in-place digit
+/// increment to avoid reformatting the number string for every single line.
 #[cfg(unix)]
 fn nl_number_all_stream(
     data: &[u8],
@@ -316,50 +316,59 @@ fn nl_number_all_stream(
     let mut num = *line_number;
     let mut pos: usize = 0;
 
-    // Pre-allocated output buffer
     let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
 
-    // Pre-format the number prefix (number + separator) for fast increment.
-    // prefix_buf holds: [pad][number][separator]
-    let mut prefix_buf: Vec<u8> = Vec::with_capacity(width + sep.len() + 22);
+    // Use fixed-size array for prefix (avoid heap indirection)
+    let mut prefix_buf = [0u8; 32];
     let mut prefix_len: usize;
+    let mut num_end: usize;
 
     // Format initial prefix
     {
         let mut num_buf = itoa::Buffer::new();
         let num_str = num_buf.format(num);
         let pad = width.saturating_sub(num_str.len());
-        let pad_char = match fmt {
-            NumberFormat::Rz => b'0',
-            _ => b' ',
-        };
+        let mut wp = 0;
         match fmt {
-            NumberFormat::Rn | NumberFormat::Rz => {
-                prefix_buf.resize(pad, pad_char);
-                prefix_buf.extend_from_slice(num_str.as_bytes());
+            NumberFormat::Rn => {
+                for _ in 0..pad {
+                    prefix_buf[wp] = b' ';
+                    wp += 1;
+                }
+                prefix_buf[wp..wp + num_str.len()].copy_from_slice(num_str.as_bytes());
+                wp += num_str.len();
+            }
+            NumberFormat::Rz => {
+                for _ in 0..pad {
+                    prefix_buf[wp] = b'0';
+                    wp += 1;
+                }
+                prefix_buf[wp..wp + num_str.len()].copy_from_slice(num_str.as_bytes());
+                wp += num_str.len();
             }
             NumberFormat::Ln => {
-                prefix_buf.extend_from_slice(num_str.as_bytes());
-                prefix_buf.resize(prefix_buf.len() + pad, b' ');
+                prefix_buf[wp..wp + num_str.len()].copy_from_slice(num_str.as_bytes());
+                wp += num_str.len();
+                for _ in 0..pad {
+                    prefix_buf[wp] = b' ';
+                    wp += 1;
+                }
             }
         }
-        prefix_buf.extend_from_slice(sep);
-        prefix_len = prefix_buf.len();
+        num_end = wp;
+        prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
+        wp += sep.len();
+        prefix_len = wp;
     }
-
-    // The number digits end at `num_end` (exclusive) in prefix_buf
-    let mut num_end = prefix_len - sep.len();
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
 
-        // Flush buffer when near full
         if output.len() + line_len + prefix_len + 2 > BUF_SIZE {
             write_all_fd(fd, &output)?;
             output.clear();
         }
 
-        // Write prefix + line content + newline
         let needed = output.len() + prefix_len + line_len + 1;
         if needed > output.capacity() {
             output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
@@ -370,18 +379,15 @@ fn nl_number_all_stream(
             std::ptr::copy_nonoverlapping(prefix_buf.as_ptr(), dst, prefix_len);
             std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), line_len);
             *dst.add(prefix_len + line_len) = b'\n';
-            output.set_len(start + prefix_len + line_len + 1);
+            output.set_len(needed);
         }
 
         num += 1;
         pos = nl_pos + 1;
 
-        // Increment the number in prefix_buf in-place
-        // For Rn/Rz: digits are right-aligned, last digit at num_end-1
-        // For Ln: digits start at 0, last digit at (num_end - padding_start - 1)
+        // In-place digit increment
         match fmt {
             NumberFormat::Rn | NumberFormat::Rz => {
-                // Increment last digit, carry if needed
                 let mut idx = num_end - 1;
                 loop {
                     if prefix_buf[idx] < b'9' {
@@ -390,31 +396,31 @@ fn nl_number_all_stream(
                     }
                     prefix_buf[idx] = b'0';
                     if idx == 0 {
-                        // Overflow: reformat entire prefix
-                        prefix_buf.clear();
                         let mut nb = itoa::Buffer::new();
                         let ns = nb.format(num);
                         let p = width.saturating_sub(ns.len());
                         let pc = if fmt == NumberFormat::Rz { b'0' } else { b' ' };
-                        prefix_buf.resize(p, pc);
-                        prefix_buf.extend_from_slice(ns.as_bytes());
-                        prefix_buf.extend_from_slice(sep);
-                        prefix_len = prefix_buf.len();
-                        num_end = prefix_len - sep.len();
+                        let mut wp = 0;
+                        for _ in 0..p {
+                            prefix_buf[wp] = pc;
+                            wp += 1;
+                        }
+                        prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
+                        wp += ns.len();
+                        num_end = wp;
+                        prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
+                        prefix_len = wp + sep.len();
                         break;
                     }
                     idx -= 1;
                     let c = prefix_buf[idx];
                     if c == b' ' || c == b'0' {
-                        // Pad char becomes '1' (expanding number width)
                         prefix_buf[idx] = b'1';
                         break;
                     }
-                    // else: digit, carry continues
                 }
             }
             NumberFormat::Ln => {
-                // Left-justified: find the last digit (before padding spaces)
                 let mut last_digit = 0;
                 for j in 0..num_end {
                     if prefix_buf[j].is_ascii_digit() {
@@ -431,30 +437,36 @@ fn nl_number_all_stream(
                     }
                     prefix_buf[idx] = b'0';
                     if idx == 0 {
-                        // Need more digits: reformat
-                        prefix_buf.clear();
                         let mut nb = itoa::Buffer::new();
                         let ns = nb.format(num);
                         let p = width.saturating_sub(ns.len());
-                        prefix_buf.extend_from_slice(ns.as_bytes());
-                        prefix_buf.resize(prefix_buf.len() + p, b' ');
-                        prefix_buf.extend_from_slice(sep);
-                        prefix_len = prefix_buf.len();
-                        num_end = prefix_len - sep.len();
+                        let mut wp = 0;
+                        prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
+                        wp += ns.len();
+                        for _ in 0..p {
+                            prefix_buf[wp] = b' ';
+                            wp += 1;
+                        }
+                        num_end = wp;
+                        prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
+                        prefix_len = wp + sep.len();
                         break;
                     }
                     idx -= 1;
                     if prefix_buf[idx] == b' ' {
-                        // Expanding: reformat
-                        prefix_buf.clear();
                         let mut nb = itoa::Buffer::new();
                         let ns = nb.format(num);
                         let p = width.saturating_sub(ns.len());
-                        prefix_buf.extend_from_slice(ns.as_bytes());
-                        prefix_buf.resize(prefix_buf.len() + p, b' ');
-                        prefix_buf.extend_from_slice(sep);
-                        prefix_len = prefix_buf.len();
-                        num_end = prefix_len - sep.len();
+                        let mut wp = 0;
+                        prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
+                        wp += ns.len();
+                        for _ in 0..p {
+                            prefix_buf[wp] = b' ';
+                            wp += 1;
+                        }
+                        num_end = wp;
+                        prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
+                        prefix_len = wp + sep.len();
                         break;
                     }
                 }
@@ -480,7 +492,6 @@ fn nl_number_all_stream(
         num += 1;
     }
 
-    // Flush remaining data
     if !output.is_empty() {
         write_all_fd(fd, &output)?;
     }
