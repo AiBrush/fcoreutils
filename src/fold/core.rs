@@ -31,6 +31,11 @@ pub fn fold_bytes(
         }
     }
 
+    // Column mode with spaces: if no tabs, byte mode is equivalent (on glibc)
+    if break_at_spaces && memchr::memchr(b'\t', data).is_none() {
+        return fold_byte_fast_spaces(data, width, out);
+    }
+
     fold_column_mode_streaming(data, width, break_at_spaces, out)
 }
 
@@ -44,22 +49,18 @@ fn fold_width_zero(data: &[u8], out: &mut impl Write) -> std::io::Result<()> {
 /// Buffers output into ~1MB chunks to reduce write syscalls.
 fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
     let mut seg_start = 0usize;
-    let mut col = 0usize;
     let mut buf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let segment = &data[seg_start..nl_pos];
         let mut start = 0;
-        while start + width - col < segment.len() {
-            let chunk = width - col;
-            buf.extend_from_slice(&segment[start..start + chunk]);
+        while start + width < segment.len() {
+            buf.extend_from_slice(&segment[start..start + width]);
             buf.push(b'\n');
-            start += chunk;
-            col = 0;
+            start += width;
         }
         buf.extend_from_slice(&segment[start..]);
         buf.push(b'\n');
-        col = 0;
         seg_start = nl_pos + 1;
 
         if buf.len() >= 1024 * 1024 {
@@ -72,12 +73,10 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
     if seg_start < data.len() {
         let segment = &data[seg_start..];
         let mut start = 0;
-        while start + width - col < segment.len() {
-            let chunk = width - col;
-            buf.extend_from_slice(&segment[start..start + chunk]);
+        while start + width < segment.len() {
+            buf.extend_from_slice(&segment[start..start + width]);
             buf.push(b'\n');
-            start += chunk;
-            col = 0;
+            start += width;
         }
         if start < segment.len() {
             buf.extend_from_slice(&segment[start..]);
@@ -438,6 +437,26 @@ fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
         // High byte: count as 1 column, 1 byte (GNU glibc compat)
         (1, 1)
     }
+}
+
+/// Check if folding would produce identical output (all lines fit within width).
+/// Used by the binary for direct write-through optimization.
+pub fn fold_is_passthrough(data: &[u8], width: usize, count_bytes: bool) -> bool {
+    if width == 0 || data.is_empty() {
+        return data.is_empty();
+    }
+    // Column mode with tabs: can't easily determine passthrough
+    if !count_bytes && memchr::memchr(b'\t', data).is_some() {
+        return false;
+    }
+    let mut prev = 0;
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        if nl_pos - prev > width {
+            return false;
+        }
+        prev = nl_pos + 1;
+    }
+    data.len() - prev <= width
 }
 
 /// Recalculate column position by replaying a segment (handles tabs, CR, backspace).
