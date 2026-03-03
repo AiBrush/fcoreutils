@@ -41,26 +41,31 @@ fn fold_width_zero(data: &[u8], out: &mut impl Write) -> std::io::Result<()> {
 }
 
 /// Fast fold by byte count without -s flag.
-/// Streaming: writes folded output directly to the writer via a fixed buffer,
-/// avoiding large output Vec allocation. Uses memchr_iter for newline detection.
+/// Buffers output into ~1MB chunks to reduce write syscalls.
 fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
     let mut seg_start = 0usize;
     let mut col = 0usize;
+    let mut buf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let segment = &data[seg_start..nl_pos];
         let mut start = 0;
         while start + width - col < segment.len() {
             let chunk = width - col;
-            out.write_all(&segment[start..start + chunk])?;
-            out.write_all(b"\n")?;
+            buf.extend_from_slice(&segment[start..start + chunk]);
+            buf.push(b'\n');
             start += chunk;
             col = 0;
         }
-        out.write_all(&segment[start..])?;
-        out.write_all(b"\n")?;
+        buf.extend_from_slice(&segment[start..]);
+        buf.push(b'\n');
         col = 0;
         seg_start = nl_pos + 1;
+
+        if buf.len() >= 1024 * 1024 {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
     }
 
     // Handle final segment without trailing newline
@@ -69,14 +74,18 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
         let mut start = 0;
         while start + width - col < segment.len() {
             let chunk = width - col;
-            out.write_all(&segment[start..start + chunk])?;
-            out.write_all(b"\n")?;
+            buf.extend_from_slice(&segment[start..start + chunk]);
+            buf.push(b'\n');
             start += chunk;
             col = 0;
         }
         if start < segment.len() {
-            out.write_all(&segment[start..])?;
+            buf.extend_from_slice(&segment[start..]);
         }
+    }
+
+    if !buf.is_empty() {
+        out.write_all(&buf)?;
     }
 
     Ok(())
@@ -106,8 +115,8 @@ fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std
     Ok(())
 }
 
-/// Streaming fold by column count — writes directly to the output writer.
-/// Avoids the ~data.len() output Vec allocation by processing line-by-line.
+/// Streaming fold by column count — buffers output into ~1MB chunks.
+/// Reuses a single buffer for non-ASCII line processing.
 fn fold_column_mode_streaming(
     data: &[u8],
     width: usize,
@@ -119,22 +128,27 @@ fn fold_column_mode_streaming(
     }
 
     let mut pos = 0;
+    let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
+    let mut line_buf: Vec<u8> = Vec::with_capacity(4096);
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_data = &data[pos..nl_pos];
 
         if line_data.len() <= width {
-            // Short line: no wrapping needed
-            out.write_all(line_data)?;
+            outbuf.extend_from_slice(line_data);
         } else if is_ascii_simple(line_data) {
-            // Long ASCII-simple line: fold by bytes
-            fold_segment_bytes_streaming(out, line_data, width)?;
+            fold_segment_bytes_to_buf(line_data, width, &mut outbuf);
         } else {
-            let mut buf = Vec::with_capacity(line_data.len() + line_data.len() / width + 1);
-            fold_one_line_column(line_data, width, false, &mut buf);
-            out.write_all(&buf)?;
+            line_buf.clear();
+            fold_one_line_column(line_data, width, false, &mut line_buf);
+            outbuf.extend_from_slice(&line_buf);
         }
-        out.write_all(b"\n")?;
+        outbuf.push(b'\n');
+
+        if outbuf.len() >= 1024 * 1024 {
+            out.write_all(&outbuf)?;
+            outbuf.clear();
+        }
 
         pos = nl_pos + 1;
     }
@@ -143,36 +157,35 @@ fn fold_column_mode_streaming(
     if pos < data.len() {
         let line_data = &data[pos..];
         if line_data.len() <= width {
-            out.write_all(line_data)?;
+            outbuf.extend_from_slice(line_data);
         } else if is_ascii_simple(line_data) {
-            fold_segment_bytes_streaming(out, line_data, width)?;
+            fold_segment_bytes_to_buf(line_data, width, &mut outbuf);
         } else {
-            let mut buf = Vec::with_capacity(line_data.len() + line_data.len() / width + 1);
-            fold_one_line_column(line_data, width, false, &mut buf);
-            out.write_all(&buf)?;
+            line_buf.clear();
+            fold_one_line_column(line_data, width, false, &mut line_buf);
+            outbuf.extend_from_slice(&line_buf);
         }
+    }
+
+    if !outbuf.is_empty() {
+        out.write_all(&outbuf)?;
     }
 
     Ok(())
 }
 
-/// Streaming fold of a byte segment — writes directly to writer.
+/// Fold a byte segment into a buffer (no streaming writes).
 #[inline]
-fn fold_segment_bytes_streaming(
-    out: &mut impl Write,
-    segment: &[u8],
-    width: usize,
-) -> std::io::Result<()> {
+fn fold_segment_bytes_to_buf(segment: &[u8], width: usize, buf: &mut Vec<u8>) {
     let mut start = 0;
     while start + width < segment.len() {
-        out.write_all(&segment[start..start + width])?;
-        out.write_all(b"\n")?;
+        buf.extend_from_slice(&segment[start..start + width]);
+        buf.push(b'\n');
         start += width;
     }
     if start < segment.len() {
-        out.write_all(&segment[start..])?;
+        buf.extend_from_slice(&segment[start..]);
     }
-    Ok(())
 }
 
 /// Streaming fold of a byte segment with -s (break at spaces).

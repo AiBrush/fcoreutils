@@ -1,10 +1,10 @@
 use memchr::memchr_iter;
 use std::io::{self, BufRead, IoSlice, Write};
 
-/// Minimum file size for parallel processing (8MB).
+/// Minimum file size for parallel processing (4MB).
 /// Files above this threshold use rayon parallel chunked processing.
-/// 8MB balances the split_for_scope scan overhead against parallel benefits.
-const PARALLEL_THRESHOLD: usize = 8 * 1024 * 1024;
+/// 4MB balances rayon init overhead against parallel benefits on multi-core.
+const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
@@ -329,7 +329,7 @@ fn multi_select_chunk(
     buf.reserve(data.len());
     let base = data.as_ptr();
     let mut start = 0;
-    let max_delims = max_field.min(64);
+    let max_delims = max_field.min(128);
 
     for end_pos in memchr_iter(line_delim, data) {
         let line = unsafe { std::slice::from_raw_parts(base.add(start), end_pos - start) };
@@ -372,7 +372,7 @@ fn multi_select_line_fast(
     let base = line.as_ptr();
 
     // Collect delimiter positions up to max_delims (early exit).
-    let mut delim_pos = [0usize; 64];
+    let mut delim_pos = [0usize; 128];
     let mut num_delims: usize = 0;
 
     for pos in memchr_iter(delim, line) {
@@ -3212,7 +3212,7 @@ fn cut_fields_inplace_general(
     }
 
     let max_field = ranges.last().map_or(0, |r| r.end);
-    let max_delims = max_field.min(64);
+    let max_delims = max_field.min(128);
     let mut wp: usize = 0;
     let mut rp: usize = 0;
 
@@ -3223,7 +3223,7 @@ fn cut_fields_inplace_general(
         let line_len = line_end - rp;
 
         // Collect delimiter positions (relative to line start)
-        let mut delim_pos = [0usize; 64];
+        let mut delim_pos = [0usize; 128];
         let mut num_delims: usize = 0;
 
         for pos in memchr_iter(delim, &data[rp..line_end]) {

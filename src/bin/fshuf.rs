@@ -383,7 +383,7 @@ fn main() {
     let stdout = io::stdout();
     let mut out: Box<dyn Write> = if let Some(ref outfile) = output_file {
         match fs::File::create(outfile) {
-            Ok(f) => Box::new(io::BufWriter::new(f)),
+            Ok(f) => Box::new(io::BufWriter::with_capacity(1024 * 1024, f)),
             Err(e) => {
                 eprintln!(
                     "{}: {}: {}",
@@ -395,7 +395,7 @@ fn main() {
             }
         }
     } else {
-        Box::new(io::BufWriter::new(stdout.lock()))
+        Box::new(io::BufWriter::with_capacity(1024 * 1024, stdout.lock()))
     };
 
     let delimiter = if zero_terminated { b'\0' } else { b'\n' };
@@ -481,10 +481,19 @@ fn run_range_shuffle(
         if count == 0 || range_size == 0 {
             return;
         }
-        for _ in 0..count {
+        let batch_size = count.min(8192);
+        let mut buf = Vec::with_capacity(batch_size * 12);
+        for i in 0..count {
             let val = lo + rng.gen_max(range_size - 1);
-            let _ = out.write_all(ibuf.format(val).as_bytes());
-            let _ = out.write_all(&[delimiter]);
+            buf.extend_from_slice(ibuf.format(val).as_bytes());
+            buf.push(delimiter);
+            if (i + 1) % batch_size == 0 {
+                let _ = out.write_all(&buf);
+                buf.clear();
+            }
+        }
+        if !buf.is_empty() {
+            let _ = out.write_all(&buf);
         }
         return;
     }
@@ -511,18 +520,24 @@ fn run_range_shuffle(
                 result.push(val);
             }
         }
+        // Batch output into single buffer
+        let mut buf = Vec::with_capacity(count * 8);
         for val in result {
-            let _ = out.write_all(ibuf.format(val).as_bytes());
-            let _ = out.write_all(&[delimiter]);
+            buf.extend_from_slice(ibuf.format(val).as_bytes());
+            buf.push(delimiter);
         }
+        let _ = out.write_all(&buf);
     } else {
         // Dense path: generate all values and Fisher-Yates shuffle
         let mut values: Vec<u64> = (lo..=hi).collect();
         shuffle(&mut values, rng);
+        // Batch output into single buffer
+        let mut buf = Vec::with_capacity(count * 8);
         for &val in values.iter().take(count) {
-            let _ = out.write_all(ibuf.format(val).as_bytes());
-            let _ = out.write_all(&[delimiter]);
+            buf.extend_from_slice(ibuf.format(val).as_bytes());
+            buf.push(delimiter);
         }
+        let _ = out.write_all(&buf);
     }
 }
 
@@ -538,16 +553,15 @@ fn run_file_shuffle(
     let data = read_file_data(filename);
     let sep = if zero_terminated { 0u8 } else { b'\n' };
 
-    // Build index of line start/end offsets — no per-line allocation
-    let mut offsets: Vec<(usize, usize)> = Vec::new();
+    // Build index of line start/end offsets using SIMD memchr scan
+    let estimated_lines = data.len() / 40 + 64;
+    let mut offsets: Vec<(usize, usize)> = Vec::with_capacity(estimated_lines);
     let mut start = 0;
-    for (i, &b) in data.iter().enumerate() {
-        if b == sep {
-            if i > start {
-                offsets.push((start, i));
-            }
-            start = i + 1;
+    for pos in memchr::memchr_iter(sep, &data) {
+        if pos > start {
+            offsets.push((start, pos));
         }
+        start = pos + 1;
     }
     if start < data.len() {
         offsets.push((start, data.len()));
@@ -566,32 +580,46 @@ fn run_file_shuffle(
             eprintln!("{}: no lines to repeat", TOOL_NAME);
             process::exit(1);
         }
-        for _ in 0..count {
+        // Batch output into contiguous buffer to reduce write syscalls
+        let batch_size = count.min(8192);
+        let mut buf = Vec::with_capacity(batch_size * 80);
+        for i in 0..count {
             let idx = rng.gen_range(offsets.len());
             let (s, e) = offsets[idx];
-            let _ = out.write_all(&data[s..e]);
-            let _ = out.write_all(&[delimiter]);
+            buf.extend_from_slice(&data[s..e]);
+            buf.push(delimiter);
+            if (i + 1) % batch_size == 0 {
+                let _ = out.write_all(&buf);
+                buf.clear();
+            }
+        }
+        if !buf.is_empty() {
+            let _ = out.write_all(&buf);
         }
     } else {
         // Shuffle indices (cheap u64 swaps) instead of strings
         shuffle(&mut offsets, rng);
         let count = head_count.unwrap_or(offsets.len()).min(offsets.len());
+        // Build contiguous output buffer: single write_all instead of 2*count calls
+        let total_size: usize = offsets.iter().take(count).map(|&(s, e)| e - s + 1).sum();
+        let mut buf = Vec::with_capacity(total_size);
         for &(s, e) in offsets.iter().take(count) {
-            let _ = out.write_all(&data[s..e]);
-            let _ = out.write_all(&[delimiter]);
+            buf.extend_from_slice(&data[s..e]);
+            buf.push(delimiter);
         }
+        let _ = out.write_all(&buf);
     }
 }
 
-fn read_file_data(filename: Option<&str>) -> Vec<u8> {
+fn read_file_data(filename: Option<&str>) -> coreutils_rs::common::io::FileData {
     match filename {
         Some("-") | None => {
             let mut buf = Vec::new();
             io::stdin().lock().read_to_end(&mut buf).unwrap_or(0);
-            buf
+            coreutils_rs::common::io::FileData::Owned(buf)
         }
-        Some(file) => match fs::read(file) {
-            Ok(c) => c,
+        Some(file) => match coreutils_rs::common::io::read_file(std::path::Path::new(file)) {
+            Ok(data) => data,
             Err(e) => {
                 eprintln!(
                     "{}: {}: {}",

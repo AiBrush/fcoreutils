@@ -194,9 +194,9 @@ fn tac_bytes_before_contiguous(data: &[u8], sep: u8, out: &mut impl Write) -> io
     Ok(())
 }
 
-/// After-separator mode for small files: forward SIMD scan + direct writes.
+/// After-separator mode for small files: forward SIMD scan + contiguous buffer.
 /// Single forward memchr_iter scan replaces N backward memrchr calls.
-/// Writes record slices directly to the BufWriter (no intermediate buffer).
+/// Builds reversed output in a single contiguous buffer, then writes once.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -212,25 +212,26 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
         return out.write_all(data);
     }
 
-    // Write records in reverse order directly from the source data
+    // Build reversed output in a contiguous buffer (single write_all at end)
+    let mut buf = Vec::with_capacity(data.len());
     let mut end_pos = data.len();
     for &pos in positions.iter().rev() {
         let rec_start = pos + 1;
         if rec_start < end_pos {
-            out.write_all(&data[rec_start..end_pos])?;
+            buf.extend_from_slice(&data[rec_start..end_pos]);
         }
         end_pos = rec_start;
     }
     if end_pos > 0 {
-        out.write_all(&data[..end_pos])?;
+        buf.extend_from_slice(&data[..end_pos]);
     }
 
-    Ok(())
+    out.write_all(&buf)
 }
 
-/// Before-separator mode for small files: forward SIMD scan + direct writes.
+/// Before-separator mode for small files: forward SIMD scan + contiguous buffer.
 /// Single forward memchr_iter scan replaces N backward memrchr calls.
-/// Writes record slices directly to the BufWriter (no intermediate buffer).
+/// Builds reversed output in a single contiguous buffer, then writes once.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -246,19 +247,20 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
         return out.write_all(data);
     }
 
-    // Write records in reverse order directly from the source data (before mode)
+    // Build reversed output in a contiguous buffer (before mode)
+    let mut buf = Vec::with_capacity(data.len());
     let mut end_pos = data.len();
     for &pos in positions.iter().rev() {
         if pos < end_pos {
-            out.write_all(&data[pos..end_pos])?;
+            buf.extend_from_slice(&data[pos..end_pos]);
         }
         end_pos = pos;
     }
     if end_pos > 0 {
-        out.write_all(&data[..end_pos])?;
+        buf.extend_from_slice(&data[..end_pos]);
     }
 
-    Ok(())
+    out.write_all(&buf)
 }
 
 /// Reverse records using a multi-byte string separator.

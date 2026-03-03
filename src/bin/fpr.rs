@@ -351,7 +351,7 @@ fn main() {
     };
 
     let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(64 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
     let mut had_error = false;
 
     if cli.config.merge {

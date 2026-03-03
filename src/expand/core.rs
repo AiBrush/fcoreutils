@@ -709,6 +709,32 @@ fn unexpand_regular_fast(
     Ok(())
 }
 
+/// Check if a line needs unexpand processing (has tab or consecutive spaces).
+/// Uses a single SIMD scan with memchr2 to find the first space or tab,
+/// then checks if it's a tab (always needs processing) or if the next byte
+/// is also a space (consecutive spaces need processing).
+#[inline]
+fn needs_unexpand(line: &[u8]) -> bool {
+    let mut offset = 0;
+    while offset < line.len() {
+        match memchr::memchr2(b' ', b'\t', &line[offset..]) {
+            Some(pos) => {
+                let abs = offset + pos;
+                if line[abs] == b'\t' {
+                    return true;
+                }
+                // It's a space — check if followed by another space
+                if abs + 1 < line.len() && line[abs + 1] == b' ' {
+                    return true;
+                }
+                offset = abs + 1;
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
 /// Fast unexpand -a for regular tab stops without backspaces.
 /// Buffers output into a Vec to avoid per-call write_all overhead.
 /// Handles single spaces efficiently (most common case: no tab conversion needed).
@@ -727,10 +753,9 @@ fn unexpand_regular_fast_all(
         let line = &data[pos..nl_pos];
 
         // Fast check: skip lines with no tabs and no consecutive spaces.
-        // Two separate SIMD scans are needed: memchr2 can't work because
-        // a space appearing before a tab would cause us to miss the tab.
-        let needs_processing =
-            memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some();
+        // Single pass: scan for tab OR space using memchr2 to find the first
+        // blank, then check if it needs processing (tab or double space).
+        let needs_processing = needs_unexpand(line);
 
         if !needs_processing {
             // No conversion needed: copy line as-is
@@ -741,8 +766,8 @@ fn unexpand_regular_fast_all(
         }
         output.push(b'\n');
 
-        // Flush periodically
-        if output.len() >= 256 * 1024 {
+        // Flush periodically (1MB for fewer syscalls)
+        if output.len() >= 1024 * 1024 {
             out.write_all(&output)?;
             output.clear();
         }
@@ -752,9 +777,7 @@ fn unexpand_regular_fast_all(
     // Handle final line without trailing newline
     if pos < data.len() {
         let line = &data[pos..];
-        let needs_processing =
-            memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some();
-        if !needs_processing {
+        if !needs_unexpand(line) {
             output.extend_from_slice(line);
         } else {
             unexpand_line_all(line, tab_size, &mut output);
