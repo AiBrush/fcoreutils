@@ -256,84 +256,161 @@ fn fold_segment_bytes_spaces_streaming(
 }
 
 /// Streaming fold column mode with -s (break at spaces).
+/// Uses buffered output to minimize write syscalls.
 fn fold_column_mode_spaces_streaming(
     data: &[u8],
     width: usize,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
     let mut pos = 0;
+    let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
 
-    while pos < data.len() {
-        let remaining = &data[pos..];
-        let line_end = memchr::memchr(b'\n', remaining).map(|p| pos + p);
-        let line_data = match line_end {
-            Some(nl) => &data[pos..nl],
-            None => &data[pos..],
-        };
-
-        if line_data.len() <= width {
-            if is_ascii_simple(line_data) {
-                out.write_all(line_data)?;
-            } else {
-                let mut buf = Vec::new();
-                fold_one_line_column(line_data, width, true, &mut buf);
-                out.write_all(&buf)?;
-            }
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line = &data[pos..nl_pos];
+        // Short-circuit: line fits in width AND has no tabs → no folding needed
+        if line.len() <= width && memchr::memchr(b'\t', line).is_none() {
+            outbuf.extend_from_slice(line);
         } else {
-            fold_line_spaces_checked_streaming(line_data, width, out)?;
+            fold_column_spaces_fast(line, width, &mut outbuf);
+        }
+        outbuf.push(b'\n');
+
+        if outbuf.len() >= 1024 * 1024 {
+            out.write_all(&outbuf)?;
+            outbuf.clear();
         }
 
-        if let Some(nl) = line_end {
-            out.write_all(b"\n")?;
-            pos = nl + 1;
+        pos = nl_pos + 1;
+    }
+
+    // Handle final line without trailing newline
+    if pos < data.len() {
+        let line = &data[pos..];
+        if line.len() <= width && memchr::memchr(b'\t', line).is_none() {
+            outbuf.extend_from_slice(line);
         } else {
-            break;
+            fold_column_spaces_fast(line, width, &mut outbuf);
         }
+    }
+
+    if !outbuf.is_empty() {
+        out.write_all(&outbuf)?;
     }
 
     Ok(())
 }
 
-/// Streaming fold with -s, checking each chunk for non-simple bytes.
-fn fold_line_spaces_checked_streaming(
-    line: &[u8],
-    width: usize,
-    out: &mut impl Write,
-) -> std::io::Result<()> {
-    let mut start = 0;
-    while start + width < line.len() {
-        let chunk = &line[start..start + width];
-        if !is_ascii_simple(chunk) {
-            let mut buf = Vec::new();
-            fold_one_line_column(&line[start..], width, true, &mut buf);
-            out.write_all(&buf)?;
-            return Ok(());
-        }
-        match memchr::memrchr(b' ', chunk) {
-            Some(sp_offset) => {
-                let break_at = start + sp_offset + 1;
-                out.write_all(&line[start..break_at])?;
-                out.write_all(b"\n")?;
-                start = break_at;
+/// Fast column-mode fold for a single line with -s (break at spaces).
+/// Uses memchr2 to find tabs and spaces in bulk, processing runs of regular
+/// bytes without per-byte branching. Matches GNU fold's exact algorithm:
+/// - `column > width` triggers break (strictly greater)
+/// - Break at last blank: output INCLUDING the blank, remainder starts after it
+/// - After break: recalculate column from remaining data, re-process current char
+/// - All bytes width 1 except tab (next tab stop), BS (col-1), CR (col=0)
+#[inline]
+fn fold_column_spaces_fast(line: &[u8], width: usize, outbuf: &mut Vec<u8>) {
+    let mut col: usize = 0;
+    let mut seg_start: usize = 0;
+    let mut last_space_after: usize = 0;
+    let mut has_space = false;
+    let mut i: usize = 0;
+
+    while i < line.len() {
+        let b = line[i];
+        if b == b'\t' {
+            let new_col = ((col >> 3) + 1) << 3;
+            if new_col > width && col > 0 {
+                // Tab exceeds width — break
+                if has_space {
+                    outbuf.extend_from_slice(&line[seg_start..last_space_after]);
+                    outbuf.push(b'\n');
+                    seg_start = last_space_after;
+                    col = recalc_column(&line[seg_start..i]);
+                    has_space = false;
+                    continue; // re-evaluate tab
+                }
+                outbuf.extend_from_slice(&line[seg_start..i]);
+                outbuf.push(b'\n');
+                seg_start = i;
+                col = 0;
+                continue; // re-evaluate tab with col=0
             }
-            None => {
-                out.write_all(&line[start..start + width])?;
-                out.write_all(b"\n")?;
-                start += width;
+            // Tab also counts as a breakable whitespace for -s (GNU compat)
+            has_space = true;
+            last_space_after = i + 1;
+            col = new_col;
+            i += 1;
+        } else if b == b' ' {
+            col += 1;
+            if col > width {
+                if has_space {
+                    outbuf.extend_from_slice(&line[seg_start..last_space_after]);
+                    outbuf.push(b'\n');
+                    seg_start = last_space_after;
+                    col = recalc_column(&line[seg_start..i]);
+                    has_space = false;
+                    continue; // re-evaluate this space
+                }
+                // No prior blank — break before this space (GNU: output buffer, rescan)
+                outbuf.extend_from_slice(&line[seg_start..i]);
+                outbuf.push(b'\n');
+                seg_start = i;
+                col = 1; // space starts the new line with width 1
+                has_space = true;
+                last_space_after = i + 1;
+                i += 1;
+                continue;
             }
-        }
-    }
-    if start < line.len() {
-        let tail = &line[start..];
-        if is_ascii_simple(tail) {
-            out.write_all(tail)?;
+            has_space = true;
+            last_space_after = i + 1;
+            i += 1;
         } else {
-            let mut buf = Vec::new();
-            fold_one_line_column(tail, width, true, &mut buf);
-            out.write_all(&buf)?;
+            // Find next tab or space using SIMD memchr2
+            let run_end = match memchr::memchr2(b'\t', b' ', &line[i + 1..]) {
+                Some(off) => i + 1 + off,
+                None => line.len(),
+            };
+
+            // Process run of regular bytes: each has column width 1
+            let run_remaining = run_end - i;
+            if col + run_remaining <= width {
+                // Entire run fits
+                col += run_remaining;
+                i = run_end;
+            } else {
+                // Run exceeds width — need to break
+                let mut j = i;
+                loop {
+                    let rem = run_end - j;
+                    if col + rem <= width {
+                        col += rem;
+                        i = run_end;
+                        break;
+                    }
+                    if has_space {
+                        // Break at last blank (includes the blank)
+                        outbuf.extend_from_slice(&line[seg_start..last_space_after]);
+                        outbuf.push(b'\n');
+                        seg_start = last_space_after;
+                        col = j - seg_start; // regular bytes only, each width 1
+                        has_space = false;
+                        continue; // re-check with new col
+                    }
+                    // No blank — hard break at width boundary
+                    let fit = width - col;
+                    outbuf.extend_from_slice(&line[seg_start..j + fit]);
+                    outbuf.push(b'\n');
+                    j += fit;
+                    seg_start = j;
+                    col = 0;
+                }
+            }
         }
     }
-    Ok(())
+
+    if seg_start < line.len() {
+        outbuf.extend_from_slice(&line[seg_start..]);
+    }
 }
 
 /// Check if data is pure ASCII with no tabs, backspaces, CR, or control chars.
