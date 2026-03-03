@@ -16,7 +16,7 @@ use std::process;
 use std::time::SystemTime;
 
 #[cfg(unix)]
-use coreutils_rs::common::io::{FileData, read_file_direct, read_stdin};
+use coreutils_rs::common::io::{FileData, read_file, read_stdin};
 #[cfg(unix)]
 use coreutils_rs::common::{io_error_msg, reset_sigpipe};
 #[cfg(unix)]
@@ -409,7 +409,7 @@ fn main() {
                     }
                 }
             } else {
-                match read_file_direct(Path::new(filename)) {
+                match read_file(Path::new(filename)) {
                     Ok(d) => d,
                     Err(e) => {
                         if !cli.config.no_file_warnings {

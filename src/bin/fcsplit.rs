@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{FileData, read_file_direct, read_stdin};
+use coreutils_rs::common::io::{FileData, read_file, read_stdin};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::csplit::{self, CsplitConfig, Pattern};
 
@@ -224,7 +224,7 @@ fn main() {
             }
         }
     } else {
-        match read_file_direct(Path::new(&cli.file)) {
+        match read_file(Path::new(&cli.file)) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("csplit: cannot open '{}': {}", cli.file, io_error_msg(&e));

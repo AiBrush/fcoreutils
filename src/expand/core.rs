@@ -726,11 +726,11 @@ fn unexpand_regular_fast_all(
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line = &data[pos..nl_pos];
 
-        // Fast check: single SIMD scan for tab or space; if space, peek for double-space.
-        let needs_processing = match memchr::memchr2(b'\t', b' ', line) {
-            None => false,
-            Some(i) => line[i] == b'\t' || line.get(i + 1) == Some(&b' '),
-        };
+        // Fast check: skip lines with no tabs and no consecutive spaces.
+        // Two separate SIMD scans are needed: memchr2 can't work because
+        // a space appearing before a tab would cause us to miss the tab.
+        let needs_processing =
+            memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some();
 
         if !needs_processing {
             // No conversion needed: copy line as-is
@@ -752,10 +752,8 @@ fn unexpand_regular_fast_all(
     // Handle final line without trailing newline
     if pos < data.len() {
         let line = &data[pos..];
-        let needs_processing = match memchr::memchr2(b'\t', b' ', line) {
-            None => false,
-            Some(i) => line[i] == b'\t' || line.get(i + 1) == Some(&b' '),
-        };
+        let needs_processing =
+            memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some();
         if !needs_processing {
             output.extend_from_slice(line);
         } else {

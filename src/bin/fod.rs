@@ -365,8 +365,7 @@ fn main() {
             process::exit(1);
         }
     } else if operands.len() == 1 && operands[0] != "-" {
-        // Single file: read_file_direct avoids mmap page fault overhead
-        match coreutils_rs::common::io::read_file_direct(std::path::Path::new(&operands[0])) {
+        match coreutils_rs::common::io::read_file(std::path::Path::new(&operands[0])) {
             Ok(data) => {
                 if let Err(e) = od_process(data.as_ref(), &mut out, &config) {
                     eprintln!("{}: {}", TOOL_NAME, e);
