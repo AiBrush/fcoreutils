@@ -977,16 +977,13 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
                     {
                         // Use mmap for zero-copy access — avoids heap allocation + read copy.
                         if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&file) } {
-                            let len = mmap.len();
-                            #[cfg(target_os = "linux")]
-                            {
-                                if len >= 2 * 1024 * 1024 {
-                                    let _ = mmap.advise(memmap2::Advice::HugePage);
-                                }
-                            }
                             let _ = mmap.advise(memmap2::Advice::Sequential);
                             #[cfg(target_os = "linux")]
                             {
+                                let len = mmap.len();
+                                if len >= 2 * 1024 * 1024 {
+                                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                                }
                                 if len >= 4 * 1024 * 1024 {
                                     if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
                                         let _ = mmap.advise(memmap2::Advice::WillNeed);
@@ -1035,16 +1032,13 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
                     if meta.file_type().is_file() && meta.len() <= FAST_PATH_LIMIT && meta.len() > 0
                     {
                         if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&file) } {
-                            let len = mmap.len();
-                            #[cfg(target_os = "linux")]
-                            {
-                                if len >= 2 * 1024 * 1024 {
-                                    let _ = mmap.advise(memmap2::Advice::HugePage);
-                                }
-                            }
                             let _ = mmap.advise(memmap2::Advice::Sequential);
                             #[cfg(target_os = "linux")]
                             {
+                                let len = mmap.len();
+                                if len >= 2 * 1024 * 1024 {
+                                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                                }
                                 if len >= 4 * 1024 * 1024 {
                                     if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
                                         let _ = mmap.advise(memmap2::Advice::WillNeed);
@@ -1075,16 +1069,13 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
                     if meta.file_type().is_file() && meta.len() <= FAST_PATH_LIMIT && meta.len() > 0
                     {
                         if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&file) } {
-                            let len = mmap.len();
-                            #[cfg(target_os = "linux")]
-                            {
-                                if len >= 2 * 1024 * 1024 {
-                                    let _ = mmap.advise(memmap2::Advice::HugePage);
-                                }
-                            }
                             let _ = mmap.advise(memmap2::Advice::Sequential);
                             #[cfg(target_os = "linux")]
                             {
+                                let len = mmap.len();
+                                if len >= 2 * 1024 * 1024 {
+                                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                                }
                                 if len >= 4 * 1024 * 1024 {
                                     if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
                                         let _ = mmap.advise(memmap2::Advice::WillNeed);
