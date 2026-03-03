@@ -6,7 +6,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{FileData, read_file, read_stdin};
+use coreutils_rs::common::io::{FileData, read_file_direct, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::fold;
 
@@ -244,7 +244,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file(Path::new(filename)) {
+            match read_file_direct(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("fold: {}: {}", filename, io_error_msg(&e));
@@ -287,7 +287,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file(Path::new(filename)) {
+            match read_file_direct(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("fold: {}: {}", filename, io_error_msg(&e));

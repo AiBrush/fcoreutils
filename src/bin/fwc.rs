@@ -10,7 +10,7 @@ use clap::Parser;
 use memchr::memchr_iter;
 use rayon::prelude::*;
 
-use coreutils_rs::common::io::{FileData, file_size, read_file, read_stdin};
+use coreutils_rs::common::io::{FileData, file_size, read_file_direct, read_stdin};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::wc;
 use memmap2::MmapOptions;
@@ -312,7 +312,7 @@ fn main() {
             }
         }
 
-        // Read file data (zero-copy mmap for large files)
+        // Read file data
         // For stdin: try mmap if it's a regular file redirect (< file)
         let data: FileData = if filename == "-" {
             #[cfg(unix)]
@@ -339,7 +339,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file(Path::new(filename)) {
+            match read_file_direct(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("wc: {}: {}", filename, io_error_msg(&e));
