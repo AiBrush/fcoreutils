@@ -115,8 +115,7 @@ fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std
     Ok(())
 }
 
-/// Streaming fold by column count — buffers output into ~1MB chunks.
-/// Reuses a single buffer for non-ASCII line processing.
+/// Streaming fold by column count — per-line dispatch with memchr.
 fn fold_column_mode_streaming(
     data: &[u8],
     width: usize,
@@ -129,19 +128,14 @@ fn fold_column_mode_streaming(
 
     let mut pos = 0;
     let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
-    let mut line_buf: Vec<u8> = Vec::with_capacity(4096);
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
-        let line_data = &data[pos..nl_pos];
-
-        if line_data.len() <= width {
-            outbuf.extend_from_slice(line_data);
-        } else if is_ascii_simple(line_data) {
-            fold_segment_bytes_to_buf(line_data, width, &mut outbuf);
+        let line = &data[pos..nl_pos];
+        // Short-circuit: no tabs AND byte length fits → no folding needed
+        if line.len() <= width && memchr::memchr(b'\t', line).is_none() {
+            outbuf.extend_from_slice(line);
         } else {
-            line_buf.clear();
-            fold_one_line_column(line_data, width, false, &mut line_buf);
-            outbuf.extend_from_slice(&line_buf);
+            fold_column_tab_fast(line, width, &mut outbuf);
         }
         outbuf.push(b'\n');
 
@@ -155,15 +149,11 @@ fn fold_column_mode_streaming(
 
     // Handle final line without trailing newline
     if pos < data.len() {
-        let line_data = &data[pos..];
-        if line_data.len() <= width {
-            outbuf.extend_from_slice(line_data);
-        } else if is_ascii_simple(line_data) {
-            fold_segment_bytes_to_buf(line_data, width, &mut outbuf);
+        let line = &data[pos..];
+        if line.len() <= width && memchr::memchr(b'\t', line).is_none() {
+            outbuf.extend_from_slice(line);
         } else {
-            line_buf.clear();
-            fold_one_line_column(line_data, width, false, &mut line_buf);
-            outbuf.extend_from_slice(&line_buf);
+            fold_column_tab_fast(line, width, &mut outbuf);
         }
     }
 
@@ -174,17 +164,60 @@ fn fold_column_mode_streaming(
     Ok(())
 }
 
-/// Fold a byte segment into a buffer (no streaming writes).
+/// Fast column-mode fold for a single line (no newlines).
+/// All non-tab bytes have column width 1 (matching GNU fold's adjust_column
+/// on glibc). Uses memchr to batch-process runs of non-tab bytes.
 #[inline]
-fn fold_segment_bytes_to_buf(segment: &[u8], width: usize, buf: &mut Vec<u8>) {
-    let mut start = 0;
-    while start + width < segment.len() {
-        buf.extend_from_slice(&segment[start..start + width]);
-        buf.push(b'\n');
-        start += width;
+fn fold_column_tab_fast(line: &[u8], width: usize, outbuf: &mut Vec<u8>) {
+    let mut col: usize = 0;
+    let mut seg_start: usize = 0;
+    let mut i: usize = 0;
+
+    while i < line.len() {
+        if line[i] == b'\t' {
+            let tab_col = ((col >> 3) + 1) << 3;
+            if tab_col > width && col > 0 {
+                // Tab would exceed width — break before it
+                outbuf.extend_from_slice(&line[seg_start..i]);
+                outbuf.push(b'\n');
+                seg_start = i;
+                col = 0;
+                continue; // Re-evaluate tab with col=0
+            }
+            col = tab_col;
+            i += 1;
+        } else {
+            // Find next tab or end-of-line using SIMD memchr
+            let run_end = match memchr::memchr(b'\t', &line[i + 1..]) {
+                Some(off) => i + 1 + off,
+                None => line.len(),
+            };
+
+            // Process run of non-tab bytes: each has column width 1
+            let run_len = run_end - i;
+            if col + run_len <= width {
+                // Entire run fits — advance in bulk
+                col += run_len;
+                i = run_end;
+            } else {
+                // Run exceeds width — emit chunks of `width - col` bytes
+                while col + (run_end - i) > width {
+                    let fit = width - col;
+                    outbuf.extend_from_slice(&line[seg_start..i + fit]);
+                    outbuf.push(b'\n');
+                    i += fit;
+                    seg_start = i;
+                    col = 0;
+                }
+                col += run_end - i;
+                i = run_end;
+            }
+        }
     }
-    if start < segment.len() {
-        buf.extend_from_slice(&segment[start..]);
+
+    // Flush remaining segment
+    if seg_start < line.len() {
+        outbuf.extend_from_slice(&line[seg_start..]);
     }
 }
 
