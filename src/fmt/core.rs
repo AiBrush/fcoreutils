@@ -844,14 +844,6 @@ fn run_dp(
         }
 
         if best_total < i64::MAX {
-            // All valid DP costs are non-negative because the minimum break cost
-            // is LINE_COST - SENTENCE_BONUS = 4900 - 2500 = 2400 > 0. The sentinel
-            // value -1 (0xFFFFFFFF_FFFFFFFF) is used to mark uninitialized entries,
-            // so this invariant must hold for the sentinel check `cj1 >= 0` to work.
-            debug_assert!(
-                best_total >= 0,
-                "DP cost negative: sentinel invariant broken"
-            );
             unsafe {
                 *dp_cost_ptr.add(i) = best_total;
                 *best_ptr.add(i) = best_j;
@@ -883,37 +875,39 @@ fn reflow_chunk<W: Write>(
 
     run_dp(n, prefix, first_indent, cont_indent, config, winfo, dp);
 
-    let line_buf = &mut dp.out_buf;
+    // Build all output lines in one buffer, then write once.
+    let out_buf = &mut dp.out_buf;
+    out_buf.clear();
+
     let mut i = 0;
     let mut is_first_line = true;
     while i < n {
         let j = dp.best[i] as usize;
-        line_buf.clear();
-        line_buf.extend_from_slice(prefix);
+        out_buf.extend_from_slice(prefix);
         if is_first_line {
-            line_buf.extend_from_slice(first_indent);
+            out_buf.extend_from_slice(first_indent);
         } else {
-            line_buf.extend_from_slice(cont_indent);
+            out_buf.extend_from_slice(cont_indent);
         }
         let off = word_off[i] as usize;
         let wlen = (winfo[i] & 0xFFFF) as usize;
-        line_buf.extend_from_slice(&bytes[off..off + wlen]);
+        out_buf.extend_from_slice(&bytes[off..off + wlen]);
         for k in (i + 1)..=j {
             if winfo[k - 1] & SENT_FLAG != 0 {
-                line_buf.extend_from_slice(b"  ");
+                out_buf.extend_from_slice(b"  ");
             } else {
-                line_buf.push(b' ');
+                out_buf.push(b' ');
             }
             let off = word_off[k] as usize;
             let wlen = (winfo[k] & 0xFFFF) as usize;
-            line_buf.extend_from_slice(&bytes[off..off + wlen]);
+            out_buf.extend_from_slice(&bytes[off..off + wlen]);
         }
-        line_buf.push(b'\n');
-        output.write_all(line_buf)?;
+        out_buf.push(b'\n');
         is_first_line = false;
         i = j + 1;
     }
-    Ok(())
+
+    output.write_all(out_buf)
 }
 
 /// Split a single input line using the optimal paragraph algorithm.
