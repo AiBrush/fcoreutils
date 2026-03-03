@@ -542,6 +542,111 @@ unsafe fn write_line_number_raw(dst: *mut u8, num: u64) -> usize {
     }
 }
 
+/// Streaming cat -n/-b from a raw fd. Reads in 4MB chunks, finds the last
+/// newline in each chunk to split on line boundaries, and processes complete
+/// lines via cat_number_all_fast or cat_number_nonblank_fast. Partial line
+/// data at the end of a chunk is carried to the next read.
+/// This avoids loading the entire file into memory — peak RSS is ~12MB
+/// (4MB read buf + ~8MB output buf) instead of file_size * 2.
+#[cfg(target_os = "linux")]
+fn cat_stream_numbered(
+    fd: i32,
+    line_num: &mut u64,
+    nonblank: bool,
+    out: &mut impl Write,
+) -> io::Result<bool> {
+    const READ_BUF: usize = 4 * 1024 * 1024;
+    let mut buf = vec![0u8; READ_BUF];
+    let mut carry: Vec<u8> = Vec::new();
+
+    loop {
+        let n = loop {
+            let ret = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if ret >= 0 {
+                break ret as usize;
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        };
+        if n == 0 {
+            // EOF — process any remaining carry data
+            if !carry.is_empty() {
+                if nonblank {
+                    cat_number_nonblank_fast(&carry, line_num, out)?;
+                } else {
+                    cat_number_all_fast(&carry, line_num, out)?;
+                }
+            }
+            return Ok(true);
+        }
+
+        let chunk = &buf[..n];
+
+        if carry.is_empty() {
+            // No carry — find last newline to split on line boundary
+            match memchr::memrchr(b'\n', chunk) {
+                Some(last_nl) => {
+                    let complete = &chunk[..last_nl + 1];
+                    if nonblank {
+                        cat_number_nonblank_fast(complete, line_num, out)?;
+                    } else {
+                        cat_number_all_fast(complete, line_num, out)?;
+                    }
+                    // Save partial line after last newline
+                    if last_nl + 1 < n {
+                        carry.extend_from_slice(&chunk[last_nl + 1..]);
+                    }
+                }
+                None => {
+                    // No newline in entire chunk — save as carry
+                    carry.extend_from_slice(chunk);
+                }
+            }
+        } else {
+            // Have carry data — prepend to this chunk's first line
+            match memchr::memchr(b'\n', chunk) {
+                Some(first_nl) => {
+                    // Complete the carried line
+                    carry.extend_from_slice(&chunk[..first_nl + 1]);
+                    if nonblank {
+                        cat_number_nonblank_fast(&carry, line_num, out)?;
+                    } else {
+                        cat_number_all_fast(&carry, line_num, out)?;
+                    }
+                    carry.clear();
+
+                    // Process remaining complete lines
+                    let rest = &chunk[first_nl + 1..];
+                    if !rest.is_empty() {
+                        match memchr::memrchr(b'\n', rest) {
+                            Some(last_nl) => {
+                                let complete = &rest[..last_nl + 1];
+                                if nonblank {
+                                    cat_number_nonblank_fast(complete, line_num, out)?;
+                                } else {
+                                    cat_number_all_fast(complete, line_num, out)?;
+                                }
+                                if last_nl + 1 < rest.len() {
+                                    carry.extend_from_slice(&rest[last_nl + 1..]);
+                                }
+                            }
+                            None => {
+                                carry.extend_from_slice(rest);
+                            }
+                        }
+                    }
+                }
+                None => {
+                    // No newline — append to carry
+                    carry.extend_from_slice(chunk);
+                }
+            }
+        }
+    }
+}
+
 /// Ultra-fast path for cat -n (number all lines, no other options).
 /// Uses pre-formatted numbers with raw buffer writes to minimize per-line overhead.
 /// Single pass through data with memchr_iter for batched SIMD newline scanning.
@@ -1001,6 +1106,81 @@ pub fn cat_file(
         }
 
         // Non-plain path: need directory check and same-file detection before processing
+        // On Linux, use fstat on opened fd to avoid redundant metadata calls, then
+        // stream cat -n/-b directly from fd for zero-copy I/O.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            match crate::common::io::open_noatime(path) {
+                Ok(file) => {
+                    let fd = file.as_raw_fd();
+                    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                    if unsafe { libc::fstat(fd, &mut stat) } == 0 {
+                        // Directory check
+                        if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                            eprintln!("{}: {}: Is a directory", tool_name, filename);
+                            return Ok(false);
+                        }
+                        // Same-file detection
+                        let mut stdout_stat: libc::stat = unsafe { std::mem::zeroed() };
+                        if unsafe { libc::fstat(1, &mut stdout_stat) } == 0
+                            && stat.st_dev == stdout_stat.st_dev
+                            && stat.st_ino == stdout_stat.st_ino
+                        {
+                            eprintln!("{}: {}: input file is output file", tool_name, filename);
+                            return Ok(false);
+                        }
+                    }
+
+                    // Streaming path for cat -n (number all lines only)
+                    if config.number
+                        && !config.number_nonblank
+                        && !config.show_ends
+                        && !config.show_tabs
+                        && !config.show_nonprinting
+                        && !config.squeeze_blank
+                        && !*pending_cr
+                    {
+                        unsafe {
+                            libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+                        }
+                        return cat_stream_numbered(fd, line_num, false, out);
+                    }
+
+                    // Streaming path for cat -b (number non-blank only)
+                    if config.number_nonblank
+                        && !config.number
+                        && !config.show_ends
+                        && !config.show_tabs
+                        && !config.show_nonprinting
+                        && !config.squeeze_blank
+                        && !*pending_cr
+                    {
+                        unsafe {
+                            libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+                        }
+                        return cat_stream_numbered(fd, line_num, true, out);
+                    }
+
+                    // Other options: read entire file via fd, then process
+                    let size = if unsafe { libc::fstat(fd, &mut stat) } == 0 && stat.st_size > 0 {
+                        stat.st_size as usize
+                    } else {
+                        0
+                    };
+                    let mut data = Vec::with_capacity(size);
+                    let mut reader = std::io::BufReader::new(&file);
+                    if reader.read_to_end(&mut data).is_ok() {
+                        cat_with_options(&data, config, line_num, pending_cr, out)?;
+                        return Ok(true);
+                    }
+                    // read failed, fall through to read_file
+                }
+                Err(_) => {} // open failed, fall through to read_file
+            }
+        }
+
+        // Non-Linux path or Linux fallback
         // Check if it's a directory
         match std::fs::metadata(path) {
             Ok(meta) if meta.is_dir() => {
@@ -1010,7 +1190,6 @@ pub fn cat_file(
             _ => {}
         }
 
-        // GNU cat: detect when input file is the same as stdout (e.g. cat file >> file)
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
