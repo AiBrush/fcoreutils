@@ -573,6 +573,27 @@ fn expand_generic(
     Ok(())
 }
 
+/// Check if unexpand would produce output identical to input (passthrough case).
+/// Used by the binary to bypass BufWriter and write directly for maximum throughput.
+pub fn unexpand_is_passthrough(data: &[u8], tabs: &TabStops, all: bool) -> bool {
+    if data.is_empty() {
+        return true;
+    }
+    // No spaces or tabs at all → passthrough
+    if memchr::memchr2(b' ', b'\t', data).is_none() {
+        return true;
+    }
+    if let TabStops::Regular(_) = tabs {
+        if all {
+            memchr::memchr(b'\t', data).is_none() && memchr::memmem::find(data, b"  ").is_none()
+        } else {
+            !unexpand_default_needs_processing(data)
+        }
+    } else {
+        false
+    }
+}
+
 /// Unexpand spaces to tabs.
 /// If `all` is true, convert all sequences of spaces; otherwise only leading spaces.
 pub fn unexpand_bytes(
@@ -590,8 +611,22 @@ pub fn unexpand_bytes(
         return out.write_all(data);
     }
 
-    // For regular tab stops, use the optimized SIMD-scanning path
+    // For regular tab stops, check passthrough BEFORE expensive backspace scan
     if let TabStops::Regular(tab_size) = tabs {
+        if all {
+            // -a mode: if no tabs and no consecutive spaces, output = input
+            if memchr::memchr(b'\t', data).is_none() && memchr::memmem::find(data, b"  ").is_none()
+            {
+                return out.write_all(data);
+            }
+        } else {
+            // Default mode: only leading whitespace matters.
+            // If no line starts with space or tab, output = input.
+            if !unexpand_default_needs_processing(data) {
+                return out.write_all(data);
+            }
+        }
+
         if memchr::memchr(b'\x08', data).is_none() {
             return unexpand_regular_fast(data, *tab_size, all, out);
         }
@@ -599,6 +634,18 @@ pub fn unexpand_bytes(
 
     // Generic path for tab lists or data with backspaces
     unexpand_generic(data, tabs, all, out)
+}
+
+/// Check if default-mode unexpand needs to process any data.
+/// Returns true if any line starts with a space or tab.
+/// Uses memmem for 2-byte pattern search — one SIMD pass per pattern,
+/// much faster than memchr_iter + per-match branching when no matches exist.
+#[inline]
+fn unexpand_default_needs_processing(data: &[u8]) -> bool {
+    if data[0] == b' ' || data[0] == b'\t' {
+        return true;
+    }
+    memchr::memmem::find(data, b"\n ").is_some() || memchr::memmem::find(data, b"\n\t").is_some()
 }
 
 /// Emit a run of blanks as the optimal combination of tabs and spaces.
@@ -649,6 +696,7 @@ fn emit_blanks(
 
 /// Fast unexpand for regular tab stops without backspaces.
 /// Uses memchr SIMD scanning to skip non-special bytes in bulk.
+/// Passthrough checks are done by the caller (unexpand_bytes).
 fn unexpand_regular_fast(
     data: &[u8],
     tab_size: usize,
@@ -711,6 +759,7 @@ fn unexpand_regular_fast(
 
 /// Fast unexpand -a for regular tab stops without backspaces.
 /// Per-line processing with SIMD scanning for blank runs.
+/// Passthrough checks are done by the caller (unexpand_bytes).
 fn unexpand_regular_fast_all(
     data: &[u8],
     tab_size: usize,
@@ -721,7 +770,12 @@ fn unexpand_regular_fast_all(
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line = &data[pos..nl_pos];
-        unexpand_line_all_fast(line, tab_size, &mut output);
+        // Per-line fast check: no tabs and no double-spaces → copy through
+        if memchr::memchr(b'\t', line).is_none() && memchr::memmem::find(line, b"  ").is_none() {
+            output.extend_from_slice(line);
+        } else {
+            unexpand_line_all_fast(line, tab_size, &mut output);
+        }
         output.push(b'\n');
 
         if output.len() >= 1024 * 1024 {
@@ -733,7 +787,12 @@ fn unexpand_regular_fast_all(
 
     // Handle final line without trailing newline
     if pos < data.len() {
-        unexpand_line_all_fast(&data[pos..], tab_size, &mut output);
+        let line = &data[pos..];
+        if memchr::memchr(b'\t', line).is_none() && memchr::memmem::find(line, b"  ").is_none() {
+            output.extend_from_slice(line);
+        } else {
+            unexpand_line_all_fast(line, tab_size, &mut output);
+        }
     }
 
     if !output.is_empty() {
