@@ -419,10 +419,17 @@ fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
 /// Write all IoSlice entries via writev, handling partial writes.
 #[cfg(unix)]
 fn writev_all(fd: i32, slices: &[IoSlice<'_>]) -> io::Result<()> {
+    // IOV_MAX: Linux=1024, macOS=1024, POSIX minimum=16.
+    // Use libc::IOV_MAX when available, fallback to conservative POSIX minimum.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const MAX_IOV: usize = 1024;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    const MAX_IOV: usize = 16; // POSIX _XOPEN_IOV_MAX
+
     let mut slice_idx = 0;
     while slice_idx < slices.len() {
         let remaining = &slices[slice_idx..];
-        let n_vecs = remaining.len().min(1024) as i32; // IOV_MAX
+        let n_vecs = remaining.len().min(MAX_IOV) as i32;
         let ret = unsafe { libc::writev(fd, remaining.as_ptr() as *const libc::iovec, n_vecs) };
         if ret < 0 {
             let err = io::Error::last_os_error();

@@ -9,8 +9,9 @@ use std::io::{self, Read, Write};
 use std::process;
 
 /// Write entire buffer to a raw fd, retrying on short writes.
+/// Returns false on BrokenPipe (caller should stop output), propagates other errors.
 #[cfg(unix)]
-fn raw_write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
+fn raw_write_all(fd: i32, mut data: &[u8]) -> io::Result<bool> {
     while !data.is_empty() {
         let n = unsafe { libc::write(fd, data.as_ptr() as *const _, data.len()) };
         if n < 0 {
@@ -18,11 +19,24 @@ fn raw_write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
             if err.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
+            if err.kind() == io::ErrorKind::BrokenPipe {
+                return Ok(false);
+            }
             return Err(err);
         }
         data = &data[n as usize..];
     }
-    Ok(())
+    Ok(true)
+}
+
+/// Write to a `dyn Write` with BrokenPipe handling.
+/// Returns false on BrokenPipe (caller should stop output), propagates other errors.
+fn checked_write_all(out: &mut dyn Write, data: &[u8]) -> io::Result<bool> {
+    match out.write_all(data) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 const TOOL_NAME: &str = "shuf";
@@ -478,15 +492,23 @@ fn run_string_shuffle(
         }
         for _ in 0..count {
             let idx = rng.gen_range(lines.len());
-            let _ = out.write_all(lines[idx].as_bytes());
-            let _ = out.write_all(&[delimiter]);
+            if !checked_write_all(out, lines[idx].as_bytes()).unwrap_or(false) {
+                return;
+            }
+            if !checked_write_all(out, &[delimiter]).unwrap_or(false) {
+                return;
+            }
         }
     } else {
         shuffle(lines, rng);
         let count = head_count.unwrap_or(lines.len()).min(lines.len());
         for line in lines.iter().take(count) {
-            let _ = out.write_all(line.as_bytes());
-            let _ = out.write_all(&[delimiter]);
+            if !checked_write_all(out, line.as_bytes()).unwrap_or(false) {
+                return;
+            }
+            if !checked_write_all(out, &[delimiter]).unwrap_or(false) {
+                return;
+            }
         }
     }
 }
@@ -515,12 +537,14 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
             if (i + 1) % batch_size == 0 {
-                let _ = out.write_all(&buf);
+                if !checked_write_all(out, &buf).unwrap_or(false) {
+                    return;
+                }
                 buf.clear();
             }
         }
         if !buf.is_empty() {
-            let _ = out.write_all(&buf);
+            let _ = checked_write_all(out, &buf);
         }
         return;
     }
@@ -553,7 +577,7 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
         }
-        let _ = out.write_all(&buf);
+        let _ = checked_write_all(out, &buf);
     } else if hi <= u32::MAX as u64 {
         // Use u32 array when range fits — halves cache footprint for Fisher-Yates
         let lo32 = lo as u32;
@@ -569,12 +593,14 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
             if buf.len() >= OUT_CHUNK {
-                let _ = out.write_all(&buf);
+                if !checked_write_all(out, &buf).unwrap_or(false) {
+                    return;
+                }
                 buf.clear();
             }
         }
         if !buf.is_empty() {
-            let _ = out.write_all(&buf);
+            let _ = checked_write_all(out, &buf);
         }
     } else {
         // Dense path for u64 ranges
@@ -590,12 +616,14 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
             if buf.len() >= OUT_CHUNK {
-                let _ = out.write_all(&buf);
+                if !checked_write_all(out, &buf).unwrap_or(false) {
+                    return;
+                }
                 buf.clear();
             }
         }
         if !buf.is_empty() {
-            let _ = out.write_all(&buf);
+            let _ = checked_write_all(out, &buf);
         }
     }
 }
@@ -652,7 +680,9 @@ fn run_file_shuffle(
             let line_len = (e - s) as usize;
             let needed = buf.len() + line_len + 1;
             if needed > buf.capacity() {
-                let _ = out.write_all(&buf);
+                if !checked_write_all(out, &buf).unwrap_or(false) {
+                    return;
+                }
                 buf.clear();
                 if line_len + 1 > buf.capacity() {
                     buf.reserve(line_len + 1);
@@ -666,12 +696,14 @@ fn run_file_shuffle(
                 buf.set_len(pos + line_len + 1);
             }
             if (i + 1) % 8192 == 0 && buf.len() >= CHUNK {
-                let _ = out.write_all(&buf);
+                if !checked_write_all(out, &buf).unwrap_or(false) {
+                    return;
+                }
                 buf.clear();
             }
         }
         if !buf.is_empty() {
-            let _ = out.write_all(&buf);
+            let _ = checked_write_all(out, &buf);
         }
     } else {
         let n = offsets.len();
@@ -688,7 +720,14 @@ fn run_file_shuffle(
         {
             // Fast output path: build contiguous output buffer with unsafe ptr copy,
             // then flush in 1MB chunks via raw fd write (bypasses BufWriter overhead).
-            let out_fd: i32 = if is_stdout { 1 } else { -1 };
+            // Flush BufWriter before bypassing it with raw fd writes to prevent
+            // out-of-order output if any data was buffered earlier.
+            let out_fd: i32 = if is_stdout {
+                let _ = out.flush();
+                1
+            } else {
+                -1
+            };
 
             const CHUNK: usize = 1024 * 1024; // 1MB output chunks
             // Estimate: each line avg ~80 bytes + delimiter
@@ -707,9 +746,11 @@ fn run_file_shuffle(
                 if needed > buf.capacity() {
                     // Flush current buffer
                     if out_fd >= 0 {
-                        let _ = raw_write_all(out_fd, &buf);
-                    } else {
-                        let _ = out.write_all(&buf);
+                        if !raw_write_all(out_fd, &buf).unwrap_or(false) {
+                            return;
+                        }
+                    } else if !checked_write_all(out, &buf).unwrap_or(false) {
+                        return;
                     }
                     buf.clear();
                     if line_len + 1 > buf.capacity() {
@@ -728,7 +769,7 @@ fn run_file_shuffle(
                 if out_fd >= 0 {
                     let _ = raw_write_all(out_fd, &buf);
                 } else {
-                    let _ = out.write_all(&buf);
+                    let _ = checked_write_all(out, &buf);
                 }
             }
         }
@@ -741,12 +782,14 @@ fn run_file_shuffle(
                 buf.extend_from_slice(&data[s as usize..e as usize]);
                 buf.push(delimiter);
                 if buf.len() >= OUT_CHUNK {
-                    let _ = out.write_all(&buf);
+                    if !checked_write_all(out, &buf).unwrap_or(false) {
+                        return;
+                    }
                     buf.clear();
                 }
             }
             if !buf.is_empty() {
-                let _ = out.write_all(&buf);
+                let _ = checked_write_all(out, &buf);
             }
         }
     }

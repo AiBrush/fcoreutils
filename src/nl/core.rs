@@ -598,6 +598,8 @@ fn nl_number_nonempty_stream(
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
 
+        // For blank lines (line_len==0), actual bytes are blank_pad+1, so `needed`
+        // overestimates by ~prefix_len. Harmless: just flushes one line early at boundary.
         let needed = line_len + prefix_len + 2;
         if write_pos + needed > BUF_SIZE {
             unsafe {
