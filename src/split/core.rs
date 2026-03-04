@@ -740,15 +740,124 @@ fn split_by_round_robin_extract(input_path: &str, k: u64, n: u64) -> io::Result<
     Ok(())
 }
 
-/// Fast pre-loaded line splitting: scans mmap/buffer for line boundaries,
-/// then uses copy_file_range on Linux (zero-copy) or write_all on other platforms.
-/// Uses parallel file creation for many chunks to amortize rayon overhead.
+/// Single-pass streaming line split: read() + memchr scan + write() in one loop.
+/// Avoids mmap page faults by using sequential read() with kernel readahead.
+/// Writes directly to output files via raw fd, eliminating BufWriter overhead.
 #[cfg(unix)]
+fn split_lines_streaming_fast(
+    file: &File,
+    config: &SplitConfig,
+    lines_per_chunk: u64,
+) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let in_fd = file.as_raw_fd();
+    // Hint kernel for sequential readahead (Linux only)
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    }
+
+    let limit = max_chunks(&config.suffix_type, config.suffix_length);
+    let sep = config.separator;
+
+    const BUF_SIZE: usize = 1024 * 1024; // 1MB read buffer
+    let mut buf = vec![0u8; BUF_SIZE];
+    let mut chunk_index: u64 = 0;
+    let mut lines_in_chunk: u64 = 0;
+    let mut out_file: Option<File> = None;
+
+    loop {
+        let n = {
+            let mut total = 0;
+            loop {
+                let ret = unsafe {
+                    libc::read(
+                        in_fd,
+                        buf[total..].as_mut_ptr() as *mut libc::c_void,
+                        (BUF_SIZE - total) as _,
+                    )
+                };
+                if ret > 0 {
+                    total += ret as usize;
+                    if total >= BUF_SIZE {
+                        break; // Buffer full
+                    }
+                    // Continue reading to fill buffer for SIMD efficiency
+                } else if ret == 0 {
+                    break; // EOF
+                } else {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+            total
+        };
+        if n == 0 {
+            break;
+        }
+
+        let data = &buf[..n];
+        let mut pos = 0;
+
+        while pos < n {
+            if out_file.is_none() {
+                if chunk_index >= limit {
+                    return Err(io::Error::other("output file suffixes exhausted"));
+                }
+                let path = output_path(config, chunk_index);
+                if config.verbose {
+                    eprintln!("creating file '{}'", path);
+                }
+                out_file = Some(File::create(path)?);
+                lines_in_chunk = 0;
+            }
+
+            let slice = &data[pos..];
+            let lines_needed = lines_per_chunk - lines_in_chunk;
+            let mut found = 0u64;
+            let mut last_sep_end = 0;
+
+            for offset in memchr::memchr_iter(sep, slice) {
+                found += 1;
+                last_sep_end = offset + 1;
+                if found >= lines_needed {
+                    break;
+                }
+            }
+
+            if found >= lines_needed {
+                // Write contiguous slice up to split point
+                out_file
+                    .as_ref()
+                    .unwrap()
+                    .write_all(&slice[..last_sep_end])?;
+                pos += last_sep_end;
+                out_file = None;
+                chunk_index += 1;
+            } else {
+                // Not enough lines — write entire remainder and read more
+                out_file.as_ref().unwrap().write_all(slice)?;
+                lines_in_chunk += found;
+                pos = n;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Pre-loaded line splitting: scans buffer for line boundaries,
+/// then writes from pre-loaded data. Used as fallback for non-streaming paths.
+#[cfg(unix)]
+#[allow(dead_code)]
 fn split_lines_preloaded(
     data: &[u8],
     config: &SplitConfig,
     lines_per_chunk: u64,
-    #[cfg(target_os = "linux")] input_fd: Option<std::os::unix::io::RawFd>,
 ) -> io::Result<()> {
     let limit = max_chunks(&config.suffix_type, config.suffix_length);
     let sep = config.separator;
@@ -796,79 +905,35 @@ fn split_lines_preloaded(
         }
     }
 
-    // On Linux with a file fd, use copy_file_range for zero-copy output
+    // Write chunks from mmap data directly — pages are warm from the scan.
+    // Uses fallocate on Linux to pre-allocate output files, avoiding
+    // fragmentation and extra page faults during write.
     #[cfg(target_os = "linux")]
-    if let Some(in_fd) = input_fd {
+    let write_chunk = |chunk_data: &[u8], path: &str| -> io::Result<()> {
         use std::os::unix::io::AsRawFd;
+        let out_file = File::create(path)?;
+        let out_fd = out_file.as_raw_fd();
+        unsafe { libc::fallocate(out_fd, 0, 0, chunk_data.len() as libc::off_t) };
+        // write_all from mmap data — already in page cache from scan
+        let mut f = out_file;
+        f.write_all(chunk_data)?;
+        Ok(())
+    };
 
-        let write_chunk =
-            |in_fd: i32, chunk_off: usize, chunk_len: usize, path: &str| -> io::Result<()> {
-                let out_file = File::create(path)?;
-                let out_fd = out_file.as_raw_fd();
-                unsafe { libc::fallocate(out_fd, 0, 0, chunk_len as libc::off_t) };
+    #[cfg(not(target_os = "linux"))]
+    let write_chunk = |chunk_data: &[u8], path: &str| -> io::Result<()> {
+        let mut file = File::create(path)?;
+        file.write_all(chunk_data)?;
+        Ok(())
+    };
 
-                let mut off_in = chunk_off as i64;
-                let mut copied = 0usize;
-                while copied < chunk_len {
-                    let n = unsafe {
-                        libc::copy_file_range(
-                            in_fd,
-                            &mut off_in as *mut i64 as *mut libc::off64_t,
-                            out_fd,
-                            std::ptr::null_mut(),
-                            chunk_len - copied,
-                            0,
-                        )
-                    };
-                    if n > 0 {
-                        copied += n as usize;
-                    } else if n == 0 {
-                        break;
-                    } else {
-                        let err = io::Error::last_os_error();
-                        if err.raw_os_error() == Some(libc::EINTR) {
-                            continue;
-                        }
-                        // Fallback to write_all from mmap
-                        let out_file2 =
-                            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(out_fd) };
-                        let mut f: File = out_file2;
-                        f.write_all(&data[chunk_off + copied..chunk_off + chunk_len])?;
-                        std::mem::forget(f); // Don't double-close
-                        break;
-                    }
-                }
-                Ok(())
-            };
-
-        if chunks.len() >= 64 && !config.verbose {
-            chunks
-                .par_iter()
-                .zip(paths.par_iter())
-                .try_for_each(|(&(start, end), path)| {
-                    write_chunk(in_fd, start, end - start, path)
-                })?;
-        } else {
-            for (i, &(start, end)) in chunks.iter().enumerate() {
-                write_chunk(in_fd, start, end - start, &paths[i])?;
-            }
-        }
-        return Ok(());
-    }
-
-    // Fallback: write from mmap/buffer data
     if chunks.len() >= 64 && !config.verbose {
         chunks.par_iter().zip(paths.par_iter()).try_for_each(
-            |(&(start, end), path)| -> io::Result<()> {
-                let mut file = File::create(path)?;
-                file.write_all(&data[start..end])?;
-                Ok(())
-            },
+            |(&(start, end), path)| -> io::Result<()> { write_chunk(&data[start..end], path) },
         )?;
     } else {
         for (i, &(start, end)) in chunks.iter().enumerate() {
-            let mut file = File::create(&paths[i])?;
-            file.write_all(&data[start..end])?;
+            write_chunk(&data[start..end], &paths[i])?;
         }
     }
 
@@ -1139,67 +1204,16 @@ pub fn split_file(input_path: &str, config: &SplitConfig) -> io::Result<()> {
         return split_by_round_robin_extract(input_path, k, n);
     }
 
-    // Fast path: mmap+memchr line splitting for regular files (no filter).
-    // Scans mmap for line boundaries, then uses copy_file_range (Linux) or
-    // write_all (other platforms) for zero-copy output.
+    // Fast path: single-pass streaming line split for regular files.
+    // Reads file once with read() + sequential fadvise, scans for newlines
+    // with SIMD memchr, and writes directly to output files — no mmap overhead.
     #[cfg(unix)]
     if let SplitMode::Lines(n) = config.mode {
         if input_path != "-" && config.filter.is_none() {
-            const FAST_PATH_LIMIT: u64 = 512 * 1024 * 1024;
             if let Ok(file) = File::open(input_path) {
                 if let Ok(meta) = file.metadata() {
-                    if meta.file_type().is_file() && meta.len() <= FAST_PATH_LIMIT && meta.len() > 0
-                    {
-                        // Use mmap for zero-copy scanning of line boundaries
-                        if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&file) } {
-                            let _ = mmap.advise(memmap2::Advice::Sequential);
-                            #[cfg(target_os = "linux")]
-                            {
-                                let _ = mmap.advise(memmap2::Advice::WillNeed);
-                            }
-                            #[cfg(not(target_os = "linux"))]
-                            {
-                                let _ = mmap.advise(memmap2::Advice::WillNeed);
-                            }
-                            #[cfg(target_os = "linux")]
-                            {
-                                use std::os::unix::io::AsRawFd;
-                                return split_lines_preloaded(
-                                    &mmap,
-                                    config,
-                                    n,
-                                    Some(file.as_raw_fd()),
-                                );
-                            }
-                            #[cfg(not(target_os = "linux"))]
-                            {
-                                return split_lines_preloaded(&mmap, config, n);
-                            }
-                        }
-                        // Fallback: read into Vec
-                        let len = meta.len() as usize;
-                        let mut buf = vec![0u8; len];
-                        let mut total = 0;
-                        let mut f = &file;
-                        while total < buf.len() {
-                            match f.read(&mut buf[total..]) {
-                                Ok(0) => break,
-                                Ok(n) => total += n,
-                                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
-                                    continue;
-                                }
-                                Err(e) => return Err(e),
-                            }
-                        }
-                        buf.truncate(total);
-                        #[cfg(target_os = "linux")]
-                        {
-                            return split_lines_preloaded(&buf, config, n, None);
-                        }
-                        #[cfg(not(target_os = "linux"))]
-                        {
-                            return split_lines_preloaded(&buf, config, n);
-                        }
+                    if meta.file_type().is_file() && meta.len() > 0 {
+                        return split_lines_streaming_fast(&file, config, n);
                     }
                 }
             }
