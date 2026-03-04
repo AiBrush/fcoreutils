@@ -8,6 +8,19 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::process;
 
+/// Write entire buffer to a raw fd, retrying on short writes.
+#[cfg(unix)]
+fn raw_write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
+    while !data.is_empty() {
+        let n = unsafe { libc::write(fd, data.as_ptr() as *const _, data.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        data = &data[n as usize..];
+    }
+    Ok(())
+}
+
 const TOOL_NAME: &str = "shuf";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -435,6 +448,7 @@ fn main() {
             delimiter,
             head_count,
             repeat,
+            output_file.is_none(),
         );
     }
 
@@ -536,17 +550,37 @@ fn run_range_shuffle(
             buf.push(delimiter);
         }
         let _ = out.write_all(&buf);
+    } else if hi <= u32::MAX as u64 {
+        // Use u32 array when range fits — halves cache footprint for Fisher-Yates
+        let lo32 = lo as u32;
+        let mut values: Vec<u32> = (lo32..=(hi as u32)).collect();
+        let n = values.len();
+        for i in 0..count {
+            let j = i + rng.gen_range(n - i);
+            values.swap(i, j);
+        }
+        const OUT_CHUNK: usize = 1024 * 1024;
+        let mut buf = Vec::with_capacity(OUT_CHUNK + 32);
+        for &val in values.iter().take(count) {
+            buf.extend_from_slice(ibuf.format(val).as_bytes());
+            buf.push(delimiter);
+            if buf.len() >= OUT_CHUNK {
+                let _ = out.write_all(&buf);
+                buf.clear();
+            }
+        }
+        if !buf.is_empty() {
+            let _ = out.write_all(&buf);
+        }
     } else {
-        // Dense path: generate all values and partial Fisher-Yates shuffle.
-        // Only do `count` rounds instead of full N shuffle — O(count) vs O(N).
+        // Dense path for u64 ranges
         let mut values: Vec<u64> = (lo..=hi).collect();
         let n = values.len();
         for i in 0..count {
             let j = i + rng.gen_range(n - i);
             values.swap(i, j);
         }
-        // Chunked output to avoid huge single allocation for 1M numbers
-        const OUT_CHUNK: usize = 256 * 1024;
+        const OUT_CHUNK: usize = 1024 * 1024;
         let mut buf = Vec::with_capacity(OUT_CHUNK + 32);
         for &val in values.iter().take(count) {
             buf.extend_from_slice(ibuf.format(val).as_bytes());
@@ -562,6 +596,7 @@ fn run_range_shuffle(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_file_shuffle(
     filename: Option<&str>,
     zero_terminated: bool,
@@ -570,6 +605,7 @@ fn run_file_shuffle(
     delimiter: u8,
     head_count: Option<usize>,
     repeat: bool,
+    is_stdout: bool,
 ) {
     let data = read_file_data(filename);
     let sep = if zero_terminated { 0u8 } else { b'\n' };
@@ -603,14 +639,29 @@ fn run_file_shuffle(
             eprintln!("{}: no lines to repeat", TOOL_NAME);
             process::exit(1);
         }
-        let batch_size = count.min(8192);
-        let mut buf = Vec::with_capacity(batch_size * 80);
+        const CHUNK: usize = 1024 * 1024;
+        let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + 256);
+        let src = data.as_ptr();
         for i in 0..count {
             let idx = rng.gen_range(offsets.len());
             let [s, e] = offsets[idx];
-            buf.extend_from_slice(&data[s as usize..e as usize]);
-            buf.push(delimiter);
-            if (i + 1) % batch_size == 0 {
+            let line_len = (e - s) as usize;
+            let needed = buf.len() + line_len + 1;
+            if needed > buf.capacity() {
+                let _ = out.write_all(&buf);
+                buf.clear();
+                if line_len + 1 > buf.capacity() {
+                    buf.reserve(line_len + 1);
+                }
+            }
+            let pos = buf.len();
+            unsafe {
+                let dst = buf.as_mut_ptr().add(pos);
+                std::ptr::copy_nonoverlapping(src.add(s as usize), dst, line_len);
+                *dst.add(line_len) = delimiter;
+                buf.set_len(pos + line_len + 1);
+            }
+            if (i + 1) % 8192 == 0 && buf.len() >= CHUNK {
                 let _ = out.write_all(&buf);
                 buf.clear();
             }
@@ -629,19 +680,70 @@ fn run_file_shuffle(
             offsets.swap(i, j);
         }
 
-        // Chunked output: write in 256KB batches to avoid huge single allocation
-        const OUT_CHUNK: usize = 256 * 1024;
-        let mut buf = Vec::with_capacity(OUT_CHUNK + 256);
-        for &[s, e] in offsets[..count].iter() {
-            buf.extend_from_slice(&data[s as usize..e as usize]);
-            buf.push(delimiter);
-            if buf.len() >= OUT_CHUNK {
-                let _ = out.write_all(&buf);
-                buf.clear();
+        #[cfg(unix)]
+        {
+            // Fast output path: build contiguous output buffer with unsafe ptr copy,
+            // then flush in 1MB chunks via raw fd write (bypasses BufWriter overhead).
+            let out_fd: i32 = if is_stdout { 1 } else { -1 };
+
+            const CHUNK: usize = 1024 * 1024; // 1MB output chunks
+            // Estimate: each line avg ~80 bytes + delimiter
+            let est_size = if count == n {
+                data.len() + count
+            } else {
+                count * 80
+            }
+            .min(CHUNK + 256);
+            let mut buf: Vec<u8> = Vec::with_capacity(est_size.max(CHUNK + 256));
+            let src = data.as_ptr();
+
+            for &[s, e] in offsets[..count].iter() {
+                let line_len = (e - s) as usize;
+                let needed = buf.len() + line_len + 1;
+                if needed > buf.capacity() {
+                    // Flush current buffer
+                    if out_fd >= 0 {
+                        let _ = raw_write_all(out_fd, &buf);
+                    } else {
+                        let _ = out.write_all(&buf);
+                    }
+                    buf.clear();
+                    if line_len + 1 > buf.capacity() {
+                        buf.reserve(line_len + 1);
+                    }
+                }
+                let pos = buf.len();
+                unsafe {
+                    let dst = buf.as_mut_ptr().add(pos);
+                    std::ptr::copy_nonoverlapping(src.add(s as usize), dst, line_len);
+                    *dst.add(line_len) = delimiter;
+                    buf.set_len(pos + line_len + 1);
+                }
+            }
+            if !buf.is_empty() {
+                if out_fd >= 0 {
+                    let _ = raw_write_all(out_fd, &buf);
+                } else {
+                    let _ = out.write_all(&buf);
+                }
             }
         }
-        if !buf.is_empty() {
-            let _ = out.write_all(&buf);
+
+        #[cfg(not(unix))]
+        {
+            const OUT_CHUNK: usize = 1024 * 1024;
+            let mut buf = Vec::with_capacity(OUT_CHUNK + 256);
+            for &[s, e] in offsets[..count].iter() {
+                buf.extend_from_slice(&data[s as usize..e as usize]);
+                buf.push(delimiter);
+                if buf.len() >= OUT_CHUNK {
+                    let _ = out.write_all(&buf);
+                    buf.clear();
+                }
+            }
+            if !buf.is_empty() {
+                let _ = out.write_all(&buf);
+            }
         }
     }
 }

@@ -375,8 +375,8 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// After-separator mode: build full reversed output in one buffer, write once.
-/// Uses unsafe pointer arithmetic for zero-overhead record copying.
+/// After-separator mode: zero-copy writev from source data in reverse order.
+/// Avoids allocating a full output buffer by using IoSlice directly into mmap'd data.
 #[cfg(unix)]
 fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
     // Forward SIMD scan: collect all separator positions
@@ -389,37 +389,72 @@ fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
         return write_all_fd(fd, data);
     }
 
-    // Build entire reversed output in one buffer → single write() syscall.
-    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
-    let base = buf.as_mut_ptr();
-    let src = data.as_ptr();
-    let mut pos: usize = 0;
+    // Build IoSlice entries pointing into source data in reverse record order.
+    // This is zero-copy: no output buffer allocation needed.
+    let n_records = positions.len() + 1; // last record after last separator + possible first record
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(n_records.min(IOSLICE_BATCH_SIZE));
     let mut end_pos = data.len();
 
     for &sep_pos in positions.iter().rev() {
         let rec_start = sep_pos + 1;
         if rec_start < end_pos {
-            let len = end_pos - rec_start;
-            unsafe {
-                std::ptr::copy_nonoverlapping(src.add(rec_start), base.add(pos), len);
+            slices.push(IoSlice::new(&data[rec_start..end_pos]));
+            if slices.len() >= IOSLICE_BATCH_SIZE {
+                writev_all(fd, &slices)?;
+                slices.clear();
             }
-            pos += len;
         }
         end_pos = rec_start;
     }
+    // First record (before first separator)
     if end_pos > 0 {
-        unsafe {
-            std::ptr::copy_nonoverlapping(src, base.add(pos), end_pos);
-        }
-        pos += end_pos;
+        slices.push(IoSlice::new(&data[..end_pos]));
     }
-    unsafe {
-        buf.set_len(pos);
+    if !slices.is_empty() {
+        writev_all(fd, &slices)?;
     }
-    write_all_fd(fd, &buf)
+    Ok(())
 }
 
-/// Before-separator mode: build full reversed output in one buffer, write once.
+/// Write all IoSlice entries via writev, handling partial writes.
+#[cfg(unix)]
+fn writev_all(fd: i32, slices: &[IoSlice<'_>]) -> io::Result<()> {
+    let mut offset = 0;
+    let mut slice_idx = 0;
+    while slice_idx < slices.len() {
+        let remaining = &slices[slice_idx..];
+        let n_vecs = remaining.len().min(1024) as i32; // IOV_MAX
+        let ret = unsafe { libc::writev(fd, remaining.as_ptr() as *const libc::iovec, n_vecs) };
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        let mut written = ret as usize;
+        // Advance past fully written slices
+        while slice_idx < slices.len() && written > 0 {
+            let slice_len = slices[slice_idx].len();
+            if written >= slice_len - offset {
+                written -= slice_len - offset;
+                offset = 0;
+                slice_idx += 1;
+            } else {
+                offset += written;
+                written = 0;
+                // Partial write within a slice - need to fallback to write for the rest
+                let remaining_data = &slices[slice_idx][offset..];
+                write_all_fd(fd, remaining_data)?;
+                offset = 0;
+                slice_idx += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Before-separator mode: zero-copy writev from source data in reverse order.
 #[cfg(unix)]
 fn tac_bytes_before_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
     let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
@@ -431,32 +466,27 @@ fn tac_bytes_before_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
         return write_all_fd(fd, data);
     }
 
-    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
-    let base = buf.as_mut_ptr();
-    let src = data.as_ptr();
-    let mut pos: usize = 0;
+    let n_records = positions.len() + 1;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(n_records.min(IOSLICE_BATCH_SIZE));
     let mut end_pos = data.len();
 
     for &sep_pos in positions.iter().rev() {
         if sep_pos < end_pos {
-            let len = end_pos - sep_pos;
-            unsafe {
-                std::ptr::copy_nonoverlapping(src.add(sep_pos), base.add(pos), len);
+            slices.push(IoSlice::new(&data[sep_pos..end_pos]));
+            if slices.len() >= IOSLICE_BATCH_SIZE {
+                writev_all(fd, &slices)?;
+                slices.clear();
             }
-            pos += len;
         }
         end_pos = sep_pos;
     }
     if end_pos > 0 {
-        unsafe {
-            std::ptr::copy_nonoverlapping(src, base.add(pos), end_pos);
-        }
-        pos += end_pos;
+        slices.push(IoSlice::new(&data[..end_pos]));
     }
-    unsafe {
-        buf.set_len(pos);
+    if !slices.is_empty() {
+        writev_all(fd, &slices)?;
     }
-    write_all_fd(fd, &buf)
+    Ok(())
 }
 
 /// Reverse records using a multi-byte string separator.
