@@ -50,44 +50,109 @@ fn fold_width_zero(data: &[u8], out: &mut impl Write) -> std::io::Result<()> {
 }
 
 /// Fast fold by byte count without -s flag.
-/// Buffers output into ~1MB chunks to reduce write syscalls.
+/// Uses unsafe pointer copies and a pre-allocated 1MB output buffer.
+/// For short lines (≤width), copies line+newline with a single memcpy.
 fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
+    const BUF_CAP: usize = 1024 * 1024 + 4096;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP);
+    // Pre-fault buffer pages
+    unsafe {
+        std::ptr::write_bytes(buf.as_mut_ptr(), 0, BUF_CAP);
+    }
+    let base = buf.as_mut_ptr();
+    let src = data.as_ptr();
+    let mut wp: usize = 0;
     let mut seg_start = 0usize;
-    let mut buf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
-        let segment = &data[seg_start..nl_pos];
-        let mut start = 0;
-        while start + width < segment.len() {
-            buf.extend_from_slice(&segment[start..start + width]);
-            buf.push(b'\n');
-            start += width;
-        }
-        buf.extend_from_slice(&segment[start..]);
-        buf.push(b'\n');
-        seg_start = nl_pos + 1;
+        let seg_len = nl_pos - seg_start;
 
-        if buf.len() >= 1024 * 1024 {
-            out.write_all(&buf)?;
-            buf.clear();
+        if seg_len <= width {
+            // Short line: fits without folding. Copy line + newline in one go.
+            let total = seg_len + 1;
+            if wp + total > BUF_CAP {
+                unsafe { buf.set_len(wp) };
+                out.write_all(&buf)?;
+                buf.clear();
+                wp = 0;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(seg_start), base.add(wp), total);
+            }
+            wp += total;
+        } else {
+            // Long line: fold at width boundaries.
+            let mut off = seg_start;
+            let end = nl_pos;
+            while off + width < end {
+                let chunk = width + 1; // width bytes + newline
+                if wp + chunk > BUF_CAP {
+                    unsafe { buf.set_len(wp) };
+                    out.write_all(&buf)?;
+                    buf.clear();
+                    wp = 0;
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), width);
+                    *base.add(wp + width) = b'\n';
+                }
+                wp += chunk;
+                off += width;
+            }
+            // Remaining bytes + newline
+            let rem = end - off + 1; // includes the newline at nl_pos
+            if wp + rem > BUF_CAP {
+                unsafe { buf.set_len(wp) };
+                out.write_all(&buf)?;
+                buf.clear();
+                wp = 0;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), rem);
+            }
+            wp += rem;
         }
+        seg_start = nl_pos + 1;
     }
 
     // Handle final segment without trailing newline
     if seg_start < data.len() {
-        let segment = &data[seg_start..];
-        let mut start = 0;
-        while start + width < segment.len() {
-            buf.extend_from_slice(&segment[start..start + width]);
-            buf.push(b'\n');
-            start += width;
+        let seg_len = data.len() - seg_start;
+        let mut off = seg_start;
+        let end = data.len();
+        while off + width < end {
+            let chunk = width + 1;
+            if wp + chunk > BUF_CAP {
+                unsafe { buf.set_len(wp) };
+                out.write_all(&buf)?;
+                buf.clear();
+                wp = 0;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), width);
+                *base.add(wp + width) = b'\n';
+            }
+            wp += chunk;
+            off += width;
         }
-        if start < segment.len() {
-            buf.extend_from_slice(&segment[start..]);
+        if off < end {
+            let rem = end - off;
+            if wp + rem > BUF_CAP {
+                unsafe { buf.set_len(wp) };
+                out.write_all(&buf)?;
+                buf.clear();
+                wp = 0;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), rem);
+            }
+            wp += rem;
         }
+        let _ = seg_len;
     }
 
-    if !buf.is_empty() {
+    if wp > 0 {
+        unsafe { buf.set_len(wp) };
         out.write_all(&buf)?;
     }
 

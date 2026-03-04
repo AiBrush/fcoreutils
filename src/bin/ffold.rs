@@ -1,14 +1,51 @@
-use std::io::{self, BufWriter, Write};
-#[cfg(unix)]
-use std::mem::ManuallyDrop;
-#[cfg(unix)]
-use std::os::unix::io::FromRawFd;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process;
 
 use coreutils_rs::common::io::{FileData, read_file, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::fold;
+
+/// Minimal writer that batches writes via raw libc::write to fd 1.
+/// Eliminates BufWriter overhead (double-buffering) since fold's core
+/// already buffers into ~1MB chunks internally.
+#[cfg(unix)]
+struct RawStdout;
+
+#[cfg(unix)]
+impl Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let ret = unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, buf.len() as _) };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        while !buf.is_empty() {
+            let ret =
+                unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, buf.len() as _) };
+            if ret > 0 {
+                buf = &buf[ret as usize..];
+            } else if ret == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 struct Cli {
     bytes: bool,
@@ -207,16 +244,14 @@ fn main() {
 
     let mut had_error = false;
 
-    // Use 1MB BufWriter for batched output on all platforms.
-    // fold_bytes streams output directly, so buffering is essential.
+    // fold_bytes already buffers into ~1MB chunks internally, so we use
+    // a direct raw-fd writer to avoid double-buffering through BufWriter.
     #[cfg(unix)]
-    let stdout_raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-    #[cfg(unix)]
-    let mut out = BufWriter::with_capacity(1024 * 1024, &*stdout_raw);
+    let mut out = RawStdout;
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+    let mut out = io::BufWriter::with_capacity(1024 * 1024, stdout.lock());
 
     for filename in &files {
         let data = if filename == "-" {
