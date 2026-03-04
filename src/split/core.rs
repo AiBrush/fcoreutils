@@ -752,7 +752,8 @@ fn split_lines_streaming_fast(
     use std::os::unix::io::AsRawFd;
 
     let in_fd = file.as_raw_fd();
-    // Hint kernel for sequential readahead
+    // Hint kernel for sequential readahead (Linux only)
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::posix_fadvise(in_fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
     }
