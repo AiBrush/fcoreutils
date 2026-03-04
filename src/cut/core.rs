@@ -362,131 +362,120 @@ fn multi_select_chunk(
     }
 }
 
-/// Single-pass multi-field extraction using memchr2 + bitmask selection.
-/// Processes the entire data in one SIMD scan, tracking field numbers
-/// and outputting selected fields. Uses raw pointer writes to eliminate
-/// Vec method overhead (no capacity checks, no length updates per field).
+/// Per-line multi-field extraction with early termination after max_field.
+/// For `-f1,3,5` on 20-field CSV, this scans only 5 delimiters per line
+/// instead of all 20, reducing per-hit overhead by ~75%.
 fn multi_select_chunk_bitmask(
     data: &[u8],
     delim: u8,
     line_delim: u8,
     mask: u64,
-    _max_field: usize,
+    max_field: usize,
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
-    // Reserve worst case: entire data + one extra byte per field for delimiters
     buf.reserve(data.len() + 1);
     let initial_len = buf.len();
     let out_base = unsafe { buf.as_mut_ptr().add(initial_len) };
     let src = data.as_ptr();
     let mut wp: usize = 0;
 
-    let mut field_num: usize = 1; // 1-based
-    let mut field_start: usize = 0;
-    let mut first_on_line = true;
-    let mut line_has_delim = false;
     let mut line_start: usize = 0;
 
-    for hit in memchr::memchr2_iter(delim, line_delim, data) {
-        if data[hit] == line_delim {
-            // End of line
-            if !line_has_delim {
-                if !suppress {
-                    let len = hit - line_start;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(src.add(line_start), out_base.add(wp), len);
-                    }
-                    wp += len;
-                    unsafe {
-                        *out_base.add(wp) = line_delim;
-                    }
-                    wp += 1;
-                }
-            } else {
-                if field_num <= 64 && (mask & (1u64 << (field_num - 1))) != 0 {
-                    if !first_on_line {
-                        unsafe {
-                            *out_base.add(wp) = delim;
-                        }
-                        wp += 1;
-                    }
-                    let len = hit - field_start;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(src.add(field_start), out_base.add(wp), len);
-                    }
-                    wp += len;
-                }
-                unsafe {
-                    *out_base.add(wp) = line_delim;
-                }
-                wp += 1;
-            }
-            field_num = 1;
-            field_start = hit + 1;
-            line_start = hit + 1;
-            first_on_line = true;
-            line_has_delim = false;
-        } else {
-            // Delimiter
-            line_has_delim = true;
-            if field_num <= 64 && (mask & (1u64 << (field_num - 1))) != 0 {
-                if !first_on_line {
-                    unsafe {
-                        *out_base.add(wp) = delim;
-                    }
-                    wp += 1;
-                }
-                let len = hit - field_start;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(field_start), out_base.add(wp), len);
-                }
-                wp += len;
-                first_on_line = false;
-            }
-            field_num += 1;
-            field_start = hit + 1;
+    for line_end in memchr_iter(line_delim, data) {
+        let line = &data[line_start..line_end];
+        wp = bitmask_extract_line(line, delim, mask, max_field, suppress, src, out_base, wp);
+        unsafe {
+            *out_base.add(wp) = line_delim;
         }
+        wp += 1;
+        line_start = line_end + 1;
     }
 
-    // Handle final segment
-    if field_start < data.len() {
-        if !line_has_delim {
-            if !suppress {
-                let len = data.len() - line_start;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(line_start), out_base.add(wp), len);
-                }
-                wp += len;
-                unsafe {
-                    *out_base.add(wp) = line_delim;
-                }
-                wp += 1;
-            }
-        } else {
-            if field_num <= 64 && (mask & (1u64 << (field_num - 1))) != 0 {
-                if !first_on_line {
-                    unsafe {
-                        *out_base.add(wp) = delim;
-                    }
-                    wp += 1;
-                }
-                let len = data.len() - field_start;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(field_start), out_base.add(wp), len);
-                }
-                wp += len;
-            }
-            unsafe {
-                *out_base.add(wp) = line_delim;
-            }
-            wp += 1;
+    // Handle final line without trailing newline
+    if line_start < data.len() {
+        let line = &data[line_start..];
+        wp = bitmask_extract_line(line, delim, mask, max_field, suppress, src, out_base, wp);
+        unsafe {
+            *out_base.add(wp) = line_delim;
         }
+        wp += 1;
     }
 
     unsafe {
         buf.set_len(initial_len + wp);
     }
+}
+
+/// Extract selected fields from a single line using bitmask, with early exit
+/// after max_field. Returns updated write position.
+#[inline(always)]
+fn bitmask_extract_line(
+    line: &[u8],
+    delim: u8,
+    mask: u64,
+    max_field: usize,
+    suppress: bool,
+    src: *const u8,
+    out_base: *mut u8,
+    mut wp: usize,
+) -> usize {
+    let line_off = unsafe { line.as_ptr().offset_from(src) as usize };
+    let mut field_num: usize = 1;
+    let mut field_start = line_off;
+    let mut first = true;
+    let mut has_delim = false;
+
+    for pos in memchr_iter(delim, line) {
+        has_delim = true;
+        let abs_pos = line_off + pos;
+        if (mask & (1u64 << (field_num - 1))) != 0 {
+            if !first {
+                unsafe {
+                    *out_base.add(wp) = delim;
+                }
+                wp += 1;
+            }
+            let len = abs_pos - field_start;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(field_start), out_base.add(wp), len);
+            }
+            wp += len;
+            first = false;
+        }
+        field_num += 1;
+        field_start = abs_pos + 1;
+        if field_num > max_field {
+            break;
+        }
+    }
+
+    // Last field (or entire line if no delimiter)
+    if !has_delim {
+        if !suppress {
+            let len = line.len();
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(line_off), out_base.add(wp), len);
+            }
+            wp += len;
+        }
+    } else if (mask & (1u64 << (field_num - 1))) != 0 {
+        // Last selected field extends to end of line
+        if !first {
+            unsafe {
+                *out_base.add(wp) = delim;
+            }
+            wp += 1;
+        }
+        let end = line_off + line.len();
+        let len = end - field_start;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(field_start), out_base.add(wp), len);
+        }
+        wp += len;
+    }
+
+    wp
 }
 
 /// Extract selected fields from a single line using delimiter position scanning.
