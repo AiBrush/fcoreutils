@@ -335,7 +335,8 @@ pub fn pr_data<W: Write>(
 }
 
 /// Ultra-fast contiguous-write paginator for single-column, no-transform mode.
-/// Instead of per-line writes, writes entire page bodies as contiguous data slices.
+/// Streams through data using memchr_iter without building a Vec<usize> of newline positions.
+/// Pre-computes the header prefix (date + filename) once, appending only the page number per page.
 fn pr_data_contiguous<W: Write>(
     data: &[u8],
     output: &mut W,
@@ -363,56 +364,61 @@ fn pr_data_contiguous<W: Write>(
     };
     let show_header = !config.omit_header && !config.omit_pagination && !suppress_header;
 
-    // Index newline positions using SIMD memchr — single O(n) pass
-    let newline_positions: Vec<usize> = memchr::memchr_iter(b'\n', data).collect();
-    let has_trailing_newline = data.last() == Some(&b'\n');
-    let total_lines = if has_trailing_newline {
-        newline_positions.len()
-    } else {
-        newline_positions.len() + 1
-    };
-
-    let mut page_buf: Vec<u8> = Vec::with_capacity(128 * 1024);
-    let mut page_num = 1usize;
-    let mut line_idx = 0;
-
-    // Handle empty input
-    if total_lines == 0 || data.is_empty() {
-        if page_num >= config.first_page
-            && (config.last_page == 0 || page_num <= config.last_page)
-            && show_header
-        {
-            write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
+    if data.is_empty() {
+        if show_header {
+            let mut page_buf: Vec<u8> = Vec::with_capacity(256);
+            write_header(&mut page_buf, &date_str, header_str, 1, config)?;
             write_footer(&mut page_buf, config)?;
             output.write_all(&page_buf)?;
         }
         return Ok(());
     }
 
-    while line_idx < total_lines {
-        let page_end_line = (line_idx + body_lines_per_page).min(total_lines);
-        let lines_in_page = page_end_line - line_idx;
+    let footer: &[u8] = if show_header {
+        if config.form_feed {
+            b"\x0c"
+        } else {
+            b"\n\n\n\n\n"
+        }
+    } else {
+        b""
+    };
 
-        if page_num >= config.first_page && (config.last_page == 0 || page_num <= config.last_page)
-        {
+    // Stream through data: skip body_lines_per_page newlines at a time
+    let mut page_buf: Vec<u8> = Vec::with_capacity(128 * 1024);
+    let mut page_num = 1usize;
+    let mut byte_pos = 0usize;
+    loop {
+        if byte_pos >= data.len() {
+            break;
+        }
+
+        // Find the end of this page: skip body_lines_per_page newlines
+        let page_start = byte_pos;
+        let mut lines_found = 0usize;
+        let remaining = &data[byte_pos..];
+        let mut page_end = data.len();
+
+        for nl_off in memchr::memchr_iter(b'\n', remaining) {
+            lines_found += 1;
+            if lines_found >= body_lines_per_page {
+                page_end = byte_pos + nl_off + 1;
+                break;
+            }
+        }
+
+        let in_range = page_num >= config.first_page
+            && (config.last_page == 0 || page_num <= config.last_page);
+
+        if in_range {
             page_buf.clear();
 
             if show_header {
                 write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
             }
 
-            // Write body: contiguous chunk of original input data (one extend_from_slice)
-            let byte_start = if line_idx == 0 {
-                0
-            } else {
-                newline_positions[line_idx - 1] + 1
-            };
-            let byte_end = if page_end_line <= newline_positions.len() {
-                newline_positions[page_end_line - 1] + 1 // Include trailing newline
-            } else {
-                data.len() // Last line without trailing newline
-            };
-            page_buf.extend_from_slice(&data[byte_start..byte_end]);
+            // Write body: contiguous slice of original data
+            page_buf.extend_from_slice(&data[page_start..page_end]);
 
             // Ensure last line ends with newline
             if page_buf.last() != Some(&b'\n') {
@@ -421,19 +427,22 @@ fn pr_data_contiguous<W: Write>(
 
             // Pad remaining body lines
             if show_header || (!config.omit_header && !config.omit_pagination) {
-                let pad_lines = body_lines_per_page.saturating_sub(lines_in_page);
+                let pad_lines = body_lines_per_page.saturating_sub(lines_found);
                 page_buf.resize(page_buf.len() + pad_lines, b'\n');
             }
 
-            if show_header {
-                write_footer(&mut page_buf, config)?;
-            }
+            page_buf.extend_from_slice(footer);
 
             output.write_all(&page_buf)?;
         }
 
-        line_idx = page_end_line;
+        byte_pos = page_end;
         page_num += 1;
+
+        // If we didn't find enough lines, we've consumed all data
+        if lines_found < body_lines_per_page {
+            break;
+        }
     }
 
     Ok(())
