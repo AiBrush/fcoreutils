@@ -419,7 +419,6 @@ fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
 /// Write all IoSlice entries via writev, handling partial writes.
 #[cfg(unix)]
 fn writev_all(fd: i32, slices: &[IoSlice<'_>]) -> io::Result<()> {
-    let mut offset = 0;
     let mut slice_idx = 0;
     while slice_idx < slices.len() {
         let remaining = &slices[slice_idx..];
@@ -431,23 +430,24 @@ fn writev_all(fd: i32, slices: &[IoSlice<'_>]) -> io::Result<()> {
                 continue;
             }
             return Err(err);
+        } else if ret == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "writev returned 0",
+            ));
         }
         let mut written = ret as usize;
         // Advance past fully written slices
         while slice_idx < slices.len() && written > 0 {
             let slice_len = slices[slice_idx].len();
-            if written >= slice_len - offset {
-                written -= slice_len - offset;
-                offset = 0;
+            if written >= slice_len {
+                written -= slice_len;
                 slice_idx += 1;
             } else {
-                offset += written;
-                written = 0;
-                // Partial write within a slice - need to fallback to write for the rest
-                let remaining_data = &slices[slice_idx][offset..];
-                write_all_fd(fd, remaining_data)?;
-                offset = 0;
+                // Partial write within a slice — write remainder via write_all_fd
+                write_all_fd(fd, &slices[slice_idx][written..])?;
                 slice_idx += 1;
+                break;
             }
         }
     }

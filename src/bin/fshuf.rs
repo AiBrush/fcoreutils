@@ -14,7 +14,11 @@ fn raw_write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
     while !data.is_empty() {
         let n = unsafe { libc::write(fd, data.as_ptr() as *const _, data.len()) };
         if n < 0 {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
         }
         data = &data[n as usize..];
     }
