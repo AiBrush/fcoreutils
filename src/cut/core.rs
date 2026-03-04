@@ -10,6 +10,39 @@ const PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
 
+/// Input chunk size for sequential processing. Keeps output buffer (~256KB)
+/// hot in L2 cache and avoids full-size allocation page faults.
+const SEQ_CHUNK: usize = 256 * 1024;
+
+/// Process data in newline-aligned chunks, writing each chunk's output immediately.
+/// Avoids allocating a full-size output buffer (e.g. 12MB for 11MB input).
+fn process_chunked(
+    data: &[u8],
+    line_delim: u8,
+    out: &mut impl Write,
+    mut process_fn: impl FnMut(&[u8], &mut Vec<u8>),
+) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(SEQ_CHUNK * 2);
+    let mut start = 0;
+    while start < data.len() {
+        let end = if start + SEQ_CHUNK >= data.len() {
+            data.len()
+        } else {
+            match memchr::memrchr(line_delim, &data[start..start + SEQ_CHUNK]) {
+                Some(pos) => start + pos + 1,
+                None => (start + SEQ_CHUNK).min(data.len()),
+            }
+        };
+        buf.clear();
+        process_fn(&data[start..end], &mut buf);
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+        start = end;
+    }
+    Ok(())
+}
+
 /// Configuration for cut operations.
 pub struct CutConfig<'a> {
     pub mode: CutMode,
@@ -302,13 +335,9 @@ fn process_fields_multi_select(
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len() * 3 / 4);
-        multi_select_chunk(
-            data, delim, line_delim, ranges, max_field, suppress, &mut buf,
-        );
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            multi_select_chunk(chunk, delim, line_delim, ranges, max_field, suppress, buf);
+        })?;
     }
     Ok(())
 }
@@ -723,23 +752,20 @@ fn process_fields_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        // +1 for potential trailing line_delim when input doesn't end with one
-        let mut buf = Vec::with_capacity(data.len() + 1);
-        process_fields_chunk(
-            data,
-            delim,
-            ranges,
-            output_delim,
-            suppress,
-            max_field,
-            field_mask,
-            line_delim,
-            complement,
-            &mut buf,
-        );
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            process_fields_chunk(
+                chunk,
+                delim,
+                ranges,
+                output_delim,
+                suppress,
+                max_field,
+                field_mask,
+                line_delim,
+                complement,
+                buf,
+            );
+        })?;
     }
     Ok(())
 }
@@ -860,16 +886,9 @@ fn process_single_field(
             if data.len() >= FIELD_PARALLEL_MIN {
                 return single_field1_parallel(data, delim, line_delim, out);
             }
-            // Sequential: two-level scan into buffer, single write_all.
-            // Buffer approach is faster than writev for high-delimiter-density
-            // data because it produces one contiguous buffer (one write syscall)
-            // instead of many IoSlice entries (kernel overhead per iovec).
-            let mut buf = Vec::with_capacity(data.len() + 1);
-            single_field1_to_buf(data, delim, line_delim, &mut buf);
-            if !buf.is_empty() {
-                out.write_all(&buf)?;
-            }
-            return Ok(());
+            return process_chunked(data, line_delim, out, |chunk, buf| {
+                single_field1_to_buf(chunk, delim, line_delim, buf);
+            });
         }
 
         // Two-level approach for field N: outer newline scan + inner delim scan
@@ -968,13 +987,11 @@ fn process_complement_range(
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
-        complement_range_chunk(
-            data, delim, skip_start, skip_end, line_delim, suppress, &mut buf,
-        );
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            complement_range_chunk(
+                chunk, delim, skip_start, skip_end, line_delim, suppress, buf,
+            );
+        })?;
     }
     Ok(())
 }
@@ -1156,11 +1173,9 @@ fn process_complement_single_field(
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
-        complement_single_field_chunk(data, delim, skip_idx, line_delim, suppress, &mut buf);
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            complement_single_field_chunk(chunk, delim, skip_idx, line_delim, suppress, buf);
+        })?;
     }
     Ok(())
 }
@@ -1312,11 +1327,9 @@ fn process_fields_prefix(
         // Most lines have enough fields, so the output is often identical to input.
         fields_prefix_zerocopy(data, delim, line_delim, last_field, out)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
-        fields_prefix_chunk(data, delim, line_delim, last_field, suppress, &mut buf);
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            fields_prefix_chunk(chunk, delim, line_delim, last_field, suppress, buf);
+        })?;
     }
     Ok(())
 }
@@ -1505,11 +1518,9 @@ fn process_fields_suffix(
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
-        fields_suffix_chunk(data, delim, line_delim, start_field, suppress, &mut buf);
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            fields_suffix_chunk(chunk, delim, line_delim, start_field, suppress, buf);
+        })?;
     }
     Ok(())
 }
@@ -1635,19 +1646,17 @@ fn process_fields_mid_range(
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
-        fields_mid_range_chunk(
-            data,
-            delim,
-            line_delim,
-            start_field,
-            end_field,
-            suppress,
-            &mut buf,
-        );
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            fields_mid_range_chunk(
+                chunk,
+                delim,
+                line_delim,
+                start_field,
+                end_field,
+                suppress,
+                buf,
+            );
+        })?;
     }
     Ok(())
 }
@@ -2640,11 +2649,9 @@ fn process_bytes_mid_range(
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
-        bytes_mid_range_chunk(data, skip, end_byte, line_delim, &mut buf);
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            bytes_mid_range_chunk(chunk, skip, end_byte, line_delim, buf);
+        })?;
     }
     Ok(())
 }
@@ -2729,11 +2736,9 @@ fn process_bytes_complement_mid(
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        let mut buf = Vec::with_capacity(data.len());
-        bytes_complement_mid_chunk(data, prefix_bytes, skip_end, line_delim, &mut buf);
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            bytes_complement_mid_chunk(chunk, prefix_bytes, skip_end, line_delim, buf);
+        })?;
     }
     Ok(())
 }
@@ -2901,12 +2906,9 @@ fn process_bytes_fast(data: &[u8], cfg: &CutConfig, out: &mut impl Write) -> io:
             .collect();
         write_ioslices(out, &slices)?;
     } else {
-        // +1 for potential trailing line_delim when input doesn't end with one
-        let mut buf = Vec::with_capacity(data.len() + 1);
-        process_bytes_chunk(data, ranges, complement, output_delim, line_delim, &mut buf);
-        if !buf.is_empty() {
-            out.write_all(&buf)?;
-        }
+        process_chunked(data, line_delim, out, |chunk, buf| {
+            process_bytes_chunk(chunk, ranges, complement, output_delim, line_delim, buf);
+        })?;
     }
     Ok(())
 }
