@@ -750,23 +750,26 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io
             Ok(32)
         }
         HashAlgorithm::Sha1 => {
-            let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
-            hex_encode_to_slice(digest.as_ref(), out);
+            // sha1 crate uses cpufeatures for runtime SHA-NI dispatch (~1.3 GB/s
+            // on machines with SHA-NI), matching OpenSSL without dlopen overhead.
+            let digest = sha1::Sha1::digest(data);
+            hex_encode_to_slice(&digest, out);
             Ok(40)
         }
         HashAlgorithm::Sha224 => {
+            // sha2 crate has SHA-NI support, comparable to OpenSSL at all sizes.
             let digest = sha2::Sha224::digest(data);
             hex_encode_to_slice(&digest, out);
             Ok(56)
         }
         HashAlgorithm::Sha256 => {
+            // sha2 crate has SHA-NI support, comparable to OpenSSL at all sizes.
             let digest = sha2::Sha256::digest(data);
             hex_encode_to_slice(&digest, out);
             Ok(64)
         }
         HashAlgorithm::Sha384 => {
-            // Use ring directly — avoids OpenSSL dlopen (~5ms) overhead.
-            // ring uses BoringSSL assembly for SHA-384/512 on x86-64/aarch64.
+            // ring uses BoringSSL assembly for SHA-384/512.
             let digest = ring::digest::digest(&ring::digest::SHA384, data);
             hex_encode_to_slice(digest.as_ref(), out);
             Ok(96)
