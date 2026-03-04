@@ -321,8 +321,9 @@ fn try_mmap_stdin_with_threshold(_min_size: usize) -> Option<memmap2::Mmap> {
 
 /// Try to create a MAP_PRIVATE (copy-on-write) mmap of stdin for in-place translate.
 /// MAP_PRIVATE means writes only affect our process's copy — the underlying file
-/// is unmodified. Only used for large files (called after try_mmap_stdin
-/// returns a read-only mmap that's >= 64MB and dropped).
+/// is unmodified.
+/// Only used for files >= 32MB. For smaller files, the MAP_PRIVATE + MAP_POPULATE
+/// mmap setup cost (~5ms for 10MB) exceeds the benefit vs a simple read() + translate.
 #[cfg(unix)]
 fn try_mmap_stdin_mut() -> Option<memmap2::MmapMut> {
     use std::os::unix::io::AsRawFd;
@@ -336,11 +337,15 @@ fn try_mmap_stdin_mut() -> Option<memmap2::MmapMut> {
     if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
         return None;
     }
+    // For files < 32MB, read() + in-place translate is faster than MAP_PRIVATE mmap
+    // because mmap setup (MAP_POPULATE + HUGEPAGE) costs ~5ms for 10MB files.
+    if (stat.st_size as usize) < 32 * 1024 * 1024 {
+        return None;
+    }
 
     use std::os::unix::io::FromRawFd;
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     // map_copy creates MAP_PRIVATE mapping — writes are COW, file untouched
-    // Always use MAP_POPULATE here since this path is only reached for large files
     let mmap = unsafe { memmap2::MmapOptions::new().populate().map_copy(&file) }.ok();
     std::mem::forget(file); // Don't close stdin
     #[cfg(target_os = "linux")]
@@ -437,6 +442,7 @@ fn main() {
         // separate output buffer (~300µs) + copying translated data into it.
         let result = if let Some(mut mm_mut) = try_mmap_stdin_mut() {
             // MAP_PRIVATE mmap: translate in-place, then write the mmap data.
+            // Only used for files >= 32MB where mmap setup cost is amortized.
             // vmsplice is safe: get_user_pages() pins the COW pages, keeping them
             // alive even after the mmap is unmapped. Pages are only freed after
             // the pipe reader releases its references.
@@ -456,7 +462,9 @@ fn main() {
                 tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut lock)
             }
         } else if let Some(mm) = try_mmap_stdin_with_threshold(0) {
-            // Fallback: read-only mmap + separate buffer translate.
+            // Read-only mmap + separate buffer translate (any regular file).
+            // Read-only mmap is cheap (no MAP_PRIVATE COW setup). For files < 32MB
+            // where MAP_PRIVATE mmap was skipped, this path handles them efficiently.
             // MUST use raw write (not vmsplice) — translate_mmap_readonly calls
             // translate_to_separate_buf which allocates a heap Vec. With vmsplice,
             // the heap pages could be freed/reused before the pipe reader reads them.
@@ -478,10 +486,6 @@ fn main() {
         } else {
             // Piped stdin: streaming translate for pipeline parallelism.
             // Read chunks, translate in-place with SIMD, write immediately.
-            // This overlaps I/O with compute: while ftr translates chunk N,
-            // upstream cat writes chunk N+1 to the pipe.
-            // MUST use raw write (not vmsplice) — stdin is read in chunks via a
-            // locked reader, and the internal buffer is overwritten each iteration.
             #[cfg(target_os = "linux")]
             {
                 let mut reader = RawStdin;

@@ -185,72 +185,57 @@ impl RawBufWriter {
 }
 
 /// Fast path for the common case: 2 files, single-byte delimiter (usually tab).
-/// Scans both files simultaneously with memchr, writing results into a 1MB buffer.
-/// Uses unsafe pointer writes to eliminate bounds checks in the hot loop.
+/// Pre-splits both files into line offsets with a single SIMD memchr_iter pass each,
+/// then iterates with O(1) indexing, writing into a 1MB buffer with raw fd writes.
 fn paste_two_files_fast(
     data_a: &[u8],
     data_b: &[u8],
     delim: u8,
     terminator: u8,
 ) -> std::io::Result<()> {
+    if data_a.is_empty() && data_b.is_empty() {
+        return Ok(());
+    }
+
+    // Pre-split both files — single SIMD pass each.
+    let lines_a = presplit_lines(data_a, terminator);
+    let lines_b = presplit_lines(data_b, terminator);
+    let max_lines = lines_a.len().max(lines_b.len());
+    if max_lines == 0 {
+        return Ok(());
+    }
+
     let buf_cap = BUF_SIZE;
     let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
     // Pre-fault pages
     unsafe {
         std::ptr::write_bytes(buf.as_mut_ptr(), 0, buf_cap);
     }
-
     let base = buf.as_mut_ptr();
     let mut pos: usize = 0;
-    let mut cur_a: usize = 0;
-    let mut cur_b: usize = 0;
-    let done_a = data_a.is_empty();
-    let done_b = data_b.is_empty();
 
-    if done_a && done_b {
-        return Ok(());
-    }
+    let ptr_a = data_a.as_ptr();
+    let ptr_b = data_b.as_ptr();
+    let na = lines_a.len();
+    let nb = lines_b.len();
 
-    loop {
-        let a_exhausted = cur_a >= data_a.len();
-        let b_exhausted = cur_b >= data_b.len();
-        if a_exhausted && b_exhausted {
-            break;
-        }
-
-        // Find line end in file A
-        let (line_a_ptr, line_a_len, new_cur_a) = if !a_exhausted {
-            match memchr::memchr(terminator, &data_a[cur_a..]) {
-                Some(off) => (data_a.as_ptr().wrapping_add(cur_a), off, cur_a + off + 1),
-                None => (
-                    data_a.as_ptr().wrapping_add(cur_a),
-                    data_a.len() - cur_a,
-                    data_a.len(),
-                ),
-            }
+    for i in 0..max_lines {
+        // Get line lengths from pre-split offsets
+        let (a_off, a_len) = if i < na {
+            let (s, e) = unsafe { *lines_a.get_unchecked(i) };
+            (s as usize, (e - s) as usize)
         } else {
-            (std::ptr::null(), 0, cur_a)
+            (0, 0)
         };
 
-        // Find line end in file B
-        let (line_b_ptr, line_b_len, new_cur_b) = if !b_exhausted {
-            match memchr::memchr(terminator, &data_b[cur_b..]) {
-                Some(off) => (data_b.as_ptr().wrapping_add(cur_b), off, cur_b + off + 1),
-                None => (
-                    data_b.as_ptr().wrapping_add(cur_b),
-                    data_b.len() - cur_b,
-                    data_b.len(),
-                ),
-            }
+        let (b_off, b_len) = if i < nb {
+            let (s, e) = unsafe { *lines_b.get_unchecked(i) };
+            (s as usize, (e - s) as usize)
         } else {
-            (std::ptr::null(), 0, cur_b)
+            (0, 0)
         };
 
-        cur_a = new_cur_a;
-        cur_b = new_cur_b;
-
-        // Total bytes for this output line: line_a + delim + line_b + terminator
-        let out_len = line_a_len + 1 + line_b_len + 1;
+        let out_len = a_len + 1 + b_len + 1;
 
         // Flush if needed
         if pos + out_len > buf_cap {
@@ -262,15 +247,15 @@ fn paste_two_files_fast(
 
         // Write directly with unsafe pointer copies
         unsafe {
-            if line_a_len > 0 {
-                std::ptr::copy_nonoverlapping(line_a_ptr, base.add(pos), line_a_len);
-                pos += line_a_len;
+            if a_len > 0 {
+                std::ptr::copy_nonoverlapping(ptr_a.add(a_off), base.add(pos), a_len);
+                pos += a_len;
             }
             *base.add(pos) = delim;
             pos += 1;
-            if line_b_len > 0 {
-                std::ptr::copy_nonoverlapping(line_b_ptr, base.add(pos), line_b_len);
-                pos += line_b_len;
+            if b_len > 0 {
+                std::ptr::copy_nonoverlapping(ptr_b.add(b_off), base.add(pos), b_len);
+                pos += b_len;
             }
             *base.add(pos) = terminator;
             pos += 1;
@@ -287,7 +272,8 @@ fn paste_two_files_fast(
 }
 
 /// Streaming paste for the parallel (normal) mode.
-/// Uses memchr per-line scanning and a 1MB output buffer with raw fd writes.
+/// Pre-splits all files into line offsets with SIMD memchr_iter, then uses
+/// O(1) indexing with a 1MB output buffer and raw fd writes.
 /// For the common 2-file case, dispatches to an optimized fast path.
 pub fn paste_parallel_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io::Result<()> {
     let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
@@ -319,62 +305,41 @@ pub fn paste_parallel_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::
         return paste_two_files_fast(file_data[0], file_data[1], delims[0], terminator);
     }
 
+    // Pre-split all files into line offsets — single SIMD pass per file.
+    let file_lines: Vec<Vec<(u32, u32)>> = file_data
+        .iter()
+        .map(|data| presplit_lines(data, terminator))
+        .collect();
+    let max_lines = file_lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    if max_lines == 0 {
+        return Ok(());
+    }
+
     let mut writer = RawBufWriter::new();
 
-    // Cursors: current position in each file.
-    // Initialize to usize::MAX for empty files (already exhausted).
-    let mut cursors: Vec<usize> = file_data
-        .iter()
-        .map(|d| if d.is_empty() { usize::MAX } else { 0 })
-        .collect();
-    let mut active_count = file_data.iter().filter(|d| !d.is_empty()).count();
-
-    loop {
-        if active_count == 0 {
-            break;
-        }
-
-        let mut newly_exhausted = 0;
-
+    for line_idx in 0..max_lines {
         for file_idx in 0..nfiles {
             if file_idx > 0 && has_delims {
                 writer.push(delims[(file_idx - 1) % delims.len()]);
             }
-
-            let cursor = cursors[file_idx];
-            if cursor == usize::MAX {
-                continue;
-            }
-
-            let data = file_data[file_idx];
-
-            match memchr::memchr(terminator, &data[cursor..]) {
-                Some(offset) => {
-                    writer.extend(&data[cursor..cursor + offset]);
-                    let new_cursor = cursor + offset + 1;
-                    if new_cursor >= data.len() {
-                        cursors[file_idx] = usize::MAX;
-                        newly_exhausted += 1;
-                    } else {
-                        cursors[file_idx] = new_cursor;
-                    }
-                }
-                None => {
-                    writer.extend(&data[cursor..]);
-                    cursors[file_idx] = usize::MAX;
-                    newly_exhausted += 1;
+            let lines = &file_lines[file_idx];
+            if line_idx < lines.len() {
+                let (s, e) = unsafe { *lines.get_unchecked(line_idx) };
+                let len = (e - s) as usize;
+                if len > 0 {
+                    writer.extend(&file_data[file_idx][s as usize..e as usize]);
                 }
             }
         }
-
         writer.push(terminator);
-        active_count -= newly_exhausted;
     }
 
     writer.finish()
 }
 
 /// Streaming paste for serial mode.
+/// Pre-splits each file into line offsets with SIMD memchr_iter, then iterates
+/// with O(1) indexing.
 pub fn paste_serial_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io::Result<()> {
     let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
     let delims = &config.delimiters;
@@ -388,29 +353,22 @@ pub fn paste_serial_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io
             continue;
         }
 
-        let mut cursor = 0;
-        let mut first = true;
-        let mut delim_idx = 0;
-
-        while cursor < data.len() {
-            if !first && has_delims {
-                writer.push(delims[delim_idx % delims.len()]);
-                delim_idx += 1;
-            }
-            first = false;
-
-            match memchr::memchr(terminator, &data[cursor..]) {
-                Some(offset) => {
-                    writer.extend(&data[cursor..cursor + offset]);
-                    cursor += offset + 1;
-                }
-                None => {
-                    writer.extend(&data[cursor..]);
-                    cursor = data.len();
-                }
-            }
+        let lines = presplit_lines(data, terminator);
+        if lines.is_empty() {
+            writer.push(terminator);
+            continue;
         }
 
+        // First line: no leading delimiter
+        let (s, e) = lines[0];
+        writer.extend(&data[s as usize..e as usize]);
+        // Subsequent lines: prepend cycling delimiter
+        for (i, &(s, e)) in lines[1..].iter().enumerate() {
+            if has_delims {
+                writer.push(delims[i % delims.len()]);
+            }
+            writer.extend(&data[s as usize..e as usize]);
+        }
         writer.push(terminator);
     }
 

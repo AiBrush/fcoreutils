@@ -7,7 +7,7 @@ fn main() {
 #[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::path::Path;
 #[cfg(unix)]
@@ -21,6 +21,46 @@ use coreutils_rs::common::io::{FileData, read_file, read_stdin};
 use coreutils_rs::common::{io_error_msg, reset_sigpipe};
 #[cfg(unix)]
 use coreutils_rs::pr::{self, PrConfig};
+
+/// Direct fd writer — pr already buffers pages internally (~128KB per page),
+/// so BufWriter's 1MB buffer adds unnecessary allocation + double-copy.
+#[cfg(unix)]
+struct RawStdout;
+
+#[cfg(unix)]
+impl Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let ret = unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, buf.len() as _) };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        while !buf.is_empty() {
+            let ret =
+                unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, buf.len() as _) };
+            if ret > 0 {
+                buf = &buf[ret as usize..];
+            } else if ret == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 #[cfg(unix)]
 struct Cli {
@@ -350,8 +390,7 @@ fn main() {
         cli.files
     };
 
-    let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+    let mut out = RawStdout;
     let mut had_error = false;
 
     if cli.config.merge {
@@ -442,8 +481,6 @@ fn main() {
             }
         }
     }
-
-    let _ = out.flush();
 
     if had_error {
         process::exit(1);
