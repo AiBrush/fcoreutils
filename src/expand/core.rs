@@ -573,6 +573,27 @@ fn expand_generic(
     Ok(())
 }
 
+/// Check if unexpand would produce output identical to input (passthrough case).
+/// Used by the binary to bypass BufWriter and write directly for maximum throughput.
+pub fn unexpand_is_passthrough(data: &[u8], tabs: &TabStops, all: bool) -> bool {
+    if data.is_empty() {
+        return true;
+    }
+    // No spaces or tabs at all → passthrough
+    if memchr::memchr2(b' ', b'\t', data).is_none() {
+        return true;
+    }
+    if let TabStops::Regular(_) = tabs {
+        if all {
+            memchr::memchr(b'\t', data).is_none() && memchr::memmem::find(data, b"  ").is_none()
+        } else {
+            !unexpand_default_needs_processing(data)
+        }
+    } else {
+        false
+    }
+}
+
 /// Unexpand spaces to tabs.
 /// If `all` is true, convert all sequences of spaces; otherwise only leading spaces.
 pub fn unexpand_bytes(
@@ -590,8 +611,22 @@ pub fn unexpand_bytes(
         return out.write_all(data);
     }
 
-    // For regular tab stops, use the optimized SIMD-scanning path
+    // For regular tab stops, check passthrough BEFORE expensive backspace scan
     if let TabStops::Regular(tab_size) = tabs {
+        if all {
+            // -a mode: if no tabs and no consecutive spaces, output = input
+            if memchr::memchr(b'\t', data).is_none() && memchr::memmem::find(data, b"  ").is_none()
+            {
+                return out.write_all(data);
+            }
+        } else {
+            // Default mode: only leading whitespace matters.
+            // If no line starts with space or tab, output = input.
+            if !unexpand_default_needs_processing(data) {
+                return out.write_all(data);
+            }
+        }
+
         if memchr::memchr(b'\x08', data).is_none() {
             return unexpand_regular_fast(data, *tab_size, all, out);
         }
@@ -599,6 +634,18 @@ pub fn unexpand_bytes(
 
     // Generic path for tab lists or data with backspaces
     unexpand_generic(data, tabs, all, out)
+}
+
+/// Check if default-mode unexpand needs to process any data.
+/// Returns true if any line starts with a space or tab.
+/// Uses memmem for 2-byte pattern search — one SIMD pass per pattern,
+/// much faster than memchr_iter + per-match branching when no matches exist.
+#[inline]
+fn unexpand_default_needs_processing(data: &[u8]) -> bool {
+    if data[0] == b' ' || data[0] == b'\t' {
+        return true;
+    }
+    memchr::memmem::find(data, b"\n ").is_some() || memchr::memmem::find(data, b"\n\t").is_some()
 }
 
 /// Emit a run of blanks as the optimal combination of tabs and spaces.
@@ -649,6 +696,7 @@ fn emit_blanks(
 
 /// Fast unexpand for regular tab stops without backspaces.
 /// Uses memchr SIMD scanning to skip non-special bytes in bulk.
+/// Passthrough checks are done by the caller (unexpand_bytes).
 fn unexpand_regular_fast(
     data: &[u8],
     tab_size: usize,
@@ -710,39 +758,27 @@ fn unexpand_regular_fast(
 }
 
 /// Fast unexpand -a for regular tab stops without backspaces.
-/// Buffers output into a Vec to avoid per-call write_all overhead.
-/// Handles single spaces efficiently (most common case: no tab conversion needed).
+/// Per-line processing with SIMD scanning for blank runs.
+/// Passthrough checks are done by the caller (unexpand_bytes).
 fn unexpand_regular_fast_all(
     data: &[u8],
     tab_size: usize,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
-    // Line-level fast path: process the file line by line.
-    // Lines with only single spaces (no tabs, no double spaces) don't need
-    // any conversion and can be copied as-is — this covers most natural text.
     let mut output: Vec<u8> = Vec::with_capacity(data.len());
     let mut pos: usize = 0;
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line = &data[pos..nl_pos];
-
-        // Fast check: skip lines with no tabs and no consecutive spaces.
-        // Two separate SIMD scans are needed: memchr2 can't work because
-        // a space appearing before a tab would cause us to miss the tab.
-        let needs_processing =
-            memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some();
-
-        if !needs_processing {
-            // No conversion needed: copy line as-is
+        // Per-line fast check: no tabs and no double-spaces → copy through
+        if memchr::memchr(b'\t', line).is_none() && memchr::memmem::find(line, b"  ").is_none() {
             output.extend_from_slice(line);
         } else {
-            // Process this line through the blank-conversion logic
-            unexpand_line_all(line, tab_size, &mut output);
+            unexpand_line_all_fast(line, tab_size, &mut output);
         }
         output.push(b'\n');
 
-        // Flush periodically
-        if output.len() >= 256 * 1024 {
+        if output.len() >= 1024 * 1024 {
             out.write_all(&output)?;
             output.clear();
         }
@@ -752,12 +788,10 @@ fn unexpand_regular_fast_all(
     // Handle final line without trailing newline
     if pos < data.len() {
         let line = &data[pos..];
-        let needs_processing =
-            memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some();
-        if !needs_processing {
+        if memchr::memchr(b'\t', line).is_none() && memchr::memmem::find(line, b"  ").is_none() {
             output.extend_from_slice(line);
         } else {
-            unexpand_line_all(line, tab_size, &mut output);
+            unexpand_line_all_fast(line, tab_size, &mut output);
         }
     }
 
@@ -767,42 +801,137 @@ fn unexpand_regular_fast_all(
     Ok(())
 }
 
-/// Process a single line for unexpand -a, converting blank runs to tabs+spaces.
+/// Process a single line for unexpand -a with SIMD-accelerated blank detection.
+/// Uses memchr2 to skip non-blank bytes in bulk, only processing blank runs.
+/// Single spaces (not followed by another blank) are included in the copy path.
 #[inline]
-fn unexpand_line_all(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
+fn unexpand_line_all_fast(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
     let mut column: usize = 0;
     let mut pos: usize = 0;
 
-    while pos < line.len() {
-        // Check for blanks to convert
-        if line[pos] == b' ' || line[pos] == b'\t' {
-            // Count consecutive blanks, tracking column advancement
-            let blank_start_col = column;
-            while pos < line.len() && (line[pos] == b' ' || line[pos] == b'\t') {
-                if line[pos] == b'\t' {
-                    column += tab_size - column % tab_size;
-                } else {
-                    column += 1;
+    loop {
+        // Find next tab or convertible blank run using SIMD scan.
+        // Skip single spaces (most common) by continuing past them.
+        let blank_pos = {
+            let mut search = pos;
+            loop {
+                match memchr::memchr2(b' ', b'\t', &line[search..]) {
+                    Some(off) => {
+                        let abs = search + off;
+                        if line[abs] == b'\t' {
+                            break Some(abs);
+                        }
+                        // Space: check if followed by another blank
+                        if abs + 1 < line.len() && (line[abs + 1] == b' ' || line[abs + 1] == b'\t')
+                        {
+                            break Some(abs);
+                        }
+                        // Single space: skip and keep searching
+                        search = abs + 1;
+                    }
+                    None => break None,
                 }
-                pos += 1;
             }
-            // Vec<u8> implements Write, so we can use emit_blanks directly.
-            emit_blanks(output, blank_start_col, column - blank_start_col, tab_size).unwrap();
-            continue;
-        }
+        };
 
-        // Non-blank: copy until next space or tab
-        match memchr::memchr2(b' ', b'\t', &line[pos..]) {
-            Some(offset) => {
-                output.extend_from_slice(&line[pos..pos + offset]);
-                column += offset;
-                pos += offset;
+        match blank_pos {
+            Some(bp) => {
+                // Copy non-blank prefix (including single spaces)
+                if bp > pos {
+                    output.extend_from_slice(&line[pos..bp]);
+                    column += bp - pos;
+                }
+
+                // Process blank run
+                let blank_start_col = column;
+                let blank_start = bp;
+                pos = bp;
+                while pos < line.len() && (line[pos] == b' ' || line[pos] == b'\t') {
+                    if line[pos] == b'\t' {
+                        column += tab_size - column % tab_size;
+                    } else {
+                        column += 1;
+                    }
+                    pos += 1;
+                }
+                emit_blank_run_vec(output, &line[blank_start..pos], blank_start_col, tab_size);
             }
             None => {
-                output.extend_from_slice(&line[pos..]);
+                // Rest of line has no convertible blanks
+                if pos < line.len() {
+                    output.extend_from_slice(&line[pos..]);
+                }
                 break;
             }
         }
+    }
+}
+
+/// Emit a blank run character-by-character, matching GNU unexpand behavior:
+/// - Spaces are accumulated and converted to tabs at tab stops (but a single
+///   space at a tab stop stays as space unless more blanks follow).
+/// - Input tabs are always emitted as tabs. Pending spaces before a tab are
+///   merged into the tab's column range and emitted as optimal tabs.
+#[inline(always)]
+fn emit_blank_run_vec(output: &mut Vec<u8>, blanks: &[u8], start_col: usize, tab_size: usize) {
+    let mut col = start_col;
+    let mut pending_spaces: usize = 0;
+    let mut pending_start_col = start_col;
+
+    for (idx, &b) in blanks.iter().enumerate() {
+        if b == b'\t' {
+            let new_col = col + (tab_size - col % tab_size);
+
+            if pending_spaces > 0 {
+                // Merge pending spaces with this tab: emit tabs for all tab stops
+                // in the range [pending_start_col .. new_col]
+                let mut tc = pending_start_col;
+                loop {
+                    let next_ts = tc + (tab_size - tc % tab_size);
+                    if next_ts > new_col {
+                        break;
+                    }
+                    output.push(b'\t');
+                    tc = next_ts;
+                }
+                // Any remaining gap (shouldn't happen for well-formed tab runs)
+                let gap = new_col - tc;
+                if gap > 0 {
+                    let len = output.len();
+                    output.resize(len + gap, b' ');
+                }
+                pending_spaces = 0;
+            } else {
+                // No pending spaces: emit the input tab directly
+                output.push(b'\t');
+            }
+
+            col = new_col;
+            pending_start_col = col;
+        } else {
+            // Space
+            if pending_spaces == 0 {
+                pending_start_col = col;
+            }
+            pending_spaces += 1;
+            col += 1;
+            // Check if we've reached a tab stop
+            if col.is_multiple_of(tab_size) {
+                let more_follow = idx + 1 < blanks.len();
+                if pending_spaces >= 2 || more_follow {
+                    output.push(b'\t');
+                    pending_spaces = 0;
+                    pending_start_col = col;
+                }
+                // else: single space at tab stop with nothing after → keep as space
+            }
+        }
+    }
+
+    // Flush remaining pending spaces as literal spaces
+    if pending_spaces > 0 {
+        let len = output.len();
+        output.resize(len + pending_spaces, b' ');
     }
 }
 

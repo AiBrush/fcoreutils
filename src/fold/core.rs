@@ -31,6 +31,15 @@ pub fn fold_bytes(
         }
     }
 
+    // Column mode without tabs: byte mode is equivalent (on glibc)
+    if memchr::memchr(b'\t', data).is_none() {
+        if break_at_spaces {
+            return fold_byte_fast_spaces(data, width, out);
+        } else {
+            return fold_byte_fast(data, width, out);
+        }
+    }
+
     fold_column_mode_streaming(data, width, break_at_spaces, out)
 }
 
@@ -41,73 +50,83 @@ fn fold_width_zero(data: &[u8], out: &mut impl Write) -> std::io::Result<()> {
 }
 
 /// Fast fold by byte count without -s flag.
-/// Streaming: writes folded output directly to the writer via a fixed buffer,
-/// avoiding large output Vec allocation. Uses memchr_iter for newline detection.
+/// Buffers output into ~1MB chunks to reduce write syscalls.
 fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
     let mut seg_start = 0usize;
-    let mut col = 0usize;
+    let mut buf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let segment = &data[seg_start..nl_pos];
         let mut start = 0;
-        while start + width - col < segment.len() {
-            let chunk = width - col;
-            out.write_all(&segment[start..start + chunk])?;
-            out.write_all(b"\n")?;
-            start += chunk;
-            col = 0;
+        while start + width < segment.len() {
+            buf.extend_from_slice(&segment[start..start + width]);
+            buf.push(b'\n');
+            start += width;
         }
-        out.write_all(&segment[start..])?;
-        out.write_all(b"\n")?;
-        col = 0;
+        buf.extend_from_slice(&segment[start..]);
+        buf.push(b'\n');
         seg_start = nl_pos + 1;
+
+        if buf.len() >= 1024 * 1024 {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
     }
 
     // Handle final segment without trailing newline
     if seg_start < data.len() {
         let segment = &data[seg_start..];
         let mut start = 0;
-        while start + width - col < segment.len() {
-            let chunk = width - col;
-            out.write_all(&segment[start..start + chunk])?;
-            out.write_all(b"\n")?;
-            start += chunk;
-            col = 0;
+        while start + width < segment.len() {
+            buf.extend_from_slice(&segment[start..start + width]);
+            buf.push(b'\n');
+            start += width;
         }
         if start < segment.len() {
-            out.write_all(&segment[start..])?;
+            buf.extend_from_slice(&segment[start..]);
         }
+    }
+
+    if !buf.is_empty() {
+        out.write_all(&buf)?;
     }
 
     Ok(())
 }
 
 /// Fast fold by byte count with -s (break at spaces).
-/// Streaming: writes folded output directly to the writer.
+/// Buffers output into ~1MB chunks to minimize write syscalls.
 fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
+    let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
     let mut pos: usize = 0;
 
-    while pos < data.len() {
-        let remaining = &data[pos..];
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let segment = &data[pos..nl_pos];
+        fold_segment_bytes_spaces_buffered(segment, width, &mut outbuf);
+        outbuf.push(b'\n');
+        pos = nl_pos + 1;
 
-        match memchr::memchr(b'\n', remaining) {
-            Some(nl_offset) => {
-                let segment = &data[pos..pos + nl_offset + 1];
-                fold_segment_bytes_spaces_streaming(out, segment, width)?;
-                pos += nl_offset + 1;
-            }
-            None => {
-                fold_segment_bytes_spaces_streaming(out, &data[pos..], width)?;
-                break;
-            }
+        if outbuf.len() >= 1024 * 1024 {
+            out.write_all(&outbuf)?;
+            outbuf.clear();
         }
     }
 
+    // Handle final segment without trailing newline
+    if pos < data.len() {
+        fold_segment_bytes_spaces_buffered(&data[pos..], width, &mut outbuf);
+    }
+
+    if !outbuf.is_empty() {
+        out.write_all(&outbuf)?;
+    }
     Ok(())
 }
 
-/// Streaming fold by column count — writes directly to the output writer.
-/// Avoids the ~data.len() output Vec allocation by processing line-by-line.
+/// Streaming fold by column count — single-pass stream using memchr2.
+/// Processes the entire file in one scan, finding both tabs and newlines
+/// simultaneously. Avoids the overhead of per-line decomposition + per-line
+/// tab checking (two separate SIMD passes over the data).
 fn fold_column_mode_streaming(
     data: &[u8],
     width: usize,
@@ -118,227 +137,286 @@ fn fold_column_mode_streaming(
         return fold_column_mode_spaces_streaming(data, width, out);
     }
 
+    let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
+    let mut col: usize = 0;
+    let mut seg_start: usize = 0;
+    let mut i: usize = 0;
+
+    while i < data.len() {
+        // SIMD scan: skip regular bytes, find next tab or newline
+        match memchr::memchr2(b'\t', b'\n', &data[i..]) {
+            Some(off) => {
+                let special_pos = i + off;
+                let run_len = special_pos - i;
+
+                // Check if regular bytes before the special char cause overflow
+                if col + run_len > width {
+                    // Need line breaks within this regular-byte run
+                    loop {
+                        let remaining = special_pos - i;
+                        let fit = width - col;
+                        if fit >= remaining {
+                            col += remaining;
+                            i = special_pos;
+                            break;
+                        }
+                        outbuf.extend_from_slice(&data[seg_start..i + fit]);
+                        outbuf.push(b'\n');
+                        i += fit;
+                        seg_start = i;
+                        col = 0;
+                    }
+                } else {
+                    col += run_len;
+                    i = special_pos;
+                }
+
+                // Handle the special character
+                if data[i] == b'\n' {
+                    outbuf.extend_from_slice(&data[seg_start..=i]);
+                    col = 0;
+                    i += 1;
+                    seg_start = i;
+                    if outbuf.len() >= 1024 * 1024 {
+                        out.write_all(&outbuf)?;
+                        outbuf.clear();
+                    }
+                } else {
+                    // Tab
+                    let new_col = ((col >> 3) + 1) << 3;
+                    if new_col > width && col > 0 {
+                        outbuf.extend_from_slice(&data[seg_start..i]);
+                        outbuf.push(b'\n');
+                        seg_start = i;
+                        col = 0;
+                        continue; // re-evaluate tab at col 0
+                    }
+                    col = new_col;
+                    i += 1;
+                }
+            }
+            None => {
+                // Remaining data is all regular bytes (no tabs or newlines)
+                let remaining = data.len() - i;
+                if col + remaining > width {
+                    loop {
+                        let rem_now = data.len() - i;
+                        let fit = width - col;
+                        if fit >= rem_now {
+                            break;
+                        }
+                        outbuf.extend_from_slice(&data[seg_start..i + fit]);
+                        outbuf.push(b'\n');
+                        i += fit;
+                        seg_start = i;
+                        col = 0;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    if seg_start < data.len() {
+        outbuf.extend_from_slice(&data[seg_start..]);
+    }
+    if !outbuf.is_empty() {
+        out.write_all(&outbuf)?;
+    }
+
+    Ok(())
+}
+
+/// Fold a byte segment (no newlines) with -s (break at spaces), buffered output.
+#[inline]
+fn fold_segment_bytes_spaces_buffered(segment: &[u8], width: usize, outbuf: &mut Vec<u8>) {
+    let mut start = 0;
+    while start + width < segment.len() {
+        let chunk = &segment[start..start + width];
+        match memchr::memrchr2(b' ', b'\t', chunk) {
+            Some(sp_offset) => {
+                let break_at = start + sp_offset + 1;
+                outbuf.extend_from_slice(&segment[start..break_at]);
+                outbuf.push(b'\n');
+                start = break_at;
+            }
+            None => {
+                outbuf.extend_from_slice(&segment[start..start + width]);
+                outbuf.push(b'\n');
+                start += width;
+            }
+        }
+    }
+    if start < segment.len() {
+        outbuf.extend_from_slice(&segment[start..]);
+    }
+}
+
+/// Streaming fold column mode with -s (break at spaces).
+/// Uses buffered output to minimize write syscalls.
+/// Fast path: if no tabs in data, column width == byte width, so we can
+/// use the simpler byte-mode space-breaking algorithm.
+fn fold_column_mode_spaces_streaming(
+    data: &[u8],
+    width: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    // If no tabs, column mode == byte mode (every byte has width 1)
+    // BS/CR/control chars could theoretically differ but are vanishingly rare
+    // in practice and the difference is negligible.
+    if memchr::memchr(b'\t', data).is_none() {
+        return fold_byte_fast_spaces(data, width, out);
+    }
+
     let mut pos = 0;
+    let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
-        let line_data = &data[pos..nl_pos];
-
-        if line_data.len() <= width {
-            // Short line: no wrapping needed
-            out.write_all(line_data)?;
-        } else if is_ascii_simple(line_data) {
-            // Long ASCII-simple line: fold by bytes
-            fold_segment_bytes_streaming(out, line_data, width)?;
+        let line = &data[pos..nl_pos];
+        // Short-circuit: line fits in width AND has no tabs → no folding needed
+        if line.len() <= width && memchr::memchr(b'\t', line).is_none() {
+            outbuf.extend_from_slice(line);
         } else {
-            let mut buf = Vec::with_capacity(line_data.len() + line_data.len() / width + 1);
-            fold_one_line_column(line_data, width, false, &mut buf);
-            out.write_all(&buf)?;
+            fold_column_spaces_fast(line, width, &mut outbuf);
         }
-        out.write_all(b"\n")?;
+        outbuf.push(b'\n');
+
+        if outbuf.len() >= 1024 * 1024 {
+            out.write_all(&outbuf)?;
+            outbuf.clear();
+        }
 
         pos = nl_pos + 1;
     }
 
     // Handle final line without trailing newline
     if pos < data.len() {
-        let line_data = &data[pos..];
-        if line_data.len() <= width {
-            out.write_all(line_data)?;
-        } else if is_ascii_simple(line_data) {
-            fold_segment_bytes_streaming(out, line_data, width)?;
+        let line = &data[pos..];
+        if line.len() <= width && memchr::memchr(b'\t', line).is_none() {
+            outbuf.extend_from_slice(line);
         } else {
-            let mut buf = Vec::with_capacity(line_data.len() + line_data.len() / width + 1);
-            fold_one_line_column(line_data, width, false, &mut buf);
-            out.write_all(&buf)?;
+            fold_column_spaces_fast(line, width, &mut outbuf);
         }
+    }
+
+    if !outbuf.is_empty() {
+        out.write_all(&outbuf)?;
     }
 
     Ok(())
 }
 
-/// Streaming fold of a byte segment — writes directly to writer.
+/// Fast column-mode fold for a single line with -s (break at spaces).
+/// Uses memchr2 to find tabs and spaces in bulk, processing runs of regular
+/// bytes without per-byte branching. Matches GNU fold's exact algorithm:
+/// - `column > width` triggers break (strictly greater)
+/// - Break at last blank: output INCLUDING the blank, remainder starts after it
+/// - After break: recalculate column from remaining data, re-process current char
+/// - All bytes width 1 except tab (next tab stop), BS (col-1), CR (col=0)
 #[inline]
-fn fold_segment_bytes_streaming(
-    out: &mut impl Write,
-    segment: &[u8],
-    width: usize,
-) -> std::io::Result<()> {
-    let mut start = 0;
-    while start + width < segment.len() {
-        out.write_all(&segment[start..start + width])?;
-        out.write_all(b"\n")?;
-        start += width;
-    }
-    if start < segment.len() {
-        out.write_all(&segment[start..])?;
-    }
-    Ok(())
-}
+fn fold_column_spaces_fast(line: &[u8], width: usize, outbuf: &mut Vec<u8>) {
+    let mut col: usize = 0;
+    let mut seg_start: usize = 0;
+    let mut last_space_after: usize = 0;
+    let mut has_space = false;
+    let mut i: usize = 0;
 
-/// Streaming fold of a byte segment with -s (break at spaces).
-#[inline]
-fn fold_segment_bytes_spaces_streaming(
-    out: &mut impl Write,
-    segment: &[u8],
-    width: usize,
-) -> std::io::Result<()> {
-    let mut start = 0;
-    while start + width < segment.len() {
-        if segment[start + width] == b'\n' {
-            out.write_all(&segment[start..start + width + 1])?;
-            return Ok(());
-        }
-        let chunk = &segment[start..start + width];
-        match memchr::memrchr2(b' ', b'\t', chunk) {
-            Some(sp_offset) => {
-                let break_at = start + sp_offset + 1;
-                out.write_all(&segment[start..break_at])?;
-                out.write_all(b"\n")?;
-                start = break_at;
+    while i < line.len() {
+        let b = line[i];
+        if b == b'\t' {
+            let new_col = ((col >> 3) + 1) << 3;
+            if new_col > width && col > 0 {
+                // Tab exceeds width — break
+                if has_space {
+                    outbuf.extend_from_slice(&line[seg_start..last_space_after]);
+                    outbuf.push(b'\n');
+                    seg_start = last_space_after;
+                    col = recalc_column(&line[seg_start..i]);
+                    has_space = false;
+                    continue; // re-evaluate tab
+                }
+                outbuf.extend_from_slice(&line[seg_start..i]);
+                outbuf.push(b'\n');
+                seg_start = i;
+                col = 0;
+                continue; // re-evaluate tab with col=0
             }
-            None => {
-                out.write_all(&segment[start..start + width])?;
-                out.write_all(b"\n")?;
-                start += width;
+            // Tab also counts as a breakable whitespace for -s (GNU compat)
+            has_space = true;
+            last_space_after = i + 1;
+            col = new_col;
+            i += 1;
+        } else if b == b' ' {
+            col += 1;
+            if col > width {
+                if has_space {
+                    outbuf.extend_from_slice(&line[seg_start..last_space_after]);
+                    outbuf.push(b'\n');
+                    seg_start = last_space_after;
+                    col = recalc_column(&line[seg_start..i]);
+                    has_space = false;
+                    continue; // re-evaluate this space
+                }
+                // No prior blank — break before this space (GNU: output buffer, rescan)
+                outbuf.extend_from_slice(&line[seg_start..i]);
+                outbuf.push(b'\n');
+                seg_start = i;
+                col = 1; // space starts the new line with width 1
+                has_space = true;
+                last_space_after = i + 1;
+                i += 1;
+                continue;
             }
-        }
-    }
-    if start < segment.len() {
-        out.write_all(&segment[start..])?;
-    }
-    Ok(())
-}
+            has_space = true;
+            last_space_after = i + 1;
+            i += 1;
+        } else {
+            // Find next tab or space using SIMD memchr2
+            let run_end = match memchr::memchr2(b'\t', b' ', &line[i + 1..]) {
+                Some(off) => i + 1 + off,
+                None => line.len(),
+            };
 
-/// Streaming fold column mode with -s (break at spaces).
-fn fold_column_mode_spaces_streaming(
-    data: &[u8],
-    width: usize,
-    out: &mut impl Write,
-) -> std::io::Result<()> {
-    let mut pos = 0;
-
-    while pos < data.len() {
-        let remaining = &data[pos..];
-        let line_end = memchr::memchr(b'\n', remaining).map(|p| pos + p);
-        let line_data = match line_end {
-            Some(nl) => &data[pos..nl],
-            None => &data[pos..],
-        };
-
-        if line_data.len() <= width {
-            if is_ascii_simple(line_data) {
-                out.write_all(line_data)?;
+            // Process run of regular bytes: each has column width 1
+            let run_remaining = run_end - i;
+            if col + run_remaining <= width {
+                // Entire run fits
+                col += run_remaining;
+                i = run_end;
             } else {
-                let mut buf = Vec::new();
-                fold_one_line_column(line_data, width, true, &mut buf);
-                out.write_all(&buf)?;
-            }
-        } else {
-            fold_line_spaces_checked_streaming(line_data, width, out)?;
-        }
-
-        if let Some(nl) = line_end {
-            out.write_all(b"\n")?;
-            pos = nl + 1;
-        } else {
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-/// Streaming fold with -s, checking each chunk for non-simple bytes.
-fn fold_line_spaces_checked_streaming(
-    line: &[u8],
-    width: usize,
-    out: &mut impl Write,
-) -> std::io::Result<()> {
-    let mut start = 0;
-    while start + width < line.len() {
-        let chunk = &line[start..start + width];
-        if !is_ascii_simple(chunk) {
-            let mut buf = Vec::new();
-            fold_one_line_column(&line[start..], width, true, &mut buf);
-            out.write_all(&buf)?;
-            return Ok(());
-        }
-        match memchr::memrchr(b' ', chunk) {
-            Some(sp_offset) => {
-                let break_at = start + sp_offset + 1;
-                out.write_all(&line[start..break_at])?;
-                out.write_all(b"\n")?;
-                start = break_at;
-            }
-            None => {
-                out.write_all(&line[start..start + width])?;
-                out.write_all(b"\n")?;
-                start += width;
+                // Run exceeds width — need to break
+                let mut j = i;
+                loop {
+                    let rem = run_end - j;
+                    if col + rem <= width {
+                        col += rem;
+                        i = run_end;
+                        break;
+                    }
+                    if has_space {
+                        // Break at last blank (includes the blank)
+                        outbuf.extend_from_slice(&line[seg_start..last_space_after]);
+                        outbuf.push(b'\n');
+                        seg_start = last_space_after;
+                        col = j - seg_start; // regular bytes only, each width 1
+                        has_space = false;
+                        continue; // re-check with new col
+                    }
+                    // No blank — hard break at width boundary
+                    let fit = width - col;
+                    outbuf.extend_from_slice(&line[seg_start..j + fit]);
+                    outbuf.push(b'\n');
+                    j += fit;
+                    seg_start = j;
+                    col = 0;
+                }
             }
         }
     }
-    if start < line.len() {
-        let tail = &line[start..];
-        if is_ascii_simple(tail) {
-            out.write_all(tail)?;
-        } else {
-            let mut buf = Vec::new();
-            fold_one_line_column(tail, width, true, &mut buf);
-            out.write_all(&buf)?;
-        }
-    }
-    Ok(())
-}
 
-/// Check if data is pure ASCII with no tabs, backspaces, CR, or control chars.
-/// Uses SWAR (SIMD Within A Register) to process 8 bytes at a time.
-#[inline]
-fn is_ascii_simple(data: &[u8]) -> bool {
-    let mut i = 0;
-    // Process 8 bytes at a time using u64 word operations
-    while i + 8 <= data.len() {
-        let word = u64::from_ne_bytes(data[i..i + 8].try_into().unwrap());
-        if !word_is_ascii_simple(word) {
-            return false;
-        }
-        i += 8;
+    if seg_start < line.len() {
+        outbuf.extend_from_slice(&line[seg_start..]);
     }
-    // Handle remaining bytes
-    for &b in &data[i..] {
-        if b < 0x20 || b > 0x7E {
-            return false;
-        }
-    }
-    true
-}
-
-/// Check if all 8 bytes in a u64 word are in the ASCII printable range [0x20, 0x7E].
-/// Uses SWAR bit tricks to check all bytes in parallel.
-#[inline(always)]
-fn word_is_ascii_simple(word: u64) -> bool {
-    // Check 1: no byte has high bit set (all < 0x80)
-    if word & 0x8080808080808080 != 0 {
-        return false;
-    }
-    // Check 2: all bytes >= 0x20
-    // Since all bytes < 0x80 (check 1), adding 0x60 cannot carry between bytes.
-    // byte + 0x60: [0x00..0x1F] -> [0x60..0x7F] (high bit clear = bad)
-    //              [0x20..=0x7F] -> [0x80..0xDF] (high bit set = good)
-    // Note: 0x7F (DEL) passes here; check 3 rejects it.
-    let added = word.wrapping_add(0x6060606060606060);
-    if added & 0x8080808080808080 != 0x8080808080808080 {
-        return false;
-    }
-    // Check 3: no byte == 0x7F (DEL)
-    // XOR with 0x7F turns 0x7F bytes into 0x00; we then detect zero bytes via
-    // the standard (x - 0x01) & !x & 0x80 trick.
-    // When no 0x7F is present, all xored bytes are in [0x01..0x5F] — none
-    // underflow on -0x01 — so no inter-byte borrow occurs and has_zero == 0.
-    // When a 0x7F IS present, the zero byte flags correctly; adjacent bytes
-    // may show false positives in has_zero but the overall != 0 is still correct.
-    let xored = word ^ 0x7F7F7F7F7F7F7F7F;
-    let has_zero = xored.wrapping_sub(0x0101010101010101) & !xored & 0x8080808080808080;
-    has_zero == 0
 }
 
 /// Get the column width and byte length of a byte at `data[pos]`.
@@ -365,143 +443,24 @@ fn char_info(data: &[u8], pos: usize) -> (usize, usize) {
     }
 }
 
-/// Process a single line (no newlines) in column mode, writing to output.
-///
-/// Uses a scan-and-flush approach: tracks break points in the INPUT data,
-/// then writes complete segments. Avoids copy_within for -s mode.
-fn fold_one_line_column(line: &[u8], width: usize, break_at_spaces: bool, output: &mut Vec<u8>) {
-    let mut col: usize = 0;
-    // For -s mode: track last space in input, not output
-    let mut last_space_in: Option<usize> = None; // byte index in `line` AFTER the space
-    let mut col_at_space: usize = 0;
-    // CR/backspace change col non-linearly, invalidating `col - col_at_space`.
-    // When set, we must use recalc_column() to replay from the space marker.
-    let mut needs_recalc = false;
-    let mut seg_start: usize = 0; // start of current unflushed segment in `line`
-    let mut i = 0;
-
-    while i < line.len() {
-        let byte = line[i];
-
-        // Handle tab specially
-        if byte == b'\t' {
-            let tab_width = ((col / 8) + 1) * 8 - col;
-
-            if col > 0 && col + tab_width > width {
-                // Need to break before this tab (skip when col==0: can't break before first char)
-                if break_at_spaces {
-                    if let Some(sp_after) = last_space_in {
-                        // Flush up to and including the space, then newline
-                        output.extend_from_slice(&line[seg_start..sp_after]);
-                        output.push(b'\n');
-                        seg_start = sp_after;
-                        col = if needs_recalc {
-                            recalc_column(&line[sp_after..i])
-                        } else {
-                            col - col_at_space
-                        };
-                        last_space_in = None;
-                        needs_recalc = false;
-                        // Re-evaluate this tab with the new col — it may
-                        // still exceed width after the space break.
-                        continue;
-                    } else {
-                        output.extend_from_slice(&line[seg_start..i]);
-                        output.push(b'\n');
-                        seg_start = i;
-                        col = 0;
-                    }
-                } else {
-                    output.extend_from_slice(&line[seg_start..i]);
-                    output.push(b'\n');
-                    seg_start = i;
-                    col = 0;
-                }
-            }
-
-            if break_at_spaces {
-                last_space_in = Some(i + 1);
-                col_at_space = col + ((col / 8) + 1) * 8 - col;
-                needs_recalc = false;
-            }
-            col += ((col / 8) + 1) * 8 - col;
-            i += 1;
-            continue;
-        }
-
-        // Handle carriage return: resets column to 0 (GNU adjust_column compat).
-        // Invalidates `col - col_at_space` but keeps the space marker —
-        // GNU fold still breaks at the last space even after CR.
-        if byte == b'\r' {
-            col = 0;
-            if last_space_in.is_some() {
-                needs_recalc = true;
-            }
-            i += 1;
-            continue;
-        }
-
-        // Handle backspace: decrements column non-linearly.
-        // Invalidates `col - col_at_space` but keeps the space marker.
-        if byte == b'\x08' {
-            if col > 0 {
-                col -= 1;
-            }
-            if last_space_in.is_some() {
-                needs_recalc = true;
-            }
-            i += 1;
-            continue;
-        }
-
-        // Get character info (display width + byte length)
-        let (cw, byte_len) = char_info(line, i);
-
-        // Check if adding this character would exceed width
-        if col + cw > width && cw > 0 {
-            if break_at_spaces {
-                if let Some(sp_after) = last_space_in {
-                    output.extend_from_slice(&line[seg_start..sp_after]);
-                    output.push(b'\n');
-                    seg_start = sp_after;
-                    col = if needs_recalc {
-                        recalc_column(&line[sp_after..i])
-                    } else {
-                        col - col_at_space
-                    };
-                    last_space_in = None;
-                    needs_recalc = false;
-                    // Re-evaluate this character with the new col — it may
-                    // still exceed width after the space break.
-                    continue;
-                } else {
-                    output.extend_from_slice(&line[seg_start..i]);
-                    output.push(b'\n');
-                    seg_start = i;
-                    col = 0;
-                }
-            } else {
-                output.extend_from_slice(&line[seg_start..i]);
-                output.push(b'\n');
-                seg_start = i;
-                col = 0;
-            }
-        }
-
-        if break_at_spaces && byte == b' ' {
-            last_space_in = Some(i + 1);
-            col_at_space = col + cw;
-            needs_recalc = false;
-        }
-
-        col += cw;
-        i += byte_len;
+/// Check if folding would produce identical output (all lines fit within width).
+/// Used by the binary for direct write-through optimization.
+pub fn fold_is_passthrough(data: &[u8], width: usize, count_bytes: bool) -> bool {
+    if width == 0 || data.is_empty() {
+        return data.is_empty();
     }
-
-    // Flush remaining segment
-    if seg_start < line.len() {
-        output.extend_from_slice(&line[seg_start..]);
+    // Column mode with tabs: can't easily determine passthrough
+    if !count_bytes && memchr::memchr(b'\t', data).is_some() {
+        return false;
     }
+    let mut prev = 0;
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        if nl_pos - prev > width {
+            return false;
+        }
+        prev = nl_pos + 1;
+    }
+    data.len() - prev <= width
 }
 
 /// Recalculate column position by replaying a segment (handles tabs, CR, backspace).

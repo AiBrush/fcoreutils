@@ -299,6 +299,21 @@ pub fn paste_parallel_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::
         return Ok(());
     }
 
+    // Fast path: single file is a passthrough (output == input)
+    if nfiles == 1 {
+        let data = file_data[0];
+        if data.is_empty() {
+            return Ok(());
+        }
+        // If data ends with terminator, output is identical to input
+        if *data.last().unwrap() == terminator {
+            return raw_write_all(data);
+        }
+        // Otherwise: write data + terminator
+        raw_write_all(data)?;
+        return raw_write_all(&[terminator]);
+    }
+
     // Fast path: 2 files with single-byte delimiter (the common case: `paste file1 file2`)
     if nfiles == 2 && delims.len() == 1 {
         return paste_two_files_fast(file_data[0], file_data[1], delims[0], terminator);
