@@ -769,12 +769,23 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io
             Ok(64)
         }
         HashAlgorithm::Sha384 => {
-            // ring uses BoringSSL assembly for SHA-384/512.
+            // OpenSSL's SHA-384/512 uses AVX-512/SHA-NI hardware acceleration when
+            // available, significantly faster than ring's BoringSSL assembly.
+            if data.len() >= 4 * 1024 * 1024 && openssl_evp::is_available() {
+                let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha384, data)?;
+                hex_encode_to_slice(&digest, out);
+                return Ok(96);
+            }
             let digest = ring::digest::digest(&ring::digest::SHA384, data);
             hex_encode_to_slice(digest.as_ref(), out);
             Ok(96)
         }
         HashAlgorithm::Sha512 => {
+            if data.len() >= 4 * 1024 * 1024 && openssl_evp::is_available() {
+                let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha512, data)?;
+                hex_encode_to_slice(&digest, out);
+                return Ok(128);
+            }
             let digest = ring::digest::digest(&ring::digest::SHA512, data);
             hex_encode_to_slice(digest.as_ref(), out);
             Ok(128)

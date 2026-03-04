@@ -14,134 +14,121 @@ fn main() {
 use std::process;
 
 #[cfg(unix)]
-use clap::Parser;
-
-#[cfg(unix)]
 use coreutils_rs::who;
 
 #[cfg(unix)]
-#[derive(Parser)]
-#[command(
-    name = "who",
-    version = env!("CARGO_PKG_VERSION"),
-    about = "Show who is logged on",
-    after_help = "If ARG1 ARG2 given (e.g. 'who am i'), print only the entry for the current terminal."
-)]
-struct Cli {
-    /// same as -b -d --login -p -r -t -T -u
-    #[arg(short = 'a', long = "all")]
-    all: bool,
+const TOOL_NAME: &str = "who";
+#[cfg(unix)]
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-    /// time of last system boot
-    #[arg(short = 'b', long = "boot")]
-    boot: bool,
-
-    /// print dead processes
-    #[arg(short = 'd', long = "dead")]
-    dead: bool,
-
-    /// print line of column headings
-    #[arg(short = 'H', long = "heading")]
-    heading: bool,
-
-    /// print system login processes
-    #[arg(short = 'l', long = "login")]
-    login: bool,
-
-    /// only hostname and user associated with stdin
-    #[arg(short = 'm')]
-    only_current: bool,
-
-    /// print active processes spawned by init
-    #[arg(short = 'p', long = "process")]
-    init_process: bool,
-
-    /// all login names and number of users logged on
-    #[arg(short = 'q', long = "count")]
-    count: bool,
-
-    /// print current runlevel
-    #[arg(short = 'r', long = "runlevel")]
-    runlevel: bool,
-
-    /// print only name, line, and time (default)
-    #[arg(short = 's', long = "short")]
-    short: bool,
-
-    /// print last system clock change
-    #[arg(short = 't', long = "time")]
-    time: bool,
-
-    /// add user's message status as +, - or ?
-    #[arg(short = 'T', short_alias = 'w', long = "mesg")]
-    mesg: bool,
-
-    /// list users logged in
-    #[arg(short = 'u', long = "users")]
-    users: bool,
-
-    /// print ips instead of hostnames
-    #[arg(long = "ips")]
-    ips: bool,
-
-    /// attempt to canonicalize hostnames via DNS
-    #[arg(long = "lookup")]
-    lookup: bool,
-
-    /// optional positional arguments (FILE or "am i")
-    #[arg(trailing_var_arg = true)]
-    args: Vec<String>,
+#[cfg(unix)]
+fn print_help() {
+    println!("Usage: {} [OPTION]... [ FILE | ARG1 ARG2 ]", TOOL_NAME);
+    println!("Show who is logged on.");
+    println!();
+    println!("  -a, --all            same as -b -d --login -p -r -t -T -u");
+    println!("  -b, --boot           time of last system boot");
+    println!("  -d, --dead           print dead processes");
+    println!("  -H, --heading        print line of column headings");
+    println!("  -l, --login          print system login processes");
+    println!("  -m                   only hostname and user associated with stdin");
+    println!("  -p, --process        print active processes spawned by init");
+    println!("  -q, --count          all login names and number of users logged on");
+    println!("  -r, --runlevel       print current runlevel");
+    println!("  -s, --short          print only name, line, and time (default)");
+    println!("  -t, --time           print last system clock change");
+    println!("  -T, -w, --mesg       add user's message status as +, - or ?");
+    println!("  -u, --users          list users logged in");
+    println!("      --ips            print ips instead of hostnames");
+    println!("      --lookup         attempt to canonicalize hostnames via DNS");
+    println!("      --help           display this help and exit");
+    println!("      --version        output version information and exit");
+    println!();
+    println!(
+        "If ARG1 ARG2 given (e.g. 'who am i'), print only the entry for the current terminal."
+    );
 }
 
 #[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    // Handle --version before clap (clap exits with code 2 for unknown options)
-    let raw_args: Vec<String> = std::env::args().collect();
-    if raw_args.iter().any(|a| a == "--version") {
-        println!("who (fcoreutils) {}", env!("CARGO_PKG_VERSION"));
-        process::exit(0);
-    }
-
-    let cli = Cli::parse();
-
-    // GNU who allows 0, 1, or 2 operands but rejects 3+
-    if cli.args.len() > 2 {
-        eprintln!("who: extra operand '{}'", cli.args[2]);
-        eprintln!("Try 'who --help' for more information.");
-        process::exit(1);
-    }
-
     let mut config = who::WhoConfig::default();
+    let mut positional: Vec<String> = Vec::new();
 
-    // Check for "who am i" / "who am I" pattern (exactly 2 extra args)
-    if cli.args.len() == 2 {
-        let a = cli.args[0].to_lowercase();
-        let b = cli.args[1].to_lowercase();
-        if a == "am" && (b == "i" || b == "I") {
-            config.am_i = true;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--help" => {
+                print_help();
+                return;
+            }
+            "--version" => {
+                println!("{} (fcoreutils) {}", TOOL_NAME, VERSION);
+                return;
+            }
+            "-a" | "--all" => {
+                config.show_all = true;
+                config.apply_all();
+            }
+            "-b" | "--boot" => config.show_boot = true,
+            "-d" | "--dead" => config.show_dead = true,
+            "-H" | "--heading" => config.show_heading = true,
+            "-l" | "--login" => config.show_login = true,
+            "-m" => config.only_current = true,
+            "-p" | "--process" => config.show_init_spawn = true,
+            "-q" | "--count" => config.show_count = true,
+            "-r" | "--runlevel" => config.show_runlevel = true,
+            "-s" | "--short" => config.short_format = true,
+            "-t" | "--time" => config.show_clock_change = true,
+            "-T" | "-w" | "--mesg" => config.show_mesg = true,
+            "-u" | "--users" => config.show_users = true,
+            "--ips" => config.show_ips = true,
+            "--lookup" => config.show_lookup = true,
+            s if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
+                for ch in s[1..].chars() {
+                    match ch {
+                        'a' => {
+                            config.show_all = true;
+                            config.apply_all();
+                        }
+                        'b' => config.show_boot = true,
+                        'd' => config.show_dead = true,
+                        'H' => config.show_heading = true,
+                        'l' => config.show_login = true,
+                        'm' => config.only_current = true,
+                        'p' => config.show_init_spawn = true,
+                        'q' => config.show_count = true,
+                        'r' => config.show_runlevel = true,
+                        's' => config.short_format = true,
+                        't' => config.show_clock_change = true,
+                        'T' | 'w' => config.show_mesg = true,
+                        'u' => config.show_users = true,
+                        _ => {
+                            eprintln!("{}: invalid option -- '{}'", TOOL_NAME, ch);
+                            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+            _ => positional.push(arg),
         }
     }
 
-    config.show_boot = cli.boot;
-    config.show_dead = cli.dead;
-    config.show_heading = cli.heading;
-    config.show_login = cli.login;
-    config.only_current = cli.only_current;
-    config.show_init_spawn = cli.init_process;
-    config.show_count = cli.count;
-    config.show_runlevel = cli.runlevel;
-    config.short_format = cli.short;
-    config.show_clock_change = cli.time;
-    config.show_mesg = cli.mesg;
-    config.show_users = cli.users;
-    config.show_ips = cli.ips;
-    config.show_lookup = cli.lookup;
+    // GNU who allows 0, 1, or 2 operands but rejects 3+
+    if positional.len() > 2 {
+        eprintln!("{}: extra operand '{}'", TOOL_NAME, positional[2]);
+        eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+        process::exit(1);
+    }
 
-    if cli.all {
-        config.show_all = true;
-        config.apply_all();
+    // Check for "who am i" / "who am I" pattern (exactly 2 extra args)
+    if positional.len() == 2 {
+        let a = positional[0].to_lowercase();
+        let b = positional[1].to_lowercase();
+        if a == "am" && (b == "i" || b == "I") {
+            config.am_i = true;
+        }
     }
 
     let output = who::run_who(&config);

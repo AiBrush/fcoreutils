@@ -11,6 +11,8 @@ fn main() {
 #[cfg(unix)]
 use std::ffi::CStr;
 #[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::process;
 
 #[cfg(unix)]
@@ -21,10 +23,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
-    let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if let Some(arg) = args.first() {
-        match arg.as_str() {
+    if let Some(arg) = std::env::args_os().nth(1) {
+        let arg = arg.to_string_lossy();
+        match arg.as_ref() {
             "--help" => {
                 println!("Usage: {}", TOOL_NAME);
                 println!("  or:  {} OPTION", TOOL_NAME);
@@ -54,9 +56,14 @@ fn main() {
         process::exit(1);
     }
 
-    // SAFETY: getpwuid returned a valid non-null pointer, pw_name is a valid C string
+    // SAFETY: getpwuid returned a valid non-null pointer, pw_name is a valid C string.
+    // Write name bytes directly to stdout to avoid format machinery and String allocation.
     let name = unsafe { CStr::from_ptr((*pw).pw_name) };
-    println!("{}", name.to_string_lossy());
+    let bytes = name.to_bytes();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let _ = out.write_all(bytes);
+    let _ = out.write_all(b"\n");
 }
 
 #[cfg(all(test, unix))]

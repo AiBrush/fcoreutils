@@ -2,6 +2,7 @@
 //
 // Usage: printenv [OPTION]... [VARIABLE]...
 
+use std::io::Write;
 use std::process;
 
 const TOOL_NAME: &str = "printenv";
@@ -52,12 +53,17 @@ fn main() {
         }
     }
 
-    let terminator = if null_terminated { '\0' } else { '\n' };
+    let term: &[u8] = if null_terminated { b"\0" } else { b"\n" };
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
 
     if names.is_empty() {
-        // Print all environment variables
-        for (key, value) in std::env::vars() {
-            print!("{}={}{}", key, value, terminator);
+        // Print all environment variables using vars_os to avoid UTF-8 validation
+        for (key, value) in std::env::vars_os() {
+            let _ = out.write_all(key.as_encoded_bytes());
+            let _ = out.write_all(b"=");
+            let _ = out.write_all(value.as_encoded_bytes());
+            let _ = out.write_all(term);
         }
     } else {
         let mut exit_code = 0;
@@ -67,9 +73,12 @@ fn main() {
                 exit_code = 1;
                 continue;
             }
-            match std::env::var(name) {
-                Ok(val) => print!("{}{}", val, terminator),
-                Err(_) => exit_code = 1,
+            match std::env::var_os(name) {
+                Some(val) => {
+                    let _ = out.write_all(val.as_encoded_bytes());
+                    let _ = out.write_all(term);
+                }
+                None => exit_code = 1,
             }
         }
         process::exit(exit_code);

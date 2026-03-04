@@ -23,10 +23,10 @@ fn main() {
     coreutils_rs::common::reset_sigpipe();
 
     let mut silent = false;
-    let args: Vec<String> = std::env::args().skip(1).collect();
 
-    for arg in &args {
-        match arg.as_str() {
+    for arg in std::env::args_os().skip(1) {
+        let arg = arg.to_string_lossy();
+        match arg.as_ref() {
             "--help" => {
                 println!("Usage: {} [OPTION]...", TOOL_NAME);
                 println!("Print the file name of the terminal connected to standard input.");
@@ -65,19 +65,19 @@ fn main() {
         if !silent {
             let name = unsafe { libc::ttyname(0) };
             if name.is_null() {
-                // Shouldn't happen if isatty returned 1, but handle gracefully
-                if !silent {
-                    println!("not a tty");
-                }
+                let _ = std::io::Write::write_all(&mut std::io::stdout().lock(), b"not a tty\n");
                 process::exit(1);
             }
             // SAFETY: ttyname returned a valid non-null pointer
             let cstr = unsafe { CStr::from_ptr(name) };
-            println!("{}", cstr.to_string_lossy());
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            let _ = std::io::Write::write_all(&mut out, cstr.to_bytes());
+            let _ = std::io::Write::write_all(&mut out, b"\n");
         }
     } else {
         if !silent {
-            println!("not a tty");
+            let _ = std::io::Write::write_all(&mut std::io::stdout().lock(), b"not a tty\n");
         }
         process::exit(1);
     }

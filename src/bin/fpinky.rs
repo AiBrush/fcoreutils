@@ -15,83 +15,91 @@ fn main() {
 use std::process;
 
 #[cfg(unix)]
-use clap::Parser;
-
-#[cfg(unix)]
 use coreutils_rs::pinky;
 
 #[cfg(unix)]
-#[derive(Parser)]
-#[command(name = "pinky", version = env!("CARGO_PKG_VERSION"), about = "Lightweight finger", disable_help_flag = true)]
-struct Cli {
-    /// display this help and exit
-    #[arg(long = "help", action = clap::ArgAction::Help)]
-    help: Option<bool>,
-    /// produce long format output for the specified USERs
-    #[arg(short = 'l')]
-    long_format: bool,
+const TOOL_NAME: &str = "pinky";
+#[cfg(unix)]
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-    /// omit the user's home directory and shell in long format
-    #[arg(short = 'b')]
-    omit_home_shell: bool,
-
-    /// omit the user's project file in long format
-    #[arg(short = 'h')]
-    omit_project: bool,
-
-    /// omit the user's plan file in long format
-    #[arg(short = 'p')]
-    omit_plan: bool,
-
-    /// do short format output (default)
-    #[arg(short = 's')]
-    short_format: bool,
-
-    /// omit the column of full names in short format
-    #[arg(short = 'f')]
-    omit_heading: bool,
-
-    /// omit the user's full name in short format
-    #[arg(short = 'w')]
-    omit_fullname: bool,
-
-    /// omit the user's full name and remote host in short format
-    #[arg(short = 'i')]
-    omit_fullname_host: bool,
-
-    /// omit the user's full name, remote host and idle time in short format
-    #[arg(short = 'q')]
-    omit_fullname_host_idle: bool,
-
-    /// users to look up
-    users: Vec<String>,
+#[cfg(unix)]
+fn print_help() {
+    println!("Usage: {} [OPTION]... [USER]...", TOOL_NAME);
+    println!("Lightweight finger.");
+    println!();
+    println!("  -l                   produce long format output for the specified USERs");
+    println!("  -b                   omit the user's home directory and shell in long format");
+    println!("  -h                   omit the user's project file in long format");
+    println!("  -p                   omit the user's plan file in long format");
+    println!("  -s                   do short format output (default)");
+    println!("  -f                   omit the column of full names in short format");
+    println!("  -w                   omit the user's full name in short format");
+    println!("  -i                   omit the user's full name and remote host in short format");
+    println!("  -q                   omit the user's full name, remote host and idle time");
+    println!("      --help           display this help and exit");
+    println!("      --version        output version information and exit");
 }
 
 #[cfg(unix)]
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    // Handle --version before clap
-    let raw_args: Vec<String> = std::env::args().collect();
-    if raw_args.iter().any(|a| a == "--version") {
-        println!("pinky (fcoreutils) {}", env!("CARGO_PKG_VERSION"));
-        process::exit(0);
+    let mut long_format = false;
+    let mut omit_home_shell = false;
+    let mut omit_project = false;
+    let mut omit_plan = false;
+    let mut omit_heading = false;
+    let mut omit_fullname = false;
+    let mut omit_fullname_host = false;
+    let mut omit_fullname_host_idle = false;
+    let mut users: Vec<String> = Vec::new();
+
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--help" => {
+                print_help();
+                return;
+            }
+            "--version" => {
+                println!("{} (fcoreutils) {}", TOOL_NAME, VERSION);
+                return;
+            }
+            s if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
+                for ch in s[1..].chars() {
+                    match ch {
+                        'l' => long_format = true,
+                        'b' => omit_home_shell = true,
+                        'h' => omit_project = true,
+                        'p' => omit_plan = true,
+                        's' => {} // short format is default
+                        'f' => omit_heading = true,
+                        'w' => omit_fullname = true,
+                        'i' => omit_fullname_host = true,
+                        'q' => omit_fullname_host_idle = true,
+                        _ => {
+                            eprintln!("{}: invalid option -- '{}'", TOOL_NAME, ch);
+                            eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+            _ => users.push(arg),
+        }
     }
 
-    let cli = Cli::parse();
-
-    let short_format = !cli.long_format;
+    let short_format = !long_format;
     let config = pinky::PinkyConfig {
-        long_format: cli.long_format,
+        long_format,
         short_format,
-        omit_home_shell: cli.omit_home_shell,
-        omit_project: cli.omit_project,
-        omit_plan: cli.omit_plan,
-        omit_heading: cli.omit_heading,
-        omit_fullname: cli.omit_fullname,
-        omit_fullname_host: cli.omit_fullname_host,
-        omit_fullname_host_idle: cli.omit_fullname_host_idle,
-        users: cli.users,
+        omit_home_shell,
+        omit_project,
+        omit_plan,
+        omit_heading,
+        omit_fullname,
+        omit_fullname_host,
+        omit_fullname_host_idle,
+        users,
     };
 
     let output = pinky::run_pinky(&config);
