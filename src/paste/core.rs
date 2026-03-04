@@ -112,11 +112,7 @@ struct RawBufWriter {
 
 impl RawBufWriter {
     fn new() -> Self {
-        let mut buf = Vec::with_capacity(BUF_SIZE);
-        // Touch all pages upfront to avoid page faults during hot loop
-        unsafe {
-            std::ptr::write_bytes(buf.as_mut_ptr(), 0, BUF_SIZE);
-        }
+        let buf = Vec::with_capacity(BUF_SIZE);
         Self { buf, error: None }
     }
 
@@ -207,10 +203,6 @@ fn paste_two_files_fast(
 
     let buf_cap = BUF_SIZE;
     let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
-    // Pre-fault pages
-    unsafe {
-        std::ptr::write_bytes(buf.as_mut_ptr(), 0, buf_cap);
-    }
     let base = buf.as_mut_ptr();
     let mut pos: usize = 0;
 
@@ -305,6 +297,21 @@ pub fn paste_parallel_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::
         return paste_two_files_fast(file_data[0], file_data[1], delims[0], terminator);
     }
 
+    // N-file fast path: unsafe pointer arithmetic with 1MB buffer
+    paste_n_files_fast(file_data, delims, has_delims, terminator)
+}
+
+/// Fast path for N files: unsafe pointer arithmetic with 1MB buffer.
+/// Pre-splits all files into line offsets, then uses O(1) indexing with
+/// direct pointer writes to eliminate RawBufWriter overhead.
+fn paste_n_files_fast(
+    file_data: &[&[u8]],
+    delims: &[u8],
+    has_delims: bool,
+    terminator: u8,
+) -> std::io::Result<()> {
+    let nfiles = file_data.len();
+
     // Pre-split all files into line offsets — single SIMD pass per file.
     let file_lines: Vec<Vec<(u32, u32)>> = file_data
         .iter()
@@ -315,26 +322,75 @@ pub fn paste_parallel_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::
         return Ok(());
     }
 
-    let mut writer = RawBufWriter::new();
+    let mut buf_cap = BUF_SIZE;
+    let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
+    let mut base = buf.as_mut_ptr();
+    let mut pos: usize = 0;
+
+    // Cache file data pointers
+    let ptrs: Vec<*const u8> = file_data.iter().map(|d| d.as_ptr()).collect();
 
     for line_idx in 0..max_lines {
+        // Estimate output size for this line
+        let mut est_len = nfiles; // delimiters + terminator
         for file_idx in 0..nfiles {
-            if file_idx > 0 && has_delims {
-                writer.push(delims[(file_idx - 1) % delims.len()]);
-            }
-            let lines = &file_lines[file_idx];
-            if line_idx < lines.len() {
-                let (s, e) = unsafe { *lines.get_unchecked(line_idx) };
-                let len = (e - s) as usize;
-                if len > 0 {
-                    writer.extend(&file_data[file_idx][s as usize..e as usize]);
-                }
+            if line_idx < file_lines[file_idx].len() {
+                let (s, e) = unsafe { *file_lines[file_idx].get_unchecked(line_idx) };
+                est_len += (e - s) as usize;
             }
         }
-        writer.push(terminator);
+
+        // Flush if needed
+        if pos + est_len > buf_cap {
+            unsafe {
+                buf.set_len(pos);
+            }
+            raw_write_all(&buf)?;
+            buf.clear();
+            pos = 0;
+            // Grow buffer for oversized lines (> 1 MiB)
+            if est_len > buf_cap {
+                buf.reserve(est_len);
+                buf_cap = buf.capacity();
+                base = buf.as_mut_ptr();
+            }
+        }
+
+        // Write all columns with unsafe pointer copies
+        unsafe {
+            for file_idx in 0..nfiles {
+                if file_idx > 0 && has_delims {
+                    *base.add(pos) = *delims.get_unchecked((file_idx - 1) % delims.len());
+                    pos += 1;
+                }
+                let lines = &file_lines[file_idx];
+                if line_idx < lines.len() {
+                    let (s, e) = *lines.get_unchecked(line_idx);
+                    let len = (e - s) as usize;
+                    if len > 0 {
+                        std::ptr::copy_nonoverlapping(
+                            ptrs[file_idx].add(s as usize),
+                            base.add(pos),
+                            len,
+                        );
+                        pos += len;
+                    }
+                }
+            }
+            *base.add(pos) = terminator;
+            pos += 1;
+        }
     }
 
-    writer.finish()
+    // Final flush
+    if pos > 0 {
+        unsafe {
+            buf.set_len(pos);
+        }
+        raw_write_all(&buf)?;
+    }
+
+    Ok(())
 }
 
 /// Streaming paste for serial mode.
