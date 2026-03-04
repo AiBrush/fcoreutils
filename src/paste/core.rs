@@ -62,6 +62,384 @@ pub fn parse_delimiters(s: &str) -> Vec<u8> {
     result
 }
 
+/// Output buffer size for streaming paste (1 MiB).
+const BUF_SIZE: usize = 1024 * 1024;
+
+/// Raw write to stdout fd 1. Returns any error encountered.
+#[cfg(unix)]
+fn raw_write_all(data: &[u8]) -> std::io::Result<()> {
+    let mut written = 0;
+    while written < data.len() {
+        let ret = unsafe {
+            libc::write(
+                1,
+                data[written..].as_ptr() as *const libc::c_void,
+                (data.len() - written) as _,
+            )
+        };
+        if ret > 0 {
+            written += ret as usize;
+        } else if ret == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "write returned 0",
+            ));
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn raw_write_all(data: &[u8]) -> std::io::Result<()> {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    lock.write_all(data)?;
+    lock.flush()
+}
+
+/// A streaming output writer that buffers into a fixed-size buffer
+/// and flushes via raw libc::write on Unix for minimal overhead.
+struct RawBufWriter {
+    buf: Vec<u8>,
+    error: Option<std::io::Error>,
+}
+
+impl RawBufWriter {
+    fn new() -> Self {
+        let buf = Vec::with_capacity(BUF_SIZE);
+        Self { buf, error: None }
+    }
+
+    /// Append a single byte. Flushes if buffer is full.
+    #[inline(always)]
+    fn push(&mut self, b: u8) {
+        if self.buf.len() >= BUF_SIZE {
+            self.flush_buf();
+        }
+        self.buf.push(b);
+    }
+
+    /// Append a slice. Flushes as needed for large slices.
+    #[inline(always)]
+    fn extend(&mut self, data: &[u8]) {
+        let avail = BUF_SIZE - self.buf.len();
+        if data.len() <= avail {
+            self.buf.extend_from_slice(data);
+        } else {
+            self.extend_slow(data);
+        }
+    }
+
+    #[cold]
+    fn extend_slow(&mut self, data: &[u8]) {
+        if self.error.is_some() {
+            return;
+        }
+        let avail = BUF_SIZE - self.buf.len();
+        // Fill current buffer
+        self.buf.extend_from_slice(&data[..avail]);
+        self.flush_buf();
+        let mut remaining = &data[avail..];
+        // Write full BUF_SIZE chunks directly, bypassing the buffer
+        while remaining.len() >= BUF_SIZE {
+            if let Err(e) = raw_write_all(&remaining[..BUF_SIZE]) {
+                self.error = Some(e);
+                return;
+            }
+            remaining = &remaining[BUF_SIZE..];
+        }
+        // Buffer the tail
+        if !remaining.is_empty() {
+            self.buf.extend_from_slice(remaining);
+        }
+    }
+
+    /// Flush internal buffer.
+    fn flush_buf(&mut self) {
+        if !self.buf.is_empty() && self.error.is_none() {
+            if let Err(e) = raw_write_all(&self.buf) {
+                self.error = Some(e);
+            }
+            self.buf.clear();
+        }
+    }
+
+    /// Finish: flush remaining data and return any error.
+    fn finish(mut self) -> std::io::Result<()> {
+        self.flush_buf();
+        match self.error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Fast path for the common case: 2 files, single-byte delimiter (usually tab).
+/// Pre-splits both files into line offsets with a single SIMD memchr_iter pass each,
+/// then iterates with O(1) indexing, writing into a 1MB buffer with raw fd writes.
+fn paste_two_files_fast(
+    data_a: &[u8],
+    data_b: &[u8],
+    delim: u8,
+    terminator: u8,
+) -> std::io::Result<()> {
+    if data_a.is_empty() && data_b.is_empty() {
+        return Ok(());
+    }
+
+    // Pre-split both files — single SIMD pass each.
+    let lines_a = presplit_lines(data_a, terminator);
+    let lines_b = presplit_lines(data_b, terminator);
+    let max_lines = lines_a.len().max(lines_b.len());
+    if max_lines == 0 {
+        return Ok(());
+    }
+
+    let buf_cap = BUF_SIZE;
+    let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
+    let base = buf.as_mut_ptr();
+    let mut pos: usize = 0;
+
+    let ptr_a = data_a.as_ptr();
+    let ptr_b = data_b.as_ptr();
+    let na = lines_a.len();
+    let nb = lines_b.len();
+
+    for i in 0..max_lines {
+        // Get line lengths from pre-split offsets
+        let (a_off, a_len) = if i < na {
+            let (s, e) = unsafe { *lines_a.get_unchecked(i) };
+            (s as usize, (e - s) as usize)
+        } else {
+            (0, 0)
+        };
+
+        let (b_off, b_len) = if i < nb {
+            let (s, e) = unsafe { *lines_b.get_unchecked(i) };
+            (s as usize, (e - s) as usize)
+        } else {
+            (0, 0)
+        };
+
+        let out_len = a_len + 1 + b_len + 1;
+
+        // Flush if needed
+        if pos + out_len > buf_cap {
+            unsafe { buf.set_len(pos) };
+            raw_write_all(&buf)?;
+            buf.clear();
+            pos = 0;
+        }
+
+        // Write directly with unsafe pointer copies
+        unsafe {
+            if a_len > 0 {
+                std::ptr::copy_nonoverlapping(ptr_a.add(a_off), base.add(pos), a_len);
+                pos += a_len;
+            }
+            *base.add(pos) = delim;
+            pos += 1;
+            if b_len > 0 {
+                std::ptr::copy_nonoverlapping(ptr_b.add(b_off), base.add(pos), b_len);
+                pos += b_len;
+            }
+            *base.add(pos) = terminator;
+            pos += 1;
+        }
+    }
+
+    // Final flush
+    if pos > 0 {
+        unsafe { buf.set_len(pos) };
+        raw_write_all(&buf)?;
+    }
+
+    Ok(())
+}
+
+/// Streaming paste for the parallel (normal) mode.
+/// Pre-splits all files into line offsets with SIMD memchr_iter, then uses
+/// O(1) indexing with a 1MB output buffer and raw fd writes.
+/// For the common 2-file case, dispatches to an optimized fast path.
+pub fn paste_parallel_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io::Result<()> {
+    let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
+    let delims = &config.delimiters;
+    let has_delims = !delims.is_empty();
+    let nfiles = file_data.len();
+
+    if nfiles == 0 || file_data.iter().all(|d| d.is_empty()) {
+        return Ok(());
+    }
+
+    // Fast path: single file is a passthrough (output == input)
+    if nfiles == 1 {
+        let data = file_data[0];
+        if data.is_empty() {
+            return Ok(());
+        }
+        // If data ends with terminator, output is identical to input
+        if *data.last().unwrap() == terminator {
+            return raw_write_all(data);
+        }
+        // Otherwise: write data + terminator
+        raw_write_all(data)?;
+        return raw_write_all(&[terminator]);
+    }
+
+    // Fast path: 2 files with single-byte delimiter (the common case: `paste file1 file2`)
+    if nfiles == 2 && delims.len() == 1 {
+        return paste_two_files_fast(file_data[0], file_data[1], delims[0], terminator);
+    }
+
+    // N-file fast path: unsafe pointer arithmetic with 1MB buffer
+    paste_n_files_fast(file_data, delims, has_delims, terminator)
+}
+
+/// Fast path for N files: unsafe pointer arithmetic with 1MB buffer.
+/// Pre-splits all files into line offsets, then uses O(1) indexing with
+/// direct pointer writes to eliminate RawBufWriter overhead.
+fn paste_n_files_fast(
+    file_data: &[&[u8]],
+    delims: &[u8],
+    has_delims: bool,
+    terminator: u8,
+) -> std::io::Result<()> {
+    let nfiles = file_data.len();
+
+    // Pre-split all files into line offsets — single SIMD pass per file.
+    let file_lines: Vec<Vec<(u32, u32)>> = file_data
+        .iter()
+        .map(|data| presplit_lines(data, terminator))
+        .collect();
+    let max_lines = file_lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    if max_lines == 0 {
+        return Ok(());
+    }
+
+    let mut buf_cap = BUF_SIZE;
+    let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
+    let mut base = buf.as_mut_ptr();
+    let mut pos: usize = 0;
+
+    // Cache file data pointers
+    let ptrs: Vec<*const u8> = file_data.iter().map(|d| d.as_ptr()).collect();
+
+    for line_idx in 0..max_lines {
+        // Estimate output size for this line
+        let mut est_len = nfiles; // delimiters + terminator
+        for file_idx in 0..nfiles {
+            if line_idx < file_lines[file_idx].len() {
+                let (s, e) = unsafe { *file_lines[file_idx].get_unchecked(line_idx) };
+                est_len += (e - s) as usize;
+            }
+        }
+
+        // Flush if needed
+        if pos + est_len > buf_cap {
+            unsafe {
+                buf.set_len(pos);
+            }
+            raw_write_all(&buf)?;
+            buf.clear();
+            pos = 0;
+            // Grow buffer for oversized lines (> 1 MiB)
+            if est_len > buf_cap {
+                buf.reserve(est_len);
+                buf_cap = buf.capacity();
+                base = buf.as_mut_ptr();
+            }
+        }
+
+        // Write all columns with unsafe pointer copies
+        unsafe {
+            for file_idx in 0..nfiles {
+                if file_idx > 0 && has_delims {
+                    *base.add(pos) = *delims.get_unchecked((file_idx - 1) % delims.len());
+                    pos += 1;
+                }
+                let lines = &file_lines[file_idx];
+                if line_idx < lines.len() {
+                    let (s, e) = *lines.get_unchecked(line_idx);
+                    let len = (e - s) as usize;
+                    if len > 0 {
+                        std::ptr::copy_nonoverlapping(
+                            ptrs[file_idx].add(s as usize),
+                            base.add(pos),
+                            len,
+                        );
+                        pos += len;
+                    }
+                }
+            }
+            *base.add(pos) = terminator;
+            pos += 1;
+        }
+    }
+
+    // Final flush
+    if pos > 0 {
+        unsafe {
+            buf.set_len(pos);
+        }
+        raw_write_all(&buf)?;
+    }
+
+    Ok(())
+}
+
+/// Streaming paste for serial mode.
+/// Pre-splits each file into line offsets with SIMD memchr_iter, then iterates
+/// with O(1) indexing.
+pub fn paste_serial_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io::Result<()> {
+    let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
+    let delims = &config.delimiters;
+    let has_delims = !delims.is_empty();
+
+    let mut writer = RawBufWriter::new();
+
+    for data in file_data {
+        if data.is_empty() {
+            writer.push(terminator);
+            continue;
+        }
+
+        let lines = presplit_lines(data, terminator);
+        if lines.is_empty() {
+            writer.push(terminator);
+            continue;
+        }
+
+        // First line: no leading delimiter
+        let (s, e) = lines[0];
+        writer.extend(&data[s as usize..e as usize]);
+        // Subsequent lines: prepend cycling delimiter
+        for (i, &(s, e)) in lines[1..].iter().enumerate() {
+            if has_delims {
+                writer.push(delims[i % delims.len()]);
+            }
+            writer.extend(&data[s as usize..e as usize]);
+        }
+        writer.push(terminator);
+    }
+
+    writer.finish()
+}
+
+/// Streaming paste entry point. Writes directly to stdout using raw fd writes.
+pub fn paste_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io::Result<()> {
+    if config.serial {
+        paste_serial_stream(file_data, config)
+    } else {
+        paste_parallel_stream(file_data, config)
+    }
+}
+
 /// Pre-split a file into line offset pairs using a single SIMD memchr_iter pass.
 /// Returns a Vec of (start, end) byte offsets — one per line.
 #[inline]

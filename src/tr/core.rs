@@ -4123,20 +4123,25 @@ fn translate_to_separate_buf(
         return writer.write_all(&out_buf);
     }
 
-    // Single-allocation translate: full-size output buffer, single translate, single write.
-    // For 10MB data, this does 1 write() instead of 40 chunked writes, eliminating
-    // 39 write() syscalls. SIMD translate streams through src and dst sequentially,
-    // so the L2 cache argument for 256KB chunks doesn't apply (src data doesn't fit
-    // in L2 anyway). The reduced syscall overhead more than compensates.
-    let mut out_buf = alloc_uninit_vec(data.len());
-    if let Some((lo, hi, offset)) = range_info {
-        translate_range_simd(data, &mut out_buf, lo, hi, offset);
-    } else if let Some((lo, hi, replacement)) = const_info {
-        translate_range_to_constant_simd(data, &mut out_buf, lo, hi, replacement);
-    } else {
-        translate_to(data, &mut out_buf, table);
+    // Chunked translate: fixed 256KB output buffer, translate + write in chunks.
+    // Avoids allocating a full-size output buffer (10MB → 10MB allocation = ~3ms
+    // of page faults). The 256KB buffer stays hot in L2 cache and its pages are
+    // faulted once then reused across chunks. ~40 write() syscalls for 10MB is
+    // cheaper than the page fault cost of a fresh 10MB allocation.
+    const CHUNK: usize = 256 * 1024;
+    let mut out_buf = alloc_uninit_vec(CHUNK);
+    for chunk in data.chunks(CHUNK) {
+        let dst = &mut out_buf[..chunk.len()];
+        if let Some((lo, hi, offset)) = range_info {
+            translate_range_simd(chunk, dst, lo, hi, offset);
+        } else if let Some((lo, hi, replacement)) = const_info {
+            translate_range_to_constant_simd(chunk, dst, lo, hi, replacement);
+        } else {
+            translate_to(chunk, dst, table);
+        }
+        writer.write_all(dst)?;
     }
-    writer.write_all(&out_buf)
+    Ok(())
 }
 
 /// Translate from a read-only mmap (or any byte slice) to a separate output buffer.

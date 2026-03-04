@@ -178,11 +178,68 @@ fn enlarge_pipes() {
     }
 }
 
+/// Ultra-fast path for `fsha1sum <single_file>` — raw syscalls, zero allocation.
+#[cfg(target_os = "linux")]
+fn single_file_fast(path: &Path) -> ! {
+    let mut out_buf = [0u8; 4096];
+    match hash::hash_file_raw_to_buf(HashAlgorithm::Sha1, path, &mut out_buf) {
+        Ok(hex_len) => {
+            let name_bytes = {
+                use std::os::unix::ffi::OsStrExt;
+                path.as_os_str().as_bytes()
+            };
+            let mut pos = hex_len;
+            out_buf[pos] = b' ';
+            pos += 1;
+            out_buf[pos] = b' ';
+            pos += 1;
+            if pos + name_bytes.len() < out_buf.len() {
+                out_buf[pos..pos + name_bytes.len()].copy_from_slice(name_bytes);
+                pos += name_bytes.len();
+                out_buf[pos] = b'\n';
+                pos += 1;
+                unsafe {
+                    libc::write(1, out_buf.as_ptr() as *const libc::c_void, pos as _);
+                }
+            } else {
+                let mut v = Vec::with_capacity(pos + name_bytes.len() + 1);
+                v.extend_from_slice(&out_buf[..pos]);
+                v.extend_from_slice(name_bytes);
+                v.push(b'\n');
+                unsafe {
+                    libc::write(1, v.as_ptr() as *const libc::c_void, v.len() as _);
+                }
+            }
+            process::exit(0);
+        }
+        Err(e) => {
+            eprintln!(
+                "{}: {}: {}",
+                TOOL_NAME,
+                path.to_string_lossy(),
+                io_error_msg(&e)
+            );
+            process::exit(1);
+        }
+    }
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
     #[cfg(target_os = "linux")]
-    enlarge_pipes();
+    {
+        let mut args = std::env::args_os();
+        let _ = args.next();
+        if let Some(arg) = args.next()
+            && args.next().is_none()
+        {
+            let bytes = arg.as_encoded_bytes();
+            if !bytes.is_empty() && bytes[0] != b'-' {
+                single_file_fast(Path::new(&arg));
+            }
+        }
+    }
 
     let cli = parse_args();
     let algo = HashAlgorithm::Sha1;
@@ -202,6 +259,12 @@ fn main() {
     } else {
         cli.files.clone()
     };
+
+    // Only enlarge pipes when stdin is involved — saves 2 fcntl syscalls
+    #[cfg(target_os = "linux")]
+    if files.iter().any(|f| f == "-") {
+        enlarge_pipes();
+    }
 
     // Raw fd stdout on Unix for zero-overhead writes
     #[cfg(unix)]

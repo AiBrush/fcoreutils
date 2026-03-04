@@ -2067,8 +2067,9 @@ fn encode_stream_wrapped_fused(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     // Align read size to bytes_per_line for complete output lines per chunk.
-    // ~420K lines * 57 bytes = ~24MB input, ~32MB output.
-    let lines_per_chunk = (24 * 1024 * 1024) / bytes_per_line;
+    // ~210K lines * 57 bytes = ~12MB input, ~16MB output per chunk.
+    // Smaller chunks have better cache behavior for the 4-line unrolled encode loop.
+    let lines_per_chunk = (12 * 1024 * 1024) / bytes_per_line;
     let read_size = lines_per_chunk * bytes_per_line;
     let line_out = wrap_col + 1; // wrap_col encoded bytes + 1 newline
 

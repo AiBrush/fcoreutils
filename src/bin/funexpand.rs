@@ -8,7 +8,7 @@ use std::process;
 
 use coreutils_rs::common::io::read_file;
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
-use coreutils_rs::expand::{TabStops, parse_tab_stops, unexpand_bytes};
+use coreutils_rs::expand::{TabStops, parse_tab_stops, unexpand_bytes, unexpand_is_passthrough};
 
 struct Cli {
     all: bool,
@@ -146,6 +146,26 @@ fn parse_args() -> Cli {
     cli
 }
 
+/// Write all bytes directly to a file descriptor, bypassing BufWriter.
+#[cfg(unix)]
+fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
+    let mut pos = 0;
+    while pos < data.len() {
+        let n = unsafe {
+            libc::write(
+                fd,
+                data[pos..].as_ptr() as *const libc::c_void,
+                data.len() - pos,
+            )
+        };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        pos += n as usize;
+    }
+    Ok(())
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -162,11 +182,11 @@ fn main() {
     #[cfg(unix)]
     let stdout_raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
     #[cfg(unix)]
-    let mut out = BufWriter::with_capacity(256 * 1024, &*stdout_raw);
+    let mut out = BufWriter::with_capacity(1024 * 1024, &*stdout_raw);
     #[cfg(not(unix))]
     let stdout = io::stdout();
     #[cfg(not(unix))]
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
 
     let mut had_error = false;
 
@@ -243,6 +263,19 @@ fn main() {
                     continue;
                 }
             };
+            // Fast path: if output = input, bypass BufWriter and write directly
+            #[cfg(unix)]
+            if unexpand_is_passthrough(&data, &cli.tabs, cli.all) {
+                // Flush any buffered data first, then write directly to fd
+                if let Err(e) = out.flush() {
+                    Err(e)
+                } else {
+                    write_all_fd(1, &data)
+                }
+            } else {
+                unexpand_bytes(&data, &cli.tabs, cli.all, &mut out)
+            }
+            #[cfg(not(unix))]
             unexpand_bytes(&data, &cli.tabs, cli.all, &mut out)
         };
 
