@@ -33,6 +33,64 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
     }
 }
 
+/// Stream reversed byte-separated records directly to an fd.
+/// For large files (≥64MB), uses parallel chunk reversal for multi-core speedup.
+/// For smaller files, uses contiguous buffer + raw write() syscalls.
+#[cfg(unix)]
+pub fn tac_bytes_to_fd(data: &[u8], separator: u8, before: bool, fd: i32) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    // Large files: use parallel contiguous reversal, write result via raw fd
+    if data.len() >= PARALLEL_THRESHOLD {
+        let mut out = RawFdWriter { fd };
+        return if !before {
+            tac_bytes_after_contiguous(data, separator, &mut out)
+        } else {
+            tac_bytes_before_contiguous(data, separator, &mut out)
+        };
+    }
+    if !before {
+        tac_bytes_after_fd(data, separator, fd)
+    } else {
+        tac_bytes_before_fd(data, separator, fd)
+    }
+}
+
+/// Thin write adapter for a raw fd. Avoids BufWriter's buffer allocation
+/// while still satisfying the Write trait for contiguous path functions.
+#[cfg(unix)]
+struct RawFdWriter {
+    fd: i32,
+}
+
+#[cfg(unix)]
+impl Write for RawFdWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            let ret = unsafe {
+                libc::write(self.fd, buf.as_ptr() as *const libc::c_void, buf.len() as _)
+            };
+            if ret >= 0 {
+                return Ok(ret as usize);
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        write_all_fd(self.fd, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Reverse records of an owned Vec. Delegates to tac_bytes.
 pub fn tac_bytes_owned(
     data: &mut [u8],
@@ -194,76 +252,211 @@ fn tac_bytes_before_contiguous(data: &[u8], sep: u8, out: &mut impl Write) -> io
     Ok(())
 }
 
-/// After-separator mode for small files: backward memrchr scan + streaming output.
-/// Zero extra allocation: scans backward with memrchr, writes records directly.
+/// After-separator mode for small files: forward SIMD scan + streaming 1MB output.
+/// Uses a 1MB internal buffer that flushes to the writer, avoiding the massive
+/// allocation of building the entire reversed output in memory.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
 
-    let mut prev_end = data.len();
-    let mut search_end = data.len();
-
-    loop {
-        match memchr::memrchr(sep, &data[..search_end]) {
-            Some(pos) => {
-                let rec_start = pos + 1;
-                if rec_start < prev_end {
-                    out.write_all(&data[rec_start..prev_end])?;
-                }
-                prev_end = rec_start;
-                search_end = pos;
-            }
-            None => {
-                if prev_end > 0 {
-                    out.write_all(&data[..prev_end])?;
-                }
-                break;
-            }
-        }
-        if search_end == 0 {
-            if prev_end > 0 {
-                out.write_all(&data[..prev_end])?;
-            }
-            break;
-        }
+    // Forward SIMD scan: collect all separator positions in one pass
+    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos);
     }
 
+    if positions.is_empty() {
+        return out.write_all(data);
+    }
+
+    // Stream reversed output using a 1MB buffer
+    const BUF_SIZE: usize = 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
+    let mut end_pos = data.len();
+
+    for &pos in positions.iter().rev() {
+        let rec_start = pos + 1;
+        if rec_start < end_pos {
+            let record = &data[rec_start..end_pos];
+            if buf.len() + record.len() > BUF_SIZE {
+                out.write_all(&buf)?;
+                buf.clear();
+            }
+            buf.extend_from_slice(record);
+        }
+        end_pos = rec_start;
+    }
+    if end_pos > 0 {
+        let record = &data[..end_pos];
+        if buf.len() + record.len() > BUF_SIZE {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
+        buf.extend_from_slice(record);
+    }
+    if !buf.is_empty() {
+        out.write_all(&buf)?;
+    }
     Ok(())
 }
 
-/// Before-separator mode for small files: backward memrchr scan + streaming output.
-/// Zero extra allocation: scans backward with memrchr, writes records directly.
+/// Before-separator mode for small files: forward SIMD scan + streaming 1MB output.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
 
-    let mut prev_end = data.len();
-    let mut search_end = data.len();
-
-    loop {
-        match memchr::memrchr(sep, &data[..search_end]) {
-            Some(pos) => {
-                if pos < prev_end {
-                    out.write_all(&data[pos..prev_end])?;
-                }
-                prev_end = pos;
-                if pos == 0 {
-                    break;
-                }
-                search_end = pos;
-            }
-            None => {
-                if prev_end > 0 {
-                    out.write_all(&data[..prev_end])?;
-                }
-                break;
-            }
-        }
+    // Forward SIMD scan: collect all separator positions in one pass
+    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos);
     }
 
+    if positions.is_empty() {
+        return out.write_all(data);
+    }
+
+    // Stream reversed output using a 1MB buffer (before mode)
+    const BUF_SIZE: usize = 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
+    let mut end_pos = data.len();
+
+    for &pos in positions.iter().rev() {
+        if pos < end_pos {
+            let record = &data[pos..end_pos];
+            if buf.len() + record.len() > BUF_SIZE {
+                out.write_all(&buf)?;
+                buf.clear();
+            }
+            buf.extend_from_slice(record);
+        }
+        end_pos = pos;
+    }
+    if end_pos > 0 {
+        let record = &data[..end_pos];
+        if buf.len() + record.len() > BUF_SIZE {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
+        buf.extend_from_slice(record);
+    }
+    if !buf.is_empty() {
+        out.write_all(&buf)?;
+    }
     Ok(())
+}
+
+/// Write buffer to a file descriptor, retrying on partial/interrupted writes.
+#[cfg(unix)]
+#[inline]
+fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
+    let mut written = 0;
+    while written < data.len() {
+        let ret = unsafe {
+            libc::write(
+                fd,
+                data[written..].as_ptr() as *const libc::c_void,
+                (data.len() - written) as _,
+            )
+        };
+        if ret > 0 {
+            written += ret as usize;
+        } else if ret == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// After-separator mode: build full reversed output in one buffer, write once.
+/// Uses unsafe pointer arithmetic for zero-overhead record copying.
+#[cfg(unix)]
+fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
+    // Forward SIMD scan: collect all separator positions
+    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos);
+    }
+
+    if positions.is_empty() {
+        return write_all_fd(fd, data);
+    }
+
+    // Build entire reversed output in one buffer → single write() syscall.
+    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+    let base = buf.as_mut_ptr();
+    let src = data.as_ptr();
+    let mut pos: usize = 0;
+    let mut end_pos = data.len();
+
+    for &sep_pos in positions.iter().rev() {
+        let rec_start = sep_pos + 1;
+        if rec_start < end_pos {
+            let len = end_pos - rec_start;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(rec_start), base.add(pos), len);
+            }
+            pos += len;
+        }
+        end_pos = rec_start;
+    }
+    if end_pos > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, base.add(pos), end_pos);
+        }
+        pos += end_pos;
+    }
+    unsafe {
+        buf.set_len(pos);
+    }
+    write_all_fd(fd, &buf)
+}
+
+/// Before-separator mode: build full reversed output in one buffer, write once.
+#[cfg(unix)]
+fn tac_bytes_before_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
+    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos);
+    }
+
+    if positions.is_empty() {
+        return write_all_fd(fd, data);
+    }
+
+    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+    let base = buf.as_mut_ptr();
+    let src = data.as_ptr();
+    let mut pos: usize = 0;
+    let mut end_pos = data.len();
+
+    for &sep_pos in positions.iter().rev() {
+        if sep_pos < end_pos {
+            let len = end_pos - sep_pos;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(sep_pos), base.add(pos), len);
+            }
+            pos += len;
+        }
+        end_pos = sep_pos;
+    }
+    if end_pos > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, base.add(pos), end_pos);
+        }
+        pos += end_pos;
+    }
+    unsafe {
+        buf.set_len(pos);
+    }
+    write_all_fd(fd, &buf)
 }
 
 /// Reverse records using a multi-byte string separator.

@@ -168,7 +168,7 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
     let mut had_error = false;
 
     for filename in files {
-        let mut data: FileData = if filename == "-" {
+        let data: FileData = if filename == "-" {
             #[cfg(unix)]
             {
                 match try_mmap_stdin() {
@@ -229,13 +229,27 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             if sep.is_empty() {
                 // GNU tac: -s '' means NUL byte separator
                 tac::tac_bytes(bytes, b'\0', cli.before, out)
+            } else if sep.len() == 1 {
+                // Single-byte custom separator: use fd-based streaming
+                #[cfg(unix)]
+                {
+                    let _ = out.flush();
+                    tac::tac_bytes_to_fd(bytes, sep.as_bytes()[0], cli.before, 1)
+                }
+                #[cfg(not(unix))]
+                tac::tac_string_separator(bytes, sep.as_bytes(), cli.before, out)
             } else {
                 tac::tac_string_separator(bytes, sep.as_bytes(), cli.before, out)
             }
-        } else if let FileData::Owned(ref mut owned) = data {
-            tac::tac_bytes_owned(owned, b'\n', cli.before, out)
         } else {
+            // Default newline separator: use fd-based streaming to bypass BufWriter
             let bytes: &[u8] = &data;
+            #[cfg(unix)]
+            {
+                let _ = out.flush();
+                tac::tac_bytes_to_fd(bytes, b'\n', cli.before, 1)
+            }
+            #[cfg(not(unix))]
             tac::tac_bytes(bytes, b'\n', cli.before, out)
         };
 
@@ -264,12 +278,13 @@ fn main() {
         std::mem::take(&mut cli.files)
     };
 
-    // All paths use BufWriter: byte-separator path now uses streaming backward
-    // scan (many small writes), so BufWriter is needed to amortize syscalls.
+    // Use 1MB BufWriter. The tac core functions now stream 1MB chunks internally,
+    // so a smaller BufWriter suffices and avoids massive page fault overhead from
+    // allocating a 16MB buffer.
     #[cfg(unix)]
     let had_error = {
         let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, &*raw);
+        let mut writer = BufWriter::with_capacity(1024 * 1024, &*raw);
         let err = run(&cli, &files, &mut writer);
         let _ = writer.flush();
         err
@@ -278,7 +293,7 @@ fn main() {
     let had_error = {
         let stdout = io::stdout();
         let lock = stdout.lock();
-        let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, lock);
+        let mut writer = BufWriter::with_capacity(1024 * 1024, lock);
         let err = run(&cli, &files, &mut writer);
         let _ = writer.flush();
         err

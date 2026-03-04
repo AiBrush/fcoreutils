@@ -18,8 +18,10 @@ env:
 
 jobs:
   # Lint runs once on ubuntu — platform-independent checks
+  # Skip on merge_group — lint already passed on the PR.
   lint:
     name: Lint
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -35,8 +37,10 @@ jobs:
         run: cargo fmt -- --check
 
   # ── Linux: build once, test each command in parallel ──────────────
+  # Skip on merge_group — build already passed on the PR.
   build-linux:
     name: Build (ubuntu-latest)
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -50,8 +54,10 @@ jobs:
         run: cargo test --no-run
 
   # Binary tests: src/bin/f{cmd}.rs → cargo test --bin f{cmd}
+  # Skip on merge_group — tests already passed on the PR.
   test-linux-bin:
     name: Test ubuntu/${{ matrix.cmd }}
+    if: github.event_name != 'merge_group'
     needs: build-linux
     runs-on: ubuntu-latest
     strategy:
@@ -73,8 +79,10 @@ jobs:
           cargo test --bin "f${{ matrix.cmd }}"
 
   # ── macOS: build once, test each command in parallel ──────────────
+  # Skip on merge_group — build already passed on the PR.
   build-macos:
     name: Build (macos-latest)
+    if: github.event_name != 'merge_group'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -85,8 +93,10 @@ jobs:
       - name: Build and compile tests
         run: cargo test --no-run
 
+  # Skip on merge_group — tests already passed on the PR.
   test-macos-bin:
     name: Test macos/${{ matrix.cmd }}
+    if: github.event_name != 'merge_group'
     needs: build-macos
     runs-on: macos-latest
     strategy:
@@ -106,8 +116,10 @@ jobs:
           cargo test --bin "f${{ matrix.cmd }}"
 
   # ── Windows: build once, test each command in parallel ────────────
+  # Skip on merge_group — build already passed on the PR.
   build-windows:
     name: Build (windows-latest)
+    if: github.event_name != 'merge_group'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -118,8 +130,10 @@ jobs:
       - name: Build and compile tests
         run: cargo test --no-run
 
+  # Skip on merge_group — tests already passed on the PR.
   test-windows-bin:
     name: Test windows/${{ matrix.cmd }}
+    if: github.event_name != 'merge_group'
     needs: build-windows
     runs-on: windows-latest
     strategy:
@@ -147,6 +161,11 @@ jobs:
     steps:
       - name: Check results
         run: |
+          # On merge_group, tests are skipped (already passed on PR)
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            echo "Merge queue: skipping test checks (tests passed on PR)"
+            exit 0
+          fi
           results=("${{ needs.lint.result }}" \
                    "${{ needs.test-linux-bin.result }}" \
                    "${{ needs.test-macos-bin.result }}" \
@@ -169,6 +188,10 @@ jobs:
     steps:
       - name: Check result
         run: |
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            echo "Merge queue: tests skipped (already passed on PR)"
+            exit 0
+          fi
           if [[ "${{ needs.test-linux-bin.result }}" != "success" ]]; then
             echo "Linux tests failed"
             exit 1
@@ -182,6 +205,10 @@ jobs:
     steps:
       - name: Check result
         run: |
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            echo "Merge queue: tests skipped (already passed on PR)"
+            exit 0
+          fi
           if [[ "${{ needs.test-macos-bin.result }}" != "success" ]]; then
             echo "macOS tests failed"
             exit 1
@@ -195,14 +222,20 @@ jobs:
     steps:
       - name: Check result
         run: |
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            echo "Merge queue: tests skipped (already passed on PR)"
+            exit 0
+          fi
           if [[ "${{ needs.test-windows-bin.result }}" != "success" ]]; then
             echo "Windows tests failed"
             exit 1
           fi
 
   # ── Assembly: build all 20 tools once, upload as artifact ─────────
+  # Skip on merge_group — tests already passed on the PR.
   assembly-build:
     name: Build assembly
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -262,7 +295,9 @@ jobs:
             assembly/md5sum/fmd5sum
 
   # ── Assembly: test each tool in parallel (20 x86 + 1 ARM64) ──────
+  # Skip on merge_group — tests already passed on the PR.
   assembly-test:
+    if: github.event_name != 'merge_group'
     name: Test asm/${{ matrix.tool }}
     needs: assembly-build
     runs-on: ${{ matrix.runner }}

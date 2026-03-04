@@ -277,7 +277,7 @@ fn write_column_padding<W: Write>(
 
 /// Paginate raw byte data — fast path that avoids per-line String allocation.
 /// When no tab expansion or control char processing is needed, lines are
-/// extracted as &str slices directly from the input buffer (zero-copy).
+/// extracted as byte slices directly from the input buffer (zero-copy).
 pub fn pr_data<W: Write>(
     data: &[u8],
     output: &mut W,
@@ -294,21 +294,158 @@ pub fn pr_data<W: Write>(
         return pr_file(reader, output, config, filename, file_date);
     }
 
-    // Fast path: zero-copy line extraction from byte data
-    let text = String::from_utf8_lossy(data);
-    // Split into lines without trailing newlines (matching BufRead::lines behavior)
-    let all_lines: Vec<&str> = text
-        .split('\n')
-        .map(|l| l.strip_suffix('\r').unwrap_or(l))
-        .collect();
-    // Remove trailing empty line from final newline (matching lines() behavior)
-    let all_lines = if all_lines.last() == Some(&"") {
-        &all_lines[..all_lines.len() - 1]
+    // Ultra-fast path: single column, no per-line transforms → contiguous chunk writes
+    // Instead of splitting into individual lines and writing each one, we index newline
+    // positions and write entire page bodies as contiguous slices of the original data.
+    let is_simple = config.columns <= 1
+        && config.number_lines.is_none()
+        && config.indent == 0
+        && !config.truncate_lines
+        && !config.double_space
+        && !config.across
+        && memchr::memchr(b'\r', data).is_none();
+
+    if is_simple {
+        return pr_data_contiguous(data, output, config, filename, file_date);
+    }
+
+    // Normal path: split into line byte slices using SIMD memchr
+    let mut lines: Vec<&[u8]> = Vec::with_capacity(data.len() / 40 + 64);
+    let mut start = 0;
+    for pos in memchr::memchr_iter(b'\n', data) {
+        let end = if pos > start && data[pos - 1] == b'\r' {
+            pos - 1
+        } else {
+            pos
+        };
+        lines.push(&data[start..end]);
+        start = pos + 1;
+    }
+    // Handle last line without trailing newline
+    if start < data.len() {
+        let end = if data.last() == Some(&b'\r') {
+            data.len() - 1
+        } else {
+            data.len()
+        };
+        lines.push(&data[start..end]);
+    }
+
+    pr_lines_generic(&lines, output, config, filename, file_date)
+}
+
+/// Ultra-fast contiguous-write paginator for single-column, no-transform mode.
+/// Streams through data using memchr_iter without building a Vec<usize> of newline positions.
+/// Pre-computes the header prefix (date + filename) once, appending only the page number per page.
+fn pr_data_contiguous<W: Write>(
+    data: &[u8],
+    output: &mut W,
+    config: &PrConfig,
+    filename: &str,
+    file_date: Option<SystemTime>,
+) -> io::Result<()> {
+    let date = file_date.unwrap_or_else(SystemTime::now);
+    let header_str = config.header.as_deref().unwrap_or(filename);
+    let date_str = format_header_date(&date, &config.date_format);
+
+    let suppress_header = !config.omit_header
+        && !config.omit_pagination
+        && config.page_length <= HEADER_LINES + FOOTER_LINES;
+    let body_lines_per_page = if config.omit_header || config.omit_pagination {
+        if config.page_length > 0 {
+            config.page_length
+        } else {
+            DEFAULT_PAGE_LENGTH
+        }
+    } else if suppress_header {
+        config.page_length
     } else {
-        &all_lines[..]
+        config.page_length - HEADER_LINES - FOOTER_LINES
+    };
+    let show_header = !config.omit_header && !config.omit_pagination && !suppress_header;
+
+    if data.is_empty() {
+        if show_header {
+            let mut page_buf: Vec<u8> = Vec::with_capacity(256);
+            write_header(&mut page_buf, &date_str, header_str, 1, config)?;
+            write_footer(&mut page_buf, config)?;
+            output.write_all(&page_buf)?;
+        }
+        return Ok(());
+    }
+
+    let footer: &[u8] = if show_header {
+        if config.form_feed {
+            b"\x0c"
+        } else {
+            b"\n\n\n\n\n"
+        }
+    } else {
+        b""
     };
 
-    pr_lines_generic(all_lines, output, config, filename, file_date)
+    // Stream through data: skip body_lines_per_page newlines at a time
+    let mut page_buf: Vec<u8> = Vec::with_capacity(128 * 1024);
+    let mut page_num = 1usize;
+    let mut byte_pos = 0usize;
+    loop {
+        if byte_pos >= data.len() {
+            break;
+        }
+
+        // Find the end of this page: skip body_lines_per_page newlines
+        let page_start = byte_pos;
+        let mut lines_found = 0usize;
+        let remaining = &data[byte_pos..];
+        let mut page_end = data.len();
+
+        for nl_off in memchr::memchr_iter(b'\n', remaining) {
+            lines_found += 1;
+            if lines_found >= body_lines_per_page {
+                page_end = byte_pos + nl_off + 1;
+                break;
+            }
+        }
+
+        let in_range = page_num >= config.first_page
+            && (config.last_page == 0 || page_num <= config.last_page);
+
+        if in_range {
+            page_buf.clear();
+
+            if show_header {
+                write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
+            }
+
+            // Write body: contiguous slice of original data
+            page_buf.extend_from_slice(&data[page_start..page_end]);
+
+            // Ensure last line ends with newline
+            if page_buf.last() != Some(&b'\n') {
+                page_buf.push(b'\n');
+            }
+
+            // Pad remaining body lines
+            if show_header || (!config.omit_header && !config.omit_pagination) {
+                let pad_lines = body_lines_per_page.saturating_sub(lines_found);
+                page_buf.resize(page_buf.len() + pad_lines, b'\n');
+            }
+
+            page_buf.extend_from_slice(footer);
+
+            output.write_all(&page_buf)?;
+        }
+
+        byte_pos = page_end;
+        page_num += 1;
+
+        // If we didn't find enough lines, we've consumed all data
+        if lines_found < body_lines_per_page {
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 /// Paginate a single file and write output.
@@ -338,14 +475,14 @@ pub fn pr_file<R: BufRead, W: Write>(
         all_lines.push(line);
     }
 
-    // Convert to &str slice for the generic paginator
-    let refs: Vec<&str> = all_lines.iter().map(|s| s.as_str()).collect();
+    // Convert to &[u8] slices for the byte-based paginator
+    let refs: Vec<&[u8]> = all_lines.iter().map(|s| s.as_bytes()).collect();
     pr_lines_generic(&refs, output, config, filename, file_date)
 }
 
-/// Core paginator that works on a slice of string references.
+/// Core paginator that works on a slice of byte slices (zero-copy).
 fn pr_lines_generic<W: Write>(
-    all_lines: &[&str],
+    all_lines: &[&[u8]],
     output: &mut W,
     config: &PrConfig,
     filename: &str,
@@ -411,6 +548,8 @@ fn pr_lines_generic<W: Write>(
     let mut line_number = config.first_line_number;
     let mut page_num = 1usize;
     let mut line_idx = 0;
+    // Page-level output buffer: batch many small writes into one large write_all
+    let mut page_buf: Vec<u8> = Vec::with_capacity(128 * 1024);
 
     while line_idx < total_lines || (line_idx == 0 && total_lines == 0) {
         // For empty input, output one empty page (matching GNU behavior)
@@ -419,10 +558,9 @@ fn pr_lines_generic<W: Write>(
                 && (config.last_page == 0 || page_num <= config.last_page)
             {
                 if !config.omit_header && !config.omit_pagination && !suppress_header {
-                    write_header(output, &date_str, header_str, page_num, config)?;
-                }
-                if !config.omit_header && !config.omit_pagination && !suppress_header {
-                    write_footer(output, config)?;
+                    write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
+                    write_footer(&mut page_buf, config)?;
+                    output.write_all(&page_buf)?;
                 }
             }
             break;
@@ -432,15 +570,17 @@ fn pr_lines_generic<W: Write>(
 
         if page_num >= config.first_page && (config.last_page == 0 || page_num <= config.last_page)
         {
-            // Write header
+            page_buf.clear();
+
+            // Write header to page buffer
             if !config.omit_header && !config.omit_pagination && !suppress_header {
-                write_header(output, &date_str, header_str, page_num, config)?;
+                write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
             }
 
-            // Write body
+            // Write body to page buffer
             if columns > 1 {
                 write_multicolumn_body(
-                    output,
+                    &mut page_buf,
                     &all_lines[line_idx..page_end],
                     effective_config,
                     columns,
@@ -449,7 +589,7 @@ fn pr_lines_generic<W: Write>(
                 )?;
             } else {
                 write_single_column_body(
-                    output,
+                    &mut page_buf,
                     &all_lines[line_idx..page_end],
                     effective_config,
                     &mut line_number,
@@ -457,10 +597,13 @@ fn pr_lines_generic<W: Write>(
                 )?;
             }
 
-            // Write footer
+            // Write footer to page buffer
             if !config.omit_header && !config.omit_pagination && !suppress_header {
-                write_footer(output, config)?;
+                write_footer(&mut page_buf, config)?;
             }
+
+            // Flush entire page to output in one call
+            output.write_all(&page_buf)?;
         }
 
         line_idx = page_end;
@@ -529,85 +672,90 @@ pub fn pr_merge<W: Write>(
     let mut line_idx = 0;
     let mut line_number = config.first_line_number;
 
+    let col_sep_bytes = col_sep.as_bytes();
+    let mut page_buf: Vec<u8> = Vec::with_capacity(128 * 1024);
+    let mut num_buf = [0u8; 32];
+
     while line_idx < max_lines {
         let page_end = (line_idx + input_lines_per_page).min(max_lines);
 
         if page_num >= config.first_page && (config.last_page == 0 || page_num <= config.last_page)
         {
+            page_buf.clear();
+
             if !config.omit_header && !config.omit_pagination && !suppress_header {
-                write_header(output, &date_str, header_str, page_num, config)?;
+                write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
             }
 
             let indent_str = " ".repeat(config.indent);
             let mut body_lines_written = 0;
             for i in line_idx..page_end {
                 if config.double_space && body_lines_written > 0 {
-                    writeln!(output)?;
+                    page_buf.push(b'\n');
                     body_lines_written += 1;
                 }
 
-                output.write_all(indent_str.as_bytes())?;
+                page_buf.extend_from_slice(indent_str.as_bytes());
                 let mut abs_pos = config.indent;
 
                 if let Some((sep, digits)) = config.number_lines {
-                    write!(output, "{:>width$}{}", line_number, sep, width = digits)?;
+                    let num_str = format_line_number(line_number, sep, digits, &mut num_buf);
+                    page_buf.extend_from_slice(num_str);
                     abs_pos += digits + 1;
                     line_number += 1;
                 }
 
                 for (fi, file_lines) in inputs.iter().enumerate() {
                     let content = if i < file_lines.len() {
-                        &file_lines[i]
+                        file_lines[i].as_bytes()
                     } else {
-                        ""
+                        b"" as &[u8]
                     };
                     let truncated = if !explicit_sep && content.len() > col_width.saturating_sub(1)
                     {
-                        // Non-explicit separator: always truncate, leave room for separator
                         &content[..col_width.saturating_sub(1)]
                     } else if explicit_sep && config.truncate_lines && content.len() > col_width {
-                        // Explicit separator with -W: truncate to col_width
                         &content[..col_width]
                     } else {
                         content
                     };
                     if fi < num_files - 1 {
-                        // Non-last column
                         if explicit_sep {
-                            // GNU pr with explicit separator: no padding between columns
                             if fi > 0 {
-                                write!(output, "{}", col_sep)?;
+                                page_buf.extend_from_slice(col_sep_bytes);
                             }
-                            write!(output, "{}", truncated)?;
-                            abs_pos += truncated.len() + if fi > 0 { col_sep.len() } else { 0 };
+                            page_buf.extend_from_slice(truncated);
+                            abs_pos +=
+                                truncated.len() + if fi > 0 { col_sep_bytes.len() } else { 0 };
                         } else {
-                            write!(output, "{}", truncated)?;
+                            page_buf.extend_from_slice(truncated);
                             abs_pos += truncated.len();
                             let target = (fi + 1) * col_width + config.indent;
-                            write_column_padding(output, abs_pos, target)?;
+                            write_column_padding(&mut page_buf, abs_pos, target)?;
                             abs_pos = target;
                         }
                     } else {
-                        // Last column: no padding
                         if explicit_sep && fi > 0 {
-                            write!(output, "{}", col_sep)?;
+                            page_buf.extend_from_slice(col_sep_bytes);
                         }
-                        write!(output, "{}", truncated)?;
+                        page_buf.extend_from_slice(truncated);
                     }
                 }
-                writeln!(output)?;
+                page_buf.push(b'\n');
                 body_lines_written += 1;
             }
 
             // Pad remaining body lines
             while body_lines_written < body_lines_per_page {
-                writeln!(output)?;
+                page_buf.push(b'\n');
                 body_lines_written += 1;
             }
 
             if !config.omit_header && !config.omit_pagination && !suppress_header {
-                write_footer(output, config)?;
+                write_footer(&mut page_buf, config)?;
             }
+
+            output.write_all(&page_buf)?;
         }
 
         line_idx = page_end;
@@ -703,7 +851,7 @@ fn write_footer<W: Write>(output: &mut W, config: &PrConfig) -> io::Result<()> {
 /// Write body for single column mode.
 fn write_single_column_body<W: Write>(
     output: &mut W,
-    lines: &[&str],
+    lines: &[&[u8]],
     config: &PrConfig,
     line_number: &mut usize,
     body_lines_per_page: usize,
@@ -728,7 +876,7 @@ fn write_single_column_body<W: Write>(
             *line_number += 1;
         }
 
-        let content = if config.truncate_lines {
+        let content: &[u8] = if config.truncate_lines {
             if line.len() > content_width {
                 &line[..content_width]
             } else {
@@ -738,8 +886,8 @@ fn write_single_column_body<W: Write>(
             line
         };
 
-        // Direct write_all avoids std::fmt Display dispatch overhead
-        output.write_all(content.as_bytes())?;
+        // Direct write_all of byte slice — no format dispatch or UTF-8 overhead
+        output.write_all(content)?;
         output.write_all(b"\n")?;
         body_lines_written += 1;
         if body_lines_written >= body_lines_per_page {
@@ -827,7 +975,7 @@ fn compute_content_width(config: &PrConfig) -> usize {
 /// Write body for multi-column mode.
 fn write_multicolumn_body<W: Write>(
     output: &mut W,
-    lines: &[&str],
+    lines: &[&[u8]],
     config: &PrConfig,
     columns: usize,
     line_number: &mut usize,
@@ -851,14 +999,16 @@ fn write_multicolumn_body<W: Write>(
     };
 
     let indent_str = " ".repeat(config.indent);
+    let col_sep_bytes = col_sep.as_bytes();
     let mut body_lines_written = 0;
+    let mut num_buf = [0u8; 32];
 
     if config.across {
         // Print columns across: line 0 fills col0, line 1 fills col1, etc.
         let mut i = 0;
         while i < lines.len() {
             if config.double_space && body_lines_written > 0 {
-                writeln!(output)?;
+                output.write_all(b"\n")?;
                 body_lines_written += 1;
                 if body_lines_written >= body_lines_per_page {
                     break;
@@ -881,21 +1031,22 @@ fn write_multicolumn_body<W: Write>(
                 let li = i + col;
                 if li < lines.len() {
                     if explicit_sep && col > 0 {
-                        write!(output, "{}", col_sep)?;
-                        abs_pos += col_sep.len();
+                        output.write_all(col_sep_bytes)?;
+                        abs_pos += col_sep_bytes.len();
                     }
                     if let Some((sep, digits)) = config.number_lines {
-                        write!(output, "{:>width$}{}", line_number, sep, width = digits)?;
+                        let num_str = format_line_number(*line_number, sep, digits, &mut num_buf);
+                        output.write_all(num_str)?;
                         abs_pos += digits + 1;
                         *line_number += 1;
                     }
-                    let content = lines[li];
+                    let content: &[u8] = lines[li];
                     let truncated = if config.truncate_lines && content.len() > col_width {
                         &content[..col_width]
                     } else {
                         content
                     };
-                    output.write_all(truncated.as_bytes())?;
+                    output.write_all(truncated)?;
                     abs_pos += truncated.len();
                     if col < last_data_col && !explicit_sep {
                         let target = (col + 1) * col_width + config.indent;
@@ -928,7 +1079,7 @@ fn write_multicolumn_body<W: Write>(
 
         for row in 0..num_rows {
             if config.double_space && row > 0 {
-                writeln!(output)?;
+                output.write_all(b"\n")?;
                 body_lines_written += 1;
                 if body_lines_written >= body_lines_per_page {
                     break;
@@ -952,21 +1103,22 @@ fn write_multicolumn_body<W: Write>(
                 let li = col_starts[col] + row;
                 if row < col_lines {
                     if explicit_sep && col > 0 {
-                        write!(output, "{}", col_sep)?;
-                        abs_pos += col_sep.len();
+                        output.write_all(col_sep_bytes)?;
+                        abs_pos += col_sep_bytes.len();
                     }
                     if let Some((sep, digits)) = config.number_lines {
                         let num = config.first_line_number + li;
-                        write!(output, "{:>width$}{}", num, sep, width = digits)?;
+                        let num_str = format_line_number(num, sep, digits, &mut num_buf);
+                        output.write_all(num_str)?;
                         abs_pos += digits + 1;
                     }
-                    let content = lines[li];
+                    let content: &[u8] = lines[li];
                     let truncated = if config.truncate_lines && content.len() > col_width {
                         &content[..col_width]
                     } else {
                         content
                     };
-                    output.write_all(truncated.as_bytes())?;
+                    output.write_all(truncated)?;
                     abs_pos += truncated.len();
                     if col < last_data_col && !explicit_sep {
                         // Not the last column with data: pad to next column boundary
@@ -978,8 +1130,8 @@ fn write_multicolumn_body<W: Write>(
                     // Empty column before the last data column: pad to next boundary
                     if explicit_sep {
                         if col > 0 {
-                            write!(output, "{}", col_sep)?;
-                            abs_pos += col_sep.len();
+                            output.write_all(col_sep_bytes)?;
+                            abs_pos += col_sep_bytes.len();
                         }
                         // For explicit separator, just write separator, no padding
                     } else {

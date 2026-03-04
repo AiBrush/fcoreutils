@@ -40,7 +40,7 @@ static NOATIME_SUPPORTED: AtomicBool = AtomicBool::new(true);
 /// Open a file with O_NOATIME on Linux to avoid atime inode writes.
 /// Caches whether O_NOATIME works to avoid double-open on every file.
 #[cfg(target_os = "linux")]
-fn open_noatime(path: &Path) -> io::Result<File> {
+pub fn open_noatime(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     if NOATIME_SUPPORTED.load(Ordering::Relaxed) {
         match fs::OpenOptions::new()
@@ -60,7 +60,7 @@ fn open_noatime(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_noatime(path: &Path) -> io::Result<File> {
+pub fn open_noatime(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
@@ -208,12 +208,21 @@ pub fn read_file_mmap(path: &Path) -> io::Result<FileData> {
 pub fn read_file_direct(path: &Path) -> io::Result<FileData> {
     let file = open_noatime(path)?;
     let metadata = file.metadata()?;
+    #[cfg(target_os = "linux")]
+    {
+        // Only apply fadvise for files large enough to benefit (>= 64KB)
+        if metadata.len() >= 65536 {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+            }
+        }
+    }
     let len = metadata.len();
 
     if len > 0 && metadata.file_type().is_file() {
-        let mut buf = vec![0u8; len as usize];
-        let n = read_full(&mut &file, &mut buf)?;
-        buf.truncate(n);
+        let mut buf = Vec::with_capacity(len as usize);
+        io::Read::read_to_end(&mut &file, &mut buf)?;
         Ok(FileData::Owned(buf))
     } else if !metadata.file_type().is_file() {
         let mut buf = Vec::new();

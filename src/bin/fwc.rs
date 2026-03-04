@@ -312,7 +312,7 @@ fn main() {
             }
         }
 
-        // Read file data (zero-copy mmap for large files)
+        // Read file data
         // For stdin: try mmap if it's a regular file redirect (< file)
         let data: FileData = if filename == "-" {
             #[cfg(unix)]

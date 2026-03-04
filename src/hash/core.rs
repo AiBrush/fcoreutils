@@ -738,41 +738,43 @@ pub fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> io::Result<String> {
 pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io::Result<usize> {
     match algo {
         HashAlgorithm::Md5 => {
+            // For large data, OpenSSL's assembly MD5 is ~1.25x faster than pure Rust.
+            // The dlopen cost (~5ms) is amortized for files > ~20MB.
+            if data.len() >= 4 * 1024 * 1024 && openssl_evp::is_available() {
+                let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Md5, data)?;
+                hex_encode_to_slice(&digest, out);
+                return Ok(32);
+            }
             let digest = Md5::digest(data);
             hex_encode_to_slice(&digest, out);
             Ok(32)
         }
         HashAlgorithm::Sha1 => {
-            let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
-            hex_encode_to_slice(digest.as_ref(), out);
+            // sha1 crate uses cpufeatures for runtime SHA-NI dispatch (~1.3 GB/s
+            // on machines with SHA-NI), matching OpenSSL without dlopen overhead.
+            let digest = sha1::Sha1::digest(data);
+            hex_encode_to_slice(&digest, out);
             Ok(40)
         }
         HashAlgorithm::Sha224 => {
+            // sha2 crate has SHA-NI support, comparable to OpenSSL at all sizes.
             let digest = sha2::Sha224::digest(data);
             hex_encode_to_slice(&digest, out);
             Ok(56)
         }
         HashAlgorithm::Sha256 => {
+            // sha2 crate has SHA-NI support, comparable to OpenSSL at all sizes.
             let digest = sha2::Sha256::digest(data);
             hex_encode_to_slice(&digest, out);
             Ok(64)
         }
         HashAlgorithm::Sha384 => {
-            if openssl_evp::is_available() {
-                let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha384, data)?;
-                hex_encode_to_slice(&digest, out);
-                return Ok(96);
-            }
+            // ring uses BoringSSL assembly for SHA-384/512.
             let digest = ring::digest::digest(&ring::digest::SHA384, data);
             hex_encode_to_slice(digest.as_ref(), out);
             Ok(96)
         }
         HashAlgorithm::Sha512 => {
-            if openssl_evp::is_available() {
-                let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha512, data)?;
-                hex_encode_to_slice(&digest, out);
-                return Ok(128);
-            }
             let digest = ring::digest::digest(&ring::digest::SHA512, data);
             hex_encode_to_slice(digest.as_ref(), out);
             Ok(128)
@@ -876,15 +878,33 @@ fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::
         return hash_bytes_to_buf(algo, &buf[..total], out);
     }
 
-    // Larger files: fall back to hash_from_raw_fd which returns a String,
-    // then copy the hex into out.
+    // Regular files: mmap and use hash_bytes_to_buf (pure Rust crate implementations).
+    // This avoids the OpenSSL dlopen path (~5ms overhead) that hash_regular_file uses,
+    // which is critical for benchmark performance on small/medium files.
+    // The sha2 crate uses SHA-NI hardware instructions via cpufeatures on x86-64,
+    // so performance is on par with OpenSSL for SHA-256.
+    if is_regular && size > 0 {
+        use std::os::unix::io::FromRawFd;
+        let file = unsafe { File::from_raw_fd(fd) };
+        let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
+        if let Ok(mmap) = mmap_result {
+            let _ = mmap.advise(memmap2::Advice::Sequential);
+            if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                let _ = mmap.advise(memmap2::Advice::WillNeed);
+            }
+            return hash_bytes_to_buf(algo, &mmap, out);
+        }
+        // mmap failed — fall through to streaming
+        let hash_str = hash_reader(algo, file)?;
+        let hex_bytes = hash_str.as_bytes();
+        out[..hex_bytes.len()].copy_from_slice(hex_bytes);
+        return Ok(hex_bytes.len());
+    }
+
+    // Non-regular files (pipes, etc.): streaming read
     use std::os::unix::io::FromRawFd;
     let file = unsafe { File::from_raw_fd(fd) };
-    let hash_str = if is_regular && size > 0 {
-        hash_regular_file(algo, file, size)?
-    } else {
-        hash_reader(algo, file)?
-    };
+    let hash_str = hash_reader(algo, file)?;
     let hex_bytes = hash_str.as_bytes();
     out[..hex_bytes.len()].copy_from_slice(hex_bytes);
     Ok(hex_bytes.len())
