@@ -136,16 +136,25 @@ impl RandGen {
                 }
             },
             RandGen::Xorshift { state } => {
-                let n = genmax + 1;
-                let threshold = u64::MAX - (u64::MAX % n);
+                // Lemire's nearly-divisionless bounded random:
+                // Uses widening multiply (u64 * u64 → u128) to map random value
+                // to [0, n) range. Avoids expensive u64 division in ~all cases.
+                let s = genmax + 1;
                 loop {
                     *state ^= *state << 13;
                     *state ^= *state >> 7;
                     *state ^= *state << 17;
-                    let r = *state;
-                    if r < threshold {
-                        return r % n;
+                    let x = *state;
+                    let m = (x as u128) * (s as u128);
+                    let l = m as u64; // low 64 bits
+                    if l < s {
+                        // Rare rejection path (< 1/2^32 probability for typical s)
+                        let t = s.wrapping_neg() % s;
+                        if l < t {
+                            continue;
+                        }
                     }
+                    return (m >> 64) as u64;
                 }
             }
         }
@@ -528,16 +537,28 @@ fn run_range_shuffle(
         }
         let _ = out.write_all(&buf);
     } else {
-        // Dense path: generate all values and Fisher-Yates shuffle
+        // Dense path: generate all values and partial Fisher-Yates shuffle.
+        // Only do `count` rounds instead of full N shuffle — O(count) vs O(N).
         let mut values: Vec<u64> = (lo..=hi).collect();
-        shuffle(&mut values, rng);
-        // Batch output into single buffer
-        let mut buf = Vec::with_capacity(count * 8);
+        let n = values.len();
+        for i in 0..count {
+            let j = i + rng.gen_range(n - i);
+            values.swap(i, j);
+        }
+        // Chunked output to avoid huge single allocation for 1M numbers
+        const OUT_CHUNK: usize = 256 * 1024;
+        let mut buf = Vec::with_capacity(OUT_CHUNK + 32);
         for &val in values.iter().take(count) {
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
+            if buf.len() >= OUT_CHUNK {
+                let _ = out.write_all(&buf);
+                buf.clear();
+            }
         }
-        let _ = out.write_all(&buf);
+        if !buf.is_empty() {
+            let _ = out.write_all(&buf);
+        }
     }
 }
 
@@ -553,18 +574,20 @@ fn run_file_shuffle(
     let data = read_file_data(filename);
     let sep = if zero_terminated { 0u8 } else { b'\n' };
 
-    // Build index of line start/end offsets using SIMD memchr scan
+    // Build line index as (start, end) pairs using u32 for compactness.
+    // At 8 bytes per entry (vs 16 for (usize, usize)), this halves cache footprint
+    // for the Fisher-Yates shuffle where random access is the bottleneck.
     let estimated_lines = data.len() / 40 + 64;
-    let mut offsets: Vec<(usize, usize)> = Vec::with_capacity(estimated_lines);
-    let mut start = 0;
+    let mut offsets: Vec<[u32; 2]> = Vec::with_capacity(estimated_lines);
+    let mut start = 0usize;
     for pos in memchr::memchr_iter(sep, &data) {
         if pos > start {
-            offsets.push((start, pos));
+            offsets.push([start as u32, pos as u32]);
         }
         start = pos + 1;
     }
     if start < data.len() {
-        offsets.push((start, data.len()));
+        offsets.push([start as u32, data.len() as u32]);
     }
 
     if offsets.is_empty() && !repeat {
@@ -580,13 +603,12 @@ fn run_file_shuffle(
             eprintln!("{}: no lines to repeat", TOOL_NAME);
             process::exit(1);
         }
-        // Batch output into contiguous buffer to reduce write syscalls
         let batch_size = count.min(8192);
         let mut buf = Vec::with_capacity(batch_size * 80);
         for i in 0..count {
             let idx = rng.gen_range(offsets.len());
-            let (s, e) = offsets[idx];
-            buf.extend_from_slice(&data[s..e]);
+            let [s, e] = offsets[idx];
+            buf.extend_from_slice(&data[s as usize..e as usize]);
             buf.push(delimiter);
             if (i + 1) % batch_size == 0 {
                 let _ = out.write_all(&buf);
@@ -597,17 +619,30 @@ fn run_file_shuffle(
             let _ = out.write_all(&buf);
         }
     } else {
-        // Shuffle indices (cheap u64 swaps) instead of strings
-        shuffle(&mut offsets, rng);
-        let count = head_count.unwrap_or(offsets.len()).min(offsets.len());
-        // Build contiguous output buffer: single write_all instead of 2*count calls
-        let total_size: usize = offsets.iter().take(count).map(|&(s, e)| e - s + 1).sum();
-        let mut buf = Vec::with_capacity(total_size);
-        for &(s, e) in offsets.iter().take(count) {
-            buf.extend_from_slice(&data[s..e]);
-            buf.push(delimiter);
+        let n = offsets.len();
+        let count = head_count.unwrap_or(n).min(n);
+
+        // Partial Fisher-Yates: only do `count` rounds instead of shuffling all N.
+        // O(count) random swaps instead of O(N). Huge win for -n 100 from 200K lines.
+        for i in 0..count {
+            let j = i + rng.gen_range(n - i);
+            offsets.swap(i, j);
         }
-        let _ = out.write_all(&buf);
+
+        // Chunked output: write in 256KB batches to avoid huge single allocation
+        const OUT_CHUNK: usize = 256 * 1024;
+        let mut buf = Vec::with_capacity(OUT_CHUNK + 256);
+        for &[s, e] in offsets[..count].iter() {
+            buf.extend_from_slice(&data[s as usize..e as usize]);
+            buf.push(delimiter);
+            if buf.len() >= OUT_CHUNK {
+                let _ = out.write_all(&buf);
+                buf.clear();
+            }
+        }
+        if !buf.is_empty() {
+            let _ = out.write_all(&buf);
+        }
     }
 }
 
