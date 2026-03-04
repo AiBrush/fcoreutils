@@ -259,20 +259,9 @@ fn write_column_padding<W: Write>(
     abs_pos: usize,
     target_abs_pos: usize,
 ) -> io::Result<()> {
-    let tab_size = 8;
-    let mut pos = abs_pos;
-    while pos < target_abs_pos {
-        let next_tab = ((pos / tab_size) + 1) * tab_size;
-        if next_tab <= target_abs_pos {
-            output.write_all(b"\t")?;
-            pos = next_tab;
-        } else {
-            let n = target_abs_pos - pos;
-            write_spaces(output, n)?;
-            pos = target_abs_pos;
-        }
-    }
-    Ok(())
+    // GNU pr uses plain spaces for column padding by default
+    let n = target_abs_pos.saturating_sub(abs_pos);
+    write_spaces(output, n)
 }
 
 /// Paginate raw byte data — fast path that avoids per-line String allocation.
@@ -306,7 +295,22 @@ pub fn pr_data<W: Write>(
         && memchr::memchr(b'\r', data).is_none();
 
     if is_simple {
+        // Passthrough: -t with no transforms → output == input
+        if config.omit_header || config.omit_pagination {
+            return output.write_all(data);
+        }
         return pr_data_contiguous(data, output, config, filename, file_date);
+    }
+
+    // Fast path: single column with numbering only (no indent, no truncate, no double-space)
+    if config.columns <= 1
+        && config.number_lines.is_some()
+        && config.indent == 0
+        && !config.truncate_lines
+        && !config.double_space
+        && memchr::memchr(b'\r', data).is_none()
+    {
+        return pr_data_numbered(data, output, config, filename, file_date);
     }
 
     // Normal path: split into line byte slices using SIMD memchr
@@ -443,6 +447,166 @@ fn pr_data_contiguous<W: Write>(
         if lines_found < body_lines_per_page {
             break;
         }
+    }
+
+    Ok(())
+}
+
+/// Fast numbered single-column paginator.
+/// Uses unsafe pointer arithmetic to format numbered lines directly into
+/// a pre-allocated buffer, avoiding per-line write_all overhead.
+fn pr_data_numbered<W: Write>(
+    data: &[u8],
+    output: &mut W,
+    config: &PrConfig,
+    filename: &str,
+    file_date: Option<SystemTime>,
+) -> io::Result<()> {
+    let date = file_date.unwrap_or_else(SystemTime::now);
+    let header_str = config.header.as_deref().unwrap_or(filename);
+    let date_str = format_header_date(&date, &config.date_format);
+
+    let (sep_char, digits) = config.number_lines.unwrap_or(('\t', 5));
+    let sep_byte = sep_char as u8;
+    // prefix_len = padding spaces + number digits + separator
+    let prefix_len = digits + 1; // digits + separator
+
+    let suppress_header = !config.omit_header
+        && !config.omit_pagination
+        && config.page_length <= HEADER_LINES + FOOTER_LINES;
+    let body_lines_per_page = if config.omit_header || config.omit_pagination {
+        if config.page_length > 0 {
+            config.page_length
+        } else {
+            DEFAULT_PAGE_LENGTH
+        }
+    } else if suppress_header {
+        config.page_length
+    } else {
+        config.page_length - HEADER_LINES - FOOTER_LINES
+    };
+    let show_header = !config.omit_header && !config.omit_pagination && !suppress_header;
+
+    // Pre-allocate output buffer: ~128KB for a page
+    const BUF_SIZE: usize = 128 * 1024;
+    let mut page_buf: Vec<u8> = Vec::with_capacity(BUF_SIZE + 4096);
+
+    let mut line_number = config.first_line_number;
+    let mut page_num = 1usize;
+
+    // Pre-split lines using SIMD memchr for fast iteration
+    let mut line_starts: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
+    line_starts.push(0);
+    for pos in memchr::memchr_iter(b'\n', data) {
+        line_starts.push(pos + 1);
+    }
+    let total_lines = if !data.is_empty() && data[data.len() - 1] == b'\n' {
+        line_starts.len() - 1
+    } else {
+        line_starts.len()
+    };
+
+    let mut line_idx = 0;
+
+    while line_idx < total_lines {
+        let page_end = (line_idx + body_lines_per_page).min(total_lines);
+        let in_range = page_num >= config.first_page
+            && (config.last_page == 0 || page_num <= config.last_page);
+
+        if in_range {
+            page_buf.clear();
+
+            if show_header {
+                write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
+            }
+
+            // Write numbered lines using unsafe pointer arithmetic
+            let src = data.as_ptr();
+            for li in line_idx..page_end {
+                let line_start = line_starts[li];
+                let line_end = if li + 1 < line_starts.len() {
+                    // strip trailing \n (and \r\n)
+                    let end = line_starts[li + 1] - 1;
+                    if end > line_start && data[end - 1] == b'\r' {
+                        end - 1
+                    } else {
+                        end
+                    }
+                } else {
+                    data.len()
+                };
+                let line_len = line_end - line_start;
+
+                // Ensure capacity: prefix + content + newline
+                let needed = prefix_len + line_len + 1;
+                page_buf.reserve(needed);
+
+                let wp = page_buf.len();
+                let base = page_buf.as_mut_ptr();
+
+                // Format line number with right-aligned padding
+                let mut n = line_number;
+                let mut num_pos = 19usize;
+                let mut num_tmp = [0u8; 20];
+                loop {
+                    num_tmp[num_pos] = b'0' + (n % 10) as u8;
+                    n /= 10;
+                    if n == 0 || num_pos == 0 {
+                        break;
+                    }
+                    num_pos -= 1;
+                }
+                let num_digits = 20 - num_pos;
+                let padding = digits.saturating_sub(num_digits);
+
+                unsafe {
+                    let dst = base.add(wp);
+                    // Write padding spaces
+                    std::ptr::write_bytes(dst, b' ', padding);
+                    // Write number digits
+                    std::ptr::copy_nonoverlapping(
+                        num_tmp.as_ptr().add(num_pos),
+                        dst.add(padding),
+                        num_digits,
+                    );
+                    // Write separator
+                    *dst.add(padding + num_digits) = sep_byte;
+                    // Write line content
+                    if line_len > 0 {
+                        std::ptr::copy_nonoverlapping(
+                            src.add(line_start),
+                            dst.add(prefix_len),
+                            line_len,
+                        );
+                    }
+                    // Write newline
+                    *dst.add(prefix_len + line_len) = b'\n';
+                    page_buf.set_len(wp + prefix_len + line_len + 1);
+                }
+
+                line_number += 1;
+            }
+
+            // Pad remaining body lines
+            if show_header {
+                let body_lines_written = page_end - line_idx;
+                let pad = body_lines_per_page.saturating_sub(body_lines_written);
+                page_buf.resize(page_buf.len() + pad, b'\n');
+            }
+
+            // Footer
+            if show_header {
+                write_footer(&mut page_buf, config)?;
+            }
+
+            output.write_all(&page_buf)?;
+        } else {
+            // Skip page but still advance line number
+            line_number += page_end - line_idx;
+        }
+
+        line_idx = page_end;
+        page_num += 1;
     }
 
     Ok(())
@@ -997,6 +1161,14 @@ fn write_multicolumn_body<W: Write>(
     } else {
         config.page_width / columns
     };
+    // GNU pr truncates lines in multi-column mode by default, unless -J (join_lines) is set.
+    // For non-explicit separator, truncate to col_width - 1 to leave room for padding.
+    let do_truncate = !config.join_lines;
+    let content_width = if explicit_sep {
+        col_width
+    } else {
+        col_width.saturating_sub(1)
+    };
 
     let indent_str = " ".repeat(config.indent);
     let col_sep_bytes = col_sep.as_bytes();
@@ -1041,11 +1213,17 @@ fn write_multicolumn_body<W: Write>(
                         *line_number += 1;
                     }
                     let content: &[u8] = lines[li];
-                    let truncated = if config.truncate_lines && content.len() > col_width {
-                        &content[..col_width]
+                    let mut truncated = if do_truncate && content.len() > content_width {
+                        &content[..content_width]
                     } else {
                         content
                     };
+                    // GNU pr strips trailing spaces from the last column
+                    if col == last_data_col && !explicit_sep {
+                        while truncated.last() == Some(&b' ') {
+                            truncated = &truncated[..truncated.len() - 1];
+                        }
+                    }
                     output.write_all(truncated)?;
                     abs_pos += truncated.len();
                     if col < last_data_col && !explicit_sep {
@@ -1113,11 +1291,17 @@ fn write_multicolumn_body<W: Write>(
                         abs_pos += digits + 1;
                     }
                     let content: &[u8] = lines[li];
-                    let truncated = if config.truncate_lines && content.len() > col_width {
-                        &content[..col_width]
+                    let mut truncated = if do_truncate && content.len() > content_width {
+                        &content[..content_width]
                     } else {
                         content
                     };
+                    // GNU pr strips trailing spaces from the last column
+                    if col == last_data_col && !explicit_sep {
+                        while truncated.last() == Some(&b' ') {
+                            truncated = &truncated[..truncated.len() - 1];
+                        }
+                    }
                     output.write_all(truncated)?;
                     abs_pos += truncated.len();
                     if col < last_data_col && !explicit_sep {

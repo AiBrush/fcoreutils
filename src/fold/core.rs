@@ -55,10 +55,6 @@ fn fold_width_zero(data: &[u8], out: &mut impl Write) -> std::io::Result<()> {
 fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
     const BUF_CAP: usize = 1024 * 1024 + 4096;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP);
-    // Pre-fault buffer pages
-    unsafe {
-        std::ptr::write_bytes(buf.as_mut_ptr(), 0, BUF_CAP);
-    }
     let base = buf.as_mut_ptr();
     let src = data.as_ptr();
     let mut wp: usize = 0;
