@@ -33,6 +33,21 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
     }
 }
 
+/// Stream reversed byte-separated records directly to an fd.
+/// Bypasses BufWriter to avoid its large buffer allocation overhead.
+/// Uses a 1MB internal buffer written directly via raw write() syscalls.
+#[cfg(unix)]
+pub fn tac_bytes_to_fd(data: &[u8], separator: u8, before: bool, fd: i32) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    if !before {
+        tac_bytes_after_fd(data, separator, fd)
+    } else {
+        tac_bytes_before_fd(data, separator, fd)
+    }
+}
+
 /// Reverse records of an owned Vec. Delegates to tac_bytes.
 pub fn tac_bytes_owned(
     data: &mut [u8],
@@ -194,9 +209,9 @@ fn tac_bytes_before_contiguous(data: &[u8], sep: u8, out: &mut impl Write) -> io
     Ok(())
 }
 
-/// After-separator mode for small files: forward SIMD scan + contiguous buffer.
-/// Single forward memchr_iter scan replaces N backward memrchr calls.
-/// Builds reversed output in a single contiguous buffer, then writes once.
+/// After-separator mode for small files: forward SIMD scan + streaming 1MB output.
+/// Uses a 1MB internal buffer that flushes to the writer, avoiding the massive
+/// allocation of building the entire reversed output in memory.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -212,26 +227,38 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
         return out.write_all(data);
     }
 
-    // Build reversed output in a contiguous buffer (single write_all at end)
-    let mut buf = Vec::with_capacity(data.len());
+    // Stream reversed output using a 1MB buffer
+    const BUF_SIZE: usize = 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut end_pos = data.len();
+
     for &pos in positions.iter().rev() {
         let rec_start = pos + 1;
         if rec_start < end_pos {
-            buf.extend_from_slice(&data[rec_start..end_pos]);
+            let record = &data[rec_start..end_pos];
+            if buf.len() + record.len() > BUF_SIZE {
+                out.write_all(&buf)?;
+                buf.clear();
+            }
+            buf.extend_from_slice(record);
         }
         end_pos = rec_start;
     }
     if end_pos > 0 {
-        buf.extend_from_slice(&data[..end_pos]);
+        let record = &data[..end_pos];
+        if buf.len() + record.len() > BUF_SIZE {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
+        buf.extend_from_slice(record);
     }
-
-    out.write_all(&buf)
+    if !buf.is_empty() {
+        out.write_all(&buf)?;
+    }
+    Ok(())
 }
 
-/// Before-separator mode for small files: forward SIMD scan + contiguous buffer.
-/// Single forward memchr_iter scan replaces N backward memrchr calls.
-/// Builds reversed output in a single contiguous buffer, then writes once.
+/// Before-separator mode for small files: forward SIMD scan + streaming 1MB output.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -247,20 +274,188 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
         return out.write_all(data);
     }
 
-    // Build reversed output in a contiguous buffer (before mode)
-    let mut buf = Vec::with_capacity(data.len());
+    // Stream reversed output using a 1MB buffer (before mode)
+    const BUF_SIZE: usize = 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut end_pos = data.len();
+
     for &pos in positions.iter().rev() {
         if pos < end_pos {
-            buf.extend_from_slice(&data[pos..end_pos]);
+            let record = &data[pos..end_pos];
+            if buf.len() + record.len() > BUF_SIZE {
+                out.write_all(&buf)?;
+                buf.clear();
+            }
+            buf.extend_from_slice(record);
         }
         end_pos = pos;
     }
     if end_pos > 0 {
-        buf.extend_from_slice(&data[..end_pos]);
+        let record = &data[..end_pos];
+        if buf.len() + record.len() > BUF_SIZE {
+            out.write_all(&buf)?;
+            buf.clear();
+        }
+        buf.extend_from_slice(record);
+    }
+    if !buf.is_empty() {
+        out.write_all(&buf)?;
+    }
+    Ok(())
+}
+
+/// Write buffer to a file descriptor, retrying on partial/interrupted writes.
+#[cfg(unix)]
+#[inline]
+fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
+    let mut written = 0;
+    while written < data.len() {
+        let ret = unsafe {
+            libc::write(
+                fd,
+                data[written..].as_ptr() as *const libc::c_void,
+                (data.len() - written) as _,
+            )
+        };
+        if ret > 0 {
+            written += ret as usize;
+        } else if ret == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Write all IoSlice entries via writev, handling partial writes.
+#[cfg(unix)]
+fn writev_all(fd: i32, slices: &[IoSlice<'_>]) -> io::Result<()> {
+    if slices.is_empty() {
+        return Ok(());
+    }
+    let total: usize = slices.iter().map(|s| s.len()).sum();
+    let mut written = 0usize;
+    let mut skip_slices = 0usize;
+    let mut skip_bytes = 0usize;
+
+    while written < total {
+        // Build iovec for remaining slices
+        let remaining = &slices[skip_slices..];
+        let ret = unsafe {
+            libc::writev(
+                fd,
+                remaining.as_ptr() as *const libc::iovec,
+                remaining.len().min(1024) as i32,
+            )
+        };
+        if ret > 0 {
+            written += ret as usize;
+            // Advance past fully-written slices
+            let mut advance = ret as usize + skip_bytes;
+            skip_bytes = 0;
+            while skip_slices < slices.len() {
+                let slen = slices[skip_slices].len();
+                if advance >= slen {
+                    advance -= slen;
+                    skip_slices += 1;
+                } else {
+                    skip_bytes = advance;
+                    break;
+                }
+            }
+        } else if ret == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "writev returned 0",
+            ));
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// After-separator mode streaming directly to fd via zero-copy writev.
+/// References mmap'd data directly — no output buffer allocation needed.
+#[cfg(unix)]
+fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
+    // Forward SIMD scan: collect all separator positions
+    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos);
     }
 
-    out.write_all(&buf)
+    if positions.is_empty() {
+        return write_all_fd(fd, data);
+    }
+
+    // Zero-copy reverse output via writev batches of IoSlice
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut end_pos = data.len();
+
+    for &pos in positions.iter().rev() {
+        let rec_start = pos + 1;
+        if rec_start < end_pos {
+            slices.push(IoSlice::new(&data[rec_start..end_pos]));
+            if slices.len() >= BATCH {
+                writev_all(fd, &slices)?;
+                slices.clear();
+            }
+        }
+        end_pos = rec_start;
+    }
+    if end_pos > 0 {
+        slices.push(IoSlice::new(&data[..end_pos]));
+    }
+    if !slices.is_empty() {
+        writev_all(fd, &slices)?;
+    }
+    Ok(())
+}
+
+/// Before-separator mode streaming directly to fd via zero-copy writev.
+#[cfg(unix)]
+fn tac_bytes_before_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
+    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos);
+    }
+
+    if positions.is_empty() {
+        return write_all_fd(fd, data);
+    }
+
+    const BATCH: usize = 1024;
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(BATCH);
+    let mut end_pos = data.len();
+
+    for &pos in positions.iter().rev() {
+        if pos < end_pos {
+            slices.push(IoSlice::new(&data[pos..end_pos]));
+            if slices.len() >= BATCH {
+                writev_all(fd, &slices)?;
+                slices.clear();
+            }
+        }
+        end_pos = pos;
+    }
+    if end_pos > 0 {
+        slices.push(IoSlice::new(&data[..end_pos]));
+    }
+    if !slices.is_empty() {
+        writev_all(fd, &slices)?;
+    }
+    Ok(())
 }
 
 /// Reverse records using a multi-byte string separator.

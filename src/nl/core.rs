@@ -301,6 +301,7 @@ fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> 
 /// Streaming fast path for nl -b a: writes output in ~1MB batches directly to fd.
 /// Uses pre-formatted prefix in a stack-allocated buffer with in-place digit
 /// increment to avoid reformatting the number string for every single line.
+/// Raw write_pos tracking eliminates per-line Vec metadata overhead.
 #[cfg(unix)]
 fn nl_number_all_stream(
     data: &[u8],
@@ -317,15 +318,19 @@ fn nl_number_all_stream(
     let mut pos: usize = 0;
 
     let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
+    let buf_ptr = output.as_mut_ptr();
+    let mut write_pos: usize = 0;
+    let data_ptr = data.as_ptr();
 
     // Use fixed-size array for prefix (avoid heap indirection)
     let mut prefix_buf = [0u8; 32];
     let mut prefix_len: usize;
     let mut num_end: usize;
 
+    let mut num_buf = itoa::Buffer::new();
+
     // Format initial prefix
     {
-        let mut num_buf = itoa::Buffer::new();
         let num_str = num_buf.format(num);
         let pad = width.saturating_sub(num_str.len());
         let mut wp = 0;
@@ -364,23 +369,21 @@ fn nl_number_all_stream(
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
 
-        if output.len() + line_len + prefix_len + 2 > BUF_SIZE {
+        if write_pos + line_len + prefix_len + 2 > BUF_SIZE {
+            unsafe {
+                output.set_len(write_pos);
+            }
             write_all_fd(fd, &output)?;
-            output.clear();
+            write_pos = 0;
         }
 
-        let needed = output.len() + prefix_len + line_len + 1;
-        if needed > output.capacity() {
-            output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
-        }
         unsafe {
-            let start = output.len();
-            let dst = output.as_mut_ptr().add(start);
+            let dst = buf_ptr.add(write_pos);
             std::ptr::copy_nonoverlapping(prefix_buf.as_ptr(), dst, prefix_len);
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), line_len);
+            std::ptr::copy_nonoverlapping(data_ptr.add(pos), dst.add(prefix_len), line_len);
             *dst.add(prefix_len + line_len) = b'\n';
-            output.set_len(needed);
         }
+        write_pos += prefix_len + line_len + 1;
 
         num += 1;
         pos = nl_pos + 1;
@@ -396,8 +399,7 @@ fn nl_number_all_stream(
                     }
                     prefix_buf[idx] = b'0';
                     if idx == 0 {
-                        let mut nb = itoa::Buffer::new();
-                        let ns = nb.format(num);
+                        let ns = num_buf.format(num);
                         let p = width.saturating_sub(ns.len());
                         let pc = if fmt == NumberFormat::Rz { b'0' } else { b' ' };
                         let mut wp = 0;
@@ -437,8 +439,7 @@ fn nl_number_all_stream(
                     }
                     prefix_buf[idx] = b'0';
                     if idx == 0 {
-                        let mut nb = itoa::Buffer::new();
-                        let ns = nb.format(num);
+                        let ns = num_buf.format(num);
                         let p = width.saturating_sub(ns.len());
                         let mut wp = 0;
                         prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
@@ -454,8 +455,7 @@ fn nl_number_all_stream(
                     }
                     idx -= 1;
                     if prefix_buf[idx] == b' ' {
-                        let mut nb = itoa::Buffer::new();
-                        let ns = nb.format(num);
+                        let ns = num_buf.format(num);
                         let p = width.saturating_sub(ns.len());
                         let mut wp = 0;
                         prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
@@ -477,22 +477,27 @@ fn nl_number_all_stream(
     // Handle final line without trailing newline
     if pos < data.len() {
         let remaining = data.len() - pos;
-        let needed = output.len() + prefix_len + remaining + 1;
-        if needed > output.capacity() {
-            output.reserve(needed - output.capacity());
+        if write_pos + prefix_len + remaining + 2 > BUF_SIZE {
+            unsafe {
+                output.set_len(write_pos);
+            }
+            write_all_fd(fd, &output)?;
+            write_pos = 0;
         }
         unsafe {
-            let start = output.len();
-            let dst = output.as_mut_ptr().add(start);
+            let dst = buf_ptr.add(write_pos);
             std::ptr::copy_nonoverlapping(prefix_buf.as_ptr(), dst, prefix_len);
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), dst.add(prefix_len), remaining);
+            std::ptr::copy_nonoverlapping(data_ptr.add(pos), dst.add(prefix_len), remaining);
             *dst.add(prefix_len + remaining) = b'\n';
-            output.set_len(start + prefix_len + remaining + 1);
         }
+        write_pos += prefix_len + remaining + 1;
         num += 1;
     }
 
-    if !output.is_empty() {
+    if write_pos > 0 {
+        unsafe {
+            output.set_len(write_pos);
+        }
         write_all_fd(fd, &output)?;
     }
 
@@ -661,11 +666,17 @@ pub fn nl_stream_with_state(
         return Ok(());
     }
 
-    // Fast path: number-all without section delimiters
-    let has_section_delims = !config.section_delimiter.is_empty()
-        && memchr::memmem::find(data, &config.section_delimiter).is_some();
-    if is_simple_number_all(config) && !has_section_delims {
-        return nl_number_all_stream(data, config, line_number, fd);
+    // Fast path: number-all configuration (skip upfront delimiter scan)
+    if is_simple_number_all(config) {
+        // Skip delimiter scan when delimiter is empty
+        if config.section_delimiter.is_empty() {
+            return nl_number_all_stream(data, config, line_number, fd);
+        }
+        // For default 2-byte delimiter (\:), check if it exists at all.
+        // Use memmem SIMD scan — fast for typical text without backslashes.
+        if memchr::memmem::find(data, &config.section_delimiter).is_none() {
+            return nl_number_all_stream(data, config, line_number, fd);
+        }
     }
 
     nl_generic_stream(data, config, line_number, fd)
