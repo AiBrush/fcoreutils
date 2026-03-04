@@ -132,7 +132,7 @@ fn write_spaces(out: &mut impl Write, n: usize) -> std::io::Result<()> {
 }
 
 /// Expand tabs to spaces using SIMD scanning.
-/// Uses memchr2 to find tabs and newlines, bulk-copying everything between them.
+/// Dispatches to the optimal path based on tab configuration and data content.
 pub fn expand_bytes(
     data: &[u8],
     tabs: &TabStops,
@@ -143,53 +143,66 @@ pub fn expand_bytes(
         return Ok(());
     }
 
-    // Fast path: no tabs in data → just copy through
+    // For regular tab stops, use fast SIMD paths.
+    // We combine the no-tabs and no-backspace checks to minimize full-data scans.
+    if let TabStops::Regular(tab_size) = tabs {
+        if initial_only {
+            // --initial mode: check for tabs first (cheap) to skip processing
+            if memchr::memchr(b'\t', data).is_none() {
+                return out.write_all(data);
+            }
+            return expand_initial_fast(data, *tab_size, out);
+        }
+
+        // Fast path: no tabs → write-through (avoids backspace scan too)
+        if memchr::memchr(b'\t', data).is_none() {
+            return out.write_all(data);
+        }
+
+        // Check for backspaces. If none, use the fast SIMD path.
+        if memchr::memchr(b'\x08', data).is_none() {
+            return expand_regular_fast(data, *tab_size, out);
+        }
+
+        // Has backspaces → fall through to generic
+        return expand_generic(data, tabs, initial_only, true, out);
+    }
+
+    // Tab list path: check for tabs first
     if memchr::memchr(b'\t', data).is_none() {
         return out.write_all(data);
     }
-
-    // For regular tab stops, use fast SIMD paths
-    if let TabStops::Regular(tab_size) = tabs {
-        if initial_only {
-            // --initial mode processes line-by-line anyway, so handle backspace
-            // per-line instead of scanning the whole buffer.
-            return expand_initial_fast(data, *tab_size, out);
-        } else if memchr::memchr(b'\x08', data).is_none() {
-            return expand_regular_fast(data, *tab_size, out);
-        }
-    }
-
-    // Generic path for backspace handling or tab lists.
-    // For Regular tabs, we only reach here when the memchr check at line 157 found
-    // backspaces, so has_backspace=true avoids a redundant O(n) scan.
-    // For List tabs, we haven't scanned yet, so check now.
-    let has_backspace = match tabs {
-        TabStops::Regular(_) => true,
-        TabStops::List(_) => memchr::memchr(b'\x08', data).is_some(),
-    };
+    let has_backspace = memchr::memchr(b'\x08', data).is_some();
     expand_generic(data, tabs, initial_only, has_backspace, out)
 }
 
+/// Parallel threshold: files above this size use multi-threaded expand.
+/// Below this, single-threaded is faster (avoids thread pool overhead).
+const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024; // 4MB
+
 /// Fast expand for regular tab stops without -i flag.
-/// Processes data in fixed-size input chunks. Each chunk is pre-allocated to
-/// worst-case output size, allowing the inner loop to use raw pointer writes
-/// with ZERO capacity checks or Vec::len() updates. The inner loop uses
-/// memchr2_iter (SIMD) to find tabs and newlines, bulk-copying segments between
-/// them via memcpy. A local write pointer (`wp`) tracks position — Vec::set_len
-/// is called only once per chunk.
+/// For large files (>4MB), uses rayon to process chunks in parallel.
+/// For smaller files, uses single-threaded SIMD processing.
 fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> std::io::Result<()> {
     debug_assert!(tab_size > 0, "tab_size must be > 0");
 
-    // For power-of-2 tab sizes, use bitwise AND instead of modulo
+    if data.len() >= PARALLEL_THRESHOLD {
+        expand_regular_parallel(data, tab_size, out)
+    } else {
+        expand_regular_single(data, tab_size, out)
+    }
+}
+
+/// Single-threaded expand: SIMD memchr2_iter scan of entire data.
+fn expand_regular_single(
+    data: &[u8],
+    tab_size: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
     let is_pow2 = tab_size.is_power_of_two();
     let mask = tab_size.wrapping_sub(1);
 
-    // Process in fixed-size input chunks. Each chunk is pre-allocated to worst-case
-    // so the inner loop needs NO capacity checks, NO Vec::len() reads, NO set_len()
-    // calls — just raw pointer arithmetic.
     const INPUT_CHUNK: usize = 256 * 1024;
-
-    // Worst-case output size for one chunk (every byte is a tab)
     let worst_output = INPUT_CHUNK * tab_size + tab_size;
     let mut output: Vec<u8> = Vec::with_capacity(worst_output);
 
@@ -197,7 +210,6 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
     let mut data_pos: usize = 0;
 
     while data_pos < data.len() {
-        // Find chunk boundary — prefer newline boundary for clean column tracking
         let chunk_end = if data_pos + INPUT_CHUNK >= data.len() {
             data.len()
         } else {
@@ -211,15 +223,12 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
         let chunk = &data[data_pos..chunk_end];
         output.clear();
 
-        // Raw pointer inner loop — `wp` is a local register variable.
-        // No Vec method calls until set_len at the end.
         let out_ptr = output.as_mut_ptr();
         let src = chunk.as_ptr();
         let mut wp: usize = 0;
         let mut pos: usize = 0;
 
         for hit in memchr::memchr2_iter(b'\t', b'\n', chunk) {
-            // Bulk-copy segment before this hit
             let seg_len = hit - pos;
             if seg_len > 0 {
                 unsafe {
@@ -236,7 +245,6 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
                 wp += 1;
                 column = 0;
             } else {
-                // Tab: compute spaces
                 let rem = if is_pow2 {
                     column & mask
                 } else {
@@ -253,7 +261,6 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
             pos = hit + 1;
         }
 
-        // Copy tail after last hit
         if pos < chunk.len() {
             let tail = chunk.len() - pos;
             unsafe {
@@ -263,16 +270,139 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
             column += tail;
         }
 
-        // Single set_len for the entire chunk
         unsafe {
             output.set_len(wp);
         }
-
         if wp > 0 {
             out.write_all(&output)?;
         }
 
         data_pos = chunk_end;
+    }
+
+    Ok(())
+}
+
+/// Expand a chunk of data (must start/end on newline boundaries, except possibly
+/// the last chunk). Column starts at 0 for each chunk since chunks are line-aligned.
+/// Returns the expanded output as a Vec<u8>.
+/// Pre-allocates worst-case output to eliminate all capacity checks in the hot loop.
+fn expand_chunk(chunk: &[u8], tab_size: usize, is_pow2: bool, mask: usize) -> Vec<u8> {
+    // Worst case: every byte is a tab → tab_size× expansion.
+    // For most real data the expansion ratio is ~1.5x, so this over-allocates,
+    // but it eliminates all capacity checks from the hot loop.
+    let worst_case = chunk.len() * tab_size;
+    let mut output: Vec<u8> = Vec::with_capacity(worst_case);
+
+    let out_ptr = output.as_mut_ptr();
+    let src = chunk.as_ptr();
+    let mut wp: usize = 0;
+    let mut column: usize = 0;
+    let mut pos: usize = 0;
+
+    // Inner loop: zero capacity checks, zero Vec::len() reads, zero set_len() calls.
+    // Just raw pointer arithmetic.
+    for hit in memchr::memchr2_iter(b'\t', b'\n', chunk) {
+        let seg_len = hit - pos;
+        if seg_len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(pos), out_ptr.add(wp), seg_len);
+            }
+            wp += seg_len;
+            column += seg_len;
+        }
+
+        if unsafe { *src.add(hit) } == b'\n' {
+            unsafe {
+                *out_ptr.add(wp) = b'\n';
+            }
+            wp += 1;
+            column = 0;
+        } else {
+            let rem = if is_pow2 {
+                column & mask
+            } else {
+                column % tab_size
+            };
+            let spaces = tab_size - rem;
+            unsafe {
+                std::ptr::write_bytes(out_ptr.add(wp), b' ', spaces);
+            }
+            wp += spaces;
+            column += spaces;
+        }
+
+        pos = hit + 1;
+    }
+
+    // Copy tail
+    if pos < chunk.len() {
+        let tail = chunk.len() - pos;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(pos), out_ptr.add(wp), tail);
+        }
+        wp += tail;
+    }
+
+    unsafe {
+        output.set_len(wp);
+    }
+    output
+}
+
+/// Parallel expand for large files (>4MB). Splits data into line-aligned chunks
+/// and processes them concurrently using rayon. Each chunk is expanded independently
+/// (column tracking resets at newline boundaries), then results are written in order.
+fn expand_regular_parallel(
+    data: &[u8],
+    tab_size: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    use rayon::prelude::*;
+
+    let is_pow2 = tab_size.is_power_of_two();
+    let mask = tab_size.wrapping_sub(1);
+
+    // Split data into line-aligned chunks for parallel processing.
+    // Use ~N chunks where N = number of CPUs for optimal load balance.
+    let num_chunks = rayon::current_num_threads().max(2);
+    let target_chunk_size = data.len() / num_chunks;
+    let mut chunks: Vec<&[u8]> = Vec::with_capacity(num_chunks + 1);
+    let mut pos: usize = 0;
+
+    for _ in 0..num_chunks - 1 {
+        if pos >= data.len() {
+            break;
+        }
+        let target_end = (pos + target_chunk_size).min(data.len());
+        // Find the next newline at or after target_end
+        let chunk_end = if target_end >= data.len() {
+            data.len()
+        } else {
+            match memchr::memchr(b'\n', &data[target_end..]) {
+                Some(off) => target_end + off + 1,
+                None => data.len(),
+            }
+        };
+        chunks.push(&data[pos..chunk_end]);
+        pos = chunk_end;
+    }
+    // Last chunk gets everything remaining
+    if pos < data.len() {
+        chunks.push(&data[pos..]);
+    }
+
+    // Process all chunks in parallel
+    let results: Vec<Vec<u8>> = chunks
+        .par_iter()
+        .map(|chunk| expand_chunk(chunk, tab_size, is_pow2, mask))
+        .collect();
+
+    // Write results in order
+    for result in &results {
+        if !result.is_empty() {
+            out.write_all(result)?;
+        }
     }
 
     Ok(())
@@ -443,6 +573,27 @@ fn expand_generic(
     Ok(())
 }
 
+/// Check if unexpand would produce output identical to input (passthrough case).
+/// Used by the binary to bypass BufWriter and write directly for maximum throughput.
+pub fn unexpand_is_passthrough(data: &[u8], tabs: &TabStops, all: bool) -> bool {
+    if data.is_empty() {
+        return true;
+    }
+    // No spaces or tabs at all → passthrough
+    if memchr::memchr2(b' ', b'\t', data).is_none() {
+        return true;
+    }
+    if let TabStops::Regular(_) = tabs {
+        if all {
+            memchr::memchr(b'\t', data).is_none() && memchr::memmem::find(data, b"  ").is_none()
+        } else {
+            !unexpand_default_needs_processing(data)
+        }
+    } else {
+        false
+    }
+}
+
 /// Unexpand spaces to tabs.
 /// If `all` is true, convert all sequences of spaces; otherwise only leading spaces.
 pub fn unexpand_bytes(
@@ -460,8 +611,22 @@ pub fn unexpand_bytes(
         return out.write_all(data);
     }
 
-    // For regular tab stops, use the optimized SIMD-scanning path
+    // For regular tab stops, check passthrough BEFORE expensive backspace scan
     if let TabStops::Regular(tab_size) = tabs {
+        if all {
+            // -a mode: if no tabs and no consecutive spaces, output = input
+            if memchr::memchr(b'\t', data).is_none() && memchr::memmem::find(data, b"  ").is_none()
+            {
+                return out.write_all(data);
+            }
+        } else {
+            // Default mode: only leading whitespace matters.
+            // If no line starts with space or tab, output = input.
+            if !unexpand_default_needs_processing(data) {
+                return out.write_all(data);
+            }
+        }
+
         if memchr::memchr(b'\x08', data).is_none() {
             return unexpand_regular_fast(data, *tab_size, all, out);
         }
@@ -469,6 +634,18 @@ pub fn unexpand_bytes(
 
     // Generic path for tab lists or data with backspaces
     unexpand_generic(data, tabs, all, out)
+}
+
+/// Check if default-mode unexpand needs to process any data.
+/// Returns true if any line starts with a space or tab.
+/// Uses memmem for 2-byte pattern search — one SIMD pass per pattern,
+/// much faster than memchr_iter + per-match branching when no matches exist.
+#[inline]
+fn unexpand_default_needs_processing(data: &[u8]) -> bool {
+    if data[0] == b' ' || data[0] == b'\t' {
+        return true;
+    }
+    memchr::memmem::find(data, b"\n ").is_some() || memchr::memmem::find(data, b"\n\t").is_some()
 }
 
 /// Emit a run of blanks as the optimal combination of tabs and spaces.
@@ -519,6 +696,7 @@ fn emit_blanks(
 
 /// Fast unexpand for regular tab stops without backspaces.
 /// Uses memchr SIMD scanning to skip non-special bytes in bulk.
+/// Passthrough checks are done by the caller (unexpand_bytes).
 fn unexpand_regular_fast(
     data: &[u8],
     tab_size: usize,
@@ -580,39 +758,27 @@ fn unexpand_regular_fast(
 }
 
 /// Fast unexpand -a for regular tab stops without backspaces.
-/// Buffers output into a Vec to avoid per-call write_all overhead.
-/// Handles single spaces efficiently (most common case: no tab conversion needed).
+/// Per-line processing with SIMD scanning for blank runs.
+/// Passthrough checks are done by the caller (unexpand_bytes).
 fn unexpand_regular_fast_all(
     data: &[u8],
     tab_size: usize,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
-    // Line-level fast path: process the file line by line.
-    // Lines with only single spaces (no tabs, no double spaces) don't need
-    // any conversion and can be copied as-is — this covers most natural text.
     let mut output: Vec<u8> = Vec::with_capacity(data.len());
     let mut pos: usize = 0;
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line = &data[pos..nl_pos];
-
-        // Fast check: single SIMD scan for tab or space; if space, peek for double-space.
-        let needs_processing = match memchr::memchr2(b'\t', b' ', line) {
-            None => false,
-            Some(i) => line[i] == b'\t' || line.get(i + 1) == Some(&b' '),
-        };
-
-        if !needs_processing {
-            // No conversion needed: copy line as-is
+        // Per-line fast check: no tabs and no double-spaces → copy through
+        if memchr::memchr(b'\t', line).is_none() && memchr::memmem::find(line, b"  ").is_none() {
             output.extend_from_slice(line);
         } else {
-            // Process this line through the blank-conversion logic
-            unexpand_line_all(line, tab_size, &mut output);
+            unexpand_line_all_fast(line, tab_size, &mut output);
         }
         output.push(b'\n');
 
-        // Flush periodically
-        if output.len() >= 256 * 1024 {
+        if output.len() >= 1024 * 1024 {
             out.write_all(&output)?;
             output.clear();
         }
@@ -622,14 +788,10 @@ fn unexpand_regular_fast_all(
     // Handle final line without trailing newline
     if pos < data.len() {
         let line = &data[pos..];
-        let needs_processing = match memchr::memchr2(b'\t', b' ', line) {
-            None => false,
-            Some(i) => line[i] == b'\t' || line.get(i + 1) == Some(&b' '),
-        };
-        if !needs_processing {
+        if memchr::memchr(b'\t', line).is_none() && memchr::memmem::find(line, b"  ").is_none() {
             output.extend_from_slice(line);
         } else {
-            unexpand_line_all(line, tab_size, &mut output);
+            unexpand_line_all_fast(line, tab_size, &mut output);
         }
     }
 
@@ -639,42 +801,137 @@ fn unexpand_regular_fast_all(
     Ok(())
 }
 
-/// Process a single line for unexpand -a, converting blank runs to tabs+spaces.
+/// Process a single line for unexpand -a with SIMD-accelerated blank detection.
+/// Uses memchr2 to skip non-blank bytes in bulk, only processing blank runs.
+/// Single spaces (not followed by another blank) are included in the copy path.
 #[inline]
-fn unexpand_line_all(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
+fn unexpand_line_all_fast(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
     let mut column: usize = 0;
     let mut pos: usize = 0;
 
-    while pos < line.len() {
-        // Check for blanks to convert
-        if line[pos] == b' ' || line[pos] == b'\t' {
-            // Count consecutive blanks, tracking column advancement
-            let blank_start_col = column;
-            while pos < line.len() && (line[pos] == b' ' || line[pos] == b'\t') {
-                if line[pos] == b'\t' {
-                    column += tab_size - column % tab_size;
-                } else {
-                    column += 1;
+    loop {
+        // Find next tab or convertible blank run using SIMD scan.
+        // Skip single spaces (most common) by continuing past them.
+        let blank_pos = {
+            let mut search = pos;
+            loop {
+                match memchr::memchr2(b' ', b'\t', &line[search..]) {
+                    Some(off) => {
+                        let abs = search + off;
+                        if line[abs] == b'\t' {
+                            break Some(abs);
+                        }
+                        // Space: check if followed by another blank
+                        if abs + 1 < line.len() && (line[abs + 1] == b' ' || line[abs + 1] == b'\t')
+                        {
+                            break Some(abs);
+                        }
+                        // Single space: skip and keep searching
+                        search = abs + 1;
+                    }
+                    None => break None,
                 }
-                pos += 1;
             }
-            // Vec<u8> implements Write, so we can use emit_blanks directly.
-            emit_blanks(output, blank_start_col, column - blank_start_col, tab_size).unwrap();
-            continue;
-        }
+        };
 
-        // Non-blank: copy until next space or tab
-        match memchr::memchr2(b' ', b'\t', &line[pos..]) {
-            Some(offset) => {
-                output.extend_from_slice(&line[pos..pos + offset]);
-                column += offset;
-                pos += offset;
+        match blank_pos {
+            Some(bp) => {
+                // Copy non-blank prefix (including single spaces)
+                if bp > pos {
+                    output.extend_from_slice(&line[pos..bp]);
+                    column += bp - pos;
+                }
+
+                // Process blank run
+                let blank_start_col = column;
+                let blank_start = bp;
+                pos = bp;
+                while pos < line.len() && (line[pos] == b' ' || line[pos] == b'\t') {
+                    if line[pos] == b'\t' {
+                        column += tab_size - column % tab_size;
+                    } else {
+                        column += 1;
+                    }
+                    pos += 1;
+                }
+                emit_blank_run_vec(output, &line[blank_start..pos], blank_start_col, tab_size);
             }
             None => {
-                output.extend_from_slice(&line[pos..]);
+                // Rest of line has no convertible blanks
+                if pos < line.len() {
+                    output.extend_from_slice(&line[pos..]);
+                }
                 break;
             }
         }
+    }
+}
+
+/// Emit a blank run character-by-character, matching GNU unexpand behavior:
+/// - Spaces are accumulated and converted to tabs at tab stops (but a single
+///   space at a tab stop stays as space unless more blanks follow).
+/// - Input tabs are always emitted as tabs. Pending spaces before a tab are
+///   merged into the tab's column range and emitted as optimal tabs.
+#[inline(always)]
+fn emit_blank_run_vec(output: &mut Vec<u8>, blanks: &[u8], start_col: usize, tab_size: usize) {
+    let mut col = start_col;
+    let mut pending_spaces: usize = 0;
+    let mut pending_start_col = start_col;
+
+    for (idx, &b) in blanks.iter().enumerate() {
+        if b == b'\t' {
+            let new_col = col + (tab_size - col % tab_size);
+
+            if pending_spaces > 0 {
+                // Merge pending spaces with this tab: emit tabs for all tab stops
+                // in the range [pending_start_col .. new_col]
+                let mut tc = pending_start_col;
+                loop {
+                    let next_ts = tc + (tab_size - tc % tab_size);
+                    if next_ts > new_col {
+                        break;
+                    }
+                    output.push(b'\t');
+                    tc = next_ts;
+                }
+                // Any remaining gap (shouldn't happen for well-formed tab runs)
+                let gap = new_col - tc;
+                if gap > 0 {
+                    let len = output.len();
+                    output.resize(len + gap, b' ');
+                }
+                pending_spaces = 0;
+            } else {
+                // No pending spaces: emit the input tab directly
+                output.push(b'\t');
+            }
+
+            col = new_col;
+            pending_start_col = col;
+        } else {
+            // Space
+            if pending_spaces == 0 {
+                pending_start_col = col;
+            }
+            pending_spaces += 1;
+            col += 1;
+            // Check if we've reached a tab stop
+            if col.is_multiple_of(tab_size) {
+                let more_follow = idx + 1 < blanks.len();
+                if pending_spaces >= 2 || more_follow {
+                    output.push(b'\t');
+                    pending_spaces = 0;
+                    pending_start_col = col;
+                }
+                // else: single space at tab stop with nothing after → keep as space
+            }
+        }
+    }
+
+    // Flush remaining pending spaces as literal spaces
+    if pending_spaces > 0 {
+        let len = output.len();
+        output.resize(len + pending_spaces, b' ');
     }
 }
 

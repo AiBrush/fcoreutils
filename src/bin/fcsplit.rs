@@ -1,5 +1,8 @@
+use std::path::Path;
 use std::process;
 
+use coreutils_rs::common::io::{FileData, read_file, read_stdin};
+use coreutils_rs::common::io_error_msg;
 use coreutils_rs::csplit::{self, CsplitConfig, Pattern};
 
 struct Cli {
@@ -211,7 +214,34 @@ fn main() {
         }
     }
 
-    match csplit::csplit_from_path(&cli.file, &patterns, &cli.config) {
+    // Read file data using optimized I/O
+    let data: FileData = if cli.file == "-" {
+        match read_stdin() {
+            Ok(d) => FileData::Owned(d),
+            Err(e) => {
+                eprintln!("csplit: standard input: {}", io_error_msg(&e));
+                process::exit(1);
+            }
+        }
+    } else {
+        match read_file(Path::new(&cli.file)) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("csplit: cannot open '{}': {}", cli.file, io_error_msg(&e));
+                process::exit(1);
+            }
+        }
+    };
+
+    let input = match std::str::from_utf8(&data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("csplit: {}: {}", cli.file, e);
+            process::exit(1);
+        }
+    };
+
+    match csplit::csplit_file(input, &patterns, &cli.config) {
         Ok(sizes) => {
             if !cli.config.quiet {
                 csplit::print_sizes(&sizes);

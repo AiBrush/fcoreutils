@@ -187,11 +187,9 @@ fn main() {
     // Build reference slices
     let data_refs: Vec<&[u8]> = file_data.iter().map(|d| &**d).collect();
 
-    // Build output buffer
-    let output = paste::paste_to_vec(&data_refs, &cli.config);
-
-    // Write output using raw write for minimal syscall overhead
-    if let Err(e) = write_all_raw(&output) {
+    // Pre-split lines with SIMD memchr_iter, then stream output in 1MB chunks
+    // via raw fd writes. Single-file passthrough is handled inside paste_stream.
+    if let Err(e) = paste::paste_stream(&data_refs, &cli.config) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
             process::exit(0);
         }
@@ -210,13 +208,11 @@ fn distribute_stdin_lines(data: &[u8], count: usize, terminator: u8) -> Vec<Vec<
     let mut parts = vec![Vec::new(); count];
     let mut start = 0;
     let mut line_idx = 0;
-    for (i, &b) in data.iter().enumerate() {
-        if b == terminator {
-            let target = line_idx % count;
-            parts[target].extend_from_slice(&data[start..=i]);
-            start = i + 1;
-            line_idx += 1;
-        }
+    for pos in memchr::memchr_iter(terminator, data) {
+        let target = line_idx % count;
+        parts[target].extend_from_slice(&data[start..=pos]);
+        start = pos + 1;
+        line_idx += 1;
     }
     // Handle last line without terminator
     if start < data.len() {
@@ -224,45 +220,6 @@ fn distribute_stdin_lines(data: &[u8], count: usize, terminator: u8) -> Vec<Vec<
         parts[target].extend_from_slice(&data[start..]);
     }
     parts
-}
-
-/// Write the full buffer to stdout, retrying on partial/interrupted writes.
-#[cfg(unix)]
-fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
-    let mut written = 0;
-    while written < data.len() {
-        let ret = unsafe {
-            libc::write(
-                1,
-                data[written..].as_ptr() as *const libc::c_void,
-                (data.len() - written) as _,
-            )
-        };
-        if ret > 0 {
-            written += ret as usize;
-        } else if ret == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "write returned 0",
-            ));
-        } else {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_all_raw(data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::with_capacity(256 * 1024, stdout.lock());
-    out.write_all(data)?;
-    out.flush()
 }
 
 #[cfg(test)]
