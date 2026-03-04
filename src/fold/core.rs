@@ -31,9 +31,13 @@ pub fn fold_bytes(
         }
     }
 
-    // Column mode with spaces: if no tabs, byte mode is equivalent (on glibc)
-    if break_at_spaces && memchr::memchr(b'\t', data).is_none() {
-        return fold_byte_fast_spaces(data, width, out);
+    // Column mode without tabs: byte mode is equivalent (on glibc)
+    if memchr::memchr(b'\t', data).is_none() {
+        if break_at_spaces {
+            return fold_byte_fast_spaces(data, width, out);
+        } else {
+            return fold_byte_fast(data, width, out);
+        }
     }
 
     fold_column_mode_streaming(data, width, break_at_spaces, out)

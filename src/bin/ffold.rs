@@ -168,6 +168,30 @@ fn apply_madvise(data: &FileData) {
     }
 }
 
+/// Write all bytes directly to a file descriptor, bypassing BufWriter.
+#[cfg(unix)]
+fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
+    let mut pos = 0;
+    while pos < data.len() {
+        let n = unsafe {
+            libc::write(
+                fd,
+                data[pos..].as_ptr() as *const libc::c_void,
+                (data.len() - pos) as _,
+            )
+        };
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        pos += n as usize;
+    }
+    Ok(())
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -217,6 +241,20 @@ fn main() {
 
         #[cfg(target_os = "linux")]
         apply_madvise(&data);
+
+        // Fast path: if output == input (all lines fit within width), bypass processing
+        #[cfg(unix)]
+        if fold::fold_is_passthrough(&data, cli.width, cli.bytes) {
+            let _ = out.flush();
+            if let Err(e) = write_all_fd(1, &data) {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    process::exit(0);
+                }
+                eprintln!("fold: write error: {}", io_error_msg(&e));
+                had_error = true;
+            }
+            continue;
+        }
 
         if let Err(e) = fold::fold_bytes(&data, cli.width, cli.bytes, cli.spaces, &mut out) {
             if e.kind() == io::ErrorKind::BrokenPipe {
