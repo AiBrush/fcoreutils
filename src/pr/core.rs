@@ -292,7 +292,8 @@ pub fn pr_data<W: Write>(
         && !config.truncate_lines
         && !config.double_space
         && !config.across
-        && memchr::memchr(b'\r', data).is_none();
+        && memchr::memchr(b'\r', data).is_none()
+        && memchr::memchr(b'\x0c', data).is_none();
 
     if is_simple {
         // Passthrough: -t with no transforms and no page range → output == input
@@ -470,6 +471,7 @@ fn pr_data_numbered<W: Write>(
     let date_str = format_header_date(&date, &config.date_format);
 
     let (sep_char, digits) = config.number_lines.unwrap_or(('\t', 5));
+    debug_assert!(sep_char.is_ascii(), "number separator must be ASCII");
     let sep_byte = sep_char as u8;
     let suppress_header = !config.omit_header
         && !config.omit_pagination
@@ -520,7 +522,9 @@ fn pr_data_numbered<W: Write>(
                 write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
             }
 
-            // Write numbered lines using unsafe pointer arithmetic
+            // Write numbered lines using unsafe pointer arithmetic.
+            // SAFETY: `src` points into `data` which is a &[u8] borrowed for the
+            // function's lifetime. `page_buf` may reallocate but `src` is independent.
             let src = data.as_ptr();
             for li in line_idx..page_end {
                 let line_start = line_starts[li];
