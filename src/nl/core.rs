@@ -189,6 +189,7 @@ fn is_simple_number_all(config: &NlConfig) -> bool {
         && config.join_blank_lines == 1
         && config.line_increment == 1
         && !config.no_renumber
+        && config.number_width + config.number_separator.len() <= 30
 }
 
 /// Check if config is the default "number non-empty lines" case suitable for fast path.
@@ -200,6 +201,7 @@ fn is_simple_number_nonempty(config: &NlConfig) -> bool {
         && config.join_blank_lines == 1
         && config.line_increment == 1
         && !config.no_renumber
+        && config.number_width + config.number_separator.len() <= 30
 }
 
 /// Inner write helper: formats number prefix + line content + newline into buffer.
@@ -329,7 +331,7 @@ fn nl_number_all_stream(
     let mut pos: usize = 0;
 
     let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
-    let buf_ptr = output.as_mut_ptr();
+    let mut buf_ptr = output.as_mut_ptr();
     let mut write_pos: usize = 0;
     let data_ptr = data.as_ptr();
 
@@ -380,12 +382,17 @@ fn nl_number_all_stream(
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
 
-        if write_pos + line_len + prefix_len + 2 > BUF_SIZE {
+        let needed = line_len + prefix_len + 2;
+        if write_pos + needed > BUF_SIZE {
             unsafe {
                 output.set_len(write_pos);
             }
             write_all_fd(fd, &output)?;
             write_pos = 0;
+            if needed > output.capacity() {
+                output.reserve(needed);
+                buf_ptr = output.as_mut_ptr();
+            }
         }
 
         unsafe {
@@ -534,7 +541,7 @@ fn nl_number_nonempty_stream(
     let mut pos: usize = 0;
 
     let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
-    let buf_ptr = output.as_mut_ptr();
+    let mut buf_ptr = output.as_mut_ptr();
     let mut write_pos: usize = 0;
     let data_ptr = data.as_ptr();
 
@@ -586,16 +593,23 @@ fn nl_number_nonempty_stream(
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
 
-        if write_pos + line_len + prefix_len + 2 > BUF_SIZE {
+        let needed = line_len + prefix_len + 2;
+        if write_pos + needed > BUF_SIZE {
             unsafe {
                 output.set_len(write_pos);
             }
             write_all_fd(fd, &output)?;
             write_pos = 0;
+            // Grow buffer for oversized lines
+            if needed > output.capacity() {
+                output.reserve(needed);
+                buf_ptr = output.as_mut_ptr();
+            }
         }
 
         if line_len == 0 {
-            // Blank line: write padding + newline, no numbering
+            // Blank line: write spaces(width + sep_len) + newline, no numbering
+            // GNU nl replaces the separator with spaces for unnumbered lines
             unsafe {
                 let dst = buf_ptr.add(write_pos);
                 std::ptr::write_bytes(dst, b' ', blank_pad);

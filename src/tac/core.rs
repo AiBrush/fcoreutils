@@ -67,12 +67,18 @@ struct RawFdWriter {
 #[cfg(unix)]
 impl Write for RawFdWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let ret =
-            unsafe { libc::write(self.fd, buf.as_ptr() as *const libc::c_void, buf.len() as _) };
-        if ret >= 0 {
-            Ok(ret as usize)
-        } else {
-            Err(io::Error::last_os_error())
+        loop {
+            let ret = unsafe {
+                libc::write(self.fd, buf.as_ptr() as *const libc::c_void, buf.len() as _)
+            };
+            if ret >= 0 {
+                return Ok(ret as usize);
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
         }
     }
 

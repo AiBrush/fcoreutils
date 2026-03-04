@@ -780,7 +780,10 @@ fn split_lines_streaming_fast(
                 };
                 if ret > 0 {
                     total += ret as usize;
-                    break; // Got data, process it
+                    if total >= BUF_SIZE {
+                        break; // Buffer full
+                    }
+                    // Continue reading to fill buffer for SIMD efficiency
                 } else if ret == 0 {
                     break; // EOF
                 } else {

@@ -112,11 +112,7 @@ struct RawBufWriter {
 
 impl RawBufWriter {
     fn new() -> Self {
-        let mut buf = Vec::with_capacity(BUF_SIZE);
-        // Touch all pages upfront to avoid page faults during hot loop
-        unsafe {
-            std::ptr::write_bytes(buf.as_mut_ptr(), 0, BUF_SIZE);
-        }
+        let buf = Vec::with_capacity(BUF_SIZE);
         Self { buf, error: None }
     }
 
@@ -207,10 +203,6 @@ fn paste_two_files_fast(
 
     let buf_cap = BUF_SIZE;
     let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
-    // Pre-fault pages
-    unsafe {
-        std::ptr::write_bytes(buf.as_mut_ptr(), 0, buf_cap);
-    }
     let base = buf.as_mut_ptr();
     let mut pos: usize = 0;
 
@@ -332,10 +324,6 @@ fn paste_n_files_fast(
 
     let mut buf_cap = BUF_SIZE;
     let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
-    // Pre-fault pages
-    unsafe {
-        std::ptr::write_bytes(buf.as_mut_ptr(), 0, buf_cap);
-    }
     let mut base = buf.as_mut_ptr();
     let mut pos: usize = 0;
 
