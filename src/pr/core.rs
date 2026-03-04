@@ -295,8 +295,11 @@ pub fn pr_data<W: Write>(
         && memchr::memchr(b'\r', data).is_none();
 
     if is_simple {
-        // Passthrough: -t with no transforms → output == input
-        if config.omit_header || config.omit_pagination {
+        // Passthrough: -t with no transforms and no page range → output == input
+        if (config.omit_header || config.omit_pagination)
+            && config.first_page == 1
+            && config.last_page == 0
+        {
             return output.write_all(data);
         }
         return pr_data_contiguous(data, output, config, filename, file_date);
@@ -468,9 +471,6 @@ fn pr_data_numbered<W: Write>(
 
     let (sep_char, digits) = config.number_lines.unwrap_or(('\t', 5));
     let sep_byte = sep_char as u8;
-    // prefix_len = padding spaces + number digits + separator
-    let prefix_len = digits + 1; // digits + separator
-
     let suppress_header = !config.omit_header
         && !config.omit_pagination
         && config.page_length <= HEADER_LINES + FOOTER_LINES;
@@ -537,12 +537,7 @@ fn pr_data_numbered<W: Write>(
                 };
                 let line_len = line_end - line_start;
 
-                // Ensure capacity: prefix + content + newline
-                let needed = prefix_len + line_len + 1;
-                page_buf.reserve(needed);
-
                 let wp = page_buf.len();
-                let base = page_buf.as_mut_ptr();
 
                 // Format line number with right-aligned padding
                 let mut n = line_number;
@@ -558,6 +553,16 @@ fn pr_data_numbered<W: Write>(
                 }
                 let num_digits = 20 - num_pos;
                 let padding = digits.saturating_sub(num_digits);
+                // Actual prefix width: when number overflows configured width,
+                // use num_digits instead of digits to avoid buffer overwrite
+                let actual_prefix = padding + num_digits + 1; // padding + digits + separator
+
+                // Ensure capacity with actual prefix size
+                let needed = actual_prefix + line_len + 1;
+                if page_buf.len() + needed > page_buf.capacity() {
+                    page_buf.reserve(needed);
+                }
+                let base = page_buf.as_mut_ptr();
 
                 unsafe {
                     let dst = base.add(wp);
@@ -575,13 +580,13 @@ fn pr_data_numbered<W: Write>(
                     if line_len > 0 {
                         std::ptr::copy_nonoverlapping(
                             src.add(line_start),
-                            dst.add(prefix_len),
+                            dst.add(actual_prefix),
                             line_len,
                         );
                     }
                     // Write newline
-                    *dst.add(prefix_len + line_len) = b'\n';
-                    page_buf.set_len(wp + prefix_len + line_len + 1);
+                    *dst.add(actual_prefix + line_len) = b'\n';
+                    page_buf.set_len(wp + actual_prefix + line_len + 1);
                 }
 
                 line_number += 1;
