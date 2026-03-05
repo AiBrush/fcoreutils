@@ -382,7 +382,7 @@ pub fn join(
     let mut warned1 = false;
     let mut warned2 = false;
 
-    const FLUSH_THRESHOLD: usize = 256 * 1024;
+    const FLUSH_THRESHOLD: usize = 4 * 1024 * 1024;
     let mut buf = Vec::with_capacity((data1.len() + data2.len()).min(FLUSH_THRESHOLD * 2));
 
     // Handle -o auto: build format from first lines
@@ -578,7 +578,8 @@ pub fn join(
                     i2 += 1;
                 }
 
-                // Pre-cache file2 group fields only for -o format (cross-product needs re-access)
+                // Pre-cache file2 group data for cross-product
+                let group_size = i2 - group_start;
                 let group2_fields: Vec<Vec<&[u8]>> = if print_paired && format.is_some() {
                     (group_start..i2)
                         .map(|j| split_fields(lines2[j], config.separator))
@@ -586,6 +587,26 @@ pub fn join(
                 } else {
                     Vec::new()
                 };
+                // Pre-compute file2 group suffixes for default format path.
+                // Avoids rescanning each line2 for field boundaries in the O(n×m) inner loop.
+                let group2_suffixes: Vec<Vec<u8>> =
+                    if print_paired && format.is_none() && group_size > 1 {
+                        (group_start..i2)
+                            .map(|j| {
+                                let mut s = Vec::with_capacity(lines2[j].len());
+                                write_other_fields(
+                                    lines2[j],
+                                    config.field2,
+                                    config.separator,
+                                    out_sep,
+                                    &mut s,
+                                );
+                                s
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
 
                 // For each file1 line with the same key, cross-product with file2 group
                 loop {
@@ -598,8 +619,24 @@ pub fn join(
                                     &fields1, fields2, key, specs, empty, out_sep, delim, &mut buf,
                                 );
                             }
+                        } else if !group2_suffixes.is_empty() {
+                            // Fast path: pre-computed suffixes avoid per-line field scanning
+                            let mut prefix = Vec::with_capacity(lines1[i1].len() + 2);
+                            prefix.extend_from_slice(key);
+                            write_other_fields(
+                                lines1[i1],
+                                config.field1,
+                                config.separator,
+                                out_sep,
+                                &mut prefix,
+                            );
+                            for suffix in &group2_suffixes {
+                                buf.extend_from_slice(&prefix);
+                                buf.extend_from_slice(suffix);
+                                buf.push(delim);
+                            }
                         } else {
-                            // Zero-copy path: no field Vec allocation
+                            // Single-element group or no group: direct zero-copy
                             for j in group_start..i2 {
                                 write_paired_default_zerocopy(
                                     lines1[i1],
