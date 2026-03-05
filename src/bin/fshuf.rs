@@ -765,9 +765,7 @@ fn run_file_shuffle(
         #[cfg(unix)]
         {
             // Fast output path: build contiguous output buffer with unsafe ptr copy,
-            // then flush in 1MB chunks via raw fd write (bypasses BufWriter overhead).
-            // Flush BufWriter before bypassing it with raw fd writes to prevent
-            // out-of-order output if any data was buffered earlier.
+            // then flush via raw fd write (bypasses BufWriter overhead).
             let out_fd: i32 = if is_stdout {
                 let _ = out.flush();
                 1
@@ -776,17 +774,27 @@ fn run_file_shuffle(
             };
 
             const CHUNK: usize = 1024 * 1024; // 1MB output chunks
-            // Estimate: each line avg ~80 bytes + delimiter
-            let est_size = if count == n {
-                data.len() + count
-            } else {
-                count * 80
-            }
-            .min(CHUNK + 256);
-            let mut buf: Vec<u8> = Vec::with_capacity(est_size.max(CHUNK + 256));
+            let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + 256);
             let src = data.as_ptr();
+            let offsets_slice = &offsets[..count];
+            // Prefetch distance: ~16 cache misses ahead hides DRAM latency.
+            // Uses T1 (L2) hint because shuffled access is scattered, and T0 (L1)
+            // would evict the current iteration's working set from L1.
+            // Assumes short lines (~64 bytes); for very long lines, the tail of
+            // each line will still be cold after prefetch.
+            const PREFETCH_DIST: usize = 16;
 
-            for &[s, e] in offsets[..count].iter() {
+            for (idx, &[s, e]) in offsets_slice.iter().enumerate() {
+                if idx + PREFETCH_DIST < count {
+                    let future_s = offsets_slice[idx + PREFETCH_DIST][0] as usize;
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        std::arch::x86_64::_mm_prefetch(
+                            src.add(future_s) as *const i8,
+                            std::arch::x86_64::_MM_HINT_T1,
+                        );
+                    }
+                }
                 let line_len = (e - s) as usize;
                 let needed = buf.len() + line_len + 1;
                 if needed > buf.capacity() {
