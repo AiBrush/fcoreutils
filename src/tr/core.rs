@@ -4123,25 +4123,19 @@ fn translate_to_separate_buf(
         return writer.write_all(&out_buf);
     }
 
-    // Chunked translate: fixed 256KB output buffer, translate + write in chunks.
-    // Avoids allocating a full-size output buffer (10MB → 10MB allocation = ~3ms
-    // of page faults). The 256KB buffer stays hot in L2 cache and its pages are
-    // faulted once then reused across chunks. ~40 write() syscalls for 10MB is
-    // cheaper than the page fault cost of a fresh 10MB allocation.
-    const CHUNK: usize = 256 * 1024;
-    let mut out_buf = alloc_uninit_vec(CHUNK);
-    for chunk in data.chunks(CHUNK) {
-        let dst = &mut out_buf[..chunk.len()];
-        if let Some((lo, hi, offset)) = range_info {
-            translate_range_simd(chunk, dst, lo, hi, offset);
-        } else if let Some((lo, hi, replacement)) = const_info {
-            translate_range_to_constant_simd(chunk, dst, lo, hi, replacement);
-        } else {
-            translate_to(chunk, dst, table);
-        }
-        writer.write_all(dst)?;
+    // Single full-size allocation + single write_all.
+    // alloc_uninit_vec skips zeroing so the allocation is ~0µs. Page faults happen
+    // on first write during SIMD translate but are sequential (prefetchable).
+    // A single write() syscall is far cheaper than 40× chunked writes.
+    let mut out_buf = alloc_uninit_vec(data.len());
+    if let Some((lo, hi, offset)) = range_info {
+        translate_range_simd(data, &mut out_buf, lo, hi, offset);
+    } else if let Some((lo, hi, replacement)) = const_info {
+        translate_range_to_constant_simd(data, &mut out_buf, lo, hi, replacement);
+    } else {
+        translate_to(data, &mut out_buf, table);
     }
-    Ok(())
+    writer.write_all(&out_buf)
 }
 
 /// Translate from a read-only mmap (or any byte slice) to a separate output buffer.
@@ -4325,16 +4319,11 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         return write_ioslices(writer, &slices);
     }
 
-    // Streaming compact: 256KB output buffer reduces page fault overhead.
-    // For 10MB data: ~64 page faults instead of ~2500, with ~40 write_all calls.
-    const COMPACT_BUF: usize = 256 * 1024;
-    let mut outbuf = alloc_uninit_vec(COMPACT_BUF);
-
-    for chunk in data.chunks(COMPACT_BUF) {
-        let out_pos = delete_chunk_bitset_into(chunk, &member, &mut outbuf);
-        if out_pos > 0 {
-            writer.write_all(&outbuf[..out_pos])?;
-        }
+    // Single full-size allocation + single write. No chunking overhead.
+    let mut outbuf = alloc_uninit_vec(data.len());
+    let out_pos = delete_chunk_bitset_into(data, &member, &mut outbuf);
+    if out_pos > 0 {
+        writer.write_all(&outbuf[..out_pos])?;
     }
     Ok(())
 }
@@ -4387,126 +4376,14 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
         return write_ioslices(writer, &slices);
     }
 
-    // Streaming compact: use 256KB output buffer instead of full data.len() buffer.
-    // This reduces page fault overhead from ~2500 faults (10MB) to ~64 faults (256KB).
-    // The extra write_all calls (~40 for 10MB) are negligible cost.
-    const COMPACT_BUF: usize = 256 * 1024;
-    let mut outbuf = alloc_uninit_vec(COMPACT_BUF);
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        let mut wp = 0;
-        let level = get_simd_level();
-        let len = data.len();
-        let sp = data.as_ptr();
-        let dp = outbuf.as_mut_ptr();
-        let mut ri = 0;
-
-        if level >= 3 {
-            use std::arch::x86_64::*;
-            let range = hi - lo;
-            let bias_v = unsafe { _mm256_set1_epi8(0x80u8.wrapping_sub(lo) as i8) };
-            let threshold_v = unsafe { _mm256_set1_epi8(0x80u8.wrapping_add(range) as i8) };
-            let zero = unsafe { _mm256_setzero_si256() };
-
-            while ri + 32 <= len {
-                // Flush when output buffer is nearly full
-                if wp + 32 > COMPACT_BUF {
-                    writer.write_all(&outbuf[..wp])?;
-                    wp = 0;
-                }
-
-                let input = unsafe { _mm256_loadu_si256(sp.add(ri) as *const _) };
-                let biased = unsafe { _mm256_add_epi8(input, bias_v) };
-                let gt = unsafe { _mm256_cmpgt_epi8(biased, threshold_v) };
-                let in_range = unsafe { _mm256_cmpeq_epi8(gt, zero) };
-                let keep_mask = !(unsafe { _mm256_movemask_epi8(in_range) } as u32);
-
-                if keep_mask == 0xFFFFFFFF {
-                    unsafe { std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 32) };
-                    wp += 32;
-                } else if keep_mask != 0 {
-                    let m0 = keep_mask as u8;
-                    let m1 = (keep_mask >> 8) as u8;
-                    let m2 = (keep_mask >> 16) as u8;
-                    let m3 = (keep_mask >> 24) as u8;
-
-                    if m0 == 0xFF {
-                        unsafe { std::ptr::copy_nonoverlapping(sp.add(ri), dp.add(wp), 8) };
-                    } else if m0 != 0 {
-                        unsafe { compact_8bytes_simd(sp.add(ri), dp.add(wp), m0) };
-                    }
-                    let c0 = m0.count_ones() as usize;
-
-                    if m1 == 0xFF {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(sp.add(ri + 8), dp.add(wp + c0), 8)
-                        };
-                    } else if m1 != 0 {
-                        unsafe { compact_8bytes_simd(sp.add(ri + 8), dp.add(wp + c0), m1) };
-                    }
-                    let c1 = m1.count_ones() as usize;
-
-                    if m2 == 0xFF {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(sp.add(ri + 16), dp.add(wp + c0 + c1), 8)
-                        };
-                    } else if m2 != 0 {
-                        unsafe { compact_8bytes_simd(sp.add(ri + 16), dp.add(wp + c0 + c1), m2) };
-                    }
-                    let c2 = m2.count_ones() as usize;
-
-                    if m3 == 0xFF {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                sp.add(ri + 24),
-                                dp.add(wp + c0 + c1 + c2),
-                                8,
-                            )
-                        };
-                    } else if m3 != 0 {
-                        unsafe {
-                            compact_8bytes_simd(sp.add(ri + 24), dp.add(wp + c0 + c1 + c2), m3)
-                        };
-                    }
-                    let c3 = m3.count_ones() as usize;
-                    wp += c0 + c1 + c2 + c3;
-                }
-                ri += 32;
-            }
-        }
-
-        // Scalar tail
-        while ri < len {
-            if wp + 1 > COMPACT_BUF {
-                writer.write_all(&outbuf[..wp])?;
-                wp = 0;
-            }
-            let b = unsafe { *sp.add(ri) };
-            unsafe { *dp.add(wp) = b };
-            wp += (b < lo || b > hi) as usize;
-            ri += 1;
-        }
-
-        if wp > 0 {
-            writer.write_all(&outbuf[..wp])?;
-        }
-        return Ok(());
+    // Single full-size allocation + single write. No buffer-full checks in the
+    // inner AVX2 loop. alloc_uninit_vec skips zeroing; sequential page faults
+    // are prefetchable. One write() syscall vs 40 chunked writes.
+    let mut outbuf = alloc_uninit_vec(data.len());
+    let wp = delete_range_chunk(data, &mut outbuf, lo, hi);
+    if wp > 0 {
+        writer.write_all(&outbuf[..wp])?;
     }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        // Non-x86 fallback: chunk the source and process with delete_range_chunk
-        for chunk in data.chunks(COMPACT_BUF) {
-            let clen = delete_range_chunk(chunk, &mut outbuf, lo, hi);
-            if clen > 0 {
-                writer.write_all(&outbuf[..clen])?;
-            }
-        }
-        return Ok(());
-    }
-
-    #[allow(unreachable_code)]
     Ok(())
 }
 
