@@ -742,9 +742,7 @@ fn unexpand_regular_fast(
                         break;
                     }
                 }
-                for _ in 0..(end_col - col) {
-                    buf.push(b' ');
-                }
+                buf.extend(std::iter::repeat_n(b' ', end_col - col));
                 continue;
             }
             if data[pos] == b'\n' {
