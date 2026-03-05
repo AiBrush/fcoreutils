@@ -495,12 +495,17 @@ fn nl_number_all_stream(
     // Handle final line without trailing newline
     if pos < data.len() {
         let remaining = data.len() - pos;
-        if write_pos + prefix_len + remaining + 2 > BUF_SIZE {
+        let needed = prefix_len + remaining + 2;
+        if write_pos + needed > BUF_SIZE {
             unsafe {
                 output.set_len(write_pos);
             }
             write_all_fd(fd, &output)?;
             write_pos = 0;
+            if needed > output.capacity() {
+                output.reserve(needed);
+                buf_ptr = output.as_mut_ptr();
+            }
         }
         unsafe {
             let dst = buf_ptr.add(write_pos);
@@ -593,6 +598,8 @@ fn nl_number_nonempty_stream(
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
 
+        // For blank lines (line_len==0), actual bytes are blank_pad+1, so `needed`
+        // overestimates by ~prefix_len. Harmless: just flushes one line early at boundary.
         let needed = line_len + prefix_len + 2;
         if write_pos + needed > BUF_SIZE {
             unsafe {
@@ -720,12 +727,17 @@ fn nl_number_nonempty_stream(
     // Handle final line without trailing newline
     if pos < data.len() {
         let remaining = data.len() - pos;
-        if write_pos + prefix_len + remaining + 2 > BUF_SIZE {
+        let needed = prefix_len + remaining + 2;
+        if write_pos + needed > BUF_SIZE {
             unsafe {
                 output.set_len(write_pos);
             }
             write_all_fd(fd, &output)?;
             write_pos = 0;
+            if needed > output.capacity() {
+                output.reserve(needed);
+                buf_ptr = output.as_mut_ptr();
+            }
         }
         // Final partial line is always non-blank
         unsafe {

@@ -4,6 +4,8 @@
 
 #[cfg(unix)]
 use std::ffi::CStr;
+#[cfg(unix)]
+use std::io::Write;
 use std::process;
 
 const TOOL_NAME: &str = "uname";
@@ -142,80 +144,68 @@ fn main() {
             process::exit(1);
         }
 
-        let mut parts: Vec<&str> = Vec::new();
+        let sysname = unsafe { CStr::from_ptr(uts.sysname.as_ptr()) };
+        let nodename = unsafe { CStr::from_ptr(uts.nodename.as_ptr()) };
+        let release = unsafe { CStr::from_ptr(uts.release.as_ptr()) };
+        let version = unsafe { CStr::from_ptr(uts.version.as_ptr()) };
+        let machine = unsafe { CStr::from_ptr(uts.machine.as_ptr()) };
+        let machine_bytes = machine.to_bytes();
 
-        let sysname = unsafe { CStr::from_ptr(uts.sysname.as_ptr()) }
-            .to_str()
-            .unwrap_or("unknown");
-        let nodename = unsafe { CStr::from_ptr(uts.nodename.as_ptr()) }
-            .to_str()
-            .unwrap_or("unknown");
-        let release = unsafe { CStr::from_ptr(uts.release.as_ptr()) }
-            .to_str()
-            .unwrap_or("unknown");
-        let version = unsafe { CStr::from_ptr(uts.version.as_ptr()) }
-            .to_str()
-            .unwrap_or("unknown");
-        let machine = unsafe { CStr::from_ptr(uts.machine.as_ptr()) }
-            .to_str()
-            .unwrap_or("unknown");
-
-        if show_sysname {
-            parts.push(sysname);
-        }
-        if show_nodename {
-            parts.push(nodename);
-        }
-        if show_release {
-            parts.push(release);
-        }
-        if show_version {
-            parts.push(version);
-        }
-        if show_machine {
-            parts.push(machine);
-        }
         // On Linux, -p (processor) and -i (hardware platform) return the machine
         // architecture. Every major distro (Debian, Ubuntu, Fedora, RHEL, Arch)
         // patches GNU coreutils to return the machine arch instead of "unknown".
         // We match the distro-patched behavior since that's what users expect.
         // On macOS, GNU uname maps arm64 -> "arm" and x86_64 -> "i386".
         #[cfg(target_os = "linux")]
-        let processor = machine;
+        let processor = machine_bytes;
         #[cfg(target_os = "macos")]
-        let processor = match machine {
-            "arm64" => "arm",
-            "x86_64" => "i386",
-            _ => machine,
+        let processor: &[u8] = match machine.to_bytes() {
+            b"arm64" => b"arm",
+            b"x86_64" => b"i386",
+            _ => machine_bytes,
         };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let processor = "unknown";
+        let processor: &[u8] = b"unknown";
         #[cfg(target_os = "linux")]
-        let hardware = machine;
+        let hardware = machine_bytes;
         #[cfg(target_os = "macos")]
-        let hardware = match machine {
-            "arm64" => "arm",
-            "x86_64" => "i386",
-            _ => machine,
+        let hardware: &[u8] = match machine.to_bytes() {
+            b"arm64" => b"arm",
+            b"x86_64" => b"i386",
+            _ => machine_bytes,
         };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let hardware = "unknown";
-        if show_processor {
-            parts.push(processor);
-        }
-        if show_hardware {
-            parts.push(hardware);
-        }
-        if show_os {
-            #[cfg(target_os = "linux")]
-            parts.push("GNU/Linux");
-            #[cfg(target_os = "macos")]
-            parts.push("Darwin");
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            parts.push("unknown");
-        }
+        let hardware: &[u8] = b"unknown";
 
-        println!("{}", parts.join(" "));
+        // Write fields directly to stdout, space-separated, avoiding Vec + join
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let mut first = true;
+        macro_rules! field {
+            ($cond:expr, $val:expr) => {
+                if $cond {
+                    if !first {
+                        let _ = out.write_all(b" ");
+                    }
+                    let _ = out.write_all($val);
+                    first = false;
+                }
+            };
+        }
+        field!(show_sysname, sysname.to_bytes());
+        field!(show_nodename, nodename.to_bytes());
+        field!(show_release, release.to_bytes());
+        field!(show_version, version.to_bytes());
+        field!(show_machine, machine_bytes);
+        field!(show_processor, processor);
+        field!(show_hardware, hardware);
+        #[cfg(target_os = "linux")]
+        field!(show_os, b"GNU/Linux");
+        #[cfg(target_os = "macos")]
+        field!(show_os, b"Darwin");
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        field!(show_os, b"unknown");
+        let _ = out.write_all(b"\n");
     }
 
     #[cfg(not(unix))]

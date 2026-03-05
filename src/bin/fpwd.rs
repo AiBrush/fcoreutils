@@ -3,6 +3,7 @@
 // -L: use PWD from environment (logical, default)
 // -P: avoid all symlinks (physical)
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process;
 
@@ -74,6 +75,16 @@ fn main() {
         })
     };
 
+    // Write path bytes directly to avoid Display + fmt machinery
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let _ = out.write_all(path.as_os_str().as_bytes());
+        let _ = out.write_all(b"\n");
+    }
+    #[cfg(not(unix))]
     println!("{}", path.display());
 }
 
