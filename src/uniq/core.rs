@@ -146,76 +146,10 @@ fn lines_equal(a: &[u8], b: &[u8], config: &UniqConfig) -> bool {
     }
 }
 
-/// SWAR case-insensitive comparison of 8 bytes packed in u64.
-/// Returns true if all 8 bytes are equal ignoring ASCII case.
-/// Handles non-letter bytes correctly (they must be exactly equal).
-#[inline(always)]
-fn eq_ci_u64(a: u64, b: u64) -> bool {
-    if a == b {
-        return true;
-    }
-    let diff = a ^ b;
-    // Any byte differing by more than just bit 5 is definitely not equal
-    if diff & !0x2020202020202020u64 != 0 {
-        return false;
-    }
-    // For bytes where diff == 0x20: verify both are ASCII letters (A-Z or a-z)
-    // Uppercase both: clear bit 5, check if in [0x41, 0x5A]
-    let upper_a = a & 0xDFDFDFDFDFDFDFDFu64;
-    let sub_lo = upper_a.wrapping_sub(0x4141414141414141u64);
-    let sub_hi = upper_a.wrapping_sub(0x5B5B5B5B5B5B5B5Bu64);
-    // Byte is a letter if sub_lo has high bit clear AND sub_hi has high bit set
-    let is_letter = !sub_lo & sub_hi & 0x8080808080808080u64;
-    // All bytes with diff == 0x20 must be letters
-    let need_mask = (diff & 0x2020202020202020u64) << 2; // 0x20 → 0x80
-    (is_letter & need_mask) == need_mask
-}
-
-/// Fast case-insensitive comparison using u64 word-at-a-time SWAR.
-/// Falls back to std eq_ignore_ascii_case only for the tail bytes.
+/// Case-insensitive comparison of two byte slices.
+/// Uses the standard library's correct per-byte ASCII case folding.
 #[inline(always)]
 fn lines_equal_case_insensitive(a: &[u8], b: &[u8]) -> bool {
-    let len = a.len();
-    if len != b.len() {
-        return false;
-    }
-    if len == 0 {
-        return true;
-    }
-    // Word-at-a-time comparison for lines >= 8 bytes
-    if len >= 8 {
-        let ap = a.as_ptr();
-        let bp = b.as_ptr();
-        // First 8 bytes
-        let wa = unsafe { (ap as *const u64).read_unaligned() };
-        let wb = unsafe { (bp as *const u64).read_unaligned() };
-        if !eq_ci_u64(wa, wb) {
-            return false;
-        }
-        if len <= 8 {
-            return true;
-        }
-        // Last 8 bytes (overlapping for len < 16)
-        let wa_tail = unsafe { (ap.add(len - 8) as *const u64).read_unaligned() };
-        let wb_tail = unsafe { (bp.add(len - 8) as *const u64).read_unaligned() };
-        if !eq_ci_u64(wa_tail, wb_tail) {
-            return false;
-        }
-        if len <= 16 {
-            return true;
-        }
-        // Middle bytes in 8-byte chunks
-        let mut off = 8;
-        while off + 8 <= len - 8 {
-            let wa = unsafe { (ap.add(off) as *const u64).read_unaligned() };
-            let wb = unsafe { (bp.add(off) as *const u64).read_unaligned() };
-            if !eq_ci_u64(wa, wb) {
-                return false;
-            }
-            off += 8;
-        }
-        return true;
-    }
     a.eq_ignore_ascii_case(b)
 }
 
@@ -1709,7 +1643,7 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
 
         let cur_len = cur_end - cur_start;
 
-        // Fast multi-level rejection: length → 8-byte prefix → last 8 bytes → full CI compare
+        // Fast multi-level rejection: length → 8-byte prefix (upper-cased) → full CI compare
         let is_dup = if cur_len != prev_len {
             false
         } else if cur_len == 0 {
@@ -1719,34 +1653,18 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
             let cur_prefix_upper = cur_prefix & 0xDFDFDFDFDFDFDFDFu64;
             if cur_prefix_upper != prev_prefix_upper {
                 false
-            } else if cur_len <= 8 {
-                // Prefix covers entire line, but need exact CI check
-                eq_ci_u64(
-                    unsafe { (base.add(prev_start) as *const u64).read_unaligned() },
-                    cur_prefix,
-                )
             } else {
-                // Check last 8 bytes first (catches sequential data efficiently)
-                let a_tail =
-                    unsafe { (base.add(prev_start + prev_len - 8) as *const u64).read_unaligned() };
-                let b_tail =
-                    unsafe { (base.add(cur_start + cur_len - 8) as *const u64).read_unaligned() };
-                if !eq_ci_u64(a_tail, b_tail) {
-                    false
-                } else {
-                    // Full SWAR CI comparison
-                    unsafe {
-                        let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
-                        let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
-                        lines_equal_case_insensitive(a, b)
-                    }
+                unsafe {
+                    let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
+                    let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
+                    lines_equal_case_insensitive(a, b)
                 }
             }
         } else {
             unsafe {
                 let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
                 let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
-                a.eq_ignore_ascii_case(b)
+                lines_equal_case_insensitive(a, b)
             }
         };
 
