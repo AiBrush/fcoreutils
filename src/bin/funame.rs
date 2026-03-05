@@ -159,7 +159,7 @@ fn main() {
         #[cfg(target_os = "linux")]
         let processor = machine_bytes;
         #[cfg(target_os = "macos")]
-        let processor: &[u8] = match machine.to_bytes() {
+        let processor: &[u8] = match machine_bytes {
             b"arm64" => b"arm",
             b"x86_64" => b"i386",
             _ => machine_bytes,
@@ -169,7 +169,7 @@ fn main() {
         #[cfg(target_os = "linux")]
         let hardware = machine_bytes;
         #[cfg(target_os = "macos")]
-        let hardware: &[u8] = match machine.to_bytes() {
+        let hardware: &[u8] = match machine_bytes {
             b"arm64" => b"arm",
             b"x86_64" => b"i386",
             _ => machine_bytes,

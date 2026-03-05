@@ -296,11 +296,10 @@ pub fn pr_data<W: Write>(
         && memchr::memchr(b'\x0c', data).is_none();
 
     if is_simple {
-        // Passthrough: -t with no transforms and no page range → output == input
-        if (config.omit_header || config.omit_pagination)
-            && config.first_page == 1
-            && config.last_page == 0
-        {
+        // Passthrough: -T (omit_pagination) with no transforms and no page range → output == input.
+        // -t (omit_header) alone does NOT qualify because page bodies are still separated
+        // by blank lines; only -T eliminates all inter-page structure.
+        if config.omit_pagination && config.first_page == 1 && config.last_page == 0 {
             return output.write_all(data);
         }
         return pr_data_contiguous(data, output, config, filename, file_date);
@@ -313,6 +312,7 @@ pub fn pr_data<W: Write>(
         && !config.truncate_lines
         && !config.double_space
         && memchr::memchr(b'\r', data).is_none()
+        && memchr::memchr(b'\x0c', data).is_none()
     {
         return pr_data_numbered(data, output, config, filename, file_date);
     }
