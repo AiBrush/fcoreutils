@@ -450,11 +450,11 @@ fn main() {
             repeat,
             output_file.is_none(),
         );
-        if let Err(e) = out.flush() {
-            if e.kind() != std::io::ErrorKind::BrokenPipe {
-                eprintln!("shuf: write error: {e}");
-                std::process::exit(1);
-            }
+        if let Err(e) = out.flush()
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            eprintln!("shuf: write error: {e}");
+            std::process::exit(1);
         }
     } else {
         let stdout = io::stdout();
@@ -472,11 +472,11 @@ fn main() {
             repeat,
             true,
         );
-        if let Err(e) = out.flush() {
-            if e.kind() != std::io::ErrorKind::BrokenPipe {
-                eprintln!("shuf: write error: {e}");
-                std::process::exit(1);
-            }
+        if let Err(e) = out.flush()
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            eprintln!("shuf: write error: {e}");
+            std::process::exit(1);
         }
     }
 }
