@@ -12,7 +12,7 @@ const MAX_IOV: usize = 1024;
 
 /// Input chunk size for sequential processing. Keeps output buffer (~256KB)
 /// hot in L2 cache and avoids full-size allocation page faults.
-const SEQ_CHUNK: usize = 256 * 1024;
+const SEQ_CHUNK: usize = 1024 * 1024;
 
 /// Process data in newline-aligned chunks, writing each chunk's output immediately.
 /// Avoids allocating a full-size output buffer (e.g. 12MB for 11MB input).

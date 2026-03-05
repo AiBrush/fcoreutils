@@ -53,7 +53,7 @@ fn fold_width_zero(data: &[u8], out: &mut impl Write) -> std::io::Result<()> {
 /// Uses unsafe pointer copies and a pre-allocated 1MB output buffer.
 /// For short lines (≤width), copies line+newline with a single memcpy.
 fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
-    const BUF_CAP: usize = 1024 * 1024 + 4096;
+    const BUF_CAP: usize = 4 * 1024 * 1024;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP);
     let base = buf.as_mut_ptr();
     // SAFETY: `base` stays valid across `buf.clear()` calls because clear()
@@ -161,7 +161,7 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
 /// Fast fold by byte count with -s (break at spaces).
 /// Buffers output into ~1MB chunks to minimize write syscalls.
 fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
-    let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
+    let mut outbuf: Vec<u8> = Vec::with_capacity(4 * 1024 * 1024);
     let mut pos: usize = 0;
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
@@ -170,7 +170,7 @@ fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std
         outbuf.push(b'\n');
         pos = nl_pos + 1;
 
-        if outbuf.len() >= 1024 * 1024 {
+        if outbuf.len() >= 4 * 1024 * 1024 {
             out.write_all(&outbuf)?;
             outbuf.clear();
         }
@@ -201,7 +201,7 @@ fn fold_column_mode_streaming(
         return fold_column_mode_spaces_streaming(data, width, out);
     }
 
-    let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
+    let mut outbuf: Vec<u8> = Vec::with_capacity(4 * 1024 * 1024);
     let mut col: usize = 0;
     let mut seg_start: usize = 0;
     let mut i: usize = 0;
@@ -241,7 +241,7 @@ fn fold_column_mode_streaming(
                     col = 0;
                     i += 1;
                     seg_start = i;
-                    if outbuf.len() >= 1024 * 1024 {
+                    if outbuf.len() >= 4 * 1024 * 1024 {
                         out.write_all(&outbuf)?;
                         outbuf.clear();
                     }
@@ -333,7 +333,7 @@ fn fold_column_mode_spaces_streaming(
     }
 
     let mut pos = 0;
-    let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
+    let mut outbuf: Vec<u8> = Vec::with_capacity(4 * 1024 * 1024);
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line = &data[pos..nl_pos];
@@ -345,7 +345,7 @@ fn fold_column_mode_spaces_streaming(
         }
         outbuf.push(b'\n');
 
-        if outbuf.len() >= 1024 * 1024 {
+        if outbuf.len() >= 4 * 1024 * 1024 {
             out.write_all(&outbuf)?;
             outbuf.clear();
         }

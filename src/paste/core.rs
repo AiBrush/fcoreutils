@@ -63,7 +63,7 @@ pub fn parse_delimiters(s: &str) -> Vec<u8> {
 }
 
 /// Output buffer size for streaming paste (1 MiB).
-const BUF_SIZE: usize = 1024 * 1024;
+const BUF_SIZE: usize = 4 * 1024 * 1024;
 
 /// Raw write to stdout fd 1. Returns any error encountered.
 #[cfg(unix)]

@@ -322,7 +322,7 @@ fn nl_number_all_stream(
     line_number: &mut i64,
     fd: i32,
 ) -> std::io::Result<()> {
-    const BUF_SIZE: usize = 1024 * 1024; // 1MB output buffer
+    const BUF_SIZE: usize = 4 * 1024 * 1024;
 
     let width = config.number_width;
     let sep = &config.number_separator;
@@ -330,7 +330,7 @@ fn nl_number_all_stream(
     let mut num = *line_number;
     let mut pos: usize = 0;
 
-    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 256 * 1024);
     let mut buf_ptr = output.as_mut_ptr();
     let mut write_pos: usize = 0;
     let data_ptr = data.as_ptr();
@@ -537,7 +537,7 @@ fn nl_number_nonempty_stream(
     line_number: &mut i64,
     fd: i32,
 ) -> std::io::Result<()> {
-    const BUF_SIZE: usize = 1024 * 1024;
+    const BUF_SIZE: usize = 4 * 1024 * 1024;
 
     let width = config.number_width;
     let sep = &config.number_separator;
@@ -545,7 +545,7 @@ fn nl_number_nonempty_stream(
     let mut num = *line_number;
     let mut pos: usize = 0;
 
-    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 256 * 1024);
     let mut buf_ptr = output.as_mut_ptr();
     let mut write_pos: usize = 0;
     let data_ptr = data.as_ptr();
@@ -774,9 +774,9 @@ fn nl_generic_stream(
         return Ok(());
     }
 
-    const BUF_SIZE: usize = 1024 * 1024; // 1MB output buffer
+    const BUF_SIZE: usize = 4 * 1024 * 1024;
 
-    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 256 * 1024);
     let mut current_section = Section::Body;
     let mut consecutive_blanks: usize = 0;
     let mut start = 0;
