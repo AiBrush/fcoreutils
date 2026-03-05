@@ -531,10 +531,10 @@ fn pollard_rho(n: u128) -> u128 {
                     if y >= n {
                         y -= n;
                     }
-                    let x_val = from_mont(x, n, m_inv);
-                    let y_val = from_mont(y, n, m_inv);
-                    let diff = x_val.abs_diff(y_val);
-                    let diff_mont = to_mont(diff, n);
+                    // Compute |x - y| mod n directly in Montgomery form.
+                    // Both x and y are in [0, n), so this avoids costly
+                    // from_mont + to_mont round-trips per iteration.
+                    let diff_mont = if x >= y { x - y } else { x + n - y };
                     // Accumulate product in Montgomery form
                     q = mont_mul(q, diff_mont, n, m_inv);
                     if q == 0 {
@@ -553,9 +553,8 @@ fn pollard_rho(n: u128) -> u128 {
                 if ys >= n {
                     ys -= n;
                 }
-                let x_val = from_mont(x, n, m_inv);
-                let ys_val = from_mont(ys, n, m_inv);
-                d = gcd(x_val.abs_diff(ys_val), n);
+                let diff_mont = if x >= ys { x - ys } else { x + n - ys };
+                d = gcd(from_mont(diff_mont, n, m_inv), n);
                 if d > 1 {
                     break;
                 }

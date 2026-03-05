@@ -18,6 +18,10 @@ const STREAM_BUF: usize = 8 * 1024 * 1024;
 /// Single-threaded AVX2 at 16 GB/s processes 10MB in 0.6ms which is fast enough.
 const PARALLEL_THRESHOLD: usize = 64 * 1024 * 1024;
 
+/// Maximum data size for a single full-size output allocation.
+/// Files larger than this fall back to the chunked approach to avoid OOM.
+const SINGLE_ALLOC_LIMIT: usize = 64 * 1024 * 1024;
+
 /// 256-entry lookup table for byte compaction: for each 8-bit keep mask,
 /// stores the bit positions of set bits (indices of bytes to keep).
 /// Used by compact_8bytes to replace the serial trailing_zeros loop with
@@ -3908,8 +3912,9 @@ fn translate_mmap_range(
     hi: u8,
     offset: i8,
 ) -> io::Result<()> {
-    // Parallel path: split data into chunks, translate each in parallel
-    if data.len() >= PARALLEL_THRESHOLD {
+    // Parallel path: split data into chunks, translate each in parallel.
+    // Guard against OOM: only allocate full buffer when under the limit.
+    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
         let mut buf = alloc_uninit_vec(data.len());
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
@@ -3925,6 +3930,7 @@ fn translate_mmap_range(
     }
 
     // Chunked SIMD translate: 256KB buffer fits in L2 cache.
+    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
     const CHUNK: usize = 256 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut buf = alloc_uninit_vec(buf_size);
@@ -3944,8 +3950,9 @@ fn translate_mmap_range_to_constant(
     hi: u8,
     replacement: u8,
 ) -> io::Result<()> {
-    // For mmap data (read-only), copy to buffer and translate in-place
-    if data.len() >= PARALLEL_THRESHOLD {
+    // For mmap data (read-only), copy to buffer and translate in-place.
+    // Guard against OOM: only allocate full buffer when under the limit.
+    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
         let mut buf = alloc_uninit_vec(data.len());
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
@@ -3967,6 +3974,7 @@ fn translate_mmap_range_to_constant(
     }
 
     // Chunked translate: 256KB buffer fits in L2 cache.
+    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
     const CHUNK: usize = 256 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut buf = alloc_uninit_vec(buf_size);
@@ -3980,8 +3988,9 @@ fn translate_mmap_range_to_constant(
 
 /// General table-lookup translate for mmap data, with rayon parallel processing.
 fn translate_mmap_table(data: &[u8], writer: &mut impl Write, table: &[u8; 256]) -> io::Result<()> {
-    // Parallel path: split data into chunks, translate each in parallel
-    if data.len() >= PARALLEL_THRESHOLD {
+    // Parallel path: split data into chunks, translate each in parallel.
+    // Guard against OOM: only allocate full buffer when under the limit.
+    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
         let mut buf = alloc_uninit_vec(data.len());
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
@@ -3996,6 +4005,7 @@ fn translate_mmap_table(data: &[u8], writer: &mut impl Write, table: &[u8; 256])
     }
 
     // Chunked translate: 256KB buffer fits in L2 cache.
+    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
     const CHUNK: usize = 256 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut buf = alloc_uninit_vec(buf_size);
@@ -4089,7 +4099,8 @@ fn translate_to_separate_buf(
         None
     };
 
-    if data.len() >= PARALLEL_THRESHOLD {
+    // Guard against OOM: only allocate full buffer when under the limit.
+    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
         // Parallel path: full-size output buffer, parallel translate, single write.
         let mut out_buf = alloc_uninit_vec(data.len());
         let n_threads = rayon::current_num_threads().max(1);
@@ -4123,19 +4134,28 @@ fn translate_to_separate_buf(
         return writer.write_all(&out_buf);
     }
 
-    // Single full-size allocation + single write_all.
-    // alloc_uninit_vec skips zeroing so the allocation is ~0µs. Page faults happen
-    // on first write during SIMD translate but are sequential (prefetchable).
-    // A single write() syscall is far cheaper than 40× chunked writes.
-    let mut out_buf = alloc_uninit_vec(data.len());
-    if let Some((lo, hi, offset)) = range_info {
-        translate_range_simd(data, &mut out_buf, lo, hi, offset);
-    } else if let Some((lo, hi, replacement)) = const_info {
-        translate_range_to_constant_simd(data, &mut out_buf, lo, hi, replacement);
-    } else {
-        translate_to(data, &mut out_buf, table);
+    // Chunked translate: 256KB buffer fits in L2 cache.
+    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
+    const CHUNK: usize = 256 * 1024;
+    let buf_size = data.len().min(CHUNK);
+    let mut out_buf = alloc_uninit_vec(buf_size);
+    for chunk in data.chunks(CHUNK) {
+        if let Some((lo, hi, offset)) = range_info {
+            translate_range_simd(chunk, &mut out_buf[..chunk.len()], lo, hi, offset);
+        } else if let Some((lo, hi, replacement)) = const_info {
+            translate_range_to_constant_simd(
+                chunk,
+                &mut out_buf[..chunk.len()],
+                lo,
+                hi,
+                replacement,
+            );
+        } else {
+            translate_to(chunk, &mut out_buf[..chunk.len()], table);
+        }
+        writer.write_all(&out_buf[..chunk.len()])?;
     }
-    writer.write_all(&out_buf)
+    Ok(())
 }
 
 /// Translate from a read-only mmap (or any byte slice) to a separate output buffer.
@@ -4176,7 +4196,7 @@ pub fn translate_squeeze_mmap(
     // Phase 1: parallel translate into buffer
     // Phase 2: sequential squeeze IN-PLACE on the translated buffer
     //          (squeeze only removes bytes, never grows, so no second allocation needed)
-    if data.len() >= PARALLEL_THRESHOLD {
+    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
         // Phase 1: parallel translate
         let mut translated = alloc_uninit_vec(data.len());
         let range_info = detect_range_offset(&table);
@@ -4231,16 +4251,40 @@ pub fn translate_squeeze_mmap(
         return writer.write_all(&translated[..wp]);
     }
 
-    // Single-allocation translate+squeeze: full-size buffer, single write_all.
-    // For 10MB data, this does 1 write() instead of ~40 chunked writes.
-    let mut buf = alloc_uninit_vec(data.len());
-    translate_to(data, &mut buf, &table);
+    // Single-allocation translate+squeeze for small data; chunked for large.
+    if data.len() <= SINGLE_ALLOC_LIMIT {
+        let mut buf = alloc_uninit_vec(data.len());
+        translate_to(data, &mut buf, &table);
+        let mut last_squeezed: u16 = 256;
+        let mut wp = 0;
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            for i in 0..data.len() {
+                let b = *ptr.add(i);
+                if is_member(&squeeze_set, b) {
+                    if last_squeezed == b as u16 {
+                        continue;
+                    }
+                    last_squeezed = b as u16;
+                } else {
+                    last_squeezed = 256;
+                }
+                *ptr.add(wp) = b;
+                wp += 1;
+            }
+        }
+        return writer.write_all(&buf[..wp]);
+    }
+
+    // OOM-safe chunked translate+squeeze for files > SINGLE_ALLOC_LIMIT.
+    const CHUNK: usize = 256 * 1024;
     let mut last_squeezed: u16 = 256;
-    let mut wp = 0;
-    unsafe {
-        let ptr = buf.as_mut_ptr();
-        for i in 0..data.len() {
-            let b = *ptr.add(i);
+    let mut buf = alloc_uninit_vec(CHUNK);
+    for chunk in data.chunks(CHUNK) {
+        translate_to(chunk, &mut buf[..chunk.len()], &table);
+        let mut wp = 0;
+        for i in 0..chunk.len() {
+            let b = buf[i];
             if is_member(&squeeze_set, b) {
                 if last_squeezed == b as u16 {
                     continue;
@@ -4249,11 +4293,12 @@ pub fn translate_squeeze_mmap(
             } else {
                 last_squeezed = 256;
             }
-            *ptr.add(wp) = b;
+            buf[wp] = b;
             wp += 1;
         }
+        writer.write_all(&buf[..wp])?;
     }
-    writer.write_all(&buf[..wp])
+    Ok(())
 }
 
 /// Delete from mmap'd byte slice.
@@ -4295,8 +4340,9 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         return delete_bitset_zerocopy(data, &member, writer);
     }
 
-    // Dense delete: parallel compact with writev (avoids scatter-gather copy)
-    if data.len() >= PARALLEL_THRESHOLD {
+    // Dense delete: parallel compact with writev (avoids scatter-gather copy).
+    // Guard against OOM: only allocate full buffer when under the limit.
+    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
 
@@ -4319,11 +4365,15 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         return write_ioslices(writer, &slices);
     }
 
-    // Single full-size allocation + single write. No chunking overhead.
-    let mut outbuf = alloc_uninit_vec(data.len());
-    let out_pos = delete_chunk_bitset_into(data, &member, &mut outbuf);
-    if out_pos > 0 {
-        writer.write_all(&outbuf[..out_pos])?;
+    // Streaming compact: 256KB output buffer reduces page fault overhead.
+    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
+    const COMPACT_BUF: usize = 256 * 1024;
+    let mut outbuf = alloc_uninit_vec(COMPACT_BUF);
+    for chunk in data.chunks(COMPACT_BUF) {
+        let out_pos = delete_chunk_bitset_into(chunk, &member, &mut outbuf);
+        if out_pos > 0 {
+            writer.write_all(&outbuf[..out_pos])?;
+        }
     }
     Ok(())
 }
@@ -4353,8 +4403,9 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
         return delete_range_mmap_zerocopy(data, writer, lo, hi);
     }
 
-    // Dense deletes: parallel compact with writev (avoids scatter-gather copy)
-    if data.len() >= PARALLEL_THRESHOLD {
+    // Dense deletes: parallel compact with writev (avoids scatter-gather copy).
+    // Guard against OOM: only allocate full buffer when under the limit.
+    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
 
@@ -4376,13 +4427,13 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
         return write_ioslices(writer, &slices);
     }
 
-    // Single full-size allocation + single write. No buffer-full checks in the
-    // inner AVX2 loop. alloc_uninit_vec skips zeroing; sequential page faults
-    // are prefetchable. One write() syscall vs 40 chunked writes.
-    let mut outbuf = alloc_uninit_vec(data.len());
-    let wp = delete_range_chunk(data, &mut outbuf, lo, hi);
-    if wp > 0 {
-        writer.write_all(&outbuf[..wp])?;
+    // Streaming compact: use 256KB output buffer instead of full data.len() buffer.
+    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
+    const CHUNK: usize = 256 * 1024;
+    let mut outbuf = alloc_uninit_vec(CHUNK);
+    for chunk in data.chunks(CHUNK) {
+        let kept = delete_range_chunk(chunk, &mut outbuf[..chunk.len()], lo, hi);
+        writer.write_all(&outbuf[..kept])?;
     }
     Ok(())
 }
@@ -4878,29 +4929,56 @@ pub fn delete_squeeze_mmap(
     let delete_set = build_member_set(delete_chars);
     let squeeze_set = build_member_set(squeeze_chars);
 
-    // Single-allocation delete+squeeze: full-size buffer, single write_all.
-    let mut outbuf = alloc_uninit_vec(data.len());
-    let mut last_squeezed: u16 = 256;
-    let mut out_pos = 0;
+    if data.len() <= SINGLE_ALLOC_LIMIT {
+        // Single-allocation delete+squeeze: full-size buffer, single write_all.
+        let mut outbuf = alloc_uninit_vec(data.len());
+        let mut last_squeezed: u16 = 256;
+        let mut out_pos = 0;
 
-    for &b in data.iter() {
-        if is_member(&delete_set, b) {
-            continue;
-        }
-        if is_member(&squeeze_set, b) {
-            if last_squeezed == b as u16 {
+        for &b in data.iter() {
+            if is_member(&delete_set, b) {
                 continue;
             }
-            last_squeezed = b as u16;
-        } else {
-            last_squeezed = 256;
+            if is_member(&squeeze_set, b) {
+                if last_squeezed == b as u16 {
+                    continue;
+                }
+                last_squeezed = b as u16;
+            } else {
+                last_squeezed = 256;
+            }
+            unsafe {
+                *outbuf.get_unchecked_mut(out_pos) = b;
+            }
+            out_pos += 1;
         }
-        unsafe {
-            *outbuf.get_unchecked_mut(out_pos) = b;
-        }
-        out_pos += 1;
+        return writer.write_all(&outbuf[..out_pos]);
     }
-    writer.write_all(&outbuf[..out_pos])
+
+    // OOM-safe chunked delete+squeeze for files > SINGLE_ALLOC_LIMIT.
+    const CHUNK: usize = 256 * 1024;
+    let mut outbuf = alloc_uninit_vec(CHUNK);
+    let mut last_squeezed: u16 = 256;
+    for chunk in data.chunks(CHUNK) {
+        let mut out_pos = 0;
+        for &b in chunk.iter() {
+            if is_member(&delete_set, b) {
+                continue;
+            }
+            if is_member(&squeeze_set, b) {
+                if last_squeezed == b as u16 {
+                    continue;
+                }
+                last_squeezed = b as u16;
+            } else {
+                last_squeezed = 256;
+            }
+            outbuf[out_pos] = b;
+            out_pos += 1;
+        }
+        writer.write_all(&outbuf[..out_pos])?;
+    }
+    Ok(())
 }
 
 /// Squeeze from mmap'd byte slice.
@@ -4922,7 +5000,7 @@ pub fn squeeze_mmap(squeeze_chars: &[u8], data: &[u8], writer: &mut impl Write) 
     let member = build_member_set(squeeze_chars);
 
     // Parallel path: squeeze each chunk independently, then fix boundaries
-    if data.len() >= PARALLEL_THRESHOLD {
+    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
         let n_threads = rayon::current_num_threads().max(1);
         let chunk_size = (data.len() / n_threads).max(32 * 1024);
 
@@ -4958,38 +5036,63 @@ pub fn squeeze_mmap(squeeze_chars: &[u8], data: &[u8], writer: &mut impl Write) 
         return write_ioslices(writer, &slices);
     }
 
-    // Single-allocation squeeze: full-size buffer, single write_all.
-    let mut outbuf = alloc_uninit_vec(data.len());
-    let len = data.len();
-    let mut wp = 0;
-    let mut i = 0;
+    if data.len() <= SINGLE_ALLOC_LIMIT {
+        // Single-allocation squeeze: full-size buffer, single write_all.
+        let mut outbuf = alloc_uninit_vec(data.len());
+        let len = data.len();
+        let mut wp = 0;
+        let mut i = 0;
+        let mut last_squeezed: u16 = 256;
+
+        unsafe {
+            let inp = data.as_ptr();
+            let outp = outbuf.as_mut_ptr();
+
+            while i < len {
+                let b = *inp.add(i);
+                if is_member(&member, b) {
+                    if last_squeezed != b as u16 {
+                        *outp.add(wp) = b;
+                        wp += 1;
+                        last_squeezed = b as u16;
+                    }
+                    i += 1;
+                    while i < len && *inp.add(i) == b {
+                        i += 1;
+                    }
+                } else {
+                    last_squeezed = 256;
+                    *outp.add(wp) = b;
+                    wp += 1;
+                    i += 1;
+                }
+            }
+        }
+        return writer.write_all(&outbuf[..wp]);
+    }
+
+    // OOM-safe chunked squeeze for files > SINGLE_ALLOC_LIMIT.
+    const CHUNK: usize = 256 * 1024;
+    let mut outbuf = alloc_uninit_vec(CHUNK);
     let mut last_squeezed: u16 = 256;
-
-    unsafe {
-        let inp = data.as_ptr();
-        let outp = outbuf.as_mut_ptr();
-
-        while i < len {
-            let b = *inp.add(i);
+    for chunk in data.chunks(CHUNK) {
+        let mut wp = 0;
+        for &b in chunk.iter() {
             if is_member(&member, b) {
                 if last_squeezed != b as u16 {
-                    *outp.add(wp) = b;
+                    outbuf[wp] = b;
                     wp += 1;
                     last_squeezed = b as u16;
                 }
-                i += 1;
-                while i < len && *inp.add(i) == b {
-                    i += 1;
-                }
             } else {
                 last_squeezed = 256;
-                *outp.add(wp) = b;
+                outbuf[wp] = b;
                 wp += 1;
-                i += 1;
             }
         }
+        writer.write_all(&outbuf[..wp])?;
     }
-    writer.write_all(&outbuf[..wp])
+    Ok(())
 }
 
 /// Squeeze a single chunk using bitset membership. Returns squeezed output.

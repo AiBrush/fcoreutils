@@ -418,7 +418,12 @@ fn main() {
             head_count,
             repeat,
         );
-        let _ = out.flush();
+        if let Err(e) = out.flush() {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                eprintln!("shuf: write error: {e}");
+                std::process::exit(1);
+            }
+        }
     } else {
         let stdout = io::stdout();
         let mut out = io::BufWriter::with_capacity(1024 * 1024, stdout.lock());
@@ -434,7 +439,12 @@ fn main() {
             head_count,
             repeat,
         );
-        let _ = out.flush();
+        if let Err(e) = out.flush() {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                eprintln!("shuf: write error: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 

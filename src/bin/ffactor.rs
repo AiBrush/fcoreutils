@@ -252,12 +252,15 @@ fn factor_token(
         return report_invalid(b"+", out_buf, out);
     }
 
-    // Fast path: tokens ≤ 19 chars always fit in u64 (10^19 < 2^64).
-    // Skip checked arithmetic entirely — just validate digits and accumulate.
+    // Try u64 fast path. Split by token length for optimal codegen:
+    // - len < 19: unchecked arithmetic (max 18-digit = 999_999_999_999_999_999 < u64::MAX)
+    // - len == 19: checked arithmetic only (19-digit numbers can overflow u64)
+    // - len > 19: skip u64 entirely (can't fit)
     let mut n64: u64 = 0;
     let mut valid_u64 = true;
     let mut overflowed = false;
-    if token.len() <= 19 {
+    if token.len() < 19 {
+        // Always fits in u64 — skip checked arithmetic entirely
         for &b in token {
             let d = b.wrapping_sub(b'0');
             if d > 9 {
@@ -266,47 +269,33 @@ fn factor_token(
             }
             n64 = n64 * 10 + d as u64;
         }
-        // Edge case: 19-digit numbers can overflow u64 (max is 18446744073709551615)
-        if valid_u64 && token.len() == 19 {
-            // Re-check with checked arithmetic for 19-digit edge case
-            let mut check: u64 = 0;
-            for &b in token {
-                check = match check
-                    .checked_mul(10)
-                    .and_then(|v| v.checked_add((b - b'0') as u64))
-                {
-                    Some(v) => v,
-                    None => {
-                        overflowed = true;
-                        break;
-                    }
-                };
-            }
-            if !overflowed {
-                n64 = check;
-            }
-        }
-    } else {
-        // Long tokens: need checked arithmetic
+    } else if token.len() == 19 {
+        // May overflow u64 — use checked arithmetic (no unchecked first pass)
         for &b in token {
             let d = b.wrapping_sub(b'0');
             if d > 9 {
                 valid_u64 = false;
                 break;
             }
-            n64 = match n64.checked_mul(10) {
-                Some(v) => match v.checked_add(d as u64) {
-                    Some(v) => v,
-                    None => {
-                        overflowed = true;
-                        break;
-                    }
-                },
+            n64 = match n64.checked_mul(10).and_then(|v| v.checked_add(d as u64)) {
+                Some(v) => v,
                 None => {
                     overflowed = true;
                     break;
                 }
             };
+        }
+    } else {
+        // len > 19: can't fit in u64, go straight to u128/big number path.
+        // Validate digits only.
+        for &b in token {
+            if b.wrapping_sub(b'0') > 9 {
+                valid_u64 = false;
+                break;
+            }
+        }
+        if valid_u64 {
+            overflowed = true;
         }
     }
     if valid_u64 && !overflowed {
