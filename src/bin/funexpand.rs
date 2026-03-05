@@ -166,6 +166,279 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Process leading blanks of a line into optimal tabs+spaces.
+#[cfg(unix)]
+#[inline]
+fn unexpand_leading_vec(
+    line: &[u8],
+    tab_size: usize,
+    tab_mask: usize,
+    is_pow2: bool,
+    output: &mut Vec<u8>,
+) {
+    let mut column: usize = 0;
+    let mut i: usize = 0;
+
+    while i < line.len() && (line[i] == b' ' || line[i] == b'\t') {
+        if line[i] == b'\t' {
+            let rem = if is_pow2 {
+                column & tab_mask
+            } else {
+                column % tab_size
+            };
+            column += tab_size - rem;
+        } else {
+            column += 1;
+        }
+        i += 1;
+    }
+
+    emit_blanks_vec(output, 0, column, tab_size, tab_mask, is_pow2);
+
+    if i < line.len() {
+        output.extend_from_slice(&line[i..]);
+    }
+}
+
+/// Emit blanks as optimal tabs+spaces into a Vec.
+#[cfg(unix)]
+#[inline]
+fn emit_blanks_vec(
+    output: &mut Vec<u8>,
+    start_col: usize,
+    end_col: usize,
+    tab_size: usize,
+    tab_mask: usize,
+    is_pow2: bool,
+) {
+    if start_col >= end_col {
+        return;
+    }
+    let mut col = start_col;
+
+    loop {
+        let rem = if is_pow2 {
+            col & tab_mask
+        } else {
+            col % tab_size
+        };
+        let next_tab = col + (tab_size - rem);
+        if next_tab > end_col {
+            break;
+        }
+        let blanks_consumed = next_tab - col;
+        if blanks_consumed >= 2 || next_tab < end_col {
+            output.push(b'\t');
+            col = next_tab;
+        } else {
+            break;
+        }
+    }
+
+    let remaining = end_col - col;
+    if remaining > 0 {
+        let len = output.len();
+        output.resize(len + remaining, b' ');
+    }
+}
+
+/// Streaming default mode for regular tab stops without backspaces.
+/// Zero-copy for passthrough lines: consecutive lines without leading blanks
+/// are written directly from the mmap buffer, avoiding copies entirely.
+#[cfg(unix)]
+fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> {
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
+    let tab_mask = tab_size.wrapping_sub(1);
+    let is_pow2 = tab_size.is_power_of_two();
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 256 * 1024);
+    let mut pos: usize = 0;
+    let mut pass_start: usize = 0;
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line = &data[pos..nl_pos];
+        if line.is_empty() || (line[0] != b' ' && line[0] != b'\t') {
+            pos = nl_pos + 1;
+            continue;
+        }
+
+        // Flush passthrough run + pending output before processing this line
+        if pass_start < pos {
+            if !output.is_empty() {
+                write_all_fd(fd, &output)?;
+                output.clear();
+            }
+            write_all_fd(fd, &data[pass_start..pos])?;
+        }
+
+        unexpand_leading_vec(line, tab_size, tab_mask, is_pow2, &mut output);
+        output.push(b'\n');
+
+        if output.len() >= BUF_SIZE {
+            write_all_fd(fd, &output)?;
+            output.clear();
+        }
+
+        pos = nl_pos + 1;
+        pass_start = pos;
+    }
+
+    if pos < data.len() {
+        let line = &data[pos..];
+        if !line.is_empty() && (line[0] == b' ' || line[0] == b'\t') {
+            if pass_start < pos {
+                if !output.is_empty() {
+                    write_all_fd(fd, &output)?;
+                    output.clear();
+                }
+                write_all_fd(fd, &data[pass_start..pos])?;
+                pass_start = data.len();
+            }
+            unexpand_leading_vec(line, tab_size, tab_mask, is_pow2, &mut output);
+        }
+    }
+
+    if !output.is_empty() {
+        write_all_fd(fd, &output)?;
+    }
+    if pass_start < data.len() {
+        write_all_fd(fd, &data[pass_start..data.len()])?;
+    }
+    Ok(())
+}
+
+/// Process a single line for unexpand -a with SIMD-accelerated blank detection.
+#[cfg(unix)]
+#[inline]
+fn unexpand_line_all_vec(
+    line: &[u8],
+    tab_size: usize,
+    tab_mask: usize,
+    is_pow2: bool,
+    output: &mut Vec<u8>,
+) {
+    let mut column: usize = 0;
+    let mut pos: usize = 0;
+
+    loop {
+        let blank_pos = {
+            let mut search = pos;
+            loop {
+                match memchr::memchr2(b' ', b'\t', &line[search..]) {
+                    Some(off) => {
+                        let abs = search + off;
+                        if line[abs] == b'\t' {
+                            break Some(abs);
+                        }
+                        if abs + 1 < line.len() && (line[abs + 1] == b' ' || line[abs + 1] == b'\t')
+                        {
+                            break Some(abs);
+                        }
+                        search = abs + 1;
+                    }
+                    None => break None,
+                }
+            }
+        };
+
+        match blank_pos {
+            Some(bp) => {
+                if bp > pos {
+                    output.extend_from_slice(&line[pos..bp]);
+                    column += bp - pos;
+                }
+
+                let blank_start_col = column;
+                pos = bp;
+                while pos < line.len() && (line[pos] == b' ' || line[pos] == b'\t') {
+                    if line[pos] == b'\t' {
+                        let rem = if is_pow2 {
+                            column & tab_mask
+                        } else {
+                            column % tab_size
+                        };
+                        column += tab_size - rem;
+                    } else {
+                        column += 1;
+                    }
+                    pos += 1;
+                }
+
+                emit_blanks_vec(output, blank_start_col, column, tab_size, tab_mask, is_pow2);
+            }
+            None => {
+                if pos < line.len() {
+                    output.extend_from_slice(&line[pos..]);
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Streaming -a mode for regular tab stops without backspaces.
+/// Zero-copy for passthrough lines: consecutive lines without tabs or double-spaces
+/// are written directly from the mmap buffer, avoiding copies entirely.
+#[cfg(unix)]
+fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> {
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
+    let tab_mask = tab_size.wrapping_sub(1);
+    let is_pow2 = tab_size.is_power_of_two();
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 256 * 1024);
+    let mut pos: usize = 0;
+    let mut pass_start: usize = 0;
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line = &data[pos..nl_pos];
+        if memchr::memchr(b'\t', line).is_none() && memchr::memmem::find(line, b"  ").is_none() {
+            pos = nl_pos + 1;
+            continue;
+        }
+
+        // Flush passthrough run + pending output before processing this line
+        if pass_start < pos {
+            if !output.is_empty() {
+                write_all_fd(fd, &output)?;
+                output.clear();
+            }
+            write_all_fd(fd, &data[pass_start..pos])?;
+        }
+
+        unexpand_line_all_vec(line, tab_size, tab_mask, is_pow2, &mut output);
+        output.push(b'\n');
+
+        if output.len() >= BUF_SIZE {
+            write_all_fd(fd, &output)?;
+            output.clear();
+        }
+
+        pos = nl_pos + 1;
+        pass_start = pos;
+    }
+
+    if pos < data.len() {
+        let line = &data[pos..];
+        if memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some() {
+            if pass_start < pos {
+                if !output.is_empty() {
+                    write_all_fd(fd, &output)?;
+                    output.clear();
+                }
+                write_all_fd(fd, &data[pass_start..pos])?;
+                pass_start = data.len();
+            }
+            unexpand_line_all_vec(line, tab_size, tab_mask, is_pow2, &mut output);
+        }
+    }
+
+    if !output.is_empty() {
+        write_all_fd(fd, &output)?;
+    }
+    if pass_start < data.len() {
+        write_all_fd(fd, &data[pass_start..data.len()])?;
+    }
+    Ok(())
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -263,14 +536,24 @@ fn main() {
                     continue;
                 }
             };
-            // Fast path: if output = input, bypass BufWriter and write directly
             #[cfg(unix)]
             if unexpand_is_passthrough(&data, &cli.tabs, cli.all) {
-                // Flush any buffered data first, then write directly to fd
                 if let Err(e) = out.flush() {
                     Err(e)
                 } else {
                     write_all_fd(1, &data)
+                }
+            } else if let TabStops::Regular(ts) = &cli.tabs {
+                if memchr::memchr(b'\x08', &data).is_none() {
+                    if let Err(e) = out.flush() {
+                        Err(e)
+                    } else if cli.all {
+                        unexpand_all_stream(&data, *ts, 1)
+                    } else {
+                        unexpand_default_stream(&data, *ts, 1)
+                    }
+                } else {
+                    unexpand_bytes(&data, &cli.tabs, cli.all, &mut out)
                 }
             } else {
                 unexpand_bytes(&data, &cli.tabs, cli.all, &mut out)
