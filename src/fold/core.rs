@@ -50,7 +50,7 @@ fn fold_width_zero(data: &[u8], out: &mut impl Write) -> std::io::Result<()> {
 }
 
 /// Fast fold by byte count without -s flag.
-/// Uses unsafe pointer copies and a pre-allocated 1MB output buffer.
+/// Uses unsafe pointer copies and a pre-allocated 4MB output buffer.
 /// For short lines (≤width), copies line+newline with a single memcpy.
 fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
     const BUF_CAP: usize = 4 * 1024 * 1024;
@@ -159,7 +159,7 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
 }
 
 /// Fast fold by byte count with -s (break at spaces).
-/// Buffers output into ~1MB chunks to minimize write syscalls.
+/// Buffers output into ~4MB chunks to minimize write syscalls.
 fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
     let mut outbuf: Vec<u8> = Vec::with_capacity(4 * 1024 * 1024);
     let mut pos: usize = 0;
