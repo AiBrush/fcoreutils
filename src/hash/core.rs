@@ -769,8 +769,8 @@ pub fn hash_bytes_to_buf(algo: HashAlgorithm, data: &[u8], out: &mut [u8]) -> io
             Ok(64)
         }
         HashAlgorithm::Sha384 => {
-            // OpenSSL's SHA-384/512 uses AVX-512/SHA-NI hardware acceleration when
-            // available, significantly faster than ring's BoringSSL assembly.
+            // OpenSSL's SHA-384/512 uses AVX-512 vector instructions when available,
+            // significantly faster than ring's BoringSSL assembly for large inputs.
             if data.len() >= 4 * 1024 * 1024 && openssl_evp::is_available() {
                 let digest = openssl_evp::hash_bytes(openssl_evp::EvpAlgorithm::Sha384, data)?;
                 hex_encode_to_slice(&digest, out);

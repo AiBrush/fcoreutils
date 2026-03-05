@@ -126,7 +126,7 @@ fn main() {
     if positional.len() == 2 {
         let a = positional[0].to_lowercase();
         let b = positional[1].to_lowercase();
-        if a == "am" && (b == "i" || b == "I") {
+        if a == "am" && b == "i" {
             config.am_i = true;
         }
     }
