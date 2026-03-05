@@ -20,7 +20,7 @@ const PARALLEL_THRESHOLD: usize = 64 * 1024 * 1024;
 
 /// Maximum data size for a single full-size output allocation.
 /// Files larger than this fall back to the chunked approach to avoid OOM.
-const SINGLE_ALLOC_LIMIT: usize = 64 * 1024 * 1024;
+const SINGLE_ALLOC_LIMIT: usize = 512 * 1024 * 1024;
 
 /// 256-entry lookup table for byte compaction: for each 8-bit keep mask,
 /// stores the bit positions of set bits (indices of bytes to keep).

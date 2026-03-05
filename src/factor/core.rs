@@ -249,120 +249,13 @@ fn factorize_u64(n: u64) -> Vec<u128> {
 
 // ── u128 path (for numbers > u64::MAX) ───────────────────────────────────
 
-/// Multiply two u128 values, returning (lo, hi) of the 256-bit result.
-#[inline]
-fn mul_u128_wide(a: u128, b: u128) -> (u128, u128) {
-    let a0 = a as u64 as u128;
-    let a1 = (a >> 64) as u64 as u128;
-    let b0 = b as u64 as u128;
-    let b1 = (b >> 64) as u64 as u128;
-
-    let p00 = a0 * b0;
-    let p01 = a0 * b1;
-    let p10 = a1 * b0;
-    let p11 = a1 * b1;
-
-    // Accumulate cross terms with carry tracking
-    let (mid, mid_carry) = p01.overflowing_add(p10);
-    let (lo, lo_carry) = p00.overflowing_add(mid << 64);
-    let hi = p11
-        .wrapping_add(mid >> 64)
-        .wrapping_add(if mid_carry { 1u128 << 64 } else { 0 })
-        .wrapping_add(lo_carry as u128);
-
-    (lo, hi)
-}
-
-/// Montgomery modular multiplication for u128.
-/// Computes (a * b * R^{-1}) mod m where R = 2^64.
-/// Requires m to be odd and a, b < m.
-#[inline]
-fn mont_mul(a: u128, b: u128, m: u128, m_inv: u64) -> u128 {
-    // t = a * b (256-bit, stored as t_hi:t_lo)
-    let (t_lo, t_hi) = mul_u128_wide(a, b);
-
-    // q = (t mod 2^64) * (-m^{-1}) mod 2^64
-    let q = (t_lo as u64).wrapping_mul(m_inv);
-
-    // q * m (192-bit: 64-bit * 128-bit), split as qm_lo + (qm_hi << 64)
-    let m_lo = m as u64 as u128;
-    let m_hi = (m >> 64) as u64 as u128;
-    let qm_lo = q as u128 * m_lo;
-    let qm_hi = q as u128 * m_hi;
-
-    // Compute (t + q*m) >> 64.
-    // By Montgomery property, low 64 bits of (t + q*m) are zero.
-    let (s0, c0) = t_lo.overflowing_add(qm_lo);
-    let s0_hi = s0 >> 64; // bits [64..128) of (t_lo + qm_lo)
-
-    // Accumulate bits [64..128) with qm_hi's low 64 bits
-    let mid_sum = s0_hi + (qm_hi & 0xFFFF_FFFF_FFFF_FFFF_u128);
-
-    // Assemble result = (t + q*m) >> 64 as a u128
-    let result_lo = (mid_sum as u64) as u128;
-    let result_hi = t_hi
-        .wrapping_add(c0 as u128)
-        .wrapping_add(qm_hi >> 64)
-        .wrapping_add(mid_sum >> 64);
-
-    let mut result = (result_hi << 64) | result_lo;
-
-    // Final reduction: result < 2*m, so at most one subtraction
-    if result >= m {
-        result -= m;
-    }
-    result
-}
-
-/// Compute -m^{-1} mod 2^64 using Newton's method.
-/// Requires m to be odd.
-#[inline]
-fn mont_inverse(m: u128) -> u64 {
-    let m_lo = m as u64;
-    let mut inv = m_lo; // m_lo is odd
-    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
-    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
-    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
-    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
-    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
-    inv.wrapping_neg() // We want -m^{-1}
-}
-
-/// Convert a to Montgomery form: a * R mod m, where R = 2^64.
-#[inline]
-fn to_mont(a: u128, m: u128) -> u128 {
-    // Compute a * 2^64 mod m using repeated doubling (64 steps)
-    let mut r = a % m;
-    for _ in 0..64 {
-        r <<= 1;
-        if r >= m {
-            r -= m;
-        }
-    }
-    r
-}
-
-/// Convert from Montgomery form: a * R^{-1} mod m
-#[inline]
-fn from_mont(a: u128, m: u128, m_inv: u64) -> u128 {
-    mont_mul(a, 1, m, m_inv)
-}
-
-/// Modular multiplication for u128 using Montgomery form when beneficial.
+/// Modular multiplication for u128.
+/// Uses schoolbook method (O(128) iterations) which is correct for all u128 values.
 fn mod_mul(a: u128, b: u128, m: u128) -> u128 {
     // Direct path if product won't overflow
     if a.leading_zeros() + b.leading_zeros() >= 128 {
         return (a * b) % m;
     }
-    // For odd moduli, use Montgomery multiplication
-    if m & 1 == 1 {
-        let m_inv = mont_inverse(m);
-        let a_mont = to_mont(a % m, m);
-        let b_mont = to_mont(b % m, m);
-        let r_mont = mont_mul(a_mont, b_mont, m, m_inv);
-        return from_mont(r_mont, m, m_inv);
-    }
-    // Fallback: schoolbook for even moduli (rare)
     mod_mul_schoolbook(a, b, m)
 }
 
@@ -392,23 +285,6 @@ fn mod_pow(base: u128, mut exp: u128, m: u128) -> u128 {
     if m == 1 {
         return 0;
     }
-    // For odd m, stay in Montgomery form throughout (amortizes conversion cost)
-    if m & 1 == 1 {
-        let m_inv = mont_inverse(m);
-        let mut result = to_mont(1, m);
-        let mut b = to_mont(base % m, m);
-        while exp > 0 {
-            if exp & 1 == 1 {
-                result = mont_mul(result, b, m, m_inv);
-            }
-            exp >>= 1;
-            if exp > 0 {
-                b = mont_mul(b, b, m, m_inv);
-            }
-        }
-        return from_mont(result, m, m_inv);
-    }
-    // Fallback for even moduli
     let mut result: u128 = 1;
     let mut b = base % m;
     while exp > 0 {
@@ -416,7 +292,9 @@ fn mod_pow(base: u128, mut exp: u128, m: u128) -> u128 {
             result = mod_mul_schoolbook(result, b, m);
         }
         exp >>= 1;
-        b = mod_mul_schoolbook(b, b, m);
+        if exp > 0 {
+            b = mod_mul_schoolbook(b, b, m);
+        }
     }
     result
 }
@@ -499,25 +377,20 @@ fn pollard_rho(n: u128) -> u128 {
         return 2;
     }
 
-    let m_inv = mont_inverse(n);
-
     for c_offset in 1u128..n {
-        let c_mont = to_mont(c_offset % n, n);
-        let mut x: u128 = to_mont(
-            c_offset.wrapping_mul(6364136223846793005).wrapping_add(1) % n,
-            n,
-        );
+        let c = c_offset % n;
+        let mut x: u128 = c_offset.wrapping_mul(6364136223846793005).wrapping_add(1) % n;
         let mut y = x;
         let mut ys = x;
-        let mut q: u128 = to_mont(1, n);
-        let one_mont = to_mont(1, n);
+        let mut q: u128 = 1;
         let mut r: u128 = 1;
         let mut d: u128 = 1;
 
         while d == 1 {
             x = y;
             for _ in 0..r {
-                y = mont_mul(y, y, n, m_inv).wrapping_add(c_mont);
+                y = mod_mul_schoolbook(y, y, n);
+                y = y.wrapping_add(c);
                 if y >= n {
                     y -= n;
                 }
@@ -527,21 +400,15 @@ fn pollard_rho(n: u128) -> u128 {
                 ys = y;
                 let m = (r - k).min(128);
                 for _ in 0..m {
-                    y = mont_mul(y, y, n, m_inv).wrapping_add(c_mont);
+                    y = mod_mul_schoolbook(y, y, n);
+                    y = y.wrapping_add(c);
                     if y >= n {
                         y -= n;
                     }
-                    // Compute |x - y| mod n directly in Montgomery form.
-                    // Both x and y are in [0, n), so this avoids costly
-                    // from_mont + to_mont round-trips per iteration.
-                    let diff_mont = if x >= y { x - y } else { x + n - y };
-                    // Accumulate product in Montgomery form
-                    q = mont_mul(q, diff_mont, n, m_inv);
-                    if q == 0 {
-                        q = one_mont;
-                    }
+                    let diff = if x > y { x - y } else { y - x };
+                    q = mod_mul_schoolbook(q, diff, n);
                 }
-                d = gcd(from_mont(q, n, m_inv), n);
+                d = gcd(q, n);
                 k += m;
             }
             r *= 2;
@@ -549,12 +416,13 @@ fn pollard_rho(n: u128) -> u128 {
 
         if d == n {
             loop {
-                ys = mont_mul(ys, ys, n, m_inv).wrapping_add(c_mont);
+                ys = mod_mul_schoolbook(ys, ys, n);
+                ys = ys.wrapping_add(c);
                 if ys >= n {
                     ys -= n;
                 }
-                let diff_mont = if x >= ys { x - ys } else { x + n - ys };
-                d = gcd(from_mont(diff_mont, n, m_inv), n);
+                let diff = if x > ys { x - ys } else { ys - x };
+                d = gcd(diff, n);
                 if d > 1 {
                     break;
                 }

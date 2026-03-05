@@ -1,11 +1,5 @@
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
-/// Write a large contiguous buffer, retrying on partial writes.
-#[inline]
-fn write_all_raw(writer: &mut impl Write, buf: &[u8]) -> io::Result<()> {
-    writer.write_all(buf)
-}
-
 /// Write all IoSlices to the writer, handling partial writes correctly.
 fn write_all_vectored(writer: &mut impl Write, slices: &[io::IoSlice<'_>]) -> io::Result<()> {
     let n = writer.write_vectored(slices)?;
@@ -703,7 +697,7 @@ fn process_standard_bytes(
         // Write first line
         let first_full = line_full_at(data, &line_starts, 0);
         let first_content = line_content_at(data, &line_starts, 0, content_end);
-        write_all_raw(writer, first_full)?;
+        writer.write_all(first_full)?;
         if first_full.len() == first_content.len() {
             writer.write_all(&[term])?;
         }
@@ -723,7 +717,7 @@ fn process_standard_bytes(
 
             // Unique line — write it
             let cur_full = line_full_at(data, &line_starts, i);
-            write_all_raw(writer, cur_full)?;
+            writer.write_all(cur_full)?;
             if cur_full.len() == cur.len() {
                 writer.write_all(&[term])?;
             }
