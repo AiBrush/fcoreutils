@@ -2,6 +2,7 @@ name: "CodeQL Analysis"
 
 on:
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -29,6 +30,9 @@ jobs:
         with:
           languages: ${{ matrix.language }}
 
+      # Autobuild is only needed for compiled languages (rust).
+      # Python and Actions are interpreted/declarative — CodeQL analyzes
+      # them directly without a build step.
       - name: Autobuild
         uses: github/codeql-action/autobuild@v4
         if: matrix.language == 'rust'
