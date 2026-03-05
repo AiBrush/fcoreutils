@@ -667,11 +667,11 @@ fn emit_blanks(
     // Emit tabs for each tab stop we can reach
     loop {
         let next_tab = col + (tab_size - col % tab_size);
-        if next_tab > end_col {
+        if next_tab > column {
             break;
         }
         let blanks_consumed = next_tab - col;
-        if blanks_consumed >= 2 || next_tab < end_col {
+        if blanks_consumed >= 2 || next_tab < column {
             // 2+ blanks to tab stop, OR 1 blank but more follow → emit tab
             out.write_all(b"\t")?;
             col = next_tab;
@@ -727,22 +727,27 @@ fn unexpand_regular_fast(
                     pos += 1;
                 }
                 // Emit blanks as tabs+spaces into the Vec buffer
-                let end_col = blank_start_col + (column - blank_start_col);
+
                 let mut col = blank_start_col;
                 loop {
                     let next_tab = col + (tab_size - col % tab_size);
-                    if next_tab > end_col {
+                    if next_tab > column {
                         break;
                     }
                     let blanks_consumed = next_tab - col;
-                    if blanks_consumed >= 2 || next_tab < end_col {
+                    if blanks_consumed >= 2 || next_tab < column {
                         buf.push(b'\t');
                         col = next_tab;
                     } else {
                         break;
                     }
                 }
-                buf.extend(std::iter::repeat_n(b' ', end_col - col));
+                let mut rem = column - col;
+                while rem > 0 {
+                    let chunk = rem.min(SPACES.len());
+                    buf.extend_from_slice(&SPACES[..chunk]);
+                    rem -= chunk;
+                }
                 continue;
             }
             if data[pos] == b'\n' {
@@ -1075,7 +1080,7 @@ fn emit_blanks_tablist(
             break;
         }
         let blanks_consumed = next_tab - col;
-        if blanks_consumed >= 2 || next_tab < end_col {
+        if blanks_consumed >= 2 || next_tab < column {
             out.write_all(b"\t")?;
             col = next_tab;
         } else {
