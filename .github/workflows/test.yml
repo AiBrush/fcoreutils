@@ -269,7 +269,7 @@ jobs:
           chmod +x assembly/arch/farch
           rm -f /tmp/farch.o
           echo "All 20 assembly tools built successfully"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: assembly-binaries
           path: |
