@@ -252,29 +252,62 @@ fn factor_token(
         return report_invalid(b"+", out_buf, out);
     }
 
-    // Try u64 fast path first (handles all numbers up to u64::MAX = 20 digits).
+    // Fast path: tokens ≤ 19 chars always fit in u64 (10^19 < 2^64).
+    // Skip checked arithmetic entirely — just validate digits and accumulate.
     let mut n64: u64 = 0;
     let mut valid_u64 = true;
     let mut overflowed = false;
-    for &b in token {
-        let d = b.wrapping_sub(b'0');
-        if d > 9 {
-            valid_u64 = false;
-            break;
+    if token.len() <= 19 {
+        for &b in token {
+            let d = b.wrapping_sub(b'0');
+            if d > 9 {
+                valid_u64 = false;
+                break;
+            }
+            n64 = n64 * 10 + d as u64;
         }
-        n64 = match n64.checked_mul(10) {
-            Some(v) => match v.checked_add(d as u64) {
-                Some(v) => v,
+        // Edge case: 19-digit numbers can overflow u64 (max is 18446744073709551615)
+        if valid_u64 && token.len() == 19 {
+            // Re-check with checked arithmetic for 19-digit edge case
+            let mut check: u64 = 0;
+            for &b in token {
+                check = match check
+                    .checked_mul(10)
+                    .and_then(|v| v.checked_add((b - b'0') as u64))
+                {
+                    Some(v) => v,
+                    None => {
+                        overflowed = true;
+                        break;
+                    }
+                };
+            }
+            if !overflowed {
+                n64 = check;
+            }
+        }
+    } else {
+        // Long tokens: need checked arithmetic
+        for &b in token {
+            let d = b.wrapping_sub(b'0');
+            if d > 9 {
+                valid_u64 = false;
+                break;
+            }
+            n64 = match n64.checked_mul(10) {
+                Some(v) => match v.checked_add(d as u64) {
+                    Some(v) => v,
+                    None => {
+                        overflowed = true;
+                        break;
+                    }
+                },
                 None => {
                     overflowed = true;
                     break;
                 }
-            },
-            None => {
-                overflowed = true;
-                break;
-            }
-        };
+            };
+        }
     }
     if valid_u64 && !overflowed {
         if exponents {

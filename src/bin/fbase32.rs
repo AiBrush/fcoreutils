@@ -271,28 +271,35 @@ fn base32_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
     let mut i = 0usize;
 
     while i < input.len() {
-        // Fast path: when starting a new group, try to decode 8 valid chars at once
-        if pos == 0 && i + 8 <= input.len() {
-            let chunk = &input[i..i + 8];
-            let v0 = DECODE_TABLE[chunk[0] as usize];
-            let v1 = DECODE_TABLE[chunk[1] as usize];
-            let v2 = DECODE_TABLE[chunk[2] as usize];
-            let v3 = DECODE_TABLE[chunk[3] as usize];
-            let v4 = DECODE_TABLE[chunk[4] as usize];
-            let v5 = DECODE_TABLE[chunk[5] as usize];
-            let v6 = DECODE_TABLE[chunk[6] as usize];
-            let v7 = DECODE_TABLE[chunk[7] as usize];
+        // Fast path: batch-decode consecutive 8-byte groups without newlines.
+        // Stays in this tight loop as long as all 8 bytes are valid base32 chars.
+        if pos == 0 {
+            while i + 8 <= input.len() {
+                let chunk = &input[i..i + 8];
+                let v0 = DECODE_TABLE[chunk[0] as usize];
+                let v1 = DECODE_TABLE[chunk[1] as usize];
+                let v2 = DECODE_TABLE[chunk[2] as usize];
+                let v3 = DECODE_TABLE[chunk[3] as usize];
+                let v4 = DECODE_TABLE[chunk[4] as usize];
+                let v5 = DECODE_TABLE[chunk[5] as usize];
+                let v6 = DECODE_TABLE[chunk[6] as usize];
+                let v7 = DECODE_TABLE[chunk[7] as usize];
 
-            if (v0 | v1 | v2 | v3 | v4 | v5 | v6 | v7) <= 0x1F {
-                result.extend_from_slice(&[
-                    (v0 << 3) | (v1 >> 2),
-                    (v1 << 6) | (v2 << 1) | (v3 >> 4),
-                    (v3 << 4) | (v4 >> 1),
-                    (v4 << 7) | (v5 << 2) | (v6 >> 3),
-                    (v6 << 5) | v7,
-                ]);
-                i += 8;
-                continue;
+                if (v0 | v1 | v2 | v3 | v4 | v5 | v6 | v7) <= 0x1F {
+                    result.extend_from_slice(&[
+                        (v0 << 3) | (v1 >> 2),
+                        (v1 << 6) | (v2 << 1) | (v3 >> 4),
+                        (v3 << 4) | (v4 >> 1),
+                        (v4 << 7) | (v5 << 2) | (v6 >> 3),
+                        (v6 << 5) | v7,
+                    ]);
+                    i += 8;
+                } else {
+                    break;
+                }
+            }
+            if i >= input.len() {
+                break;
             }
         }
 
@@ -392,8 +399,8 @@ fn encode_streaming(data: &[u8], wrap: usize) -> io::Result<()> {
     let remainder = data.len() % 5;
     let full_end = full_chunks * 5;
 
-    // Process in 256KB input batches to bound memory
-    const BATCH_INPUT: usize = 256 * 1024;
+    // Process in 1MB input batches to amortize per-batch overhead
+    const BATCH_INPUT: usize = 1024 * 1024;
     // Align batch to 5 bytes
     let batch_input = BATCH_INPUT / 5 * 5;
     // Output per batch: batch_input/5*8 raw + batch_input/5*8/wrap newlines + margin
@@ -514,15 +521,15 @@ fn main() {
     let cli = parse_args();
     let filename = cli.file.as_deref().unwrap_or("-");
 
-    let data = if filename == "-" {
+    let file_data = if filename == "-" {
         let mut buf = Vec::new();
         if let Err(e) = io::stdin().lock().read_to_end(&mut buf) {
             eprintln!("{}: {}", TOOL_NAME, coreutils_rs::common::io_error_msg(&e));
             process::exit(1);
         }
-        buf
+        coreutils_rs::common::io::FileData::Owned(buf)
     } else {
-        match std::fs::read(filename) {
+        match coreutils_rs::common::io::read_file(std::path::Path::new(filename)) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!(
@@ -535,12 +542,13 @@ fn main() {
             }
         }
     };
+    let data: &[u8] = &file_data;
 
     let stdout = io::stdout();
     let mut out = io::BufWriter::with_capacity(1024 * 1024, stdout.lock());
 
     if cli.decode {
-        match base32_decode(&data, cli.ignore_garbage) {
+        match base32_decode(data, cli.ignore_garbage) {
             Ok(decoded) => {
                 if let Err(e) = out.write_all(&decoded) {
                     if e.kind() == io::ErrorKind::BrokenPipe {
@@ -556,7 +564,7 @@ fn main() {
             }
         }
     } else {
-        if let Err(e) = encode_streaming(&data, cli.wrap) {
+        if let Err(e) = encode_streaming(data, cli.wrap) {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 process::exit(0);
             }

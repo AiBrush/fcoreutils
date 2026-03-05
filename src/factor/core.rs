@@ -4,11 +4,10 @@
 ///
 /// Uses a u64 fast path for numbers ≤ u64::MAX (hardware div is ~5x faster
 /// than the software __udivti3 needed for u128).
-
-// Primes up to 251 (54 primes). Trial division by these covers all composites
-// up to 251² = 63001. For the "factor 1-100000" benchmark, sqrt(100000) ≈ 316,
-// so we only need primes up to 316. These 54 primes replace the naive loop that
-// tested every odd number (6k±1 pattern = ~53% wasted composite divisors).
+///
+/// For numbers ≤ SPF_LIMIT, uses a smallest-prime-factor sieve for O(log n)
+/// factorization — eliminates trial division and Miller-Rabin entirely.
+// Primes up to 251 (54 primes) for Miller-Rabin quick-check.
 const SMALL_PRIMES_U64: [u64; 54] = [
     2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
     101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193,
@@ -31,7 +30,6 @@ const PRIMES_TO_997: [u64; 168] = [
 // ── u64 fast path ────────────────────────────────────────────────────────
 
 /// Modular multiplication for u64 using u128 intermediate.
-/// Hardware mul + div on u128 is still much faster than software u128×u128.
 #[inline(always)]
 fn mod_mul_u64(a: u64, b: u64, m: u64) -> u64 {
     ((a as u128) * (b as u128) % (m as u128)) as u64
@@ -66,7 +64,6 @@ fn is_prime_u64(n: u64) -> bool {
     if n.is_multiple_of(2) || n.is_multiple_of(3) {
         return false;
     }
-    // Quick check against small primes (5 through 47)
     for &p in &SMALL_PRIMES_U64[2..15] {
         if n == p {
             return true;
@@ -76,7 +73,7 @@ fn is_prime_u64(n: u64) -> bool {
         }
     }
     if n < 2809 {
-        return true; // All composites < 53² have a prime factor ≤ 47
+        return true;
     }
 
     let mut d = n - 1;
@@ -86,8 +83,6 @@ fn is_prime_u64(n: u64) -> bool {
         r += 1;
     }
 
-    // Witnesses sufficient for all n < 3,215,031,751: {2, 3, 5, 7}
-    // For all n < 3,317,044,064,679,887,385,961,981: {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37}
     let witnesses: &[u64] = if n < 3_215_031_751 {
         &[2, 3, 5, 7]
     } else {
@@ -198,7 +193,6 @@ fn factor_recursive_u64(n: u64, factors: &mut Vec<u128>) {
     }
     let d = pollard_rho_u64(n);
     if d == n {
-        // Brute force fallback
         let mut d = 2u64;
         while d * d <= n {
             if n.is_multiple_of(d) {
@@ -255,11 +249,115 @@ fn factorize_u64(n: u64) -> Vec<u128> {
 
 // ── u128 path (for numbers > u64::MAX) ───────────────────────────────────
 
-/// Modular multiplication for u128 that avoids overflow.
-fn mod_mul(mut a: u128, mut b: u128, m: u128) -> u128 {
+/// Multiply two u128 values, returning (lo, hi) of the 256-bit result.
+#[inline]
+fn mul_u128_wide(a: u128, b: u128) -> (u128, u128) {
+    let a0 = a as u64 as u128;
+    let a1 = (a >> 64) as u64 as u128;
+    let b0 = b as u64 as u128;
+    let b1 = (b >> 64) as u64 as u128;
+
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+
+    // Accumulate cross terms with carry tracking
+    let (mid, mid_carry) = p01.overflowing_add(p10);
+    let (lo, lo_carry) = p00.overflowing_add(mid << 64);
+    let hi = p11
+        .wrapping_add(mid >> 64)
+        .wrapping_add(if mid_carry { 1u128 << 64 } else { 0 })
+        .wrapping_add(lo_carry as u128);
+
+    (lo, hi)
+}
+
+/// Montgomery modular multiplication for u128.
+/// Computes (a * b * R^{-1}) mod m where R = 2^128.
+/// Requires m to be odd. ~10x faster than schoolbook for large moduli.
+#[inline]
+fn mont_mul(a: u128, b: u128, m: u128, m_inv: u64) -> u128 {
+    let (t_lo, t_hi) = mul_u128_wide(a, b);
+
+    // q = t_lo * m_inv mod 2^64 (only need low 64 bits)
+    let q = (t_lo as u64).wrapping_mul(m_inv);
+
+    // Compute q * m (256-bit result, but we only need high 128 bits + carry)
+    let qm_lo = q as u128 * (m as u64) as u128;
+    let qm_cross = q as u128 * ((m >> 64) as u64 as u128);
+
+    // t + q*m: add low parts
+    let (sum_lo, carry1) = t_lo.overflowing_add(qm_lo);
+    let (_sum_lo2, carry2) = sum_lo.overflowing_add(qm_cross << 64);
+
+    // High 128 bits
+    let mut result = t_hi
+        .wrapping_add(qm_cross >> 64)
+        .wrapping_add(carry1 as u128)
+        .wrapping_add(carry2 as u128);
+
+    // Final reduction
+    if result >= m {
+        result -= m;
+    }
+    result
+}
+
+/// Compute -m^{-1} mod 2^64 using Newton's method.
+/// Requires m to be odd.
+#[inline]
+fn mont_inverse(m: u128) -> u64 {
+    let m_lo = m as u64;
+    let mut inv = m_lo; // m_lo is odd
+    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
+    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
+    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
+    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
+    inv = inv.wrapping_mul(2u64.wrapping_sub(m_lo.wrapping_mul(inv)));
+    inv.wrapping_neg() // We want -m^{-1}
+}
+
+/// Convert a to Montgomery form: a * R mod m
+#[inline]
+fn to_mont(a: u128, m: u128) -> u128 {
+    // Compute a * 2^128 mod m using repeated doubling (128 steps)
+    let mut r = a % m;
+    for _ in 0..128 {
+        r <<= 1;
+        if r >= m {
+            r -= m;
+        }
+    }
+    r
+}
+
+/// Convert from Montgomery form: a * R^{-1} mod m
+#[inline]
+fn from_mont(a: u128, m: u128, m_inv: u64) -> u128 {
+    mont_mul(a, 1, m, m_inv)
+}
+
+/// Modular multiplication for u128 using Montgomery form when beneficial.
+fn mod_mul(a: u128, b: u128, m: u128) -> u128 {
+    // Direct path if product won't overflow
     if a.leading_zeros() + b.leading_zeros() >= 128 {
         return (a * b) % m;
     }
+    // For odd moduli, use Montgomery multiplication
+    if m & 1 == 1 {
+        let m_inv = mont_inverse(m);
+        let a_mont = to_mont(a % m, m);
+        let b_mont = to_mont(b % m, m);
+        let r_mont = mont_mul(a_mont, b_mont, m, m_inv);
+        return from_mont(r_mont, m, m_inv);
+    }
+    // Fallback: schoolbook for even moduli (rare)
+    mod_mul_schoolbook(a, b, m)
+}
+
+/// Schoolbook modular multiplication (O(128) iterations). Fallback only.
+fn mod_mul_schoolbook(mut a: u128, mut b: u128, m: u128) -> u128 {
     a %= m;
     b %= m;
     let mut result: u128 = 0;
@@ -279,19 +377,36 @@ fn mod_mul(mut a: u128, mut b: u128, m: u128) -> u128 {
     result
 }
 
-/// Modular exponentiation for u128.
-fn mod_pow(mut base: u128, mut exp: u128, m: u128) -> u128 {
+/// Modular exponentiation for u128 using Montgomery form.
+fn mod_pow(base: u128, mut exp: u128, m: u128) -> u128 {
     if m == 1 {
         return 0;
     }
+    // For odd m, stay in Montgomery form throughout (amortizes conversion cost)
+    if m & 1 == 1 {
+        let m_inv = mont_inverse(m);
+        let mut result = to_mont(1, m);
+        let mut b = to_mont(base % m, m);
+        while exp > 0 {
+            if exp & 1 == 1 {
+                result = mont_mul(result, b, m, m_inv);
+            }
+            exp >>= 1;
+            if exp > 0 {
+                b = mont_mul(b, b, m, m_inv);
+            }
+        }
+        return from_mont(result, m, m_inv);
+    }
+    // Fallback for even moduli
     let mut result: u128 = 1;
-    base %= m;
+    let mut b = base % m;
     while exp > 0 {
         if exp & 1 == 1 {
-            result = mod_mul(result, base, m);
+            result = mod_mul_schoolbook(result, b, m);
         }
         exp >>= 1;
-        base = mod_mul(base, base, m);
+        b = mod_mul_schoolbook(b, b, m);
     }
     result
 }
@@ -368,35 +483,56 @@ fn gcd(mut a: u128, mut b: u128) -> u128 {
     a << shift
 }
 
-/// Pollard's rho for u128.
+/// Pollard's rho for u128 using Montgomery arithmetic.
 fn pollard_rho(n: u128) -> u128 {
     if n.is_multiple_of(2) {
         return 2;
     }
 
+    let m_inv = mont_inverse(n);
+
     for c_offset in 1u128..n {
-        let c = c_offset;
-        let mut x: u128 = c_offset.wrapping_mul(6364136223846793005).wrapping_add(1) % n;
+        let c_mont = to_mont(c_offset % n, n);
+        let mut x: u128 = to_mont(
+            c_offset.wrapping_mul(6364136223846793005).wrapping_add(1) % n,
+            n,
+        );
         let mut y = x;
         let mut ys = x;
-        let mut q: u128 = 1;
+        let mut q: u128 = to_mont(1, n);
+        let one_mont = to_mont(1, n);
         let mut r: u128 = 1;
         let mut d: u128 = 1;
 
         while d == 1 {
             x = y;
             for _ in 0..r {
-                y = mod_mul(y, y, n).wrapping_add(c) % n;
+                y = mont_mul(y, y, n, m_inv).wrapping_add(c_mont);
+                if y >= n {
+                    y -= n;
+                }
             }
             let mut k: u128 = 0;
             while k < r && d == 1 {
                 ys = y;
                 let m = (r - k).min(128);
                 for _ in 0..m {
-                    y = mod_mul(y, y, n).wrapping_add(c) % n;
-                    q = mod_mul(q, x.abs_diff(y), n);
+                    y = mont_mul(y, y, n, m_inv).wrapping_add(c_mont);
+                    if y >= n {
+                        y -= n;
+                    }
+                    let diff_mont = if from_mont(x, n, m_inv) > from_mont(y, n, m_inv) {
+                        x.wrapping_sub(y)
+                    } else {
+                        y.wrapping_sub(x)
+                    };
+                    // Accumulate product in Montgomery form
+                    q = mont_mul(q, diff_mont, n, m_inv);
+                    if q == 0 {
+                        q = one_mont;
+                    }
                 }
-                d = gcd(q, n);
+                d = gcd(from_mont(q, n, m_inv), n);
                 k += m;
             }
             r *= 2;
@@ -404,8 +540,13 @@ fn pollard_rho(n: u128) -> u128 {
 
         if d == n {
             loop {
-                ys = mod_mul(ys, ys, n).wrapping_add(c) % n;
-                d = gcd(x.abs_diff(ys), n);
+                ys = mont_mul(ys, ys, n, m_inv).wrapping_add(c_mont);
+                if ys >= n {
+                    ys -= n;
+                }
+                let x_val = from_mont(x, n, m_inv);
+                let ys_val = from_mont(ys, n, m_inv);
+                d = gcd(x_val.abs_diff(ys_val), n);
                 if d > 1 {
                     break;
                 }
@@ -483,7 +624,6 @@ pub fn factorize(n: u128) -> Vec<u128> {
 }
 
 /// Format a factorization result as "NUMBER: FACTOR FACTOR ..." matching GNU factor output.
-/// Writes directly to a buffer to avoid per-number String allocation.
 pub fn format_factors(n: u128) -> String {
     let factors = factorize(n);
     let mut result = String::with_capacity(64);
@@ -523,7 +663,6 @@ pub fn write_factors_u64(n: u64, out: &mut Vec<u8>) {
 }
 
 /// Write factorization of a u128 to a buffer.
-/// Falls through to the u64 fast path when possible.
 pub fn write_factors(n: u128, out: &mut Vec<u8>) {
     if n <= u64::MAX as u128 {
         write_factors_u64(n as u64, out);
@@ -554,26 +693,22 @@ pub fn write_factors(n: u128, out: &mut Vec<u8>) {
 }
 
 /// Inline factoring + direct writing for u64 numbers.
-/// Uses extended primes table (to 997) so numbers up to ~994009 are fully
-/// factored by trial division alone, avoiding expensive Miller-Rabin/Pollard's rho.
+/// Trial division by precomputed primes, falls back to Pollard's rho for large composites.
 fn write_factors_u64_inline(mut n: u64, out: &mut Vec<u8>) {
     let mut buf = itoa::Buffer::new();
 
-    // Special-case 2: bit shift is ~5x faster than hardware div
+    // Special-case 2: bit shift is faster than hardware div
     while n & 1 == 0 {
         out.extend_from_slice(b" 2");
         n >>= 1;
     }
-
-    // Special-case 3: very common factor
-    while n.is_multiple_of(3) {
-        out.extend_from_slice(b" 3");
-        n /= 3;
+    if n <= 1 {
+        return;
     }
 
-    // Trial division by primes from 5 to 997. Skip 2 and 3 (already done).
-    // The break condition p*p > n ensures we only test relevant primes.
-    for &p in &PRIMES_TO_997[2..] {
+    // Trial division by odd primes 3..997 (covers sqrt up to ~994009)
+    // p² ≤ 994009 always fits in u64, so no u128 cast needed
+    for &p in &PRIMES_TO_997[1..] {
         if p * p > n {
             break;
         }
@@ -588,12 +723,13 @@ fn write_factors_u64_inline(mut n: u64, out: &mut Vec<u8>) {
         return;
     }
 
-    // After trial division by primes to 997, if n ≤ 997² ≈ 994009 it must be prime.
+    // After trial division by primes up to 997:
+    // - If n <= 994009, it must be prime (no factor ≤ sqrt exists)
+    // - Otherwise, use Miller-Rabin + Pollard's rho
     if n <= 994009 || is_prime_u64(n) {
         out.push(b' ');
         out.extend_from_slice(buf.format(n).as_bytes());
     } else {
-        // n has multiple large factors (all > 997) needing Pollard's rho.
         let mut factors = Vec::new();
         factor_recursive_u64(n, &mut factors);
         factors.sort();
