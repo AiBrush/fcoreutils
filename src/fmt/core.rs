@@ -590,17 +590,21 @@ struct DpBufs {
     best: Vec<u32>,
     line_len: Vec<i32>,
     out_buf: Vec<u8>,
+    break_cost: Vec<i64>,
+    word_len: Vec<u16>,
+    sep_width: Vec<u8>,
 }
 
 impl DpBufs {
     fn new() -> Self {
-        // Pre-allocate for typical paragraph sizes (256 words covers most paragraphs).
-        // This avoids repeated small reallocations for the first few paragraphs.
         Self {
             dp_cost: Vec::with_capacity(257),
             best: Vec::with_capacity(256),
             line_len: Vec::with_capacity(257),
             out_buf: Vec::with_capacity(8192),
+            break_cost: Vec::with_capacity(256),
+            word_len: Vec::with_capacity(256),
+            sep_width: Vec::with_capacity(256),
         }
     }
 
@@ -717,6 +721,11 @@ fn reflow_chunk_partial<W: Write>(
 }
 
 /// Run the backward DP pass on n words, filling dp.dp_cost, dp.best, dp.line_len.
+///
+/// Optimization: break costs at position j only depend on winfo[j-1], winfo[j], winfo[j+1],
+/// so we pre-compute them once in O(n) before the main O(n*W) DP loop. This removes all
+/// flag-checking branches from the hot inner loop, where each j is visited by ~W different
+/// values of i (W = words per line, typically 10-15).
 #[allow(clippy::too_many_arguments)]
 fn run_dp(
     n: usize,
@@ -741,106 +750,137 @@ fn run_dp(
     const PAREN_BONUS: i64 = 40 * 40;
 
     dp.ensure_capacity(n);
-    // Use ptr::write_bytes for hardware memset (rep stosb) — 3-4x faster than
-    // fill() for i64::MAX which requires 8-byte stores since 0x7F != any repeated byte.
-    // We use -1 (all 0xFF bytes) as sentinel, then check cost >= 0 to detect valid entries.
-    // All valid DP costs are non-negative, so -1 works as "uninitialized".
     unsafe {
         std::ptr::write_bytes(dp.dp_cost.as_mut_ptr(), 0xFF, n + 1);
     }
     dp.dp_cost[n] = 0;
 
+    // Pre-compute break costs: bc[j] = cost of breaking after word j.
+    // Only depends on winfo[j-1..=j+1], invariant across different line-start i.
+    // bc[n-1] = 0 (last word = end of paragraph, no break cost).
+    let bc = &mut dp.break_cost;
+    if bc.len() < n {
+        bc.resize(n, 0);
+    }
     let winfo_ptr = winfo.as_ptr();
+    unsafe {
+        *bc.as_mut_ptr().add(n - 1) = 0;
+    }
+    for j in 0..n.saturating_sub(1) {
+        let wj = unsafe { *winfo_ptr.add(j) };
+        let wj1 = unsafe { *winfo_ptr.add(j + 1) };
+        let mut cost = LINE_COST;
+
+        if wj & PERIOD_FLAG != 0 {
+            if wj & SENT_FLAG != 0 {
+                cost -= SENTENCE_BONUS;
+            } else {
+                cost += NOBREAK_COST;
+            }
+        } else if wj & PUNCT_FLAG != 0 {
+            cost -= PUNCT_BONUS;
+        } else if j > 0 {
+            let wjm1 = unsafe { *winfo_ptr.add(j - 1) };
+            if wjm1 & SENT_FLAG != 0 {
+                let wl = ((wj & 0xFFFF) as usize).min(LUT_SIZE - 1);
+                cost += DIV40K[wl];
+            }
+        }
+
+        if wj1 & PAREN_FLAG != 0 {
+            cost -= PAREN_BONUS;
+        } else if wj1 & SENT_FLAG != 0 {
+            let wl = ((wj1 & 0xFFFF) as usize).min(LUT_SIZE - 1);
+            cost += DIV22K[wl];
+        }
+
+        unsafe {
+            *bc.as_mut_ptr().add(j) = cost;
+        }
+    }
+
+    // Pre-extract word lengths and separator widths to avoid repeated mask/flag ops
+    let word_len = &mut dp.word_len;
+    if word_len.len() < n {
+        word_len.resize(n, 0);
+    }
+    let sep_w = &mut dp.sep_width;
+    if sep_w.len() < n {
+        sep_w.resize(n, 0);
+    }
+    for j in 0..n {
+        let w = unsafe { *winfo_ptr.add(j) };
+        unsafe {
+            *word_len.as_mut_ptr().add(j) = (w & 0xFFFF) as u16;
+            *sep_w.as_mut_ptr().add(j) = if j > 0 && (*winfo_ptr.add(j - 1) & SENT_FLAG != 0) {
+                2u8
+            } else {
+                1u8
+            };
+        }
+    }
+
     let dp_cost_ptr = dp.dp_cost.as_mut_ptr();
     let best_ptr = dp.best.as_mut_ptr();
     let line_len_ptr = dp.line_len.as_mut_ptr();
+    let bc_ptr = bc.as_ptr();
+    let wl_ptr = word_len.as_ptr();
+    let sw_ptr = sep_w.as_ptr();
+    let nm1 = n - 1;
 
     for i in (0..n).rev() {
         let base = if i == 0 { first_base } else { cont_base };
-        let mut len = base + unsafe { (*winfo_ptr.add(i) & 0xFFFF) as usize };
+        let mut len = base + unsafe { *wl_ptr.add(i) } as usize;
         let mut best_total = i64::MAX;
         let mut best_j = i as u32;
         let mut best_len = len as i32;
 
+        // Inner loop: try each possible line ending j from i..n
+        // Break costs and word lengths are pre-computed — the hot path is
+        // just arithmetic (two squarings + additions + comparison).
         for j in i..n {
             if j > i {
-                let sep = if unsafe { *winfo_ptr.add(j - 1) & SENT_FLAG != 0 } {
-                    2
-                } else {
-                    1
-                };
-                len += sep + unsafe { (*winfo_ptr.add(j) & 0xFFFF) as usize };
-            }
-
-            macro_rules! try_candidate {
-                () => {
-                    let lc = if j == n - 1 {
-                        0i64
-                    } else {
-                        let short_n = goal - len as i64;
-                        let short_cost = short_n * short_n * SHORT_FACTOR;
-                        let ragged_cost = if unsafe { *best_ptr.add(j + 1) as usize + 1 < n } {
-                            let ragged_n = len as i64 - unsafe { *line_len_ptr.add(j + 1) } as i64;
-                            ragged_n * ragged_n * RAGGED_FACTOR
-                        } else {
-                            0
-                        };
-                        short_cost + ragged_cost
-                    };
-
-                    let bc = if j == n - 1 {
-                        0i64
-                    } else {
-                        let wj = unsafe { *winfo_ptr.add(j) };
-                        let wj1 = unsafe { *winfo_ptr.add(j + 1) };
-                        let mut cost = LINE_COST;
-
-                        if wj & PERIOD_FLAG != 0 {
-                            if wj & SENT_FLAG != 0 {
-                                cost -= SENTENCE_BONUS;
-                            } else {
-                                cost += NOBREAK_COST;
-                            }
-                        } else if wj & PUNCT_FLAG != 0 {
-                            cost -= PUNCT_BONUS;
-                        } else if j > 0 {
-                            let wjm1 = unsafe { *winfo_ptr.add(j - 1) };
-                            if wjm1 & SENT_FLAG != 0 {
-                                let wl = ((wj & 0xFFFF) as usize).min(LUT_SIZE - 1);
-                                cost += DIV40K[wl];
-                            }
-                        }
-
-                        if wj1 & PAREN_FLAG != 0 {
-                            cost -= PAREN_BONUS;
-                        } else if wj1 & SENT_FLAG != 0 {
-                            let wl = ((wj1 & 0xFFFF) as usize).min(LUT_SIZE - 1);
-                            cost += DIV22K[wl];
-                        }
-
-                        cost
-                    };
-
-                    let cj1 = unsafe { *dp_cost_ptr.add(j + 1) };
-                    if cj1 >= 0 {
-                        let total = lc + bc + cj1;
-                        if total < best_total {
-                            best_total = total;
-                            best_j = j as u32;
-                            best_len = len as i32;
-                        }
-                    }
-                };
+                len += unsafe { *sw_ptr.add(j) } as usize + unsafe { *wl_ptr.add(j) } as usize;
             }
 
             if len >= width {
                 if j == i {
-                    try_candidate!();
+                    // Single word exceeds width — must accept it
+                    let cj1 = unsafe { *dp_cost_ptr.add(j + 1) };
+                    if cj1 >= 0 {
+                        best_total = cj1;
+                        best_j = j as u32;
+                        best_len = len as i32;
+                    }
                 }
                 break;
             }
 
-            try_candidate!();
+            // Line cost: 0 for last line of paragraph, else shortfall + raggedness
+            let lc = if j == nm1 {
+                0i64
+            } else {
+                let short_n = goal - len as i64;
+                let short_cost = short_n * short_n * SHORT_FACTOR;
+                let next_best = unsafe { *best_ptr.add(j + 1) };
+                let ragged_cost = if (next_best as usize + 1) < n {
+                    let ragged_n = len as i64 - unsafe { *line_len_ptr.add(j + 1) } as i64;
+                    ragged_n * ragged_n * RAGGED_FACTOR
+                } else {
+                    0
+                };
+                short_cost + ragged_cost
+            };
+
+            let cj1 = unsafe { *dp_cost_ptr.add(j + 1) };
+            if cj1 >= 0 {
+                let total = lc + unsafe { *bc_ptr.add(j) } + cj1;
+                if total < best_total {
+                    best_total = total;
+                    best_j = j as u32;
+                    best_len = len as i32;
+                }
+            }
         }
 
         if best_total < i64::MAX {
@@ -873,11 +913,45 @@ fn reflow_chunk<W: Write>(
         return Ok(());
     }
 
+    let out_buf = &mut dp.out_buf;
+    out_buf.clear();
+
+    // Fast path: if all words fit on one line, skip DP entirely.
+    // Compute total width = prefix + indent + sum(word_len) + separators.
+    let base = prefix.len() + first_indent.len();
+    let mut total_width = base;
+    for j in 0..n {
+        let wl = (winfo[j] & 0xFFFF) as usize;
+        if j > 0 {
+            total_width += if winfo[j - 1] & SENT_FLAG != 0 { 2 } else { 1 };
+        }
+        total_width += wl;
+    }
+    if total_width <= config.width {
+        // Single line — output directly without DP
+        out_buf.extend_from_slice(prefix);
+        out_buf.extend_from_slice(first_indent);
+        let off = word_off[0] as usize;
+        let wlen = (winfo[0] & 0xFFFF) as usize;
+        out_buf.extend_from_slice(&bytes[off..off + wlen]);
+        for k in 1..n {
+            if winfo[k - 1] & SENT_FLAG != 0 {
+                out_buf.extend_from_slice(b"  ");
+            } else {
+                out_buf.push(b' ');
+            }
+            let off = word_off[k] as usize;
+            let wlen = (winfo[k] & 0xFFFF) as usize;
+            out_buf.extend_from_slice(&bytes[off..off + wlen]);
+        }
+        out_buf.push(b'\n');
+        return output.write_all(out_buf);
+    }
+
     run_dp(n, prefix, first_indent, cont_indent, config, winfo, dp);
 
     // Build all output lines in one buffer, then write once.
     let out_buf = &mut dp.out_buf;
-    out_buf.clear();
 
     let mut i = 0;
     let mut is_first_line = true;
