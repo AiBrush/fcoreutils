@@ -761,50 +761,52 @@ fn split_lines_streaming_fast(
     let limit = max_chunks(&config.suffix_type, config.suffix_length);
     let sep = config.separator;
 
-    const BUF_SIZE: usize = 1024 * 1024; // 1MB read buffer
+    const BUF_SIZE: usize = 256 * 1024; // 256KB — matches typical kernel readahead
     let mut buf = vec![0u8; BUF_SIZE];
     let mut chunk_index: u64 = 0;
     let mut lines_in_chunk: u64 = 0;
-    let mut out_file: Option<File> = None;
+    let mut out_fd: i32 = -1;
+    let mut _out_file: Option<File> = None; // Keep File alive to hold fd
+
+    // Helper: raw write_all via libc
+    let raw_write_all = |fd: i32, mut data: &[u8]| -> io::Result<()> {
+        while !data.is_empty() {
+            let ret =
+                unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len() as _) };
+            if ret > 0 {
+                data = &data[ret as usize..];
+            } else if ret == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+        Ok(())
+    };
 
     loop {
-        let n = {
-            let mut total = 0;
-            loop {
-                let ret = unsafe {
-                    libc::read(
-                        in_fd,
-                        buf[total..].as_mut_ptr() as *mut libc::c_void,
-                        (BUF_SIZE - total) as _,
-                    )
-                };
-                if ret > 0 {
-                    total += ret as usize;
-                    if total >= BUF_SIZE {
-                        break; // Buffer full
-                    }
-                    // Continue reading to fill buffer for SIMD efficiency
-                } else if ret == 0 {
-                    break; // EOF
-                } else {
-                    let err = io::Error::last_os_error();
-                    if err.kind() == io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
-            total
-        };
+        let n = unsafe { libc::read(in_fd, buf.as_mut_ptr() as *mut libc::c_void, BUF_SIZE as _) };
         if n == 0 {
             break;
         }
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        let n = n as usize;
 
         let data = &buf[..n];
         let mut pos = 0;
 
         while pos < n {
-            if out_file.is_none() {
+            if out_fd < 0 {
                 if chunk_index >= limit {
                     return Err(io::Error::other("output file suffixes exhausted"));
                 }
@@ -812,7 +814,9 @@ fn split_lines_streaming_fast(
                 if config.verbose {
                     eprintln!("creating file '{}'", path);
                 }
-                out_file = Some(File::create(path)?);
+                let file = File::create(path)?;
+                out_fd = file.as_raw_fd();
+                _out_file = Some(file);
                 lines_in_chunk = 0;
             }
 
@@ -830,17 +834,13 @@ fn split_lines_streaming_fast(
             }
 
             if found >= lines_needed {
-                // Write contiguous slice up to split point
-                out_file
-                    .as_ref()
-                    .unwrap()
-                    .write_all(&slice[..last_sep_end])?;
+                raw_write_all(out_fd, &slice[..last_sep_end])?;
                 pos += last_sep_end;
-                out_file = None;
+                _out_file = None;
+                out_fd = -1;
                 chunk_index += 1;
             } else {
-                // Not enough lines — write entire remainder and read more
-                out_file.as_ref().unwrap().write_all(slice)?;
+                raw_write_all(out_fd, slice)?;
                 lines_in_chunk += found;
                 pos = n;
             }
@@ -899,9 +899,6 @@ fn split_bytes_zero_copy(
             let out_file = File::create(path)?;
             let out_fd = out_file.as_raw_fd();
 
-            // Pre-allocate output file to avoid block allocation during write
-            unsafe { libc::fallocate(out_fd, 0, 0, chunk_len as libc::off_t) };
-
             let mut off_in = chunk_offset as i64;
             let mut copied = 0usize;
             while copied < chunk_len {
@@ -952,8 +949,8 @@ fn split_bytes_zero_copy(
             Ok(())
         };
 
-    // Parallel file creation for many chunks (rayon overhead ~1ms, amortized at ≥64 chunks)
-    if chunks.len() >= 64 && !config.verbose {
+    // Parallel file creation for many chunks
+    if chunks.len() >= 4 && !config.verbose {
         chunks.par_iter().zip(paths.par_iter()).try_for_each(
             |(&(chunk_off, chunk_len), path)| copy_chunk(input_fd, chunk_off, chunk_len, path),
         )?;
