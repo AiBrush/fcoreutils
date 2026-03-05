@@ -405,8 +405,7 @@ fn pollard_rho(n: u128) -> u128 {
                     if y >= n {
                         y -= n;
                     }
-                    let diff = if x > y { x - y } else { y - x };
-                    q = mod_mul_schoolbook(q, diff, n);
+                    q = mod_mul_schoolbook(q, x.abs_diff(y), n);
                 }
                 d = gcd(q, n);
                 k += m;
@@ -421,8 +420,7 @@ fn pollard_rho(n: u128) -> u128 {
                 if ys >= n {
                     ys -= n;
                 }
-                let diff = if x > ys { x - ys } else { ys - x };
-                d = gcd(diff, n);
+                d = gcd(x.abs_diff(ys), n);
                 if d > 1 {
                     break;
                 }
