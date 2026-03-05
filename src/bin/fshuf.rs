@@ -731,17 +731,21 @@ fn run_file_shuffle(
             let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + 256);
             let src = data.as_ptr();
             let offsets_slice = &offsets[..count];
-            let prefetch_dist = 16;
+            // Prefetch distance: ~16 cache misses ahead hides DRAM latency.
+            // Uses T1 (L2) hint because shuffled access is scattered, and T0 (L1)
+            // would evict the current iteration's working set from L1.
+            // Assumes short lines (~64 bytes); for very long lines, the tail of
+            // each line will still be cold after prefetch.
+            const PREFETCH_DIST: usize = 16;
 
             for (idx, &[s, e]) in offsets_slice.iter().enumerate() {
-                // Prefetch future line data to hide memory latency from random access
-                if idx + prefetch_dist < count {
-                    let future_s = offsets_slice[idx + prefetch_dist][0] as usize;
+                if idx + PREFETCH_DIST < count {
+                    let future_s = offsets_slice[idx + PREFETCH_DIST][0] as usize;
                     #[cfg(target_arch = "x86_64")]
                     unsafe {
                         std::arch::x86_64::_mm_prefetch(
                             src.add(future_s) as *const i8,
-                            std::arch::x86_64::_MM_HINT_T0,
+                            std::arch::x86_64::_MM_HINT_T1,
                         );
                     }
                 }
