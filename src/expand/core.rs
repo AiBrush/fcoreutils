@@ -706,16 +706,17 @@ fn unexpand_regular_fast(
     if all {
         return unexpand_regular_fast_all(data, tab_size, out);
     }
-
+    // Internal Vec buffer reduces write() syscalls by ~100x vs per-line writes.
+    let cap = data.len().min(4 * 1024 * 1024);
+    let mut buf: Vec<u8> = Vec::with_capacity(cap);
+    let flush_at: usize = 4 * 1024 * 1024;
     let mut column: usize = 0;
     let mut pos: usize = 0;
     let mut in_initial = true;
 
     while pos < data.len() {
         if in_initial {
-            // Check for blanks to convert
             if data[pos] == b' ' || data[pos] == b'\t' {
-                // Count consecutive blanks, tracking column advancement
                 let blank_start_col = column;
                 while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
                     if data[pos] == b'\t' {
@@ -725,35 +726,61 @@ fn unexpand_regular_fast(
                     }
                     pos += 1;
                 }
-                // Emit blanks as optimal tabs+spaces
-                emit_blanks(out, blank_start_col, column - blank_start_col, tab_size)?;
+                // Emit blanks as tabs+spaces into the Vec buffer
+                let end_col = blank_start_col + (column - blank_start_col);
+                let mut col = blank_start_col;
+                loop {
+                    let next_tab = col + (tab_size - col % tab_size);
+                    if next_tab > end_col {
+                        break;
+                    }
+                    let blanks_consumed = next_tab - col;
+                    if blanks_consumed >= 2 || next_tab < end_col {
+                        buf.push(b'\t');
+                        col = next_tab;
+                    } else {
+                        break;
+                    }
+                }
+                for _ in 0..(end_col - col) {
+                    buf.push(b' ');
+                }
                 continue;
             }
             if data[pos] == b'\n' {
-                out.write_all(b"\n")?;
+                buf.push(b'\n');
                 column = 0;
                 in_initial = true;
                 pos += 1;
+                if buf.len() >= flush_at {
+                    out.write_all(&buf)?;
+                    buf.clear();
+                }
                 continue;
             }
-            // Non-blank: fall through to body mode below.
         }
 
-        // Body of line: bulk copy until newline (default mode)
         match memchr::memchr(b'\n', &data[pos..]) {
             Some(offset) => {
-                out.write_all(&data[pos..pos + offset + 1])?;
+                buf.extend_from_slice(&data[pos..pos + offset + 1]);
                 column = 0;
                 in_initial = true;
                 pos += offset + 1;
+                if buf.len() >= flush_at {
+                    out.write_all(&buf)?;
+                    buf.clear();
+                }
             }
             None => {
-                out.write_all(&data[pos..])?;
-                return Ok(());
+                buf.extend_from_slice(&data[pos..]);
+                break;
             }
         }
     }
 
+    if !buf.is_empty() {
+        out.write_all(&buf)?;
+    }
     Ok(())
 }
 
@@ -778,7 +805,7 @@ fn unexpand_regular_fast_all(
         }
         output.push(b'\n');
 
-        if output.len() >= 1024 * 1024 {
+        if output.len() >= 4 * 1024 * 1024 {
             out.write_all(&output)?;
             output.clear();
         }
