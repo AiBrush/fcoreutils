@@ -25,11 +25,10 @@ fn main() {
     let mut all = false;
     let mut ignore: usize = 0;
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        match arg.as_str() {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        let arg = arg.to_string_lossy();
+        match arg.as_ref() {
             "--help" => {
                 println!("Usage: {} [OPTION]...", TOOL_NAME);
                 println!("Print the number of processing units available to the current process,");
@@ -54,13 +53,13 @@ fn main() {
                 });
             }
             "--ignore" => {
-                i += 1;
-                if i >= args.len() {
+                let next = args.next().unwrap_or_else(|| {
                     eprintln!("{}: option '--ignore' requires an argument", TOOL_NAME);
                     process::exit(1);
-                }
-                ignore = args[i].parse().unwrap_or_else(|_| {
-                    eprintln!("{}: invalid number: '{}'", TOOL_NAME, args[i]);
+                });
+                let next = next.to_string_lossy();
+                ignore = next.parse().unwrap_or_else(|_| {
+                    eprintln!("{}: invalid number: '{}'", TOOL_NAME, next);
                     process::exit(1);
                 });
             }
@@ -70,7 +69,6 @@ fn main() {
                 process::exit(1);
             }
         }
-        i += 1;
     }
 
     let n = if all {
