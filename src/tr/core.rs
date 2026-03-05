@@ -3929,9 +3929,9 @@ fn translate_mmap_range(
         return writer.write_all(&buf);
     }
 
-    // Chunked SIMD translate: 256KB buffer fits in L2 cache.
+    // Chunked SIMD translate: 2MB buffer — fewer write() syscalls for large files.
     // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 256 * 1024;
+    const CHUNK: usize = 2 * 1024 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut buf = alloc_uninit_vec(buf_size);
     for chunk in data.chunks(CHUNK) {
@@ -3973,9 +3973,9 @@ fn translate_mmap_range_to_constant(
         return writer.write_all(&buf);
     }
 
-    // Chunked translate: 256KB buffer fits in L2 cache.
+    // Chunked translate: 2MB buffer — fewer write() syscalls for large files.
     // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 256 * 1024;
+    const CHUNK: usize = 2 * 1024 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut buf = alloc_uninit_vec(buf_size);
     for chunk in data.chunks(CHUNK) {
@@ -4004,9 +4004,9 @@ fn translate_mmap_table(data: &[u8], writer: &mut impl Write, table: &[u8; 256])
         return writer.write_all(&buf);
     }
 
-    // Chunked translate: 256KB buffer fits in L2 cache.
+    // Chunked translate: 2MB buffer — fewer write() syscalls for large files.
     // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 256 * 1024;
+    const CHUNK: usize = 2 * 1024 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut buf = alloc_uninit_vec(buf_size);
     for chunk in data.chunks(CHUNK) {
@@ -4134,9 +4134,9 @@ fn translate_to_separate_buf(
         return writer.write_all(&out_buf);
     }
 
-    // Chunked translate: 256KB buffer fits in L2 cache.
+    // Chunked translate: 2MB buffer — fewer write() syscalls for large files.
     // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 256 * 1024;
+    const CHUNK: usize = 2 * 1024 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut out_buf = alloc_uninit_vec(buf_size);
     for chunk in data.chunks(CHUNK) {
@@ -4277,7 +4277,7 @@ pub fn translate_squeeze_mmap(
     }
 
     // OOM-safe chunked translate+squeeze for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 256 * 1024;
+    const CHUNK: usize = 2 * 1024 * 1024;
     let mut last_squeezed: u16 = 256;
     let mut buf = alloc_uninit_vec(CHUNK);
     for chunk in data.chunks(CHUNK) {
@@ -4365,9 +4365,9 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         return write_ioslices(writer, &slices);
     }
 
-    // Streaming compact: 256KB output buffer reduces page fault overhead.
+    // Streaming compact: 2MB buffer — fewer write() syscalls for large files.
     // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const COMPACT_BUF: usize = 256 * 1024;
+    const COMPACT_BUF: usize = 2 * 1024 * 1024;
     let mut outbuf = alloc_uninit_vec(COMPACT_BUF);
     for chunk in data.chunks(COMPACT_BUF) {
         let out_pos = delete_chunk_bitset_into(chunk, &member, &mut outbuf);
@@ -4427,9 +4427,9 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
         return write_ioslices(writer, &slices);
     }
 
-    // Streaming compact: use 256KB output buffer instead of full data.len() buffer.
+    // Streaming compact: use 2MB buffer instead of full data.len() buffer.
     // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 256 * 1024;
+    const CHUNK: usize = 2 * 1024 * 1024;
     let mut outbuf = alloc_uninit_vec(CHUNK);
     for chunk in data.chunks(CHUNK) {
         let kept = delete_range_chunk(chunk, &mut outbuf[..chunk.len()], lo, hi);
@@ -4956,7 +4956,7 @@ pub fn delete_squeeze_mmap(
     }
 
     // OOM-safe chunked delete+squeeze for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 256 * 1024;
+    const CHUNK: usize = 2 * 1024 * 1024;
     let mut outbuf = alloc_uninit_vec(CHUNK);
     let mut last_squeezed: u16 = 256;
     for chunk in data.chunks(CHUNK) {
@@ -5072,7 +5072,7 @@ pub fn squeeze_mmap(squeeze_chars: &[u8], data: &[u8], writer: &mut impl Write) 
     }
 
     // OOM-safe chunked squeeze for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 256 * 1024;
+    const CHUNK: usize = 2 * 1024 * 1024;
     let mut outbuf = alloc_uninit_vec(CHUNK);
     let mut last_squeezed: u16 = 256;
     for chunk in data.chunks(CHUNK) {

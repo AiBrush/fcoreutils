@@ -5,7 +5,6 @@ use std::mem::ManuallyDrop;
 use std::os::unix::io::FromRawFd;
 use std::process;
 
-use coreutils_rs::common::io::FileData;
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::tr;
 
@@ -154,68 +153,6 @@ fn raw_stdout() -> ManuallyDrop<std::fs::File> {
     unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) }
 }
 
-/// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
-/// Returns None if stdin is a pipe/terminal, file is too small for mmap
-/// benefit, or on non-unix platforms.
-/// `min_size` controls the minimum file size for mmap (0 = any size).
-#[cfg(unix)]
-fn try_mmap_stdin_with_threshold(min_size: usize) -> Option<memmap2::Mmap> {
-    use std::os::unix::io::AsRawFd;
-    let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-
-    // Check if stdin is a regular file via fstat
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return None;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
-        return None;
-    }
-
-    let file_size = stat.st_size as usize;
-
-    if file_size < min_size {
-        return None;
-    }
-
-    // mmap the stdin file descriptor.
-    // MAP_POPULATE for files >= 4MB to prefault pages during mmap() call.
-    // For smaller files, lazy faulting with sequential access is faster.
-    // SAFETY: fd is valid, file is regular, size > 0
-    use std::os::unix::io::FromRawFd;
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mmap: Option<memmap2::Mmap> = if file_size >= 4 * 1024 * 1024 {
-        unsafe { memmap2::MmapOptions::new().populate().map(&file) }.ok()
-    } else {
-        unsafe { memmap2::MmapOptions::new().map(&file) }.ok()
-    };
-    std::mem::forget(file); // Don't close stdin
-    #[cfg(target_os = "linux")]
-    if let Some(ref m) = mmap {
-        unsafe {
-            libc::madvise(
-                m.as_ptr() as *mut libc::c_void,
-                m.len(),
-                libc::MADV_SEQUENTIAL | libc::MADV_WILLNEED,
-            );
-            if m.len() >= 2 * 1024 * 1024 {
-                libc::madvise(
-                    m.as_ptr() as *mut libc::c_void,
-                    m.len(),
-                    libc::MADV_HUGEPAGE,
-                );
-            }
-        }
-    }
-    mmap
-}
-
-#[cfg(not(unix))]
-fn try_mmap_stdin_with_threshold(_min_size: usize) -> Option<memmap2::Mmap> {
-    None
-}
-
 /// Enlarge pipe buffers on Linux for higher throughput.
 /// Skips /proc read — directly tries decreasing sizes via fcntl.
 /// Saves ~50µs startup vs reading /proc/sys/fs/pipe-max-size.
@@ -243,10 +180,8 @@ fn main() {
     #[cfg(all(unix, not(target_os = "linux")))]
     let mut raw = raw_stdout();
 
-    // Pure translate mode: bypass BufWriter entirely.
-    // For mmap path, use MAP_PRIVATE (COW) mmap and translate in-place to
-    // eliminate the full output buffer allocation. The kernel only copies
-    // pages that are actually modified.
+    // Pure translate mode: streaming with 8MB buffer for L2/L3 cache locality.
+    // Faster than mmap: avoids full-file allocation + page fault overhead.
     let is_pure_translate = !cli.delete && !cli.squeeze && cli.sets.len() >= 2;
 
     if is_pure_translate {
@@ -279,28 +214,9 @@ fn main() {
             tr::expand_set2(set2_str, set1.len())
         };
 
-        // For file stdin: mmap read-only, translate to separate buffer, write once.
-        // Avoids both mmap COW faults and streaming read/write syscall overhead.
-        // For pipe stdin: streaming translate for pipeline parallelism.
-        let result = if let Some(mm) = try_mmap_stdin_with_threshold(0) {
-            // Read-only mmap for regular files: translate to separate buffer.
-            #[cfg(target_os = "linux")]
-            {
-                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                tr::translate_mmap_readonly(&set1, &set2, &mm, &mut *raw_out)
-            }
-            #[cfg(all(unix, not(target_os = "linux")))]
-            {
-                tr::translate_mmap_readonly(&set1, &set2, &mm, &mut *raw)
-            }
-            #[cfg(not(unix))]
-            {
-                let stdout = io::stdout();
-                let mut lock = stdout.lock();
-                tr::translate_mmap_readonly(&set1, &set2, &mm, &mut lock)
-            }
-        } else {
-            // Pipe: streaming translate for pipeline parallelism.
+        // Streaming translate: 8MB buffer avoids full-file allocation,
+        // full-file allocation + page fault overhead of mmap path.
+        let result = {
             #[cfg(target_os = "linux")]
             {
                 let mut reader = RawStdin;
@@ -331,63 +247,31 @@ fn main() {
         return;
     }
 
-    // Try read-only mmap for non-translate modes (delete, squeeze, etc.)
-    let mmap = try_mmap_stdin_with_threshold(0);
-
-    if let Some(m) = mmap {
-        // File-redirected stdin: use batch path with mmap data.
-        // MUST use raw write (not vmsplice) — delete/squeeze functions create
-        // intermediate heap buffers (alloc_uninit_vec, Vec<Vec<u8>>). With vmsplice,
-        // freed heap pages can be reused by the allocator before the pipe reader
-        // reads them, causing data corruption.
-        let data = FileData::Mmap(m);
-        #[cfg(target_os = "linux")]
-        let result = {
-            let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-            run_mmap_mode(&cli, set1_str, &data, &mut *raw_out)
-        };
-        #[cfg(all(unix, not(target_os = "linux")))]
-        let result = run_mmap_mode(&cli, set1_str, &data, &mut *raw);
-        #[cfg(not(unix))]
-        let result = {
-            let stdout = io::stdout();
-            let mut lock = stdout.lock();
-            run_mmap_mode(&cli, set1_str, &data, &mut lock)
-        };
-        if let Err(e) = result
-            && e.kind() != io::ErrorKind::BrokenPipe
-        {
-            eprintln!("tr: {}", io_error_msg(&e));
-            process::exit(1);
-        }
-    } else {
-        // Piped stdin: streaming mode for pipeline parallelism with upstream cat.
-        // Process chunks as they arrive instead of batching all data first.
-        // Use raw write (not vmsplice) since streaming buffers are reused.
-        #[cfg(target_os = "linux")]
-        let result = {
-            let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-            run_streaming_mode(&cli, set1_str, &mut *raw_out)
-        };
-        #[cfg(all(unix, not(target_os = "linux")))]
-        let result = run_streaming_mode(&cli, set1_str, &mut *raw);
-        #[cfg(not(unix))]
-        let result = {
-            let stdout = io::stdout();
-            let mut lock = stdout.lock();
-            run_streaming_mode(&cli, set1_str, &mut lock)
-        };
-        if let Err(e) = result
-            && e.kind() != io::ErrorKind::BrokenPipe
-        {
-            eprintln!("tr: {}", io_error_msg(&e));
-            process::exit(1);
-        }
+    // Non-translate modes (delete, squeeze, etc.): streaming for all inputs.
+    // 8MB buffer — fewer syscalls than mmap with full-file allocation.
+    #[cfg(target_os = "linux")]
+    let result = {
+        let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        run_streaming_mode(&cli, set1_str, &mut *raw_out)
+    };
+    #[cfg(all(unix, not(target_os = "linux")))]
+    let result = run_streaming_mode(&cli, set1_str, &mut *raw);
+    #[cfg(not(unix))]
+    let result = {
+        let stdout = io::stdout();
+        let mut lock = stdout.lock();
+        run_streaming_mode(&cli, set1_str, &mut lock)
+    };
+    if let Err(e) = result
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("tr: {}", io_error_msg(&e));
+        process::exit(1);
     }
 }
 
-/// Dispatch streaming modes for piped stdin.
-/// Processes data chunk-by-chunk for pipeline parallelism with upstream cat.
+/// Dispatch streaming modes.
+/// Processes data in 8MB chunks — fewer read() syscalls vs small buffers.
 fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io::Result<()> {
     if cli.delete && cli.squeeze {
         if cli.sets.len() < 2 {
@@ -453,85 +337,6 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
             tr::expand_set2(set2_str, set1.len())
         };
         with_stdin_reader!(reader => tr::translate_squeeze(&set1, &set2, &mut reader, writer))
-    } else {
-        eprintln!("tr: missing operand after '{}'", set1_str);
-        eprintln!("Two strings must be given when translating.");
-        eprintln!("Try 'tr --help' for more information.");
-        process::exit(1);
-    }
-}
-
-/// Dispatch mmap-based modes — writes directly to raw fd for zero-copy.
-fn run_mmap_mode(
-    cli: &Cli,
-    set1_str: &str,
-    data: &[u8],
-    writer: &mut impl Write,
-) -> io::Result<()> {
-    if cli.delete && cli.squeeze {
-        if cli.sets.len() < 2 {
-            eprintln!("tr: missing operand after '{}'", set1_str);
-            eprintln!("Two strings must be given when both deleting and squeezing repeats.");
-            eprintln!("Try 'tr --help' for more information.");
-            process::exit(1);
-        }
-        let set2_str = &cli.sets[1];
-        let set1 = tr::parse_set(set1_str);
-        let set2 = tr::parse_set(set2_str);
-        let delete_set = if cli.complement {
-            tr::complement(&set1)
-        } else {
-            set1
-        };
-        tr::delete_squeeze_mmap(&delete_set, &set2, data, writer)
-    } else if cli.delete {
-        if cli.sets.len() > 1 {
-            eprintln!("tr: extra operand '{}'", cli.sets[1]);
-            eprintln!("Only one string may be given when deleting without squeezing.");
-            eprintln!("Try 'tr --help' for more information.");
-            process::exit(1);
-        }
-        let set1 = tr::parse_set(set1_str);
-        let delete_set = if cli.complement {
-            tr::complement(&set1)
-        } else {
-            set1
-        };
-        tr::delete_mmap(&delete_set, data, writer)
-    } else if cli.squeeze && cli.sets.len() < 2 {
-        let set1 = tr::parse_set(set1_str);
-        let squeeze_set = if cli.complement {
-            tr::complement(&set1)
-        } else {
-            set1
-        };
-        tr::squeeze_mmap(&squeeze_set, data, writer)
-    } else if cli.squeeze {
-        let set2_str = &cli.sets[1];
-        let (mut set1, set1_classes) = tr::parse_set_with_classes(set1_str);
-        if cli.complement {
-            set1 = tr::complement(&set1);
-        } else {
-            let (set2_raw, set2_classes) = tr::parse_set_with_classes(set2_str);
-            if let Err(msg) = tr::validate_case_classes(&set1_classes, &set2_classes) {
-                eprintln!("tr: {}", msg);
-                process::exit(1);
-            }
-            if let Err(msg) =
-                tr::validate_set2_class_at_end(set1.len(), set2_raw.len(), &set2_classes)
-            {
-                eprintln!("tr: {}", msg);
-                process::exit(1);
-            }
-        }
-        let set2 = if cli.truncate {
-            let raw_set = tr::parse_set(set2_str);
-            set1.truncate(raw_set.len());
-            raw_set
-        } else {
-            tr::expand_set2(set2_str, set1.len())
-        };
-        tr::translate_squeeze_mmap(&set1, &set2, data, writer)
     } else {
         eprintln!("tr: missing operand after '{}'", set1_str);
         eprintln!("Two strings must be given when translating.");
