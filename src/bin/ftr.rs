@@ -56,7 +56,6 @@ impl io::Read for RawStdin {
     }
 }
 
-/// Writer that uses vmsplice(2) for zero-copy pipe output on Linux.
 struct Cli {
     complement: bool,
     delete: bool,
@@ -212,20 +211,6 @@ fn try_mmap_stdin_with_threshold(min_size: usize) -> Option<memmap2::Mmap> {
     mmap
 }
 
-/// Try to mmap stdin for non-translate modes (delete, squeeze, etc.).
-/// Threshold=0: mmap any regular file for zero-copy access, just like translate mode.
-/// Previous 32MB threshold missed 10MB benchmark files, falling through to the
-/// slower streaming path with read()+write() copies.
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    try_mmap_stdin_with_threshold(0)
-}
-
-#[cfg(not(unix))]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    None
-}
-
 #[cfg(not(unix))]
 fn try_mmap_stdin_with_threshold(_min_size: usize) -> Option<memmap2::Mmap> {
     None
@@ -294,7 +279,7 @@ fn main() {
             tr::expand_set2(set2_str, set1.len())
         };
 
-        // For file stdin: read entire file, translate in-place, write once.
+        // For file stdin: mmap read-only, translate to separate buffer, write once.
         // Avoids both mmap COW faults and streaming read/write syscall overhead.
         // For pipe stdin: streaming translate for pipeline parallelism.
         let result = if let Some(mm) = try_mmap_stdin_with_threshold(0) {
@@ -347,7 +332,7 @@ fn main() {
     }
 
     // Try read-only mmap for non-translate modes (delete, squeeze, etc.)
-    let mmap = try_mmap_stdin();
+    let mmap = try_mmap_stdin_with_threshold(0);
 
     if let Some(m) = mmap {
         // File-redirected stdin: use batch path with mmap data.
