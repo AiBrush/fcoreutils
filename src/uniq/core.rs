@@ -146,15 +146,74 @@ fn lines_equal(a: &[u8], b: &[u8], config: &UniqConfig) -> bool {
     }
 }
 
-/// Fast case-insensitive comparison: no field/char extraction, just case-insensitive.
-/// Uses length check + 8-byte prefix rejection before full comparison.
+/// SWAR case-insensitive comparison of 8 bytes packed in u64.
+/// Returns true if all 8 bytes are equal ignoring ASCII case.
+/// Handles non-letter bytes correctly (they must be exactly equal).
 #[inline(always)]
-fn lines_equal_case_insensitive(a: &[u8], b: &[u8]) -> bool {
-    let alen = a.len();
-    if alen != b.len() {
+fn eq_ci_u64(a: u64, b: u64) -> bool {
+    if a == b {
+        return true;
+    }
+    let diff = a ^ b;
+    // Any byte differing by more than just bit 5 is definitely not equal
+    if diff & !0x2020202020202020u64 != 0 {
         return false;
     }
-    if alen == 0 {
+    // For bytes where diff == 0x20: verify both are ASCII letters (A-Z or a-z)
+    // Uppercase both: clear bit 5, check if in [0x41, 0x5A]
+    let upper_a = a & 0xDFDFDFDFDFDFDFDFu64;
+    let sub_lo = upper_a.wrapping_sub(0x4141414141414141u64);
+    let sub_hi = upper_a.wrapping_sub(0x5B5B5B5B5B5B5B5Bu64);
+    // Byte is a letter if sub_lo has high bit clear AND sub_hi has high bit set
+    let is_letter = !sub_lo & sub_hi & 0x8080808080808080u64;
+    // All bytes with diff == 0x20 must be letters
+    let need_mask = (diff & 0x2020202020202020u64) << 2; // 0x20 → 0x80
+    (is_letter & need_mask) == need_mask
+}
+
+/// Fast case-insensitive comparison using u64 word-at-a-time SWAR.
+/// Falls back to std eq_ignore_ascii_case only for the tail bytes.
+#[inline(always)]
+fn lines_equal_case_insensitive(a: &[u8], b: &[u8]) -> bool {
+    let len = a.len();
+    if len != b.len() {
+        return false;
+    }
+    if len == 0 {
+        return true;
+    }
+    // Word-at-a-time comparison for lines >= 8 bytes
+    if len >= 8 {
+        let ap = a.as_ptr();
+        let bp = b.as_ptr();
+        // First 8 bytes
+        let wa = unsafe { (ap as *const u64).read_unaligned() };
+        let wb = unsafe { (bp as *const u64).read_unaligned() };
+        if !eq_ci_u64(wa, wb) {
+            return false;
+        }
+        if len <= 8 {
+            return true;
+        }
+        // Last 8 bytes (overlapping for len < 16)
+        let wa_tail = unsafe { (ap.add(len - 8) as *const u64).read_unaligned() };
+        let wb_tail = unsafe { (bp.add(len - 8) as *const u64).read_unaligned() };
+        if !eq_ci_u64(wa_tail, wb_tail) {
+            return false;
+        }
+        if len <= 16 {
+            return true;
+        }
+        // Middle bytes in 8-byte chunks
+        let mut off = 8;
+        while off + 8 <= len - 8 {
+            let wa = unsafe { (ap.add(off) as *const u64).read_unaligned() };
+            let wb = unsafe { (bp.add(off) as *const u64).read_unaligned() };
+            if !eq_ci_u64(wa, wb) {
+                return false;
+            }
+            off += 8;
+        }
         return true;
     }
     a.eq_ignore_ascii_case(b)
@@ -1604,8 +1663,7 @@ fn format_count_prefix_into(count: u64, buf: &mut [u8]) -> usize {
 }
 
 /// Fast single-pass for case-insensitive (-i) default mode.
-/// Uses run-tracking zero-copy output and write_vectored batching.
-/// Includes speculative line-end detection and length-based early rejection.
+/// Uses u64 SWAR prefix caching, IoSlice batching, and speculative line-end detection.
 fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8) -> io::Result<()> {
     let data_len = data.len();
     let base = data.as_ptr();
@@ -1620,11 +1678,18 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
 
     let mut prev_start: usize = 0;
     let mut prev_len = first_end;
+    // Cache case-folded 8-byte prefix (clear bit 5 → uppercase) for fast rejection
+    let mut prev_prefix_upper: u64 = if prev_len >= 8 {
+        unsafe { (base.add(prev_start) as *const u64).read_unaligned() & 0xDFDFDFDFDFDFDFDFu64 }
+    } else {
+        0
+    };
 
-    // Run-tracking: flush contiguous regions from the original data.
+    // Run-tracking with IoSlice batching (mirrors process_default_sequential)
+    const BATCH: usize = 256;
+    let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut run_start: usize = 0;
     let mut cur_start = first_end + 1;
-    let mut _last_output_end = first_end + 1;
 
     while cur_start < data_len {
         // Speculative line-end detection
@@ -1644,18 +1709,55 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
 
         let cur_len = cur_end - cur_start;
 
-        // Length-based early rejection before expensive case-insensitive compare
-        let is_dup = cur_len == prev_len
-            && unsafe {
+        // Fast multi-level rejection: length → 8-byte prefix → last 8 bytes → full CI compare
+        let is_dup = if cur_len != prev_len {
+            false
+        } else if cur_len == 0 {
+            true
+        } else if cur_len >= 8 {
+            let cur_prefix = unsafe { (base.add(cur_start) as *const u64).read_unaligned() };
+            let cur_prefix_upper = cur_prefix & 0xDFDFDFDFDFDFDFDFu64;
+            if cur_prefix_upper != prev_prefix_upper {
+                false
+            } else if cur_len <= 8 {
+                // Prefix covers entire line, but need exact CI check
+                eq_ci_u64(
+                    unsafe { (base.add(prev_start) as *const u64).read_unaligned() },
+                    cur_prefix,
+                )
+            } else {
+                // Check last 8 bytes first (catches sequential data efficiently)
+                let a_tail =
+                    unsafe { (base.add(prev_start + prev_len - 8) as *const u64).read_unaligned() };
+                let b_tail =
+                    unsafe { (base.add(cur_start + cur_len - 8) as *const u64).read_unaligned() };
+                if !eq_ci_u64(a_tail, b_tail) {
+                    false
+                } else {
+                    // Full SWAR CI comparison
+                    unsafe {
+                        let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
+                        let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
+                        lines_equal_case_insensitive(a, b)
+                    }
+                }
+            }
+        } else {
+            unsafe {
                 let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
                 let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
                 a.eq_ignore_ascii_case(b)
-            };
+            }
+        };
 
         if is_dup {
-            // Duplicate — flush current run up to this line, skip it
+            // Duplicate — save current run, skip the duplicate line
             if run_start < cur_start {
-                writer.write_all(&data[run_start..cur_start])?;
+                slices.push(io::IoSlice::new(&data[run_start..cur_start]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(writer, &slices)?;
+                    slices.clear();
+                }
             }
             run_start = if cur_end < data_len {
                 cur_end + 1
@@ -1665,10 +1767,12 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
         } else {
             prev_start = cur_start;
             prev_len = cur_len;
-            _last_output_end = if cur_end < data_len {
-                cur_end + 1
+            prev_prefix_upper = if cur_len >= 8 {
+                unsafe {
+                    (base.add(cur_start) as *const u64).read_unaligned() & 0xDFDFDFDFDFDFDFDFu64
+                }
             } else {
-                cur_end
+                0
             };
         }
 
@@ -1681,11 +1785,15 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
 
     // Flush remaining run
     if run_start < data_len {
-        writer.write_all(&data[run_start..data_len])?;
+        slices.push(io::IoSlice::new(&data[run_start..data_len]));
     }
     // Ensure trailing terminator
     if !data.is_empty() && data[data_len - 1] != term {
-        writer.write_all(&[term])?;
+        let term_byte: [u8; 1] = [term];
+        slices.push(io::IoSlice::new(&term_byte));
+        write_all_vectored(writer, &slices)?;
+    } else if !slices.is_empty() {
+        write_all_vectored(writer, &slices)?;
     }
 
     Ok(())
