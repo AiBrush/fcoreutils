@@ -56,94 +56,6 @@ impl io::Read for RawStdin {
     }
 }
 
-/// Writer that uses vmsplice(2) for zero-copy pipe output on Linux.
-/// When stdout is a pipe, vmsplice references user-space pages directly
-/// in the pipe buffer (no kernel memcpy). Falls back to regular write
-/// for non-pipe fds (files, terminals).
-///
-/// SAFETY: The buffer passed to write/write_all must remain valid (not freed
-/// or mutated) until the pipe reader has consumed all referenced pages.
-/// Only safe when `buf` points into pages that will not be freed or mutated
-/// after vmsplice returns (e.g., MAP_PRIVATE mmap pages that are fully
-/// translated and no longer modified). Never use with heap Vec buffers.
-#[cfg(target_os = "linux")]
-struct VmspliceWriter {
-    raw: ManuallyDrop<std::fs::File>,
-    is_pipe: bool,
-}
-
-#[cfg(target_os = "linux")]
-impl VmspliceWriter {
-    fn new() -> Self {
-        let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        let is_pipe = unsafe {
-            let mut stat: libc::stat = std::mem::zeroed();
-            libc::fstat(1, &mut stat) == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
-        };
-        Self { raw, is_pipe }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Write for VmspliceWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if !self.is_pipe || buf.is_empty() {
-            return (&*self.raw).write(buf);
-        }
-        loop {
-            let iov = libc::iovec {
-                iov_base: buf.as_ptr() as *mut libc::c_void,
-                iov_len: buf.len(),
-            };
-            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-            if n > 0 {
-                return Ok(n as usize);
-            }
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "vmsplice wrote 0"));
-            }
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            // Permanent fallback: non-transient errors (ENOSPC, EINVAL) indicate
-            // vmsplice can't work on this fd. EAGAIN won't occur (no O_NONBLOCK).
-            self.is_pipe = false;
-            return (&*self.raw).write(buf);
-        }
-    }
-
-    fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
-        if !self.is_pipe || buf.is_empty() {
-            return (&*self.raw).write_all(buf);
-        }
-        while !buf.is_empty() {
-            let iov = libc::iovec {
-                iov_base: buf.as_ptr() as *mut libc::c_void,
-                iov_len: buf.len(),
-            };
-            let n = unsafe { libc::vmsplice(1, &iov, 1, 0) };
-            if n > 0 {
-                buf = &buf[n as usize..];
-            } else if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "vmsplice wrote 0"));
-            } else {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                self.is_pipe = false;
-                return (&*self.raw).write_all(buf);
-            }
-        }
-        Ok(())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 struct Cli {
     complement: bool,
     delete: bool,
@@ -236,7 +148,6 @@ fn parse_args() -> Cli {
 }
 
 /// Raw fd stdout for zero-overhead writes on non-Linux Unix.
-/// On Linux, VmspliceWriter is used instead for zero-copy pipe output.
 #[cfg(all(unix, not(target_os = "linux")))]
 #[inline]
 fn raw_stdout() -> ManuallyDrop<std::fs::File> {
@@ -300,76 +211,8 @@ fn try_mmap_stdin_with_threshold(min_size: usize) -> Option<memmap2::Mmap> {
     mmap
 }
 
-/// Try to mmap stdin for non-translate modes (delete, squeeze, etc.).
-/// Threshold=0: mmap any regular file for zero-copy access, just like translate mode.
-/// Previous 32MB threshold missed 10MB benchmark files, falling through to the
-/// slower streaming path with read()+write() copies.
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    try_mmap_stdin_with_threshold(0)
-}
-
-#[cfg(not(unix))]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    None
-}
-
 #[cfg(not(unix))]
 fn try_mmap_stdin_with_threshold(_min_size: usize) -> Option<memmap2::Mmap> {
-    None
-}
-
-/// Try to create a MAP_PRIVATE (copy-on-write) mmap of stdin for in-place translate.
-/// MAP_PRIVATE means writes only affect our process's copy — the underlying file
-/// is unmodified.
-/// Only used for files >= 32MB. For smaller files, the MAP_PRIVATE + MAP_POPULATE
-/// mmap setup cost (~5ms for 10MB) exceeds the benefit vs a simple read() + translate.
-#[cfg(unix)]
-fn try_mmap_stdin_mut() -> Option<memmap2::MmapMut> {
-    use std::os::unix::io::AsRawFd;
-    let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return None;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
-        return None;
-    }
-    // For files < 32MB, read() + in-place translate is faster than MAP_PRIVATE mmap
-    // because mmap setup (MAP_POPULATE + HUGEPAGE) costs ~5ms for 10MB files.
-    if (stat.st_size as usize) < 32 * 1024 * 1024 {
-        return None;
-    }
-
-    use std::os::unix::io::FromRawFd;
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    // map_copy creates MAP_PRIVATE mapping — writes are COW, file untouched
-    let mmap = unsafe { memmap2::MmapOptions::new().populate().map_copy(&file) }.ok();
-    std::mem::forget(file); // Don't close stdin
-    #[cfg(target_os = "linux")]
-    if let Some(ref m) = mmap {
-        unsafe {
-            libc::madvise(
-                m.as_ptr() as *mut libc::c_void,
-                m.len(),
-                libc::MADV_SEQUENTIAL | libc::MADV_WILLNEED,
-            );
-            if m.len() >= 2 * 1024 * 1024 {
-                libc::madvise(
-                    m.as_ptr() as *mut libc::c_void,
-                    m.len(),
-                    libc::MADV_HUGEPAGE,
-                );
-            }
-        }
-    }
-    mmap
-}
-
-#[cfg(not(unix))]
-fn try_mmap_stdin_mut() -> Option<memmap2::MmapMut> {
     None
 }
 
@@ -436,38 +279,11 @@ fn main() {
             tr::expand_set2(set2_str, set1.len())
         };
 
-        // Try MAP_PRIVATE mmap first for in-place translate (avoids separate buffer
-        // allocation). With MADV_HUGEPAGE, COW faults use 2MB pages — even for 10MB
-        // files, only ~5 COW faults (~10µs). This is faster than allocating a 10MB
-        // separate output buffer (~300µs) + copying translated data into it.
-        let result = if let Some(mut mm_mut) = try_mmap_stdin_mut() {
-            // MAP_PRIVATE mmap: translate in-place, then write the mmap data.
-            // Only used for files >= 32MB where mmap setup cost is amortized.
-            // vmsplice is safe: get_user_pages() pins the COW pages, keeping them
-            // alive even after the mmap is unmapped. Pages are only freed after
-            // the pipe reader releases its references.
-            #[cfg(target_os = "linux")]
-            {
-                let mut out = VmspliceWriter::new();
-                tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut out)
-            }
-            #[cfg(all(unix, not(target_os = "linux")))]
-            {
-                tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut *raw)
-            }
-            #[cfg(not(unix))]
-            {
-                let stdout = io::stdout();
-                let mut lock = stdout.lock();
-                tr::translate_mmap_inplace(&set1, &set2, &mut mm_mut, &mut lock)
-            }
-        } else if let Some(mm) = try_mmap_stdin_with_threshold(0) {
-            // Read-only mmap + separate buffer translate (any regular file).
-            // Read-only mmap is cheap (no MAP_PRIVATE COW setup). For files < 32MB
-            // where MAP_PRIVATE mmap was skipped, this path handles them efficiently.
-            // MUST use raw write (not vmsplice) — translate_mmap_readonly calls
-            // translate_to_separate_buf which allocates a heap Vec. With vmsplice,
-            // the heap pages could be freed/reused before the pipe reader reads them.
+        // For file stdin: mmap read-only, translate to separate buffer, write once.
+        // Avoids both mmap COW faults and streaming read/write syscall overhead.
+        // For pipe stdin: streaming translate for pipeline parallelism.
+        let result = if let Some(mm) = try_mmap_stdin_with_threshold(0) {
+            // Read-only mmap for regular files: translate to separate buffer.
             #[cfg(target_os = "linux")]
             {
                 let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
@@ -484,8 +300,7 @@ fn main() {
                 tr::translate_mmap_readonly(&set1, &set2, &mm, &mut lock)
             }
         } else {
-            // Piped stdin: streaming translate for pipeline parallelism.
-            // Read chunks, translate in-place with SIMD, write immediately.
+            // Pipe: streaming translate for pipeline parallelism.
             #[cfg(target_os = "linux")]
             {
                 let mut reader = RawStdin;
@@ -517,7 +332,7 @@ fn main() {
     }
 
     // Try read-only mmap for non-translate modes (delete, squeeze, etc.)
-    let mmap = try_mmap_stdin();
+    let mmap = try_mmap_stdin_with_threshold(0);
 
     if let Some(m) = mmap {
         // File-redirected stdin: use batch path with mmap data.

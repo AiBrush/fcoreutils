@@ -345,7 +345,7 @@ fn main() {
     let data2 = read_input(&cli.files[1], tool_name);
 
     let stdout = io::stdout();
-    let mut out = BufWriter::with_capacity(256 * 1024, stdout.lock());
+    let mut out = BufWriter::with_capacity(4 * 1024 * 1024, stdout.lock());
 
     let file1_name = if cli.files[0] == "-" {
         "-"

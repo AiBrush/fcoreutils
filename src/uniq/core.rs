@@ -1,11 +1,5 @@
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
-/// Write a large contiguous buffer, retrying on partial writes.
-#[inline]
-fn write_all_raw(writer: &mut impl Write, buf: &[u8]) -> io::Result<()> {
-    writer.write_all(buf)
-}
-
 /// Write all IoSlices to the writer, handling partial writes correctly.
 fn write_all_vectored(writer: &mut impl Write, slices: &[io::IoSlice<'_>]) -> io::Result<()> {
     let n = writer.write_vectored(slices)?;
@@ -146,17 +140,10 @@ fn lines_equal(a: &[u8], b: &[u8], config: &UniqConfig) -> bool {
     }
 }
 
-/// Fast case-insensitive comparison: no field/char extraction, just case-insensitive.
-/// Uses length check + 8-byte prefix rejection before full comparison.
+/// Case-insensitive comparison of two byte slices.
+/// Uses the standard library's correct per-byte ASCII case folding.
 #[inline(always)]
 fn lines_equal_case_insensitive(a: &[u8], b: &[u8]) -> bool {
-    let alen = a.len();
-    if alen != b.len() {
-        return false;
-    }
-    if alen == 0 {
-        return true;
-    }
     a.eq_ignore_ascii_case(b)
 }
 
@@ -710,7 +697,7 @@ fn process_standard_bytes(
         // Write first line
         let first_full = line_full_at(data, &line_starts, 0);
         let first_content = line_content_at(data, &line_starts, 0, content_end);
-        write_all_raw(writer, first_full)?;
+        writer.write_all(first_full)?;
         if first_full.len() == first_content.len() {
             writer.write_all(&[term])?;
         }
@@ -730,7 +717,7 @@ fn process_standard_bytes(
 
             // Unique line — write it
             let cur_full = line_full_at(data, &line_starts, i);
-            write_all_raw(writer, cur_full)?;
+            writer.write_all(cur_full)?;
             if cur_full.len() == cur.len() {
                 writer.write_all(&[term])?;
             }
@@ -1604,8 +1591,7 @@ fn format_count_prefix_into(count: u64, buf: &mut [u8]) -> usize {
 }
 
 /// Fast single-pass for case-insensitive (-i) default mode.
-/// Uses run-tracking zero-copy output and write_vectored batching.
-/// Includes speculative line-end detection and length-based early rejection.
+/// Uses u64 SWAR prefix caching, IoSlice batching, and speculative line-end detection.
 fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8) -> io::Result<()> {
     let data_len = data.len();
     let base = data.as_ptr();
@@ -1620,11 +1606,18 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
 
     let mut prev_start: usize = 0;
     let mut prev_len = first_end;
+    // Cache case-folded 8-byte prefix (clear bit 5 → uppercase) for fast rejection
+    let mut prev_prefix_upper: u64 = if prev_len >= 8 {
+        unsafe { (base.add(prev_start) as *const u64).read_unaligned() & 0xDFDFDFDFDFDFDFDFu64 }
+    } else {
+        0
+    };
 
-    // Run-tracking: flush contiguous regions from the original data.
+    // Run-tracking with IoSlice batching (mirrors process_default_sequential)
+    const BATCH: usize = 256;
+    let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(BATCH);
     let mut run_start: usize = 0;
     let mut cur_start = first_end + 1;
-    let mut _last_output_end = first_end + 1;
 
     while cur_start < data_len {
         // Speculative line-end detection
@@ -1644,18 +1637,39 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
 
         let cur_len = cur_end - cur_start;
 
-        // Length-based early rejection before expensive case-insensitive compare
-        let is_dup = cur_len == prev_len
-            && unsafe {
+        // Fast multi-level rejection: length → 8-byte prefix (upper-cased) → full CI compare
+        let is_dup = if cur_len != prev_len {
+            false
+        } else if cur_len == 0 {
+            true
+        } else if cur_len >= 8 {
+            let cur_prefix = unsafe { (base.add(cur_start) as *const u64).read_unaligned() };
+            let cur_prefix_upper = cur_prefix & 0xDFDFDFDFDFDFDFDFu64;
+            if cur_prefix_upper != prev_prefix_upper {
+                false
+            } else {
+                unsafe {
+                    let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
+                    let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
+                    lines_equal_case_insensitive(a, b)
+                }
+            }
+        } else {
+            unsafe {
                 let a = std::slice::from_raw_parts(base.add(prev_start), prev_len);
                 let b = std::slice::from_raw_parts(base.add(cur_start), cur_len);
-                a.eq_ignore_ascii_case(b)
-            };
+                lines_equal_case_insensitive(a, b)
+            }
+        };
 
         if is_dup {
-            // Duplicate — flush current run up to this line, skip it
+            // Duplicate — save current run, skip the duplicate line
             if run_start < cur_start {
-                writer.write_all(&data[run_start..cur_start])?;
+                slices.push(io::IoSlice::new(&data[run_start..cur_start]));
+                if slices.len() >= BATCH {
+                    write_all_vectored(writer, &slices)?;
+                    slices.clear();
+                }
             }
             run_start = if cur_end < data_len {
                 cur_end + 1
@@ -1665,10 +1679,12 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
         } else {
             prev_start = cur_start;
             prev_len = cur_len;
-            _last_output_end = if cur_end < data_len {
-                cur_end + 1
+            prev_prefix_upper = if cur_len >= 8 {
+                unsafe {
+                    (base.add(cur_start) as *const u64).read_unaligned() & 0xDFDFDFDFDFDFDFDFu64
+                }
             } else {
-                cur_end
+                0
             };
         }
 
@@ -1681,11 +1697,15 @@ fn process_default_ci_singlepass(data: &[u8], writer: &mut impl Write, term: u8)
 
     // Flush remaining run
     if run_start < data_len {
-        writer.write_all(&data[run_start..data_len])?;
+        slices.push(io::IoSlice::new(&data[run_start..data_len]));
     }
     // Ensure trailing terminator
     if !data.is_empty() && data[data_len - 1] != term {
-        writer.write_all(&[term])?;
+        let term_byte: [u8; 1] = [term];
+        slices.push(io::IoSlice::new(&term_byte));
+        write_all_vectored(writer, &slices)?;
+    } else if !slices.is_empty() {
+        write_all_vectored(writer, &slices)?;
     }
 
     Ok(())

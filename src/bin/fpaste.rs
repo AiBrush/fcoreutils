@@ -135,6 +135,36 @@ fn main() {
     // Count stdin occurrences
     let stdin_count = files.iter().filter(|f| *f == "-").count();
 
+    // Fast path: all args are stdin (e.g., `paste - -` or `paste - - -`).
+    // Skip read → distribute → paste pipeline. Instead, read stdin once and
+    // directly interleave lines into the output, avoiding intermediate copies.
+    if stdin_count == files.len()
+        && stdin_count > 1
+        && !cli.config.serial
+        && cli.config.delimiters.len() == 1
+    {
+        let stdin_data = match read_stdin() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("paste: standard input: {}", io_error_msg(&e));
+                process::exit(1);
+            }
+        };
+        if let Err(e) = paste_stdin_interleave(
+            &stdin_data,
+            stdin_count,
+            cli.config.delimiters[0],
+            terminator,
+        ) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                process::exit(0);
+            }
+            eprintln!("paste: write error: {}", io_error_msg(&e));
+            process::exit(1);
+        }
+        process::exit(0);
+    }
+
     // Read stdin once if needed
     let stdin_raw: Vec<u8> = if stdin_count > 0 {
         match read_stdin() {
@@ -187,8 +217,7 @@ fn main() {
     // Build reference slices
     let data_refs: Vec<&[u8]> = file_data.iter().map(|d| &**d).collect();
 
-    // Pre-split lines with SIMD memchr_iter, then stream output in 1MB chunks
-    // via raw fd writes. Single-file passthrough is handled inside paste_stream.
+    // Stream output in 1MB chunks via raw fd writes.
     if let Err(e) = paste::paste_stream(&data_refs, &cli.config) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
             process::exit(0);
@@ -202,22 +231,154 @@ fn main() {
     }
 }
 
+/// Direct stdin interleave: read once, group N consecutive lines, output with delimiters.
+/// Avoids the read → distribute → paste pipeline that copies data 3 times.
+/// For `paste - -`: pairs consecutive lines with a delimiter between them.
+fn paste_stdin_interleave(
+    data: &[u8],
+    count: usize,
+    delim: u8,
+    terminator: u8,
+) -> std::io::Result<()> {
+    use coreutils_rs::paste::raw_write_all as raw_write_stdout;
+
+    const BUF_CAP: usize = 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP + 65536);
+    let mut pos: usize = 0;
+    let mut cursor: usize = 0;
+    let mut col: usize = 0;
+
+    while cursor < data.len() {
+        // Find the next newline
+        let remaining = &data[cursor..];
+        let (line_len, next_cursor) = if let Some(nl) = memchr::memchr(terminator, remaining) {
+            (nl, cursor + nl + 1)
+        } else {
+            (remaining.len(), data.len())
+        };
+
+        // Write delimiter before columns 1..N
+        if col > 0 {
+            if pos >= buf.capacity() {
+                unsafe { buf.set_len(pos) };
+                raw_write_stdout(&buf)?;
+                buf.clear();
+                pos = 0;
+            }
+            unsafe { *buf.as_mut_ptr().add(pos) = delim };
+            pos += 1;
+        }
+
+        // Copy line content
+        if line_len > 0 {
+            if pos + line_len > buf.capacity() {
+                unsafe { buf.set_len(pos) };
+                raw_write_stdout(&buf)?;
+                buf.clear();
+                pos = 0;
+                if line_len > buf.capacity() {
+                    buf.reserve(line_len + 4096);
+                }
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(cursor),
+                    buf.as_mut_ptr().add(pos),
+                    line_len,
+                );
+            }
+            pos += line_len;
+        }
+
+        col += 1;
+        if col >= count {
+            // End of this output line
+            if pos >= buf.capacity() {
+                unsafe { buf.set_len(pos) };
+                raw_write_stdout(&buf)?;
+                buf.clear();
+                pos = 0;
+            }
+            unsafe { *buf.as_mut_ptr().add(pos) = terminator };
+            pos += 1;
+            col = 0;
+
+            if pos >= BUF_CAP {
+                unsafe { buf.set_len(pos) };
+                raw_write_stdout(&buf)?;
+                buf.clear();
+                pos = 0;
+            }
+        }
+
+        cursor = next_cursor;
+    }
+
+    // Handle incomplete final group (fewer than `count` lines remaining)
+    if col > 0 {
+        // Fill remaining columns with empty + delimiter
+        while col < count {
+            if pos + 2 > buf.capacity() {
+                unsafe { buf.set_len(pos) };
+                raw_write_stdout(&buf)?;
+                buf.clear();
+                pos = 0;
+            }
+            // Write delimiter for this column, then empty content
+            // (only write delimiter, content is empty)
+            // Actually: for cols > 0, delimiter was already written before
+            // For the remaining empty columns after the last line, we need delimiters
+            unsafe { *buf.as_mut_ptr().add(pos) = delim };
+            pos += 1;
+            col += 1;
+        }
+        if pos >= buf.capacity() {
+            unsafe { buf.set_len(pos) };
+            raw_write_stdout(&buf)?;
+            buf.clear();
+            pos = 0;
+        }
+        unsafe { *buf.as_mut_ptr().add(pos) = terminator };
+        pos += 1;
+    }
+
+    // Final flush
+    if pos > 0 {
+        unsafe { buf.set_len(pos) };
+        raw_write_stdout(&buf)?;
+    }
+
+    Ok(())
+}
+
 /// Distribute stdin lines round-robin among multiple stdin arguments.
 /// This matches GNU paste behavior where `paste - -` reads alternating lines from stdin.
 fn distribute_stdin_lines(data: &[u8], count: usize, terminator: u8) -> Vec<Vec<u8>> {
-    let mut parts = vec![Vec::new(); count];
+    // First pass: count bytes per target to pre-allocate exact sizes.
+    let mut sizes = vec![0usize; count];
     let mut start = 0;
     let mut line_idx = 0;
     for pos in memchr::memchr_iter(terminator, data) {
-        let target = line_idx % count;
-        parts[target].extend_from_slice(&data[start..=pos]);
+        sizes[line_idx % count] += pos + 1 - start; // include terminator
         start = pos + 1;
         line_idx += 1;
     }
-    // Handle last line without terminator
     if start < data.len() {
-        let target = line_idx % count;
-        parts[target].extend_from_slice(&data[start..]);
+        sizes[line_idx % count] += data.len() - start;
+    }
+
+    let mut parts: Vec<Vec<u8>> = sizes.iter().map(|&s| Vec::with_capacity(s)).collect();
+
+    // Second pass: distribute lines into pre-allocated buffers (no reallocation).
+    start = 0;
+    line_idx = 0;
+    for pos in memchr::memchr_iter(terminator, data) {
+        parts[line_idx % count].extend_from_slice(&data[start..=pos]);
+        start = pos + 1;
+        line_idx += 1;
+    }
+    if start < data.len() {
+        parts[line_idx % count].extend_from_slice(&data[start..]);
     }
     parts
 }

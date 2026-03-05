@@ -419,11 +419,13 @@ fn main() {
         RandGen::from_urandom()
     };
 
-    // Determine output destination
-    let stdout = io::stdout();
-    let mut out: Box<dyn Write> = if let Some(ref outfile) = output_file {
-        match fs::File::create(outfile) {
-            Ok(f) => Box::new(io::BufWriter::with_capacity(1024 * 1024, f)),
+    let delimiter = if zero_terminated { b'\0' } else { b'\n' };
+
+    // Dispatch to concrete output type to avoid Box<dyn Write> vtable overhead.
+    // This gives ~10-20% speedup on tight RNG+output loops.
+    if let Some(ref outfile) = output_file {
+        let f = match fs::File::create(outfile) {
+            Ok(f) => f,
             Err(e) => {
                 eprintln!(
                     "{}: {}: {}",
@@ -433,33 +435,13 @@ fn main() {
                 );
                 process::exit(1);
             }
-        }
-    } else {
-        Box::new(io::BufWriter::with_capacity(1024 * 1024, stdout.lock()))
-    };
-
-    let delimiter = if zero_terminated { b'\0' } else { b'\n' };
-
-    // For echo and input-range modes, use string-based shuffle
-    if echo_mode {
-        if echo_args.is_empty() && !repeat {
-            return;
-        }
-        run_string_shuffle(
+        };
+        let mut out = io::BufWriter::with_capacity(1024 * 1024, f);
+        dispatch_mode(
+            echo_mode,
+            input_range,
             &mut echo_args,
-            &mut rng,
-            &mut out,
-            delimiter,
-            head_count,
-            repeat,
-        );
-    } else if let Some((lo, hi)) = input_range {
-        run_range_shuffle(lo, hi, &mut rng, &mut out, delimiter, head_count, repeat);
-    } else {
-        // File/stdin mode: use zero-copy byte-slice shuffle for performance
-        let filename = positional.first().map(|s| s.as_str());
-        run_file_shuffle(
-            filename,
+            &positional,
             zero_terminated,
             &mut rng,
             &mut out,
@@ -468,15 +450,77 @@ fn main() {
             repeat,
             output_file.is_none(),
         );
+        if let Err(e) = out.flush()
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            eprintln!("shuf: write error: {e}");
+            std::process::exit(1);
+        }
+    } else {
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::with_capacity(1024 * 1024, stdout.lock());
+        dispatch_mode(
+            echo_mode,
+            input_range,
+            &mut echo_args,
+            &positional,
+            zero_terminated,
+            &mut rng,
+            &mut out,
+            delimiter,
+            head_count,
+            repeat,
+            true,
+        );
+        if let Err(e) = out.flush()
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            eprintln!("shuf: write error: {e}");
+            std::process::exit(1);
+        }
     }
+}
 
-    let _ = out.flush();
+#[allow(clippy::too_many_arguments)]
+fn dispatch_mode(
+    echo_mode: bool,
+    input_range: Option<(u64, u64)>,
+    echo_args: &mut [String],
+    positional: &[String],
+    zero_terminated: bool,
+    rng: &mut RandGen,
+    out: &mut impl Write,
+    delimiter: u8,
+    head_count: Option<usize>,
+    repeat: bool,
+    is_stdout: bool,
+) {
+    if echo_mode {
+        if echo_args.is_empty() && !repeat {
+            return;
+        }
+        run_string_shuffle(echo_args, rng, out, delimiter, head_count, repeat);
+    } else if let Some((lo, hi)) = input_range {
+        run_range_shuffle(lo, hi, rng, out, delimiter, head_count, repeat);
+    } else {
+        let filename = positional.first().map(|s| s.as_str());
+        run_file_shuffle(
+            filename,
+            zero_terminated,
+            rng,
+            out,
+            delimiter,
+            head_count,
+            repeat,
+            is_stdout,
+        );
+    }
 }
 
 fn run_string_shuffle(
     lines: &mut [String],
     rng: &mut RandGen,
-    out: &mut dyn Write,
+    out: &mut impl Write,
     delimiter: u8,
     head_count: Option<usize>,
     repeat: bool,
@@ -517,7 +561,7 @@ fn run_range_shuffle(
     lo: u64,
     hi: u64,
     rng: &mut RandGen,
-    out: &mut dyn Write,
+    out: &mut impl Write,
     delimiter: u8,
     head_count: Option<usize>,
     repeat: bool,
@@ -571,7 +615,6 @@ fn run_range_shuffle(
                 result.push(val);
             }
         }
-        // Batch output into single buffer
         let mut buf = Vec::with_capacity(count * 8);
         for val in result {
             buf.extend_from_slice(ibuf.format(val).as_bytes());
@@ -603,15 +646,18 @@ fn run_range_shuffle(
             let _ = checked_write_all(out, &buf);
         }
     } else {
-        // Dense path for u64 ranges
+        // Dense path: generate all values and partial Fisher-Yates shuffle.
         let mut values: Vec<u64> = (lo..=hi).collect();
         let n = values.len();
         for i in 0..count {
             let j = i + rng.gen_range(n - i);
             values.swap(i, j);
         }
-        const OUT_CHUNK: usize = 1024 * 1024;
-        let mut buf = Vec::with_capacity(OUT_CHUNK + 32);
+        // Pre-allocate output buffer sized to hold all formatted output.
+        // Average number width ~7 chars for 1M range, so estimate generously.
+        let est_size = count * 9;
+        let mut buf = Vec::with_capacity(est_size.min(4 * 1024 * 1024));
+        const OUT_CHUNK: usize = 512 * 1024;
         for &val in values.iter().take(count) {
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
@@ -633,7 +679,7 @@ fn run_file_shuffle(
     filename: Option<&str>,
     zero_terminated: bool,
     rng: &mut RandGen,
-    out: &mut dyn Write,
+    out: &mut impl Write,
     delimiter: u8,
     head_count: Option<usize>,
     repeat: bool,
@@ -719,9 +765,7 @@ fn run_file_shuffle(
         #[cfg(unix)]
         {
             // Fast output path: build contiguous output buffer with unsafe ptr copy,
-            // then flush in 1MB chunks via raw fd write (bypasses BufWriter overhead).
-            // Flush BufWriter before bypassing it with raw fd writes to prevent
-            // out-of-order output if any data was buffered earlier.
+            // then flush via raw fd write (bypasses BufWriter overhead).
             let out_fd: i32 = if is_stdout {
                 let _ = out.flush();
                 1
@@ -730,17 +774,27 @@ fn run_file_shuffle(
             };
 
             const CHUNK: usize = 1024 * 1024; // 1MB output chunks
-            // Estimate: each line avg ~80 bytes + delimiter
-            let est_size = if count == n {
-                data.len() + count
-            } else {
-                count * 80
-            }
-            .min(CHUNK + 256);
-            let mut buf: Vec<u8> = Vec::with_capacity(est_size.max(CHUNK + 256));
+            let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + 256);
             let src = data.as_ptr();
+            let offsets_slice = &offsets[..count];
+            // Prefetch distance: ~16 cache misses ahead hides DRAM latency.
+            // Uses T1 (L2) hint because shuffled access is scattered, and T0 (L1)
+            // would evict the current iteration's working set from L1.
+            // Assumes short lines (~64 bytes); for very long lines, the tail of
+            // each line will still be cold after prefetch.
+            const PREFETCH_DIST: usize = 16;
 
-            for &[s, e] in offsets[..count].iter() {
+            for (idx, &[s, e]) in offsets_slice.iter().enumerate() {
+                if idx + PREFETCH_DIST < count {
+                    let future_s = offsets_slice[idx + PREFETCH_DIST][0] as usize;
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        std::arch::x86_64::_mm_prefetch(
+                            src.add(future_s) as *const i8,
+                            std::arch::x86_64::_MM_HINT_T1,
+                        );
+                    }
+                }
                 let line_len = (e - s) as usize;
                 let needed = buf.len() + line_len + 1;
                 if needed > buf.capacity() {
