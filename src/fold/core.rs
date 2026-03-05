@@ -56,6 +56,9 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
     const BUF_CAP: usize = 1024 * 1024 + 4096;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP);
     let base = buf.as_mut_ptr();
+    // SAFETY: `base` stays valid across `buf.clear()` calls because clear()
+    // retains the allocation. We never push/extend through the Vec API, so no
+    // reallocation occurs; `wp < BUF_CAP` is maintained before every write.
     let src = data.as_ptr();
     let mut wp: usize = 0;
     let mut seg_start = 0usize;

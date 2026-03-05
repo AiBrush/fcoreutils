@@ -56,8 +56,9 @@ fn main() {
     let mut config = who::WhoConfig::default();
     let mut positional: Vec<String> = Vec::new();
 
-    for arg in std::env::args().skip(1) {
-        match arg.as_str() {
+    for arg in std::env::args_os().skip(1) {
+        let arg = arg.to_string_lossy();
+        match arg.as_ref() {
             "--help" => {
                 print_help();
                 return;
@@ -111,7 +112,7 @@ fn main() {
                     }
                 }
             }
-            _ => positional.push(arg),
+            _ => positional.push(arg.into_owned()),
         }
     }
 
