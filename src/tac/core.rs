@@ -375,123 +375,89 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// After-separator mode: zero-copy writev from source data in reverse order.
-/// Avoids allocating a full output buffer by using IoSlice directly into mmap'd data.
+/// After-separator mode: backward memrchr scan + 1MB write buffer.
+/// Eliminates the positions Vec allocation (~8MB for 1M lines) and writev
+/// overhead, replacing them with a single backward scan and buffered writes.
 #[cfg(unix)]
 fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
-    // Forward SIMD scan: collect all separator positions
-    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
-    for pos in memchr::memchr_iter(sep, data) {
-        positions.push(pos);
-    }
+    const BUF_CAP: usize = 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP);
+    let mut end = data.len();
 
-    if positions.is_empty() {
-        return write_all_fd(fd, data);
-    }
+    while end > 0 {
+        // In after mode, separator ends a record. Skip trailing separator
+        // to find the PREVIOUS one, which marks the boundary.
+        let search_end = if data[end - 1] == sep { end - 1 } else { end };
 
-    // Build IoSlice entries pointing into source data in reverse record order.
-    // This is zero-copy: no output buffer allocation needed.
-    let n_records = positions.len() + 1; // last record after last separator + possible first record
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(n_records.min(IOSLICE_BATCH_SIZE));
-    let mut end_pos = data.len();
-
-    for &sep_pos in positions.iter().rev() {
-        let rec_start = sep_pos + 1;
-        if rec_start < end_pos {
-            slices.push(IoSlice::new(&data[rec_start..end_pos]));
-            if slices.len() >= IOSLICE_BATCH_SIZE {
-                writev_all(fd, &slices)?;
-                slices.clear();
+        let (rec_start, done) = if search_end == 0 {
+            (0, true)
+        } else {
+            match memchr::memrchr(sep, &data[..search_end]) {
+                Some(pos) => (pos + 1, false),
+                None => (0, true),
             }
+        };
+
+        let record = &data[rec_start..end];
+        if buf.len() + record.len() > BUF_CAP && !buf.is_empty() {
+            write_all_fd(fd, &buf)?;
+            buf.clear();
         }
-        end_pos = rec_start;
+        if record.len() > BUF_CAP {
+            write_all_fd(fd, record)?;
+        } else {
+            buf.extend_from_slice(record);
+        }
+
+        if done {
+            break;
+        }
+        end = rec_start;
     }
-    // First record (before first separator)
-    if end_pos > 0 {
-        slices.push(IoSlice::new(&data[..end_pos]));
-    }
-    if !slices.is_empty() {
-        writev_all(fd, &slices)?;
+
+    if !buf.is_empty() {
+        write_all_fd(fd, &buf)?;
     }
     Ok(())
 }
 
-/// Write all IoSlice entries via writev, handling partial writes.
-#[cfg(unix)]
-fn writev_all(fd: i32, slices: &[IoSlice<'_>]) -> io::Result<()> {
-    // IOV_MAX: Linux=1024, macOS=1024, POSIX minimum=16.
-    // Use libc::IOV_MAX when available, fallback to conservative POSIX minimum.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const MAX_IOV: usize = 1024;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    const MAX_IOV: usize = 16; // POSIX _XOPEN_IOV_MAX
-
-    let mut slice_idx = 0;
-    while slice_idx < slices.len() {
-        let remaining = &slices[slice_idx..];
-        let n_vecs = remaining.len().min(MAX_IOV) as i32;
-        let ret = unsafe { libc::writev(fd, remaining.as_ptr() as *const libc::iovec, n_vecs) };
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        } else if ret == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "writev returned 0",
-            ));
-        }
-        let mut written = ret as usize;
-        // Advance past fully written slices
-        while slice_idx < slices.len() && written > 0 {
-            let slice_len = slices[slice_idx].len();
-            if written >= slice_len {
-                written -= slice_len;
-                slice_idx += 1;
-            } else {
-                // Partial write within a slice — write remainder via write_all_fd
-                write_all_fd(fd, &slices[slice_idx][written..])?;
-                slice_idx += 1;
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Before-separator mode: zero-copy writev from source data in reverse order.
+/// Before-separator mode: backward memrchr scan + 1MB write buffer.
 #[cfg(unix)]
 fn tac_bytes_before_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
-    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
-    for pos in memchr::memchr_iter(sep, data) {
-        positions.push(pos);
-    }
+    const BUF_CAP: usize = 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP);
+    let mut end = data.len();
 
-    if positions.is_empty() {
-        return write_all_fd(fd, data);
-    }
+    while end > 0 {
+        // In before mode, separator starts a record. Find rightmost separator.
+        let (rec_start, done) = match memchr::memrchr(sep, &data[..end]) {
+            Some(pos) => (pos, false),
+            None => (0, true),
+        };
 
-    let n_records = positions.len() + 1;
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(n_records.min(IOSLICE_BATCH_SIZE));
-    let mut end_pos = data.len();
-
-    for &sep_pos in positions.iter().rev() {
-        if sep_pos < end_pos {
-            slices.push(IoSlice::new(&data[sep_pos..end_pos]));
-            if slices.len() >= IOSLICE_BATCH_SIZE {
-                writev_all(fd, &slices)?;
-                slices.clear();
-            }
+        let record = if done {
+            &data[..end]
+        } else {
+            &data[rec_start..end]
+        };
+        if buf.len() + record.len() > BUF_CAP && !buf.is_empty() {
+            write_all_fd(fd, &buf)?;
+            buf.clear();
         }
-        end_pos = sep_pos;
+        if record.len() > BUF_CAP {
+            write_all_fd(fd, record)?;
+        } else {
+            buf.extend_from_slice(record);
+        }
+
+        if done {
+            break;
+        }
+        end = rec_start;
     }
-    if end_pos > 0 {
-        slices.push(IoSlice::new(&data[..end_pos]));
-    }
-    if !slices.is_empty() {
-        writev_all(fd, &slices)?;
+
+    if !buf.is_empty() {
+        write_all_fd(fd, &buf)?;
     }
     Ok(())
 }
