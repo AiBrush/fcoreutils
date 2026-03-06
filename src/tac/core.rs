@@ -26,21 +26,54 @@ pub fn tac_bytes_to_fd(data: &[u8], separator: u8, before: bool, fd: i32) -> io:
     }
     // u32 positions for ≤4GB (halves position array cache footprint)
     if data.len() <= u32::MAX as usize {
-        return tac_bytes_to_fd_u32(data, separator, before, fd);
+        return tac_bytes_to_fd_generic::<u32>(data, separator, before, fd);
     }
     // >4GB fallback
-    tac_bytes_to_fd_usize(data, separator, before, fd)
+    tac_bytes_to_fd_generic::<usize>(data, separator, before, fd)
 }
 
-/// Contiguous buffer approach for files ≤4GB.
-/// SIMD memchr scan → u32 positions → reverse iterate → extend_from_slice into
+/// Trait for position types used in tac reverse iteration.
+/// Allows `u32` (for ≤4GB, halves cache pressure) and `usize` (for >4GB).
+trait TacPos: Copy {
+    fn from_usize(v: usize) -> Self;
+    fn as_usize(self) -> usize;
+}
+impl TacPos for u32 {
+    #[inline(always)]
+    fn from_usize(v: usize) -> Self {
+        v as u32
+    }
+    #[inline(always)]
+    fn as_usize(self) -> usize {
+        self as usize
+    }
+}
+impl TacPos for usize {
+    #[inline(always)]
+    fn from_usize(v: usize) -> Self {
+        v
+    }
+    #[inline(always)]
+    fn as_usize(self) -> usize {
+        self
+    }
+}
+
+/// Generic contiguous-buffer reverse implementation. Parameterized over the
+/// position type (`u32` for ≤4GB to halve cache pressure, `usize` for >4GB).
+/// SIMD memchr scan → position vec → reverse iterate → extend_from_slice into
 /// 2MB buffer → write_all_fd. For a 10MB file with ~250K lines this produces
 /// ~5 write() syscalls vs ~244 writev() calls in the old approach.
 #[cfg(unix)]
-fn tac_bytes_to_fd_u32(data: &[u8], sep: u8, before: bool, fd: i32) -> io::Result<()> {
-    let mut positions: Vec<u32> = Vec::with_capacity(data.len() / 40 + 64);
+fn tac_bytes_to_fd_generic<P: TacPos>(
+    data: &[u8],
+    sep: u8,
+    before: bool,
+    fd: i32,
+) -> io::Result<()> {
+    let mut positions: Vec<P> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
-        positions.push(pos as u32);
+        positions.push(P::from_usize(pos));
     }
     if positions.is_empty() {
         return write_all_fd(fd, data);
@@ -53,7 +86,7 @@ fn tac_bytes_to_fd_u32(data: &[u8], sep: u8, before: bool, fd: i32) -> io::Resul
 
     if !before {
         for &pos in positions.iter().rev() {
-            let rec_start = pos as usize + 1;
+            let rec_start = pos.as_usize() + 1;
             if rec_start < end_pos {
                 buf.extend_from_slice(&data[rec_start..end_pos]);
                 if buf.len() >= FLUSH_SIZE {
@@ -65,7 +98,7 @@ fn tac_bytes_to_fd_u32(data: &[u8], sep: u8, before: bool, fd: i32) -> io::Resul
         }
     } else {
         for &pos in positions.iter().rev() {
-            let p = pos as usize;
+            let p = pos.as_usize();
             if p < end_pos {
                 buf.extend_from_slice(&data[p..end_pos]);
                 if buf.len() >= FLUSH_SIZE {
@@ -74,54 +107,6 @@ fn tac_bytes_to_fd_u32(data: &[u8], sep: u8, before: bool, fd: i32) -> io::Resul
                 }
             }
             end_pos = p;
-        }
-    }
-    if end_pos > 0 {
-        buf.extend_from_slice(&data[..end_pos]);
-    }
-    if !buf.is_empty() {
-        write_all_fd(fd, &buf)?;
-    }
-    Ok(())
-}
-
-/// Contiguous buffer approach for files >4GB (uses usize positions).
-#[cfg(unix)]
-fn tac_bytes_to_fd_usize(data: &[u8], sep: u8, before: bool, fd: i32) -> io::Result<()> {
-    let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
-    for pos in memchr::memchr_iter(sep, data) {
-        positions.push(pos);
-    }
-    if positions.is_empty() {
-        return write_all_fd(fd, data);
-    }
-
-    const FLUSH_SIZE: usize = 2 * 1024 * 1024;
-    let mut buf: Vec<u8> = Vec::with_capacity(FLUSH_SIZE + 256 * 1024);
-    let mut end_pos = data.len();
-
-    if !before {
-        for &pos in positions.iter().rev() {
-            let rec_start = pos + 1;
-            if rec_start < end_pos {
-                buf.extend_from_slice(&data[rec_start..end_pos]);
-                if buf.len() >= FLUSH_SIZE {
-                    write_all_fd(fd, &buf)?;
-                    buf.clear();
-                }
-            }
-            end_pos = rec_start;
-        }
-    } else {
-        for &pos in positions.iter().rev() {
-            if pos < end_pos {
-                buf.extend_from_slice(&data[pos..end_pos]);
-                if buf.len() >= FLUSH_SIZE {
-                    write_all_fd(fd, &buf)?;
-                    buf.clear();
-                }
-            }
-            end_pos = pos;
         }
     }
     if end_pos > 0 {

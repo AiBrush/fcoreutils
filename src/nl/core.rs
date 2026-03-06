@@ -439,7 +439,7 @@ fn nl_number_all_stream(
     let data_ptr = data.as_ptr();
 
     // Use fixed-size array for prefix (avoid heap indirection)
-    let mut prefix_buf = [0u8; 32];
+    let mut prefix_buf = [0u8; 64];
     let mut prefix_len: usize;
     let mut num_end: usize;
 
@@ -653,7 +653,7 @@ fn nl_number_nonempty_stream(
     let mut write_pos: usize = 0;
     let data_ptr = data.as_ptr();
 
-    let mut prefix_buf = [0u8; 32];
+    let mut prefix_buf = [0u8; 64];
     let mut prefix_len: usize;
     let mut num_end: usize;
     let mut num_buf = itoa::Buffer::new();
@@ -888,7 +888,7 @@ fn nl_number_pattern_stream(
     let mut write_pos: usize = 0;
     let data_ptr = data.as_ptr();
 
-    let mut prefix_buf = [0u8; 32];
+    let mut prefix_buf = [0u8; 64];
     let mut prefix_len: usize;
     let mut num_end: usize;
     let mut num_buf = itoa::Buffer::new();
