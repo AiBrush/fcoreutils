@@ -23,11 +23,7 @@ pub fn tac_bytes_to_fd(data: &[u8], separator: u8, before: bool, fd: i32) -> io:
     if data.is_empty() {
         return Ok(());
     }
-    if !before {
-        tac_bytes_after_fd(data, separator, fd)
-    } else {
-        tac_bytes_before_fd(data, separator, fd)
-    }
+    tac_bytes_fd_impl(data, separator, fd, before)
 }
 
 /// Reverse records of an owned Vec. Delegates to tac_bytes.
@@ -70,7 +66,11 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
                 out.write_all(&buf)?;
                 buf.clear();
             }
-            buf.extend_from_slice(record);
+            if record.len() > BUF_SIZE {
+                out.write_all(record)?;
+            } else {
+                buf.extend_from_slice(record);
+            }
         }
         end_pos = rec_start;
     }
@@ -80,7 +80,11 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
             out.write_all(&buf)?;
             buf.clear();
         }
-        buf.extend_from_slice(record);
+        if record.len() > BUF_SIZE {
+            out.write_all(record)?;
+        } else {
+            buf.extend_from_slice(record);
+        }
     }
     if !buf.is_empty() {
         out.write_all(&buf)?;
@@ -107,7 +111,11 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
                 out.write_all(&buf)?;
                 buf.clear();
             }
-            buf.extend_from_slice(record);
+            if record.len() > BUF_SIZE {
+                out.write_all(record)?;
+            } else {
+                buf.extend_from_slice(record);
+            }
         }
         end_pos = pos;
     }
@@ -117,7 +125,11 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
             out.write_all(&buf)?;
             buf.clear();
         }
-        buf.extend_from_slice(record);
+        if record.len() > BUF_SIZE {
+            out.write_all(record)?;
+        } else {
+            buf.extend_from_slice(record);
+        }
     }
     if !buf.is_empty() {
         out.write_all(&buf)?;
@@ -164,6 +176,9 @@ fn writev_all_fd(fd: i32, iovecs: &mut Vec<libc::iovec>) -> io::Result<()> {
     let mut partial_off: usize = 0;
     while idx < iovecs.len() {
         if partial_off > 0 {
+            // Safety: partial_off < iovecs[idx].iov_len (set only when n < iov_len
+            // in the accounting loop above), so the advance stays within the
+            // original slice. The pointer derives from a live mmap/slice region.
             iovecs[idx].iov_base =
                 unsafe { (iovecs[idx].iov_base as *const u8).add(partial_off) } as *mut _;
             iovecs[idx].iov_len -= partial_off;
@@ -201,22 +216,31 @@ fn writev_all_fd(fd: i32, iovecs: &mut Vec<libc::iovec>) -> io::Result<()> {
     Ok(())
 }
 
-/// After-separator: chunked forward SIMD scan + writev zero-copy from source buffer.
+/// Chunked forward SIMD scan + writev zero-copy from source buffer.
 ///
 /// Processes data in ~1MB chunks (aligned to separator boundaries) to keep the
 /// positions Vec in L2 cache. Records are written directly from the source buffer
 /// via writev, eliminating all data copying. Reuses positions and iovecs Vecs
 /// across chunks.
+///
+/// When `before` is false (after-separator mode), record boundaries are at sep+1.
+/// When `before` is true, record boundaries are at the separator position itself.
 #[cfg(unix)]
-fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
+fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<()> {
     const CHUNK_SIZE: usize = 1024 * 1024;
     const BATCH: usize = 1024;
+
+    /// Given a separator position, return the record start (after-mode: pos+1, before-mode: pos).
+    #[inline(always)]
+    fn rec_start(pos: usize, before: bool) -> usize {
+        if before { pos } else { pos + 1 }
+    }
 
     // For small data, single-pass is optimal
     if data.len() <= CHUNK_SIZE {
         let mut positions: Vec<u32> = Vec::with_capacity(data.len() / 40 + 64);
         for pos in memchr::memchr_iter(sep, data) {
-            positions.push(pos as u32);
+            positions.push(pos as u32); // safe: CHUNK_SIZE (1MB) fits in u32
         }
         if positions.is_empty() {
             return write_all_fd(fd, data);
@@ -224,17 +248,17 @@ fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
         let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(BATCH);
         let mut end_pos = data.len();
         for &pos in positions.iter().rev() {
-            let rec_start = pos as usize + 1;
-            if rec_start < end_pos {
+            let rs = rec_start(pos as usize, before);
+            if rs < end_pos {
                 iovecs.push(libc::iovec {
-                    iov_base: data[rec_start..].as_ptr() as *mut libc::c_void,
-                    iov_len: end_pos - rec_start,
+                    iov_base: data[rs..].as_ptr() as *mut libc::c_void,
+                    iov_len: end_pos - rs,
                 });
                 if iovecs.len() >= BATCH {
                     writev_all_fd(fd, &mut iovecs)?;
                 }
             }
-            end_pos = rec_start;
+            end_pos = rs;
         }
         if end_pos > 0 {
             iovecs.push(libc::iovec {
@@ -248,14 +272,17 @@ fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
         return Ok(());
     }
 
-    // Large data: find chunk boundaries at separator positions
+    // Large data: find chunk boundaries at separator positions.
+    // Use memrchr to find the rightmost separator near the target, yielding
+    // more uniform ~CHUNK_SIZE chunks (memchr would find leftmost, producing
+    // potentially tiny chunks).
     let mut chunk_bounds: Vec<usize> = Vec::new();
     chunk_bounds.push(data.len());
     let mut target = data.len().saturating_sub(CHUNK_SIZE);
     while target > 0 {
         let search_end = (target + CHUNK_SIZE).min(*chunk_bounds.last().unwrap());
-        if let Some(offset) = memchr::memchr(sep, &data[target..search_end]) {
-            let boundary = target + offset + 1;
+        if let Some(offset) = memchr::memrchr(sep, &data[target..search_end]) {
+            let boundary = rec_start(target + offset, before);
             if boundary < *chunk_bounds.last().unwrap() {
                 chunk_bounds.push(boundary);
             }
@@ -278,119 +305,21 @@ fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
         }
         positions.clear();
         for pos in memchr::memchr_iter(sep, chunk) {
-            positions.push(pos as u32);
+            positions.push(pos as u32); // safe: CHUNK_SIZE (1MB) fits in u32
         }
         let mut end_pos = chunk.len();
         for &pos in positions.iter().rev() {
-            let rec_start = pos as usize + 1;
-            if rec_start < end_pos {
+            let rs = rec_start(pos as usize, before);
+            if rs < end_pos {
                 iovecs.push(libc::iovec {
-                    iov_base: chunk[rec_start..].as_ptr() as *mut libc::c_void,
-                    iov_len: end_pos - rec_start,
+                    iov_base: chunk[rs..].as_ptr() as *mut libc::c_void,
+                    iov_len: end_pos - rs,
                 });
                 if iovecs.len() >= BATCH {
                     writev_all_fd(fd, &mut iovecs)?;
                 }
             }
-            end_pos = rec_start;
-        }
-        if end_pos > 0 {
-            iovecs.push(libc::iovec {
-                iov_base: chunk.as_ptr() as *mut libc::c_void,
-                iov_len: end_pos,
-            });
-        }
-        if !iovecs.is_empty() {
-            writev_all_fd(fd, &mut iovecs)?;
-        }
-    }
-    Ok(())
-}
-
-/// Before-separator: chunked forward SIMD scan + writev zero-copy from source buffer.
-#[cfg(unix)]
-fn tac_bytes_before_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
-    const CHUNK_SIZE: usize = 1024 * 1024;
-    const BATCH: usize = 1024;
-
-    if data.len() <= CHUNK_SIZE {
-        let mut positions: Vec<u32> = Vec::with_capacity(data.len() / 40 + 64);
-        for pos in memchr::memchr_iter(sep, data) {
-            positions.push(pos as u32);
-        }
-        if positions.is_empty() {
-            return write_all_fd(fd, data);
-        }
-        let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(BATCH);
-        let mut end_pos = data.len();
-        for &pos in positions.iter().rev() {
-            let p = pos as usize;
-            if p < end_pos {
-                iovecs.push(libc::iovec {
-                    iov_base: data[p..].as_ptr() as *mut libc::c_void,
-                    iov_len: end_pos - p,
-                });
-                if iovecs.len() >= BATCH {
-                    writev_all_fd(fd, &mut iovecs)?;
-                }
-            }
-            end_pos = p;
-        }
-        if end_pos > 0 {
-            iovecs.push(libc::iovec {
-                iov_base: data.as_ptr() as *mut libc::c_void,
-                iov_len: end_pos,
-            });
-        }
-        if !iovecs.is_empty() {
-            writev_all_fd(fd, &mut iovecs)?;
-        }
-        return Ok(());
-    }
-
-    let mut chunk_bounds: Vec<usize> = Vec::new();
-    chunk_bounds.push(data.len());
-    let mut target = data.len().saturating_sub(CHUNK_SIZE);
-    while target > 0 {
-        let search_end = (target + CHUNK_SIZE).min(*chunk_bounds.last().unwrap());
-        if let Some(offset) = memchr::memchr(sep, &data[target..search_end]) {
-            let boundary = target + offset;
-            if boundary < *chunk_bounds.last().unwrap() {
-                chunk_bounds.push(boundary);
-            }
-        }
-        target = target.saturating_sub(CHUNK_SIZE);
-    }
-    chunk_bounds.push(0);
-    chunk_bounds.reverse();
-
-    let mut positions: Vec<u32> = Vec::with_capacity(CHUNK_SIZE / 40 + 64);
-    let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(BATCH);
-
-    for ci in (0..chunk_bounds.len() - 1).rev() {
-        let chunk_start = chunk_bounds[ci];
-        let chunk_end = chunk_bounds[ci + 1];
-        let chunk = &data[chunk_start..chunk_end];
-        if chunk.is_empty() {
-            continue;
-        }
-        positions.clear();
-        for pos in memchr::memchr_iter(sep, chunk) {
-            positions.push(pos as u32);
-        }
-        let mut end_pos = chunk.len();
-        for &pos in positions.iter().rev() {
-            let p = pos as usize;
-            if p < end_pos {
-                iovecs.push(libc::iovec {
-                    iov_base: chunk[p..].as_ptr() as *mut libc::c_void,
-                    iov_len: end_pos - p,
-                });
-                if iovecs.len() >= BATCH {
-                    writev_all_fd(fd, &mut iovecs)?;
-                }
-            }
-            end_pos = p;
+            end_pos = rs;
         }
         if end_pos > 0 {
             iovecs.push(libc::iovec {
