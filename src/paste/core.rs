@@ -463,9 +463,10 @@ pub fn paste_serial_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io
     let delims = &config.delimiters;
     let has_delims = !delims.is_empty();
 
-    // Fast path: single-delimiter serial mode — chunked bulk copy + scatter replace.
-    // Instead of per-line memchr + copy, copy chunks and replace newlines with the
-    // delimiter in-place. Processes in BUF_SIZE chunks to avoid full-file allocation.
+    // Fast path: single-delimiter serial mode — bulk copy with optional scatter replace.
+    // When delimiter != terminator: copy chunks and replace terminators with the delimiter.
+    // When delimiter == terminator (identity): copy chunks as-is, no replacement needed.
+    // Processes in BUF_SIZE chunks to avoid full-file allocation.
     if has_delims && delims.len() == 1 {
         let replacement = delims[0];
         let needs_replace = replacement != terminator;
@@ -722,9 +723,10 @@ pub fn paste_serial_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8>
     let total_input: usize = file_data.iter().map(|d| d.len()).sum();
     let mut output = Vec::with_capacity(total_input + file_data.len());
 
-    // Fast path: single delimiter — bulk copy + scatter replace.
-    // Instead of line-by-line presplit + extend_from_slice (~150K calls for 10MB),
-    // copy the entire file at once and replace terminators with the delimiter.
+    // Fast path: single delimiter — bulk copy with optional scatter replace.
+    // When delimiter != terminator: copy the file and replace terminators with the delimiter.
+    // When delimiter == terminator (identity): copy the file as-is, no replacement needed.
+    // Either way, avoids line-by-line presplit + extend_from_slice (~150K calls for 10MB).
     if has_delims && delims.len() == 1 {
         let delim = delims[0];
         let needs_replace = delim != terminator;

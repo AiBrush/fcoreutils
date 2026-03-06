@@ -671,8 +671,10 @@ fn run_range_shuffle(
         }
         const OUT_CHUNK: usize = 2 * 1024 * 1024;
         // SAFETY: capacity has 64 bytes of headroom past OUT_CHUNK.
-        // u32 max is 10 digits + 1-byte delimiter = 11 bytes per iter,
-        // so pos can overshoot OUT_CHUNK by at most 11 before the flush check.
+        // Each iteration writes at most 11 bytes (10-digit u32 + delimiter).
+        // pos can enter an iteration at OUT_CHUNK - 1 (just below the flush
+        // threshold), so the maximum pos after the write is OUT_CHUNK + 10,
+        // an overshoot of 10 bytes — well within the 64-byte headroom.
         let mut buf: Vec<u8> = Vec::with_capacity(OUT_CHUNK + 64);
         let mut pos = 0usize;
         let mut base = buf.as_mut_ptr();
@@ -697,9 +699,11 @@ fn run_range_shuffle(
                 }
                 buf.clear();
                 pos = 0;
-                // Re-derive base after shared borrow of buf in checked_write_all.
+                // Re-derive base: the preceding buf.set_len(pos) and buf.clear()
+                // take &mut self, and checked_write_all takes a shared &buf borrow.
+                // All three invalidate the raw pointer under Stacked Borrows.
                 // Vec::clear() does not reallocate, so the pointer value is identical,
-                // but re-deriving resets the aliasing model (Stacked Borrows).
+                // but re-deriving resets the aliasing model.
                 base = buf.as_mut_ptr();
             }
         }
