@@ -193,7 +193,10 @@ fn expand_regular_fast(data: &[u8], tab_size: usize, out: &mut impl Write) -> st
     }
 }
 
-/// Single-threaded expand: SIMD memchr2_iter scan of entire data.
+/// Single-threaded expand: one-pass SIMD memchr2_iter scan with periodic flush.
+/// Processes the entire file in a single memchr2_iter pass (no chunk boundary
+/// logic) while using a modest output buffer that's flushed periodically to
+/// maintain a small page-fault footprint.
 fn expand_regular_single(
     data: &[u8],
     tab_size: usize,
@@ -202,82 +205,95 @@ fn expand_regular_single(
     let is_pow2 = tab_size.is_power_of_two();
     let mask = tab_size.wrapping_sub(1);
 
-    const INPUT_CHUNK: usize = 256 * 1024;
-    let worst_output = INPUT_CHUNK * tab_size + tab_size;
-    let mut output: Vec<u8> = Vec::with_capacity(worst_output);
+    // Output buffer: 2MB capacity with 64KB headroom for in-progress writes.
+    // Pre-populate pages to avoid demand-paging during first iteration.
+    const BUF_CAP: usize = 2 * 1024 * 1024;
+    const FLUSH_AT: usize = BUF_CAP - 64 * 1024;
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_CAP);
 
+    let src = data.as_ptr();
     let mut column: usize = 0;
-    let mut data_pos: usize = 0;
+    let mut pos: usize = 0;
+    let mut wp: usize = 0;
 
-    while data_pos < data.len() {
-        let chunk_end = if data_pos + INPUT_CHUNK >= data.len() {
-            data.len()
-        } else {
-            let search_end = data_pos + INPUT_CHUNK;
-            match memchr::memrchr(b'\n', &data[data_pos..search_end]) {
-                Some(off) => data_pos + off + 1,
-                None => search_end,
+    for hit in memchr::memchr2_iter(b'\t', b'\n', data) {
+        let seg_len = hit - pos;
+
+        // Flush if segment + max expansion would exceed buffer.
+        // Segments are typically short (< 1KB), so this check rarely triggers
+        // except at buffer boundaries.
+        if wp + seg_len + tab_size > BUF_CAP {
+            unsafe {
+                output.set_len(wp);
             }
-        };
-
-        let chunk = &data[data_pos..chunk_end];
-        output.clear();
+            out.write_all(&output)?;
+            output.clear();
+            wp = 0;
+        }
 
         let out_ptr = output.as_mut_ptr();
-        let src = chunk.as_ptr();
-        let mut wp: usize = 0;
-        let mut pos: usize = 0;
 
-        for hit in memchr::memchr2_iter(b'\t', b'\n', chunk) {
-            let seg_len = hit - pos;
-            if seg_len > 0 {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.add(pos), out_ptr.add(wp), seg_len);
-                }
-                wp += seg_len;
-                column += seg_len;
-            }
-
-            if unsafe { *src.add(hit) } == b'\n' {
-                unsafe {
-                    *out_ptr.add(wp) = b'\n';
-                }
-                wp += 1;
-                column = 0;
-            } else {
-                let rem = if is_pow2 {
-                    column & mask
-                } else {
-                    column % tab_size
-                };
-                let spaces = tab_size - rem;
-                unsafe {
-                    std::ptr::write_bytes(out_ptr.add(wp), b' ', spaces);
-                }
-                wp += spaces;
-                column += spaces;
-            }
-
-            pos = hit + 1;
-        }
-
-        if pos < chunk.len() {
-            let tail = chunk.len() - pos;
+        if seg_len > 0 {
             unsafe {
-                std::ptr::copy_nonoverlapping(src.add(pos), out_ptr.add(wp), tail);
+                std::ptr::copy_nonoverlapping(src.add(pos), out_ptr.add(wp), seg_len);
             }
-            wp += tail;
-            column += tail;
+            wp += seg_len;
+            column += seg_len;
         }
 
+        if unsafe { *src.add(hit) } == b'\n' {
+            unsafe {
+                *out_ptr.add(wp) = b'\n';
+            }
+            wp += 1;
+            column = 0;
+        } else {
+            let rem = if is_pow2 {
+                column & mask
+            } else {
+                column % tab_size
+            };
+            let spaces = tab_size - rem;
+            unsafe {
+                std::ptr::write_bytes(out_ptr.add(wp), b' ', spaces);
+            }
+            wp += spaces;
+            column += spaces;
+        }
+
+        pos = hit + 1;
+
+        if wp >= FLUSH_AT {
+            unsafe {
+                output.set_len(wp);
+            }
+            out.write_all(&output)?;
+            output.clear();
+            wp = 0;
+        }
+    }
+
+    if pos < data.len() {
+        let tail = data.len() - pos;
+        if wp + tail > BUF_CAP {
+            unsafe {
+                output.set_len(wp);
+            }
+            out.write_all(&output)?;
+            output.clear();
+            wp = 0;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(pos), output.as_mut_ptr().add(wp), tail);
+        }
+        wp += tail;
+    }
+
+    if wp > 0 {
         unsafe {
             output.set_len(wp);
         }
-        if wp > 0 {
-            out.write_all(&output)?;
-        }
-
-        data_pos = chunk_end;
+        out.write_all(&output)?;
     }
 
     Ok(())
