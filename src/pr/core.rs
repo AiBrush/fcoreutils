@@ -459,10 +459,12 @@ fn pr_data_contiguous<W: Write>(
         let ft_start = meta_buf.len();
         let body_slice = &data[body_start..body_end];
         let actual_lines = memchr::memchr_iter(b'\n', body_slice).count();
-        if !body_slice.is_empty() && body_slice[body_slice.len() - 1] != b'\n' {
+        let has_unterminated = !body_slice.is_empty() && body_slice[body_slice.len() - 1] != b'\n';
+        if has_unterminated {
             meta_buf.push(b'\n');
         }
-        let pad = body_lines_per_page.saturating_sub(actual_lines);
+        let effective_lines = actual_lines + has_unterminated as usize;
+        let pad = body_lines_per_page.saturating_sub(effective_lines);
         meta_buf.resize(meta_buf.len() + pad, b'\n');
         write_footer(&mut meta_buf, config)?;
         let ft_end = meta_buf.len();
@@ -491,45 +493,16 @@ fn pr_data_contiguous<W: Write>(
 }
 
 /// Write all IoSlices, handling partial writes by advancing through slices.
+/// Uses IoSlice::advance_slices for O(n) total instead of O(n²) re-scanning.
 fn write_all_ioslices<W: Write>(out: &mut W, slices: &[IoSlice<'_>]) -> io::Result<()> {
-    if slices.is_empty() {
-        return Ok(());
-    }
-    let total: usize = slices.iter().map(|s| s.len()).sum();
-    if total == 0 {
-        return Ok(());
-    }
-    let mut remaining = total;
-    let mut consumed: usize = 0;
-    while remaining > 0 {
-        // Find the first non-consumed slice
-        let mut start_idx = 0;
-        let mut skip = consumed;
-        for (i, s) in slices.iter().enumerate() {
-            if skip >= s.len() {
-                skip -= s.len();
-                start_idx = i + 1;
-            } else {
-                start_idx = i;
-                break;
-            }
-        }
-        if start_idx >= slices.len() {
-            break;
-        }
-        // If partial slice, fall back to write_all for that slice, then continue
-        if skip > 0 {
-            out.write_all(&slices[start_idx][skip..])?;
-            consumed += slices[start_idx].len() - skip;
-            remaining -= slices[start_idx].len() - skip;
-            continue;
-        }
-        let written = out.write_vectored(&slices[start_idx..])?;
+    let mut bufs = slices.to_vec();
+    let mut remaining: &mut [IoSlice<'_>] = &mut bufs;
+    while !remaining.is_empty() {
+        let written = out.write_vectored(remaining)?;
         if written == 0 {
             return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
         }
-        consumed += written;
-        remaining -= written;
+        IoSlice::advance_slices(&mut remaining, written);
     }
     Ok(())
 }
@@ -580,7 +553,7 @@ fn pr_data_numbered<W: Write>(
     };
 
     // Single output buffer — avoids per-page write_all syscalls.
-    // Cap at 64MB to avoid OOM on huge files; Vec will grow on demand if needed.
+    // Initial capacity capped at 64MB; Vec grows on demand for larger inputs.
     let num_prefix_est = digits + 2; // padding + digits + separator
     let out_cap =
         (data.len() + total_lines * num_prefix_est + total_lines / 5 + 4096).min(64 * 1024 * 1024);
@@ -783,7 +756,7 @@ fn pr_lines_generic<W: Write>(
     let mut page_num = 1usize;
     let mut line_idx = 0;
     let total_bytes: usize = all_lines.iter().map(|l| l.len() + 1).sum();
-    // Cap at 64MB to avoid OOM on huge files; Vec will grow on demand if needed.
+    // Initial capacity capped at 64MB; Vec grows on demand for larger inputs.
     let out_cap = (total_bytes + total_bytes / 5 + 4096).min(64 * 1024 * 1024);
     let mut out_buf: Vec<u8> = Vec::with_capacity(out_cap);
 

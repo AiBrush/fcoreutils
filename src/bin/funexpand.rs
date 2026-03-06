@@ -167,6 +167,8 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
 }
 
 /// Write all iovec entries using writev, handling partial writes and IOV_MAX.
+/// IOV_MAX is 1024 on Linux and macOS; POSIX minimum is 16 but all modern
+/// Unix systems support at least 1024.
 #[cfg(unix)]
 fn writev_all_result(fd: i32, iovecs: &[libc::iovec]) -> io::Result<()> {
     const IOV_MAX: usize = 1024;
@@ -177,6 +179,12 @@ fn writev_all_result(fd: i32, iovecs: &[libc::iovec]) -> io::Result<()> {
         let n = unsafe { libc::writev(fd, batch.as_ptr(), batch.len() as i32) };
         if n < 0 {
             return Err(io::Error::last_os_error());
+        }
+        if n == 0 && offset < iovecs.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "writev wrote 0 bytes",
+            ));
         }
         // Advance past fully written iovecs
         let mut written = n as usize;
@@ -194,10 +202,6 @@ fn writev_all_result(fd: i32, iovecs: &[libc::iovec]) -> io::Result<()> {
                 offset += 1;
                 written = 0;
             }
-        }
-        if n == 0 && offset < iovecs.len() {
-            // writev returned 0 but there's more to write — shouldn't happen for regular files
-            offset = batch_end;
         }
     }
     Ok(())
@@ -280,17 +284,15 @@ fn emit_blanks_vec(
 }
 
 /// Streaming default mode for regular tab stops without backspaces.
-/// Uses IoSlice/writev to batch passthrough runs and processed lines into
-/// a single vectored write, avoiding per-line write syscalls.
+/// Uses writev to batch passthrough runs and processed lines, flushing
+/// every FLUSH_SIZE bytes to bound memory usage.
 #[cfg(unix)]
 fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> {
+    const FLUSH_SIZE: usize = 8 * 1024 * 1024;
     let tab_mask = tab_size.wrapping_sub(1);
     let is_pow2 = tab_size.is_power_of_two();
-    // Single output buffer for all modified lines
-    let mut modified: Vec<u8> = Vec::with_capacity(data.len() / 4 + 4096);
-    // IoSlice segments: either passthrough slices from data or ranges in modified
-    // Encoded as (start, len, is_modified): if is_modified, indexes into modified buf
-    let mut segments: Vec<(usize, usize, bool)> = Vec::with_capacity(data.len() / 100 + 64);
+    let mut modified: Vec<u8> = Vec::with_capacity((data.len() / 4).min(FLUSH_SIZE) + 4096);
+    let mut segments: Vec<(usize, usize, bool)> = Vec::with_capacity(4096);
 
     let mut pos: usize = 0;
     let mut pass_start: usize = 0;
@@ -311,6 +313,13 @@ fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<
         unexpand_leading_vec(line, tab_size, tab_mask, is_pow2, &mut modified);
         modified.push(b'\n');
         segments.push((mod_start, modified.len() - mod_start, true));
+
+        // Flush when modified buffer exceeds threshold to bound memory
+        if modified.len() >= FLUSH_SIZE {
+            flush_segments(fd, &segments, &modified, data)?;
+            segments.clear();
+            modified.clear();
+        }
 
         pos = nl_pos + 1;
         pass_start = pos;
@@ -335,7 +344,23 @@ fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<
         segments.push((pass_start, data.len() - pass_start, false));
     }
 
-    // Build iovec array and write all at once
+    flush_segments(fd, &segments, &modified, data)
+}
+
+/// Build iovecs from segments and flush via writev.
+#[cfg(unix)]
+fn flush_segments(
+    fd: i32,
+    segments: &[(usize, usize, bool)],
+    modified: &[u8],
+    data: &[u8],
+) -> io::Result<()> {
+    if segments.is_empty() {
+        return Ok(());
+    }
+    // SAFETY: iov_base is *mut c_void per POSIX ABI, but writev only reads
+    // through it. Both `data` (mmap/read buffer) and `modified` (local Vec)
+    // are valid for `len` bytes at `ptr` for the duration of this call.
     let iovecs: Vec<libc::iovec> = segments
         .iter()
         .map(|&(start, len, is_mod)| {
@@ -350,7 +375,6 @@ fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<
             }
         })
         .collect();
-
     writev_all_result(fd, &iovecs)
 }
 
@@ -424,13 +448,15 @@ fn unexpand_line_all_vec(
 }
 
 /// Streaming -a mode for regular tab stops without backspaces.
-/// Uses IoSlice/writev to batch passthrough runs and processed lines.
+/// Uses writev to batch passthrough runs and processed lines, flushing
+/// every FLUSH_SIZE bytes to bound memory usage.
 #[cfg(unix)]
 fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> {
+    const FLUSH_SIZE: usize = 8 * 1024 * 1024;
     let tab_mask = tab_size.wrapping_sub(1);
     let is_pow2 = tab_size.is_power_of_two();
-    let mut modified: Vec<u8> = Vec::with_capacity(data.len() / 4 + 4096);
-    let mut segments: Vec<(usize, usize, bool)> = Vec::with_capacity(data.len() / 100 + 64);
+    let mut modified: Vec<u8> = Vec::with_capacity((data.len() / 4).min(FLUSH_SIZE) + 4096);
+    let mut segments: Vec<(usize, usize, bool)> = Vec::with_capacity(4096);
 
     let mut pos: usize = 0;
     let mut pass_start: usize = 0;
@@ -450,6 +476,13 @@ fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> 
         unexpand_line_all_vec(line, tab_size, tab_mask, is_pow2, &mut modified);
         modified.push(b'\n');
         segments.push((mod_start, modified.len() - mod_start, true));
+
+        // Flush when modified buffer exceeds threshold to bound memory
+        if modified.len() >= FLUSH_SIZE {
+            flush_segments(fd, &segments, &modified, data)?;
+            segments.clear();
+            modified.clear();
+        }
 
         pos = nl_pos + 1;
         pass_start = pos;
@@ -472,22 +505,7 @@ fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> 
         segments.push((pass_start, data.len() - pass_start, false));
     }
 
-    let iovecs: Vec<libc::iovec> = segments
-        .iter()
-        .map(|&(start, len, is_mod)| {
-            let ptr = if is_mod {
-                modified[start..].as_ptr()
-            } else {
-                data[start..].as_ptr()
-            };
-            libc::iovec {
-                iov_base: ptr as *mut libc::c_void,
-                iov_len: len,
-            }
-        })
-        .collect();
-
-    writev_all_result(fd, &iovecs)
+    flush_segments(fd, &segments, &modified, data)
 }
 
 fn main() {
