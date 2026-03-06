@@ -6,11 +6,10 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-#[cfg(unix)]
-use memmap2::MmapOptions;
-
 use coreutils_rs::base64::core as b64;
 use coreutils_rs::common::io::read_file;
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 
 /// Raw stdin reader for zero-overhead pipe reads on Linux.
@@ -224,45 +223,10 @@ fn main() {
     }
 }
 
-/// Try to mmap stdin as read-only if it's a regular file (e.g., shell redirect `< file`).
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-    let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return None;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
-        return None;
-    }
-
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    // No MAP_POPULATE: it synchronously faults all pages with 4KB,
-    // defeating MADV_HUGEPAGE which must be set before faults occur.
-    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
-    std::mem::forget(file);
-    #[cfg(target_os = "linux")]
-    if let Some(ref m) = mmap {
-        unsafe {
-            let ptr = m.as_ptr() as *mut libc::c_void;
-            let len = m.len();
-            // HUGEPAGE first: reduces ~25,600 minor faults to ~50 for 100MB.
-            if len >= 2 * 1024 * 1024 {
-                libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
-            }
-            libc::madvise(ptr, len, libc::MADV_SEQUENTIAL | libc::MADV_WILLNEED);
-        }
-    }
-    mmap
-}
-
 fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
     if cli.decode {
         #[cfg(unix)]
-        if let Some(mmap) = try_mmap_stdin() {
+        if let Some(mmap) = try_mmap_stdin(0) {
             return b64::decode_to_writer(&mmap, cli.ignore_garbage, out);
         }
 
@@ -277,7 +241,7 @@ fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
     }
 
     #[cfg(unix)]
-    if let Some(mmap) = try_mmap_stdin() {
+    if let Some(mmap) = try_mmap_stdin(0) {
         return b64::encode_to_writer(&mmap, cli.wrap, out);
     }
 

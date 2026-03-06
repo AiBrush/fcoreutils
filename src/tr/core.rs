@@ -6,11 +6,10 @@ use rayon::prelude::*;
 /// Linux UIO_MAXIOV is 1024; we use that as our batch limit.
 const MAX_IOV: usize = 1024;
 
-/// Stream buffer: 2MB — large enough to amortize SIMD LUT setup overhead
-/// (16 × 256-bit vector loads per translate_inplace call) across more data.
-/// For piped 10MB input: ~5 translate+write iterations vs ~20 at 512KB.
-/// MADV_HUGEPAGE on the 2MB buffer uses exactly 1 huge page (zero TLB misses).
-const STREAM_BUF: usize = 2 * 1024 * 1024;
+/// Stream buffer: 512KB — balances SIMD LUT amortization with pipeline latency.
+/// Large enough to cover SIMD setup overhead across many iterations, small enough
+/// that downstream pipeline stages aren't starved for long.
+const STREAM_BUF: usize = 512 * 1024;
 
 /// Minimum data size to engage rayon parallel processing for mmap/batch paths.
 /// For 10MB benchmark files, parallel tr translate was a 105% REGRESSION

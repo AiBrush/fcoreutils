@@ -9,6 +9,8 @@ use std::process;
 use memchr::memchr_iter;
 use rayon::prelude::*;
 
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
 use coreutils_rs::common::io::{FileData, file_size, read_file, read_stdin};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::wc;
@@ -272,38 +274,6 @@ fn num_width(n: u64) -> usize {
     width
 }
 
-/// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
-/// Returns None if stdin is a pipe/terminal.
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-    let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return None;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
-        return None;
-    }
-
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
-    std::mem::forget(file); // Don't close stdin
-    #[cfg(target_os = "linux")]
-    if let Some(ref m) = mmap {
-        unsafe {
-            libc::madvise(
-                m.as_ptr() as *mut libc::c_void,
-                m.len(),
-                libc::MADV_SEQUENTIAL,
-            );
-        }
-    }
-    mmap
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
     let cli = parse_args();
@@ -413,7 +383,7 @@ fn main() {
         let data: FileData = if filename == "-" {
             #[cfg(unix)]
             {
-                match try_mmap_stdin() {
+                match try_mmap_stdin(0) {
                     Some(mmap) => FileData::Mmap(mmap),
                     None => match read_stdin() {
                         Ok(d) => FileData::Owned(d),

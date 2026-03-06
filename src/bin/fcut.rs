@@ -8,10 +8,9 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-#[cfg(unix)]
-use memmap2::MmapOptions;
-
 use coreutils_rs::common::io::read_file;
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::cut::{self, CutMode};
 
@@ -300,51 +299,6 @@ fn parse_args() -> Cli {
     cli
 }
 
-/// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
-/// Returns None if stdin is a pipe/terminal.
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-    let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return None;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
-        return None;
-    }
-
-    let file_size = stat.st_size as usize;
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    // MAP_POPULATE for files >= 4MB to prefault pages; lazy for smaller files
-    let mmap = if file_size >= 4 * 1024 * 1024 {
-        unsafe { MmapOptions::new().populate().map(&file) }.ok()
-    } else {
-        unsafe { MmapOptions::new().map(&file) }.ok()
-    };
-    std::mem::forget(file); // Don't close stdin
-    #[cfg(target_os = "linux")]
-    if let Some(ref m) = mmap {
-        unsafe {
-            libc::madvise(
-                m.as_ptr() as *mut libc::c_void,
-                m.len(),
-                libc::MADV_SEQUENTIAL,
-            );
-            if m.len() >= 2 * 1024 * 1024 {
-                libc::madvise(
-                    m.as_ptr() as *mut libc::c_void,
-                    m.len(),
-                    libc::MADV_HUGEPAGE,
-                );
-            }
-        }
-    }
-    mmap
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -463,7 +417,7 @@ fn main() {
     #[cfg(unix)]
     let stdin_mmap = {
         if files.iter().any(|f| f == "-") {
-            try_mmap_stdin()
+            try_mmap_stdin(0)
         } else {
             None
         }

@@ -160,8 +160,12 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
 
     // Chunked encode for data > 1MB: process ~1MB at a time to keep the output
     // buffer small (~1.3MB) and warm in L2. Reduces minor page faults from ~3500 to ~320.
+    // Guard: skip if bytes_per_line > 1MB (lines_per_chunk would be 0 → infinite loop).
     if bytes_per_line.is_multiple_of(3) && data.len() > 1024 * 1024 {
-        return encode_wrapped_chunked(data, wrap_col, bytes_per_line, out);
+        let lines_per_chunk = (1024 * 1024) / bytes_per_line;
+        if lines_per_chunk > 0 {
+            return encode_wrapped_chunked(data, wrap_col, bytes_per_line, out);
+        }
     }
 
     if bytes_per_line.is_multiple_of(3) {
