@@ -266,10 +266,6 @@ fn write_column_padding<W: Write>(
     if n == 0 {
         return Ok(());
     }
-    // GNU pr uses spaces when gap <= 1, tabs otherwise
-    if n <= 1 {
-        return write_spaces(output, n);
-    }
     let next_tab = (abs_pos / 8 + 1) * 8;
     if next_tab > target_abs_pos {
         // Gap doesn't reach next tab stop → spaces only
@@ -494,7 +490,7 @@ fn pr_data_contiguous<W: Write>(
     write_all_ioslices(output, &slices)
 }
 
-/// Write all IoSlices, handling partial writes.
+/// Write all IoSlices, handling partial writes by advancing through slices.
 fn write_all_ioslices<W: Write>(out: &mut W, slices: &[IoSlice<'_>]) -> io::Result<()> {
     if slices.is_empty() {
         return Ok(());
@@ -503,19 +499,37 @@ fn write_all_ioslices<W: Write>(out: &mut W, slices: &[IoSlice<'_>]) -> io::Resu
     if total == 0 {
         return Ok(());
     }
-    let written = out.write_vectored(slices)?;
-    if written >= total {
-        return Ok(());
-    }
-    let mut skip = written;
-    for slice in slices {
-        let len = slice.len();
-        if skip >= len {
-            skip -= len;
+    let mut remaining = total;
+    let mut consumed: usize = 0;
+    while remaining > 0 {
+        // Find the first non-consumed slice
+        let mut start_idx = 0;
+        let mut skip = consumed;
+        for (i, s) in slices.iter().enumerate() {
+            if skip >= s.len() {
+                skip -= s.len();
+                start_idx = i + 1;
+            } else {
+                start_idx = i;
+                break;
+            }
+        }
+        if start_idx >= slices.len() {
+            break;
+        }
+        // If partial slice, fall back to write_all for that slice, then continue
+        if skip > 0 {
+            out.write_all(&slices[start_idx][skip..])?;
+            consumed += slices[start_idx].len() - skip;
+            remaining -= slices[start_idx].len() - skip;
             continue;
         }
-        out.write_all(&slice[skip..])?;
-        skip = 0;
+        let written = out.write_vectored(&slices[start_idx..])?;
+        if written == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
+        }
+        consumed += written;
+        remaining -= written;
     }
     Ok(())
 }
@@ -565,9 +579,11 @@ fn pr_data_numbered<W: Write>(
         line_starts.len()
     };
 
-    // Single output buffer for all pages — avoids per-page write_all syscalls
+    // Single output buffer — avoids per-page write_all syscalls.
+    // Cap at 64MB to avoid OOM on huge files; Vec will grow on demand if needed.
     let num_prefix_est = digits + 2; // padding + digits + separator
-    let out_cap = data.len() + total_lines * num_prefix_est + total_lines / 5 + 4096;
+    let out_cap =
+        (data.len() + total_lines * num_prefix_est + total_lines / 5 + 4096).min(64 * 1024 * 1024);
     let mut out_buf: Vec<u8> = Vec::with_capacity(out_cap);
 
     let mut line_number = config.first_line_number;
@@ -585,6 +601,9 @@ fn pr_data_numbered<W: Write>(
             }
 
             // Write numbered lines using unsafe pointer arithmetic.
+            // SAFETY: `src` points into `data` (a borrowed &[u8]) and is
+            // independent of `out_buf`. Reallocations of `out_buf` cannot
+            // invalidate `src` because they are separate allocations.
             let src = data.as_ptr();
             for li in line_idx..page_end {
                 let line_start = line_starts[li];
@@ -764,7 +783,9 @@ fn pr_lines_generic<W: Write>(
     let mut page_num = 1usize;
     let mut line_idx = 0;
     let total_bytes: usize = all_lines.iter().map(|l| l.len() + 1).sum();
-    let mut out_buf: Vec<u8> = Vec::with_capacity(total_bytes + total_bytes / 5 + 4096);
+    // Cap at 64MB to avoid OOM on huge files; Vec will grow on demand if needed.
+    let out_cap = (total_bytes + total_bytes / 5 + 4096).min(64 * 1024 * 1024);
+    let mut out_buf: Vec<u8> = Vec::with_capacity(out_cap);
 
     while line_idx < total_lines || (line_idx == 0 && total_lines == 0) {
         if total_lines == 0 && line_idx == 0 {
