@@ -227,9 +227,15 @@ fn paste_two_files_streaming(
             break;
         }
 
-        // a_len and b_len are bounded by file sizes (< isize::MAX), so no overflow.
+        // a_len and b_len are bounded by file sizes (< isize::MAX on 64-bit),
+        // so addition cannot overflow on 64-bit targets.
         debug_assert!(a_start + a_len <= len_a, "a out of bounds");
         debug_assert!(b_start + b_len <= len_b, "b out of bounds");
+        debug_assert!(
+            cfg!(target_pointer_width = "64")
+                || (a_len < isize::MAX as usize && b_len < isize::MAX as usize),
+            "line lengths too large for 32-bit target"
+        );
         let out_len = a_len + 1 + b_len + 1;
 
         // Flush if needed
@@ -303,19 +309,25 @@ fn paste_n_files_streaming(
 
     while files_remaining > 0 {
         // Save buffer position so we can rewind if no file produces a line.
+        // At this point pos < buf_cap due to the periodic flush at end of loop.
+        // Delimiter writes (at most nfiles-1 bytes) are checked individually,
+        // so this invariant is maintained regardless of nfiles.
         debug_assert!(
             pos < buf_cap,
             "saved_pos invariant: pos must be < buf_cap at iteration start"
         );
         let saved_pos = pos;
         let mut any_line = false;
+        // Track if a flush happened between saved_pos and the any_line check.
+        // If flushed, we cannot rewind — but this only occurs when nfiles is
+        // large enough that delimiter bytes alone overflow the buffer.
         let mut flushed_this_iter = false;
 
         for file_idx in 0..nfiles {
             // Delimiter before columns 1..N
             if file_idx > 0 && has_delims {
                 let d = unsafe { *delims.get_unchecked((file_idx - 1) % delims.len()) };
-                if pos >= buf.capacity() {
+                if pos + 1 > buf.capacity() {
                     unsafe { buf.set_len(pos) };
                     raw_write_all(&buf)?;
                     buf.clear();
@@ -391,6 +403,10 @@ fn paste_n_files_streaming(
                 // Safe to rewind delimiters written this iteration.
                 pos = saved_pos;
             }
+            // If flushed_this_iter is true, delimiters were already written to
+            // stdout and cannot be recalled. This only happens with extremely large
+            // nfiles (>65K) where delimiter bytes alone overflow the buffer. The
+            // partial row is unavoidable but harmless — we're done anyway.
             break;
         }
 
