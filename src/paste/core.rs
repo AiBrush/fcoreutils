@@ -105,7 +105,7 @@ pub fn raw_write_all(data: &[u8]) -> std::io::Result<()> {
 
 /// Streaming paste for the parallel (normal) mode.
 /// Scans each file line-by-line with memchr on-the-fly — no pre-split offset arrays.
-/// Uses a single 1MB output buffer with raw fd writes.
+/// Uses a single 2MB output buffer with raw fd writes.
 pub fn paste_parallel_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io::Result<()> {
     let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
     let delims = &config.delimiters;
@@ -140,8 +140,8 @@ pub fn paste_parallel_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::
 
 /// Fast path for 2-file paste: uses memchr_iter iterators advanced in lockstep.
 /// Zero allocation for line offsets — each iterator maintains its internal SIMD state.
-/// This is 9x faster than per-line memchr for short lines (~6 bytes avg) because
-/// memchr_iter amortizes SIMD setup across the entire file scan.
+/// memchr_iter amortizes SIMD setup across the entire file scan, avoiding per-line
+/// memchr call overhead.
 fn paste_two_files_streaming(
     data_a: &[u8],
     data_b: &[u8],
@@ -227,7 +227,9 @@ fn paste_two_files_streaming(
             break;
         }
 
+        // a_len and b_len are bounded by file sizes (< isize::MAX), so no overflow.
         let out_len = a_len + 1 + b_len + 1;
+        debug_assert!(out_len >= 2);
 
         // Flush if needed
         if pos + out_len > buf.capacity() {
@@ -300,6 +302,12 @@ fn paste_n_files_streaming(
 
     while files_remaining > 0 {
         // Save buffer position so we can rewind if no file produces a line.
+        // Safety of rewind: at this point pos < buf_cap (2MB) due to the periodic
+        // flush at the end of each iteration. The delimiter writes below add at most
+        // nfiles-1 bytes before any file data check, which is negligible compared to
+        // the 65536-byte overflow margin (buf capacity = buf_cap + 65536). So the
+        // rewind to saved_pos is always valid — no flush can occur between saved_pos
+        // and the any_line check when no file produces data.
         let saved_pos = pos;
         let mut any_line = false;
 
