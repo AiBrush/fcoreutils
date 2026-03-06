@@ -62,9 +62,9 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
 
     const BUF_CAP: usize = 1024 * 1024 + 4096;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP);
-    let base = buf.as_mut_ptr();
     let src = data.as_ptr();
     let mut wp: usize = 0;
+    let mut base = buf.as_mut_ptr();
     let mut seg_start = 0usize;
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
@@ -77,6 +77,7 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
                 out.write_all(&buf)?;
                 buf.clear();
                 wp = 0;
+                base = buf.as_mut_ptr();
             }
             unsafe {
                 std::ptr::copy_nonoverlapping(src.add(seg_start), base.add(wp), total);
@@ -92,6 +93,7 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
                     out.write_all(&buf)?;
                     buf.clear();
                     wp = 0;
+                    base = buf.as_mut_ptr();
                 }
                 unsafe {
                     std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), width);
@@ -106,6 +108,7 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
                 out.write_all(&buf)?;
                 buf.clear();
                 wp = 0;
+                base = buf.as_mut_ptr();
             }
             unsafe {
                 std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), rem);
@@ -125,6 +128,7 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
                 out.write_all(&buf)?;
                 buf.clear();
                 wp = 0;
+                base = buf.as_mut_ptr();
             }
             unsafe {
                 std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), width);
@@ -140,6 +144,7 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
                 out.write_all(&buf)?;
                 buf.clear();
                 wp = 0;
+                base = buf.as_mut_ptr();
             }
             unsafe {
                 std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), rem);
