@@ -406,7 +406,8 @@ fn pr_data_contiguous<W: Write>(
         return Ok(());
     }
 
-    // Pass 1: find page boundaries (byte offsets where each page starts)
+    // Pass 1: find page boundaries (byte offsets where each page starts).
+    // Note: scans full file; early-exit for page ranges is a future optimization.
     let est_pages = data.len() / (body_lines_per_page * 40) + 2;
     let mut page_bounds: Vec<usize> = Vec::with_capacity(est_pages + 1);
     page_bounds.push(0);
@@ -458,6 +459,8 @@ fn pr_data_contiguous<W: Write>(
 
         let ft_start = meta_buf.len();
         let body_slice = &data[body_start..body_end];
+        // Note: re-counts newlines already seen in Pass 1; avoiding this would
+        // require carrying per-page line counts from the boundary scan above.
         let actual_lines = memchr::memchr_iter(b'\n', body_slice).count();
         let has_unterminated = !body_slice.is_empty() && body_slice[body_slice.len() - 1] != b'\n';
         if has_unterminated {
@@ -493,16 +496,29 @@ fn pr_data_contiguous<W: Write>(
 }
 
 /// Write all IoSlices, handling partial writes by advancing through slices.
-/// Uses IoSlice::advance_slices for O(n) total instead of O(n²) re-scanning.
+/// Attempts write_vectored on the original borrowed slices first; only clones
+/// into a mutable Vec on partial write (needed for IoSlice::advance_slices).
 fn write_all_ioslices<W: Write>(out: &mut W, slices: &[IoSlice<'_>]) -> io::Result<()> {
+    // Try writing all slices at once without cloning.
+    let written = out.write_vectored(slices)?;
+    if written == 0 && !slices.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
+    }
+    // Check if everything was written (common case).
+    let total: usize = slices.iter().map(|s| s.len()).sum();
+    if written >= total {
+        return Ok(());
+    }
+    // Partial write: clone into mutable Vec and advance.
     let mut bufs = slices.to_vec();
     let mut remaining: &mut [IoSlice<'_>] = &mut bufs;
+    IoSlice::advance_slices(&mut remaining, written);
     while !remaining.is_empty() {
-        let written = out.write_vectored(remaining)?;
-        if written == 0 {
+        let n = out.write_vectored(remaining)?;
+        if n == 0 {
             return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
         }
-        IoSlice::advance_slices(&mut remaining, written);
+        IoSlice::advance_slices(&mut remaining, n);
     }
     Ok(())
 }

@@ -167,14 +167,18 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
 }
 
 /// Write all iovec entries using writev, handling partial writes and IOV_MAX.
-/// IOV_MAX is 1024 on Linux (UIO_MAXIOV in kernel headers) and all BSDs.
-/// libc::IOV_MAX is only defined for BSD targets, not Linux, so we hardcode.
+#[cfg(unix)]
+#[cfg(target_os = "macos")]
+const IOV_MAX_VAL: usize = libc::IOV_MAX as usize;
+#[cfg(unix)]
+#[cfg(not(target_os = "macos"))]
+const IOV_MAX_VAL: usize = 1024; // Linux UIO_MAXIOV; libc crate omits IOV_MAX for Linux
+
 #[cfg(unix)]
 fn writev_all_result(fd: i32, iovecs: &[libc::iovec]) -> io::Result<()> {
-    const IOV_MAX: usize = 1024;
     let mut offset = 0;
     while offset < iovecs.len() {
-        let batch_end = (offset + IOV_MAX).min(iovecs.len());
+        let batch_end = (offset + IOV_MAX_VAL).min(iovecs.len());
         let batch = &iovecs[offset..batch_end];
         let n = unsafe { libc::writev(fd, batch.as_ptr(), batch.len() as i32) };
         if n < 0 {
@@ -371,7 +375,10 @@ fn flush_segments(
             data[start..].as_ptr()
         };
         libc::iovec {
-            // Safety: writev only reads through iov_base; *mut required by POSIX ABI.
+            // SAFETY: The const-to-mut cast is required by the POSIX writev ABI
+            // (iov_base is declared as void*), but writev only reads through
+            // this pointer. The underlying data (modified or data) remains
+            // borrowed and valid for the duration of the writev call.
             iov_base: ptr as *mut libc::c_void,
             iov_len: len,
         }
