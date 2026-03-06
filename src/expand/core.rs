@@ -846,15 +846,30 @@ fn unexpand_line_all_fast(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
                 let blank_start_col = column;
                 let blank_start = bp;
                 pos = bp;
+                // Fast count: check if it's all spaces (common case)
+                let mut has_tab = false;
                 while pos < line.len() && (line[pos] == b' ' || line[pos] == b'\t') {
                     if line[pos] == b'\t' {
+                        has_tab = true;
                         column += tab_size - column % tab_size;
                     } else {
                         column += 1;
                     }
                     pos += 1;
                 }
-                emit_blank_run_vec(output, &line[blank_start..pos], blank_start_col, tab_size);
+                if has_tab {
+                    emit_blank_run_vec(output, &line[blank_start..pos], blank_start_col, tab_size);
+                } else {
+                    // Spaces only: use arithmetic fast path
+                    let more_follow = pos < line.len();
+                    emit_spaces_only_vec(
+                        output,
+                        blank_start_col,
+                        pos - blank_start,
+                        tab_size,
+                        more_follow,
+                    );
+                }
             }
             None => {
                 // Rest of line has no convertible blanks
@@ -867,6 +882,46 @@ fn unexpand_line_all_fast(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
     }
 }
 
+/// Fast path for space-only blank runs: compute tabs+spaces arithmetically.
+/// Avoids per-byte iteration for the common case.
+#[inline(always)]
+fn emit_spaces_only_vec(
+    output: &mut Vec<u8>,
+    start_col: usize,
+    count: usize,
+    tab_size: usize,
+    more_follow: bool,
+) {
+    if count == 0 {
+        return;
+    }
+    let end_col = start_col + count;
+    let mut col = start_col;
+
+    // Emit tabs for each tab stop boundary we cross
+    loop {
+        let next_tab = col + (tab_size - col % tab_size);
+        if next_tab > end_col {
+            break;
+        }
+        let blanks_to_tab = next_tab - col;
+        if blanks_to_tab >= 2 || next_tab < end_col || more_follow {
+            output.push(b'\t');
+            col = next_tab;
+        } else {
+            // Single space at tab stop, nothing follows → keep as space
+            break;
+        }
+    }
+
+    // Remaining spaces
+    let remaining = end_col - col;
+    if remaining > 0 {
+        let len = output.len();
+        output.resize(len + remaining, b' ');
+    }
+}
+
 /// Emit a blank run character-by-character, matching GNU unexpand behavior:
 /// - Spaces are accumulated and converted to tabs at tab stops (but a single
 ///   space at a tab stop stays as space unless more blanks follow).
@@ -874,6 +929,11 @@ fn unexpand_line_all_fast(line: &[u8], tab_size: usize, output: &mut Vec<u8>) {
 ///   merged into the tab's column range and emitted as optimal tabs.
 #[inline(always)]
 fn emit_blank_run_vec(output: &mut Vec<u8>, blanks: &[u8], start_col: usize, tab_size: usize) {
+    // Fast path: all spaces, no tabs
+    if memchr::memchr(b'\t', blanks).is_none() {
+        emit_spaces_only_vec(output, start_col, blanks.len(), tab_size, false);
+        return;
+    }
     let mut col = start_col;
     let mut pending_spaces: usize = 0;
     let mut pending_start_col = start_col;

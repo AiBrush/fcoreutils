@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IoSlice, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default page length in lines.
@@ -259,9 +259,32 @@ fn write_column_padding<W: Write>(
     abs_pos: usize,
     target_abs_pos: usize,
 ) -> io::Result<()> {
-    // GNU pr uses plain spaces for column padding by default
+    // GNU pr uses tabs (8-stop) + trailing spaces to reach column boundary.
+    // When the gap can be filled entirely with spaces fewer than one tab
+    // stop away, just emit spaces (matching GNU's encoder).
     let n = target_abs_pos.saturating_sub(abs_pos);
-    write_spaces(output, n)
+    if n == 0 {
+        return Ok(());
+    }
+    let next_tab = (abs_pos / 8 + 1) * 8;
+    if next_tab > target_abs_pos {
+        // Gap doesn't reach next tab stop → spaces only
+        return write_spaces(output, n);
+    }
+    // Tab to the first tab stop, then continue
+    output.write_all(b"\t")?;
+    let mut col = next_tab;
+    while col < target_abs_pos {
+        let nt = (col / 8 + 1) * 8;
+        if nt <= target_abs_pos {
+            output.write_all(b"\t")?;
+            col = nt;
+        } else {
+            write_spaces(output, target_abs_pos - col)?;
+            col = target_abs_pos;
+        }
+    }
+    Ok(())
 }
 
 /// Paginate raw byte data — fast path that avoids per-line String allocation.
@@ -343,8 +366,9 @@ pub fn pr_data<W: Write>(
 }
 
 /// Ultra-fast contiguous-write paginator for single-column, no-transform mode.
-/// Streams through data using memchr_iter without building a Vec<usize> of newline positions.
-/// Pre-computes the header prefix (date + filename) once, appending only the page number per page.
+/// Two-pass approach: find page boundaries via SIMD memchr, then build IoSlice
+/// references interleaving metadata (headers/footers) with zero-copy body slices
+/// from the original mmap data. Single writev call at the end.
 fn pr_data_contiguous<W: Write>(
     data: &[u8],
     output: &mut W,
@@ -382,77 +406,120 @@ fn pr_data_contiguous<W: Write>(
         return Ok(());
     }
 
-    let footer: &[u8] = if show_header {
-        if config.form_feed {
-            b"\x0c"
-        } else {
-            b"\n\n\n\n\n"
+    // Pass 1: find page boundaries (byte offsets where each page starts).
+    // Note: scans full file; early-exit for page ranges is a future optimization.
+    let est_pages = data.len() / (body_lines_per_page * 40) + 2;
+    let mut page_bounds: Vec<usize> = Vec::with_capacity(est_pages + 1);
+    page_bounds.push(0);
+    let mut lines_count = 0usize;
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        lines_count += 1;
+        if lines_count >= body_lines_per_page {
+            page_bounds.push(nl_pos + 1);
+            lines_count = 0;
         }
+    }
+    if *page_bounds.last().unwrap() < data.len() {
+        page_bounds.push(data.len());
+    }
+    let total_pages = page_bounds.len() - 1;
+
+    let first_visible = config.first_page.max(1) - 1;
+    let last_visible = if config.last_page == 0 {
+        total_pages
     } else {
-        b""
+        config.last_page.min(total_pages)
     };
+    if first_visible >= total_pages {
+        return Ok(());
+    }
 
-    // Stream through data: skip body_lines_per_page newlines at a time
-    let mut page_buf: Vec<u8> = Vec::with_capacity(128 * 1024);
-    let mut page_num = 1usize;
-    let mut byte_pos = 0usize;
-    loop {
-        if byte_pos >= data.len() {
-            break;
+    if !show_header {
+        // No headers/footers — write visible body pages contiguously
+        let start = page_bounds[first_visible];
+        let end = page_bounds[last_visible];
+        return output.write_all(&data[start..end]);
+    }
+
+    // Pass 2: build metadata buffer for all visible pages
+    let visible_count = last_visible - first_visible;
+    let header_est = visible_count * 200;
+    let mut meta_buf: Vec<u8> = Vec::with_capacity(header_est);
+    // (header_start, header_end, footer_start, footer_end) in meta_buf
+    let mut meta_ranges: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(visible_count);
+
+    for pi in first_visible..last_visible {
+        let page_num = pi + 1;
+        let body_start = page_bounds[pi];
+        let body_end = page_bounds[pi + 1];
+
+        let hdr_start = meta_buf.len();
+        write_header(&mut meta_buf, &date_str, header_str, page_num, config)?;
+        let hdr_end = meta_buf.len();
+
+        let ft_start = meta_buf.len();
+        let body_slice = &data[body_start..body_end];
+        // Note: re-counts newlines already seen in Pass 1; avoiding this would
+        // require carrying per-page line counts from the boundary scan above.
+        let actual_lines = memchr::memchr_iter(b'\n', body_slice).count();
+        let has_unterminated = !body_slice.is_empty() && body_slice[body_slice.len() - 1] != b'\n';
+        if has_unterminated {
+            meta_buf.push(b'\n');
         }
+        let effective_lines = actual_lines + has_unterminated as usize;
+        let pad = body_lines_per_page.saturating_sub(effective_lines);
+        meta_buf.resize(meta_buf.len() + pad, b'\n');
+        write_footer(&mut meta_buf, config)?;
+        let ft_end = meta_buf.len();
 
-        // Find the end of this page: skip body_lines_per_page newlines
-        let page_start = byte_pos;
-        let mut lines_found = 0usize;
-        let remaining = &data[byte_pos..];
-        let mut page_end = data.len();
+        meta_ranges.push((hdr_start, hdr_end, ft_start, ft_end));
+    }
 
-        for nl_off in memchr::memchr_iter(b'\n', remaining) {
-            lines_found += 1;
-            if lines_found >= body_lines_per_page {
-                page_end = byte_pos + nl_off + 1;
-                break;
-            }
+    // Pass 3: build IoSlice array interleaving metadata and zero-copy body slices
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(visible_count * 3);
+    for (i, &(hs, he, fs, fe)) in meta_ranges.iter().enumerate() {
+        let pi = first_visible + i;
+        if he > hs {
+            slices.push(IoSlice::new(&meta_buf[hs..he]));
         }
-
-        let in_range = page_num >= config.first_page
-            && (config.last_page == 0 || page_num <= config.last_page);
-
-        if in_range {
-            page_buf.clear();
-
-            if show_header {
-                write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
-            }
-
-            // Write body: contiguous slice of original data
-            page_buf.extend_from_slice(&data[page_start..page_end]);
-
-            // Ensure last line ends with newline
-            if page_buf.last() != Some(&b'\n') {
-                page_buf.push(b'\n');
-            }
-
-            // Pad remaining body lines
-            if show_header || (!config.omit_header && !config.omit_pagination) {
-                let pad_lines = body_lines_per_page.saturating_sub(lines_found);
-                page_buf.resize(page_buf.len() + pad_lines, b'\n');
-            }
-
-            page_buf.extend_from_slice(footer);
-
-            output.write_all(&page_buf)?;
+        let body_start = page_bounds[pi];
+        let body_end = page_bounds[pi + 1];
+        if body_end > body_start {
+            slices.push(IoSlice::new(&data[body_start..body_end]));
         }
-
-        byte_pos = page_end;
-        page_num += 1;
-
-        // If we didn't find enough lines, we've consumed all data
-        if lines_found < body_lines_per_page {
-            break;
+        if fe > fs {
+            slices.push(IoSlice::new(&meta_buf[fs..fe]));
         }
     }
 
+    write_all_ioslices(output, &slices)
+}
+
+/// Write all IoSlices, handling partial writes by advancing through slices.
+/// Attempts write_vectored on the original borrowed slices first; only clones
+/// into a mutable Vec on partial write (needed for IoSlice::advance_slices).
+fn write_all_ioslices<W: Write>(out: &mut W, slices: &[IoSlice<'_>]) -> io::Result<()> {
+    // Try writing all slices at once without cloning.
+    let written = out.write_vectored(slices)?;
+    if written == 0 && !slices.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
+    }
+    // Check if everything was written (common case).
+    let total: usize = slices.iter().map(|s| s.len()).sum();
+    if written >= total {
+        return Ok(());
+    }
+    // Partial write: clone into mutable Vec and advance.
+    let mut bufs = slices.to_vec();
+    let mut remaining: &mut [IoSlice<'_>] = &mut bufs;
+    IoSlice::advance_slices(&mut remaining, written);
+    while !remaining.is_empty() {
+        let n = out.write_vectored(remaining)?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
+        }
+        IoSlice::advance_slices(&mut remaining, n);
+    }
     Ok(())
 }
 
@@ -489,13 +556,6 @@ fn pr_data_numbered<W: Write>(
     };
     let show_header = !config.omit_header && !config.omit_pagination && !suppress_header;
 
-    // Pre-allocate output buffer: ~128KB for a page
-    const BUF_SIZE: usize = 128 * 1024;
-    let mut page_buf: Vec<u8> = Vec::with_capacity(BUF_SIZE + 4096);
-
-    let mut line_number = config.first_line_number;
-    let mut page_num = 1usize;
-
     // Pre-split lines using SIMD memchr for fast iteration
     let mut line_starts: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
     line_starts.push(0);
@@ -508,6 +568,15 @@ fn pr_data_numbered<W: Write>(
         line_starts.len()
     };
 
+    // Single output buffer — avoids per-page write_all syscalls.
+    // Initial capacity capped at 64MB; Vec grows on demand for larger inputs.
+    let num_prefix_est = digits + 2; // padding + digits + separator
+    let out_cap =
+        (data.len() + total_lines * num_prefix_est + total_lines / 5 + 4096).min(64 * 1024 * 1024);
+    let mut out_buf: Vec<u8> = Vec::with_capacity(out_cap);
+
+    let mut line_number = config.first_line_number;
+    let mut page_num = 1usize;
     let mut line_idx = 0;
 
     while line_idx < total_lines {
@@ -516,20 +585,18 @@ fn pr_data_numbered<W: Write>(
             && (config.last_page == 0 || page_num <= config.last_page);
 
         if in_range {
-            page_buf.clear();
-
             if show_header {
-                write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
+                write_header(&mut out_buf, &date_str, header_str, page_num, config)?;
             }
 
             // Write numbered lines using unsafe pointer arithmetic.
-            // SAFETY: `src` points into `data` which is a &[u8] borrowed for the
-            // function's lifetime. `page_buf` may reallocate but `src` is independent.
+            // SAFETY: `src` points into `data` (a borrowed &[u8]) and is
+            // independent of `out_buf`. Reallocations of `out_buf` cannot
+            // invalidate `src` because they are separate allocations.
             let src = data.as_ptr();
             for li in line_idx..page_end {
                 let line_start = line_starts[li];
                 let line_end = if li + 1 < line_starts.len() {
-                    // strip trailing \n (and \r\n)
                     let end = line_starts[li + 1] - 1;
                     if end > line_start && data[end - 1] == b'\r' {
                         end - 1
@@ -541,9 +608,8 @@ fn pr_data_numbered<W: Write>(
                 };
                 let line_len = line_end - line_start;
 
-                let wp = page_buf.len();
+                let wp = out_buf.len();
 
-                // Format line number with right-aligned padding
                 let mut n = line_number;
                 let mut num_pos = 19usize;
                 let mut num_tmp = [0u8; 20];
@@ -557,30 +623,23 @@ fn pr_data_numbered<W: Write>(
                 }
                 let num_digits = 20 - num_pos;
                 let padding = digits.saturating_sub(num_digits);
-                // Actual prefix width: when number overflows configured width,
-                // use num_digits instead of digits to avoid buffer overwrite
-                let actual_prefix = padding + num_digits + 1; // padding + digits + separator
+                let actual_prefix = padding + num_digits + 1;
 
-                // Ensure capacity with actual prefix size
                 let needed = actual_prefix + line_len + 1;
-                if page_buf.len() + needed > page_buf.capacity() {
-                    page_buf.reserve(needed);
+                if out_buf.len() + needed > out_buf.capacity() {
+                    out_buf.reserve(needed);
                 }
-                let base = page_buf.as_mut_ptr();
+                let base = out_buf.as_mut_ptr();
 
                 unsafe {
                     let dst = base.add(wp);
-                    // Write padding spaces
                     std::ptr::write_bytes(dst, b' ', padding);
-                    // Write number digits
                     std::ptr::copy_nonoverlapping(
                         num_tmp.as_ptr().add(num_pos),
                         dst.add(padding),
                         num_digits,
                     );
-                    // Write separator
                     *dst.add(padding + num_digits) = sep_byte;
-                    // Write line content
                     if line_len > 0 {
                         std::ptr::copy_nonoverlapping(
                             src.add(line_start),
@@ -588,29 +647,26 @@ fn pr_data_numbered<W: Write>(
                             line_len,
                         );
                     }
-                    // Write newline
                     *dst.add(actual_prefix + line_len) = b'\n';
-                    page_buf.set_len(wp + actual_prefix + line_len + 1);
+                    out_buf.set_len(wp + actual_prefix + line_len + 1);
                 }
 
                 line_number += 1;
             }
 
-            // Pad remaining body lines
             if show_header {
                 let body_lines_written = page_end - line_idx;
                 let pad = body_lines_per_page.saturating_sub(body_lines_written);
-                page_buf.resize(page_buf.len() + pad, b'\n');
+                out_buf.resize(out_buf.len() + pad, b'\n');
+                write_footer(&mut out_buf, config)?;
             }
 
-            // Footer
-            if show_header {
-                write_footer(&mut page_buf, config)?;
+            // Flush to writer when buffer exceeds 64MB to bound memory usage.
+            if out_buf.len() >= 64 * 1024 * 1024 {
+                output.write_all(&out_buf)?;
+                out_buf.clear();
             }
-
-            output.write_all(&page_buf)?;
         } else {
-            // Skip page but still advance line number
             line_number += page_end - line_idx;
         }
 
@@ -618,6 +674,9 @@ fn pr_data_numbered<W: Write>(
         page_num += 1;
     }
 
+    if !out_buf.is_empty() {
+        output.write_all(&out_buf)?;
+    }
     Ok(())
 }
 
@@ -716,24 +775,24 @@ fn pr_lines_generic<W: Write>(
         input_lines_per_page
     };
 
-    // Split into pages
+    // Single output buffer for all pages — one write_all at the end
     let total_lines = all_lines.len();
     let mut line_number = config.first_line_number;
     let mut page_num = 1usize;
     let mut line_idx = 0;
-    // Page-level output buffer: batch many small writes into one large write_all
-    let mut page_buf: Vec<u8> = Vec::with_capacity(128 * 1024);
+    let total_bytes: usize = all_lines.iter().map(|l| l.len() + 1).sum();
+    // Initial capacity capped at 64MB; Vec grows on demand for larger inputs.
+    let out_cap = (total_bytes + total_bytes / 5 + 4096).min(64 * 1024 * 1024);
+    let mut out_buf: Vec<u8> = Vec::with_capacity(out_cap);
 
     while line_idx < total_lines || (line_idx == 0 && total_lines == 0) {
-        // For empty input, output one empty page (matching GNU behavior)
         if total_lines == 0 && line_idx == 0 {
             if page_num >= config.first_page
                 && (config.last_page == 0 || page_num <= config.last_page)
             {
                 if !config.omit_header && !config.omit_pagination && !suppress_header {
-                    write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
-                    write_footer(&mut page_buf, config)?;
-                    output.write_all(&page_buf)?;
+                    write_header(&mut out_buf, &date_str, header_str, page_num, config)?;
+                    write_footer(&mut out_buf, config)?;
                 }
             }
             break;
@@ -743,17 +802,13 @@ fn pr_lines_generic<W: Write>(
 
         if page_num >= config.first_page && (config.last_page == 0 || page_num <= config.last_page)
         {
-            page_buf.clear();
-
-            // Write header to page buffer
             if !config.omit_header && !config.omit_pagination && !suppress_header {
-                write_header(&mut page_buf, &date_str, header_str, page_num, config)?;
+                write_header(&mut out_buf, &date_str, header_str, page_num, config)?;
             }
 
-            // Write body to page buffer
             if columns > 1 {
                 write_multicolumn_body(
-                    &mut page_buf,
+                    &mut out_buf,
                     &all_lines[line_idx..page_end],
                     effective_config,
                     columns,
@@ -762,7 +817,7 @@ fn pr_lines_generic<W: Write>(
                 )?;
             } else {
                 write_single_column_body(
-                    &mut page_buf,
+                    &mut out_buf,
                     &all_lines[line_idx..page_end],
                     effective_config,
                     &mut line_number,
@@ -770,24 +825,28 @@ fn pr_lines_generic<W: Write>(
                 )?;
             }
 
-            // Write footer to page buffer
             if !config.omit_header && !config.omit_pagination && !suppress_header {
-                write_footer(&mut page_buf, config)?;
+                write_footer(&mut out_buf, config)?;
             }
 
-            // Flush entire page to output in one call
-            output.write_all(&page_buf)?;
+            // Flush to writer when buffer exceeds 64MB to bound memory usage.
+            if out_buf.len() >= 64 * 1024 * 1024 {
+                output.write_all(&out_buf)?;
+                out_buf.clear();
+            }
         }
 
         line_idx = page_end;
         page_num += 1;
 
-        // Break if we've consumed all lines
         if line_idx >= total_lines {
             break;
         }
     }
 
+    if !out_buf.is_empty() {
+        output.write_all(&out_buf)?;
+    }
     Ok(())
 }
 

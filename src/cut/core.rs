@@ -10,9 +10,10 @@ const PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
 
-/// Input chunk size for sequential processing. Keeps output buffer (~256KB)
-/// hot in L2 cache and avoids full-size allocation page faults.
-const SEQ_CHUNK: usize = 256 * 1024;
+/// Input chunk size for sequential processing. 4MB reduces write_all syscalls
+/// (~3 calls for 10MB vs ~40 at 256KB). May exceed L2/L3 on smaller cores;
+/// the primary benefit is syscall reduction rather than cache residency.
+const SEQ_CHUNK: usize = 4 * 1024 * 1024;
 
 /// Process data in newline-aligned chunks, writing each chunk's output immediately.
 /// Avoids allocating a full-size output buffer (e.g. 12MB for 11MB input).
@@ -354,9 +355,11 @@ fn multi_select_chunk(
     suppress: bool,
     buf: &mut Vec<u8>,
 ) {
-    // Single-pass bitmask approach for small field numbers (common case).
-    // One memchr2 scan finds both delimiters and newlines simultaneously,
-    // avoiding per-line function call overhead and delimiter position arrays.
+    // Two-level scan for small max_field: outer memchr(newline) + inner
+    // memchr(delim) with early exit at max_field. This is faster than the
+    // single-pass memchr2 approach when lines have many fields past max_field,
+    // because we skip scanning delimiters we don't need (e.g., for -f1,3,5
+    // on a 10-field CSV, we stop after delimiter 5 instead of scanning all 9).
     if max_field <= 64 && delim != line_delim {
         let mut mask: u64 = 0;
         for r in ranges {
@@ -366,7 +369,7 @@ fn multi_select_chunk(
                 mask |= 1u64 << (f - 1);
             }
         }
-        multi_select_chunk_bitmask(data, delim, line_delim, mask, max_field, suppress, buf);
+        multi_select_twolevel(data, delim, line_delim, mask, max_field, suppress, buf);
         return;
     }
 
@@ -394,6 +397,7 @@ fn multi_select_chunk(
 /// Per-line multi-field extraction with early termination after max_field.
 /// For `-f1,3,5` on 20-field CSV, this scans only 5 delimiters per line
 /// instead of all 20, reducing per-hit overhead by ~75%.
+#[allow(dead_code)]
 fn multi_select_chunk_bitmask(
     data: &[u8],
     delim: u8,
@@ -515,6 +519,207 @@ fn multi_select_chunk_bitmask(
         }
     }
 
+    unsafe {
+        buf.set_len(initial_len + wp);
+    }
+}
+
+/// Two-level multi-field extraction: outer memchr(newline) for line boundaries,
+/// inner memchr(delim) with early exit after max_field delimiters per line.
+/// For `-f1,3,5` on a 10-field CSV, this scans only 5 delimiters per line
+/// instead of all 9, saving ~45% of delimiter processing.
+fn multi_select_twolevel(
+    data: &[u8],
+    delim: u8,
+    line_delim: u8,
+    mask: u64,
+    max_field: usize,
+    suppress: bool,
+    buf: &mut Vec<u8>,
+) {
+    buf.reserve(data.len() + 1);
+    let initial_len = buf.len();
+    let out_base = unsafe { buf.as_mut_ptr().add(initial_len) };
+    let src = data.as_ptr();
+    let mut wp: usize = 0;
+    let mut line_start: usize = 0;
+
+    for nl_pos in memchr_iter(line_delim, data) {
+        let line_len = nl_pos - line_start;
+        let line = &data[line_start..nl_pos];
+
+        if line_len == 0 {
+            if !suppress {
+                unsafe {
+                    *out_base.add(wp) = line_delim;
+                }
+                wp += 1;
+            }
+            line_start = nl_pos + 1;
+            continue;
+        }
+
+        // Scan delimiters within the line, stopping after max_field
+        let mut field_num: usize = 1;
+        let mut field_start: usize = 0;
+        let mut first_output = true;
+        let mut has_delim = false;
+
+        let mut search_start = 0;
+        while field_num <= max_field {
+            match memchr::memchr(delim, &line[search_start..]) {
+                Some(dp) => {
+                    let abs_dp = search_start + dp;
+                    has_delim = true;
+                    if (mask >> (field_num - 1)) & 1 == 1 {
+                        if !first_output {
+                            unsafe {
+                                *out_base.add(wp) = delim;
+                            }
+                            wp += 1;
+                        }
+                        let flen = abs_dp - field_start;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                src.add(line_start + field_start),
+                                out_base.add(wp),
+                                flen,
+                            );
+                        }
+                        wp += flen;
+                        first_output = false;
+                    }
+                    field_num += 1;
+                    field_start = abs_dp + 1;
+                    search_start = abs_dp + 1;
+                }
+                None => break,
+            }
+        }
+
+        if !has_delim {
+            // No delimiter: pass through or suppress
+            if !suppress {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(line_start), out_base.add(wp), line_len);
+                }
+                wp += line_len;
+                unsafe {
+                    *out_base.add(wp) = line_delim;
+                }
+                wp += 1;
+            }
+        } else {
+            // Check if the last field (after last found delimiter) is selected
+            if field_num <= 64 && (mask >> (field_num - 1)) & 1 == 1 {
+                if !first_output {
+                    unsafe {
+                        *out_base.add(wp) = delim;
+                    }
+                    wp += 1;
+                }
+                let flen = line_len - field_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src.add(line_start + field_start),
+                        out_base.add(wp),
+                        flen,
+                    );
+                }
+                wp += flen;
+            }
+            unsafe {
+                *out_base.add(wp) = line_delim;
+            }
+            wp += 1;
+        }
+
+        line_start = nl_pos + 1;
+    }
+
+    // Handle final line without trailing newline
+    if line_start < data.len() {
+        let line = &data[line_start..];
+        let line_len = line.len();
+        let mut field_num: usize = 1;
+        let mut field_start: usize = 0;
+        let mut first_output = true;
+        let mut has_delim = false;
+        let mut search_start = 0;
+
+        while field_num <= max_field {
+            match memchr::memchr(delim, &line[search_start..]) {
+                Some(dp) => {
+                    let abs_dp = search_start + dp;
+                    has_delim = true;
+                    if (mask >> (field_num - 1)) & 1 == 1 {
+                        if !first_output {
+                            unsafe {
+                                *out_base.add(wp) = delim;
+                            }
+                            wp += 1;
+                        }
+                        let flen = abs_dp - field_start;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                src.add(line_start + field_start),
+                                out_base.add(wp),
+                                flen,
+                            );
+                        }
+                        wp += flen;
+                        first_output = false;
+                    }
+                    field_num += 1;
+                    field_start = abs_dp + 1;
+                    search_start = abs_dp + 1;
+                }
+                None => break,
+            }
+        }
+
+        if !has_delim {
+            if !suppress {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(line_start), out_base.add(wp), line_len);
+                }
+                wp += line_len;
+                unsafe {
+                    *out_base.add(wp) = line_delim;
+                }
+                wp += 1;
+            }
+        } else {
+            if field_num <= 64 && (mask >> (field_num - 1)) & 1 == 1 {
+                if !first_output {
+                    unsafe {
+                        *out_base.add(wp) = delim;
+                    }
+                    wp += 1;
+                }
+                let flen = line_len - field_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src.add(line_start + field_start),
+                        out_base.add(wp),
+                        flen,
+                    );
+                }
+                wp += flen;
+            }
+            unsafe {
+                *out_base.add(wp) = line_delim;
+            }
+            wp += 1;
+        }
+    }
+
+    debug_assert!(
+        wp <= data.len() + 1,
+        "wp={} exceeded reservation data.len()+1={}",
+        wp,
+        data.len() + 1
+    );
     unsafe {
         buf.set_len(initial_len + wp);
     }
