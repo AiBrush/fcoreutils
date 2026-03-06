@@ -772,8 +772,6 @@ fn run_file_shuffle(
             offsets.swap(i, j);
         }
 
-        let last_idx = n - 1;
-
         #[cfg(unix)]
         {
             // Contiguous output buffer with raw write_all_fd.
@@ -805,7 +803,7 @@ fn run_file_shuffle(
                     }
 
                     let span = (e - s) as usize;
-                    let needs_extra = last_needs_delim && offsets_slice[idx] == offsets[last_idx];
+                    let needs_extra = last_needs_delim && e as usize == data.len();
                     let total = span + needs_extra as usize;
 
                     if buf.len() + total > BUF_SIZE && !buf.is_empty() {
@@ -854,7 +852,7 @@ fn run_file_shuffle(
                         }
                     }
                     let span = (e - s) as usize;
-                    let needs_extra = last_needs_delim && offsets_slice[idx] == offsets[last_idx];
+                    let needs_extra = last_needs_delim && e as usize == data.len();
                     let total = span + needs_extra as usize;
                     if buf.len() + total > CHUNK && !buf.is_empty() {
                         if !checked_write_all(out, &buf).unwrap_or(false) {
@@ -885,12 +883,11 @@ fn run_file_shuffle(
 
         #[cfg(not(unix))]
         {
-            let last_idx = n - 1;
             const OUT_CHUNK: usize = 2 * 1024 * 1024;
             let mut buf = Vec::with_capacity(OUT_CHUNK + 256);
             for &[s, e] in offsets[..count].iter() {
                 buf.extend_from_slice(&data[s as usize..e as usize]);
-                let needs_extra = last_needs_delim && [s, e] == offsets[last_idx];
+                let needs_extra = last_needs_delim && e as usize == data.len();
                 if needs_extra {
                     buf.push(delimiter);
                 }
