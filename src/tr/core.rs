@@ -2622,7 +2622,7 @@ fn translate_and_write_table(
 }
 
 /// Streaming SIMD range translation — single buffer, in-place transform.
-/// Uses 2MB buffer to reduce syscall count (5 iterations for 10MB instead of 20).
+/// Uses 4MB buffer to reduce syscall count (~3 iterations for 10MB instead of ~20).
 /// SIMD translate is trivial compared to syscall overhead, so fewer larger calls win.
 /// For chunks >= PARALLEL_THRESHOLD, uses rayon par_chunks_mut for multi-core.
 fn translate_range_stream(
@@ -3905,16 +3905,6 @@ pub fn translate_mmap(
         return writer.write_all(data);
     }
 
-    // Pre-fault mmap pages with POPULATE_READ (Linux 5.14+) to batch page faults
-    // into a single kernel call instead of ~2500 individual demand faults for 10MB.
-    #[cfg(target_os = "linux")]
-    if data.len() >= 2 * 1024 * 1024 {
-        unsafe {
-            // MADV_POPULATE_READ = 22
-            libc::madvise(data.as_ptr() as *mut libc::c_void, data.len(), 22);
-        }
-    }
-
     // Try SIMD fast path for single-range constant-offset translations
     if let Some((lo, hi, offset)) = detect_range_offset(&table) {
         return translate_mmap_range(data, writer, lo, hi, offset);
@@ -4329,11 +4319,18 @@ pub fn translate_squeeze_mmap(
 /// For data <= 16MB: delete into one buffer, one write syscall.
 /// For data > 16MB: chunked approach to limit memory.
 pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) -> io::Result<()> {
-    // Pre-fault mmap pages to batch page faults
+    // MADV_POPULATE_READ (Linux 5.14+) batches page faults into one kernel call
+    // instead of ~2500 individual demand faults for 10MB. Returns EINVAL on older
+    // kernels — silently ignored as it is advisory.
     #[cfg(target_os = "linux")]
     if data.len() >= 2 * 1024 * 1024 {
+        const MADV_POPULATE_READ: libc::c_int = 22;
         unsafe {
-            libc::madvise(data.as_ptr() as *mut libc::c_void, data.len(), 22);
+            libc::madvise(
+                data.as_ptr() as *mut libc::c_void,
+                data.len(),
+                MADV_POPULATE_READ,
+            );
         }
     }
     if delete_chars.len() == 1 {
