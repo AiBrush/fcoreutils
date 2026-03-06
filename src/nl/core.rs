@@ -9,6 +9,8 @@ pub enum NumberingStyle {
     NonEmpty,
     /// Don't number lines.
     None,
+    /// Number lines starting with a literal prefix (optimized from `^literal` regex).
+    Prefix(Vec<u8>),
     /// Number lines matching a basic regular expression.
     Regex(regex::bytes::Regex),
 }
@@ -65,6 +67,12 @@ pub fn parse_numbering_style(s: &str) -> Result<NumberingStyle, String> {
         "n" => Ok(NumberingStyle::None),
         _ if s.starts_with('p') => {
             let pattern = &s[1..];
+            // Optimize simple ^literal patterns to prefix match (avoids regex overhead).
+            if let Some(rest) = pattern.strip_prefix('^') {
+                if !rest.is_empty() && !rest.bytes().any(|b| b"\\.*+?|()[]{}$".contains(&b)) {
+                    return Ok(NumberingStyle::Prefix(rest.as_bytes().to_vec()));
+                }
+            }
             match regex::bytes::Regex::new(pattern) {
                 Ok(re) => Ok(NumberingStyle::Regex(re)),
                 Err(e) => Err(format!("invalid regular expression: {}", e)),
@@ -172,6 +180,7 @@ fn should_number(line: &[u8], style: &NumberingStyle) -> bool {
         NumberingStyle::All => true,
         NumberingStyle::NonEmpty => !line.is_empty(),
         NumberingStyle::None => false,
+        NumberingStyle::Prefix(prefix) => line.starts_with(prefix),
         NumberingStyle::Regex(re) => re.is_match(line),
     }
 }

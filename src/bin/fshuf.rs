@@ -737,6 +737,111 @@ fn run_range_shuffle(
     }
 }
 
+/// Sparse file shuffle: select `count` random lines from `total_lines` without
+/// building the full offset array. Uses partial Fisher-Yates on line indices,
+/// sorts them, then extracts lines in a single forward pass.
+/// O(count) memory instead of O(total_lines).
+#[allow(clippy::too_many_arguments)]
+fn run_file_shuffle_sparse(
+    data: &[u8],
+    sep: u8,
+    delimiter: u8,
+    total_lines: usize,
+    count: usize,
+    rng: &mut RandGen,
+    out: &mut impl Write,
+    is_stdout: bool,
+) {
+    // Pick `count` unique random line indices using partial Fisher-Yates.
+    // We maintain a sparse map of swapped positions to avoid O(N) array.
+    let mut selected: Vec<u32> = Vec::with_capacity(count);
+    let mut swaps: std::collections::HashMap<u32, u32> =
+        std::collections::HashMap::with_capacity(count * 2);
+
+    for i in 0..count {
+        let j = i + rng.gen_range(total_lines - i);
+        let i32 = i as u32;
+        let j32 = j as u32;
+        let vi = swaps.get(&i32).copied().unwrap_or(i32);
+        let vj = swaps.get(&j32).copied().unwrap_or(j32);
+        swaps.insert(i32, vj);
+        swaps.insert(j32, vi);
+        selected.push(vj);
+    }
+    drop(swaps);
+
+    // Sort indices to extract lines in forward order (cache-friendly)
+    // We need to remember the output order, so create (sorted_idx, output_pos) pairs.
+    let mut indexed: Vec<(u32, u32)> = selected
+        .iter()
+        .enumerate()
+        .map(|(out_pos, &line_idx)| (line_idx, out_pos as u32))
+        .collect();
+    indexed.sort_unstable_by_key(|&(line_idx, _)| line_idx);
+
+    // Single forward pass: walk data with memchr, extract selected lines
+    let mut results: Vec<(u32, u32, u32)> = Vec::with_capacity(count); // (out_pos, start, end)
+    let mut line_num: u32 = 0;
+    let mut start: u32 = 0;
+    let mut sel_idx = 0;
+
+    for pos in memchr::memchr_iter(sep, data) {
+        while sel_idx < indexed.len() && indexed[sel_idx].0 == line_num {
+            results.push((indexed[sel_idx].1, start, (pos + 1) as u32));
+            sel_idx += 1;
+        }
+        if sel_idx >= indexed.len() {
+            break;
+        }
+        start = (pos + 1) as u32;
+        line_num += 1;
+    }
+    // Handle last line without trailing delimiter
+    if sel_idx < indexed.len() {
+        let end = data.len() as u32;
+        while sel_idx < indexed.len() && indexed[sel_idx].0 == line_num {
+            results.push((indexed[sel_idx].1, start, end));
+            sel_idx += 1;
+        }
+    }
+
+    // Sort by output position to restore shuffle order
+    results.sort_unstable_by_key(|&(out_pos, _, _)| out_pos);
+
+    // Write output: sep == delimiter (both \n or both \0).
+    // Lines ending with sep already have the delimiter; last unterminated line needs one.
+    let _ = is_stdout;
+    let mut buf: Vec<u8> = Vec::with_capacity(count.min(8192) * 40);
+    for &(_out_pos, s, e) in &results {
+        let line = &data[s as usize..e as usize];
+        buf.extend_from_slice(line);
+        if line.last().copied() != Some(delimiter) {
+            buf.push(delimiter);
+        }
+        if buf.len() >= 2 * 1024 * 1024 {
+            match checked_write_all(out, &buf) {
+                Ok(false) => return,
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
+            }
+            buf.clear();
+        }
+    }
+    if !buf.is_empty() {
+        match checked_write_all(out, &buf) {
+            Ok(false) => process::exit(0),
+            Err(err) => {
+                eprintln!("{}: write error: {}", TOOL_NAME, err);
+                process::exit(1);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_file_shuffle(
     filename: Option<&str>,
@@ -750,6 +855,42 @@ fn run_file_shuffle(
 ) {
     let data = read_file_data(filename);
     let sep = if zero_terminated { 0u8 } else { b'\n' };
+
+    // Fast path: when -n count is small, avoid building the full offset array.
+    // Instead: count lines, pick random indices, sort them, and extract in one pass.
+    // This turns O(N) allocation + O(N) memchr+push into O(N) memchr count + O(count) work.
+    // For -n 100 from 600K lines: avoids 4.8MB offset array allocation + page faults.
+    if !repeat {
+        if let Some(count) = head_count {
+            let total_lines = memchr::memchr_iter(sep, &data).count()
+                + if data.last().is_some_and(|&b| b != sep) {
+                    1
+                } else {
+                    0
+                };
+            if total_lines == 0 {
+                return;
+            }
+            let count = count.min(total_lines);
+            if count == 0 {
+                return;
+            }
+            // Use sparse path when selecting <25% of lines (avoids full offset array)
+            if (count as u64) < (total_lines as u64) / 4 {
+                run_file_shuffle_sparse(
+                    &data,
+                    sep,
+                    delimiter,
+                    total_lines,
+                    count,
+                    rng,
+                    out,
+                    is_stdout,
+                );
+                return;
+            }
+        }
+    }
 
     // Build line index as (start, end) pairs using u32 for compactness.
     // At 8 bytes per entry (vs 16 for (usize, usize)), this halves cache footprint

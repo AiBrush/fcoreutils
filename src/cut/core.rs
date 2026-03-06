@@ -356,9 +356,10 @@ fn multi_select_chunk(
     buf: &mut Vec<u8>,
 ) {
     // Two-level scan for small max_field: outer memchr(newline) + inner
-    // memchr(delim) with early exit at max_field. Faster than single-pass memchr2
-    // when lines have many fields past max_field (e.g., for -f1,3,5 on 8-field CSV,
-    // stops after delimiter 5 instead of scanning all 7).
+    // memchr(delim) with early exit at max_field. This is faster than the
+    // single-pass memchr2 approach when lines have many fields past max_field,
+    // because we skip scanning delimiters we don't need (e.g., for -f1,3,5
+    // on a 10-field CSV, we stop after delimiter 5 instead of scanning all 9).
     if max_field <= 64 && delim != line_delim {
         let mut mask: u64 = 0;
         for r in ranges {
@@ -558,41 +559,37 @@ fn multi_select_twolevel(
             continue;
         }
 
-        // Scan delimiters within the line, stopping after max_field
+        // Scan delimiters within the line, stopping after max_field.
+        // Uses memchr_iter for amortized SIMD setup (one per line vs one per field).
         let mut field_num: usize = 1;
         let mut field_start: usize = 0;
         let mut first_output = true;
         let mut has_delim = false;
 
-        let mut search_start = 0;
-        while field_num <= max_field {
-            match memchr::memchr(delim, &line[search_start..]) {
-                Some(dp) => {
-                    let abs_dp = search_start + dp;
-                    has_delim = true;
-                    if (mask >> (field_num - 1)) & 1 == 1 {
-                        if !first_output {
-                            unsafe {
-                                *out_base.add(wp) = delim;
-                            }
-                            wp += 1;
-                        }
-                        let flen = abs_dp - field_start;
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                src.add(line_start + field_start),
-                                out_base.add(wp),
-                                flen,
-                            );
-                        }
-                        wp += flen;
-                        first_output = false;
+        for dp in memchr::memchr_iter(delim, line) {
+            has_delim = true;
+            if (mask >> (field_num - 1)) & 1 == 1 {
+                if !first_output {
+                    unsafe {
+                        *out_base.add(wp) = delim;
                     }
-                    field_num += 1;
-                    field_start = abs_dp + 1;
-                    search_start = abs_dp + 1;
+                    wp += 1;
                 }
-                None => break,
+                let flen = dp - field_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src.add(line_start + field_start),
+                        out_base.add(wp),
+                        flen,
+                    );
+                }
+                wp += flen;
+                first_output = false;
+            }
+            field_num += 1;
+            field_start = dp + 1;
+            if field_num > max_field {
+                break;
             }
         }
 
@@ -644,36 +641,31 @@ fn multi_select_twolevel(
         let mut field_start: usize = 0;
         let mut first_output = true;
         let mut has_delim = false;
-        let mut search_start = 0;
 
-        while field_num <= max_field {
-            match memchr::memchr(delim, &line[search_start..]) {
-                Some(dp) => {
-                    let abs_dp = search_start + dp;
-                    has_delim = true;
-                    if (mask >> (field_num - 1)) & 1 == 1 {
-                        if !first_output {
-                            unsafe {
-                                *out_base.add(wp) = delim;
-                            }
-                            wp += 1;
-                        }
-                        let flen = abs_dp - field_start;
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                src.add(line_start + field_start),
-                                out_base.add(wp),
-                                flen,
-                            );
-                        }
-                        wp += flen;
-                        first_output = false;
+        for dp in memchr::memchr_iter(delim, line) {
+            has_delim = true;
+            if (mask >> (field_num - 1)) & 1 == 1 {
+                if !first_output {
+                    unsafe {
+                        *out_base.add(wp) = delim;
                     }
-                    field_num += 1;
-                    field_start = abs_dp + 1;
-                    search_start = abs_dp + 1;
+                    wp += 1;
                 }
-                None => break,
+                let flen = dp - field_start;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src.add(line_start + field_start),
+                        out_base.add(wp),
+                        flen,
+                    );
+                }
+                wp += flen;
+                first_output = false;
+            }
+            field_num += 1;
+            field_start = dp + 1;
+            if field_num > max_field {
+                break;
             }
         }
 
