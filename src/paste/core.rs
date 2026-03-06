@@ -228,8 +228,9 @@ fn paste_two_files_streaming(
         }
 
         // a_len and b_len are bounded by file sizes (< isize::MAX), so no overflow.
+        debug_assert!(a_start + a_len <= len_a, "a out of bounds");
+        debug_assert!(b_start + b_len <= len_b, "b out of bounds");
         let out_len = a_len + 1 + b_len + 1;
-        debug_assert!(out_len >= 2);
 
         // Flush if needed
         if pos + out_len > buf.capacity() {
@@ -302,24 +303,24 @@ fn paste_n_files_streaming(
 
     while files_remaining > 0 {
         // Save buffer position so we can rewind if no file produces a line.
-        // Safety of rewind: at this point pos < buf_cap (2MB) due to the periodic
-        // flush at the end of each iteration. The delimiter writes below add at most
-        // nfiles-1 bytes before any file data check, which is negligible compared to
-        // the 65536-byte overflow margin (buf capacity = buf_cap + 65536). So the
-        // rewind to saved_pos is always valid — no flush can occur between saved_pos
-        // and the any_line check when no file produces data.
+        debug_assert!(
+            pos < buf_cap,
+            "saved_pos invariant: pos must be < buf_cap at iteration start"
+        );
         let saved_pos = pos;
         let mut any_line = false;
+        let mut flushed_this_iter = false;
 
         for file_idx in 0..nfiles {
             // Delimiter before columns 1..N
             if file_idx > 0 && has_delims {
-                let d = delims[(file_idx - 1) % delims.len()];
+                let d = unsafe { *delims.get_unchecked((file_idx - 1) % delims.len()) };
                 if pos >= buf.capacity() {
                     unsafe { buf.set_len(pos) };
                     raw_write_all(&buf)?;
                     buf.clear();
                     pos = 0;
+                    flushed_this_iter = true;
                 }
                 unsafe { *buf.as_mut_ptr().add(pos) = d };
                 pos += 1;
@@ -386,8 +387,10 @@ fn paste_n_files_streaming(
         }
 
         if !any_line {
-            // Rewind any delimiters written this iteration.
-            pos = saved_pos;
+            if !flushed_this_iter {
+                // Safe to rewind delimiters written this iteration.
+                pos = saved_pos;
+            }
             break;
         }
 
