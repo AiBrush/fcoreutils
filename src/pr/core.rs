@@ -340,13 +340,16 @@ pub fn pr_data<W: Write>(
         return pr_data_numbered(data, output, config, filename, file_date);
     }
 
-    // Fast path: multi-column down mode without numbering, no transforms
+    // Fast path: multi-column down mode without numbering, no transforms.
+    // Guards: ≤32 columns (fixed-size array), ≤4GB data (u32 offsets).
     if config.columns > 1
+        && config.columns <= 32
         && !config.across
         && config.number_lines.is_none()
         && config.indent == 0
         && !config.double_space
         && !config.join_lines
+        && data.len() <= u32::MAX as usize
         && memchr::memchr(b'\r', data).is_none()
         && memchr::memchr(b'\x0c', data).is_none()
     {
@@ -477,8 +480,9 @@ fn pr_data_multicolumn_fast<W: Write>(
             // Compute column layout: "down" mode distributes lines across columns
             let base = n / columns;
             let extra = n % columns;
-            let mut col_starts = [0u32; 33]; // support up to 32 columns
-            let max_cols = columns.min(32);
+            // Guard ensures columns <= 32, so col_starts[columns] is always in bounds.
+            let mut col_starts = [0u32; 33];
+            let max_cols = columns;
             for col in 0..max_cols {
                 let col_lines = base + if col < extra { 1 } else { 0 };
                 col_starts[col + 1] = col_starts[col] + col_lines as u32;
@@ -509,7 +513,14 @@ fn pr_data_multicolumn_fast<W: Write>(
                             abs_pos += col_sep_bytes.len();
                         }
 
-                        // Copy line content directly from source
+                        // Copy line content directly from source.
+                        // SAFETY: `src` is `data.as_ptr()` and `out_buf` is a separate
+                        // allocation, so reallocating `out_buf` cannot invalidate `src`.
+                        // `off` and `len` come from `line_offsets` built by iterating
+                        // `memchr_iter` over `data`, guaranteeing `off + len <= data.len()`.
+                        // `content_len = len.min(content_width) <= len`, so
+                        // `off as usize + content_len <= data.len()`. The u32→usize cast
+                        // is lossless because the guard ensures `data.len() <= u32::MAX`.
                         if content_len > 0 {
                             let wp = out_buf.len();
                             out_buf.reserve(content_len);
@@ -530,6 +541,9 @@ fn pr_data_multicolumn_fast<W: Write>(
                             }
                         }
 
+                        // abs_pos tracks the column alignment position. The trailing
+                        // space strip only fires on last_data_col, after which no more
+                        // padding is needed, so the divergence is harmless.
                         abs_pos += content_len;
 
                         // Pad to next column boundary
