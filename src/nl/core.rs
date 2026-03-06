@@ -259,6 +259,7 @@ fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> 
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
+        // +22: i64 prints at most 20 chars (sign + 19 digits), plus 1 newline = 21.
         let needed = output.len() + line_len + width + sep.len() + 22;
         if needed > output.capacity() {
             output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
@@ -328,6 +329,7 @@ fn nl_number_nonempty_fast(data: &[u8], config: &NlConfig, line_number: &mut i64
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
+        // +22: i64 prints at most 20 chars (sign + 19 digits), plus 1 newline = 21.
         let needed = output.len() + line_len + width + sep.len() + 22;
         if needed > output.capacity() {
             output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
@@ -360,6 +362,8 @@ fn nl_number_nonempty_fast(data: &[u8], config: &NlConfig, line_number: &mut i64
         pos = nl_pos + 1;
     }
 
+    // Handle final line without trailing newline.
+    // Always non-blank: pos < data.len() implies remaining > 0.
     if pos < data.len() {
         let remaining = data.len() - pos;
         let needed = output.len() + remaining + width + sep.len() + 22;
@@ -1017,17 +1021,9 @@ pub fn nl_stream_with_state(
         };
 
         if !has_delimiters {
-            // For files up to ~64MB, build output in-memory then write in a single
-            // syscall — eliminates chunked write overhead for small-to-medium files.
-            const IN_MEMORY_THRESHOLD: usize = 64 * 1024 * 1024;
-            if data.len() <= IN_MEMORY_THRESHOLD {
-                let output = if is_all {
-                    nl_number_all_fast(data, config, line_number)
-                } else {
-                    nl_number_nonempty_fast(data, config, line_number)
-                };
-                return write_all_fd(fd, &output);
-            }
+            // Always use the streaming path: 2MB output buffer has minimal page
+            // fault overhead (~1 fault) vs the in-memory path which allocates
+            // data.len()*2 (~20MB for 10MB input, ~5000 page faults).
             return if is_all {
                 nl_number_all_stream(data, config, line_number, fd)
             } else {
@@ -1048,8 +1044,15 @@ pub fn nl_to_vec_with_state(data: &[u8], config: &NlConfig, line_number: &mut i6
 
     // Fast paths for common benchmark cases.
     // Guard: skip fast path if data contains section delimiters (rare in practice).
-    let has_section_delims = !config.section_delimiter.is_empty()
-        && memchr::memmem::find(data, &config.section_delimiter).is_some();
+    // Fast-reject: single-byte memchr for the first delimiter byte before full memmem
+    // scan — matches the optimization in nl_stream_with_state.
+    let has_section_delims = if config.section_delimiter.is_empty() {
+        false
+    } else {
+        let first_byte = config.section_delimiter[0];
+        memchr::memchr(first_byte, data).is_some()
+            && memchr::memmem::find(data, &config.section_delimiter).is_some()
+    };
     if !has_section_delims {
         if is_simple_number_all(config) {
             return nl_number_all_fast(data, config, line_number);
