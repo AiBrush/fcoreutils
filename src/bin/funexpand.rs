@@ -167,8 +167,8 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
 }
 
 /// Write all iovec entries using writev, handling partial writes and IOV_MAX.
-/// IOV_MAX is 1024 on Linux and macOS; POSIX minimum is 16 but all modern
-/// Unix systems support at least 1024.
+/// IOV_MAX is 1024 on Linux (UIO_MAXIOV in kernel headers) and all BSDs.
+/// libc::IOV_MAX is only defined for BSD targets, not Linux, so we hardcode.
 #[cfg(unix)]
 fn writev_all_result(fd: i32, iovecs: &[libc::iovec]) -> io::Result<()> {
     const IOV_MAX: usize = 1024;
@@ -314,8 +314,10 @@ fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<
         modified.push(b'\n');
         segments.push((mod_start, modified.len() - mod_start, true));
 
-        // Flush when modified buffer exceeds threshold to bound memory
-        if modified.len() >= FLUSH_SIZE {
+        // Flush when modified buffer or segments Vec exceeds threshold.
+        // segments grows at 24 bytes/entry vs modified at ~3 bytes for short lines,
+        // so cap segments at 65536 entries (~1.5MB) to prevent unbounded growth.
+        if modified.len() >= FLUSH_SIZE || segments.len() >= 65_536 {
             flush_segments(fd, &segments, &modified, data)?;
             segments.clear();
             modified.clear();
@@ -477,8 +479,8 @@ fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> 
         modified.push(b'\n');
         segments.push((mod_start, modified.len() - mod_start, true));
 
-        // Flush when modified buffer exceeds threshold to bound memory
-        if modified.len() >= FLUSH_SIZE {
+        // Flush when modified buffer or segments Vec exceeds threshold.
+        if modified.len() >= FLUSH_SIZE || segments.len() >= 65_536 {
             flush_segments(fd, &segments, &modified, data)?;
             segments.clear();
             modified.clear();
