@@ -588,7 +588,14 @@ fn run_range_shuffle(
             }
         }
         if !buf.is_empty() {
-            let _ = checked_write_all(out, &buf);
+            match checked_write_all(out, &buf) {
+                Ok(false) => process::exit(0),
+                Err(e) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, e);
+                    process::exit(1);
+                }
+                _ => {}
+            }
         }
         return;
     }
@@ -620,7 +627,14 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
         }
-        let _ = checked_write_all(out, &buf);
+        match checked_write_all(out, &buf) {
+            Ok(false) => process::exit(0),
+            Err(e) => {
+                eprintln!("{}: write error: {}", TOOL_NAME, e);
+                process::exit(1);
+            }
+            _ => {}
+        }
     } else if hi <= u32::MAX as u64 {
         // Use u32 array when range fits — halves cache footprint for Fisher-Yates
         let lo32 = lo as u32;
@@ -643,7 +657,14 @@ fn run_range_shuffle(
             }
         }
         if !buf.is_empty() {
-            let _ = checked_write_all(out, &buf);
+            match checked_write_all(out, &buf) {
+                Ok(false) => process::exit(0),
+                Err(e) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, e);
+                    process::exit(1);
+                }
+                _ => {}
+            }
         }
     } else {
         // Dense path: generate all values and partial Fisher-Yates shuffle.
@@ -669,7 +690,14 @@ fn run_range_shuffle(
             }
         }
         if !buf.is_empty() {
-            let _ = checked_write_all(out, &buf);
+            match checked_write_all(out, &buf) {
+                Ok(false) => process::exit(0),
+                Err(e) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, e);
+                    process::exit(1);
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -738,8 +766,8 @@ fn run_file_shuffle(
                 buf.clear();
             }
             let pos = buf.len();
-            if pos + span + 1 > buf.capacity() {
-                buf.reserve(span + 1);
+            if pos + span + needs_extra as usize > buf.capacity() {
+                buf.reserve(span + needs_extra as usize);
             }
             unsafe {
                 let dst = buf.as_mut_ptr().add(pos);
@@ -759,7 +787,14 @@ fn run_file_shuffle(
             }
         }
         if !buf.is_empty() {
-            let _ = checked_write_all(out, &buf);
+            match checked_write_all(out, &buf) {
+                Ok(false) => process::exit(0),
+                Err(e) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, e);
+                    process::exit(1);
+                }
+                _ => {}
+            }
         }
     } else {
         let n = offsets.len();
@@ -803,6 +838,10 @@ fn run_file_shuffle(
                     }
 
                     let span = (e - s) as usize;
+                    // e == data.len() uniquely identifies the original unterminated last line.
+                    // No delimiter-inclusive entry can satisfy this: they have e = start + len + 1
+                    // where the +1 accounts for the delimiter byte, so e <= data.len() only if the
+                    // last byte IS the delimiter — but then last_needs_delim is false, short-circuiting.
                     let needs_extra = last_needs_delim && e as usize == data.len();
                     let total = span + needs_extra as usize;
 
@@ -830,7 +869,14 @@ fn run_file_shuffle(
                     }
                 }
                 if !buf.is_empty() {
-                    let _ = raw_write_all(out_fd, &buf);
+                    match raw_write_all(out_fd, &buf) {
+                        Ok(false) => process::exit(0),
+                        Err(e) => {
+                            eprintln!("{}: write error: {}", TOOL_NAME, e);
+                            process::exit(1);
+                        }
+                        _ => {}
+                    }
                 }
             } else {
                 // Fallback: copy-based path for non-stdout output
@@ -852,6 +898,8 @@ fn run_file_shuffle(
                         }
                     }
                     let span = (e - s) as usize;
+                    // See invariant comment in unix-stdout path above: e == data.len()
+                    // uniquely identifies the unterminated last line.
                     let needs_extra = last_needs_delim && e as usize == data.len();
                     let total = span + needs_extra as usize;
                     if buf.len() + total > CHUNK && !buf.is_empty() {
@@ -876,7 +924,14 @@ fn run_file_shuffle(
                     }
                 }
                 if !buf.is_empty() {
-                    let _ = checked_write_all(out, &buf);
+                    match checked_write_all(out, &buf) {
+                        Ok(false) => process::exit(0),
+                        Err(e) => {
+                            eprintln!("{}: write error: {}", TOOL_NAME, e);
+                            process::exit(1);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -887,6 +942,8 @@ fn run_file_shuffle(
             let mut buf = Vec::with_capacity(OUT_CHUNK + 256);
             for &[s, e] in offsets[..count].iter() {
                 buf.extend_from_slice(&data[s as usize..e as usize]);
+                // See invariant comment in unix-stdout path above: e == data.len()
+                // uniquely identifies the unterminated last line.
                 let needs_extra = last_needs_delim && e as usize == data.len();
                 if needs_extra {
                     buf.push(delimiter);
@@ -899,7 +956,14 @@ fn run_file_shuffle(
                 }
             }
             if !buf.is_empty() {
-                let _ = checked_write_all(out, &buf);
+                match checked_write_all(out, &buf) {
+                    Ok(false) => process::exit(0),
+                    Err(e) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, e);
+                        process::exit(1);
+                    }
+                    _ => {}
+                }
             }
         }
     }
