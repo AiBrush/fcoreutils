@@ -479,6 +479,7 @@ pub fn try_mmap_stdin(min_size: u64) -> Option<Mmap> {
 /// When `sequential` is true, applies MADV_SEQUENTIAL (forward read).
 /// When false, skips MADV_SEQUENTIAL (for tools like tac that read backward).
 /// MADV_HUGEPAGE is always applied for large mappings.
+#[cfg(unix)]
 pub fn try_mmap_stdin_with_hints(min_size: u64, sequential: bool) -> Option<Mmap> {
     use std::os::unix::io::{AsRawFd, FromRawFd};
     let stdin = std::io::stdin();
