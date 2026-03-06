@@ -786,12 +786,16 @@ fn run_file_shuffle(
         const CHUNK: usize = 2 * 1024 * 1024;
         let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + 256);
         let src = data.as_ptr();
-        for i in 0..count {
+        for _ in 0..count {
             let idx = rng.gen_range(offsets.len());
             let [s, e] = offsets[idx];
             let span = (e - s) as usize;
             // For delimiter-inclusive entries, span includes the delimiter.
             // For last line without delimiter, append it manually.
+            // In the repeat path, offsets are never shuffled, so offsets[last_idx]
+            // is always the unterminated last line entry. Equivalent to
+            // `e as usize == data.len()` (see invariant in the non-repeat path),
+            // but cheaper to check.
             let needs_extra = last_needs_delim && idx == last_idx;
             let needed = buf.len() + span + needs_extra as usize;
             if needed > CHUNK && !buf.is_empty() {
@@ -806,9 +810,7 @@ fn run_file_shuffle(
                 buf.clear();
             }
             let pos = buf.len();
-            if pos + span + needs_extra as usize > buf.capacity() {
-                buf.reserve(span + needs_extra as usize);
-            }
+            buf.reserve(span + needs_extra as usize);
             unsafe {
                 let dst = buf.as_mut_ptr().add(pos);
                 std::ptr::copy_nonoverlapping(src.add(s as usize), dst, span);
@@ -818,17 +820,6 @@ fn run_file_shuffle(
                 } else {
                     buf.set_len(pos + span);
                 }
-            }
-            if (i + 1) % 8192 == 0 && buf.len() >= CHUNK {
-                match checked_write_all(out, &buf) {
-                    Ok(false) => return,
-                    Err(err) => {
-                        eprintln!("{}: write error: {}", TOOL_NAME, err);
-                        process::exit(1);
-                    }
-                    _ => {}
-                }
-                buf.clear();
             }
         }
         if !buf.is_empty() {
@@ -901,9 +892,7 @@ fn run_file_shuffle(
                         }
                         buf.clear();
                     }
-                    if total > buf.capacity().saturating_sub(buf.len()) {
-                        buf.reserve(total);
-                    }
+                    buf.reserve(total);
                     let pos = buf.len();
                     unsafe {
                         let dst = buf.as_mut_ptr().add(pos);
@@ -961,9 +950,7 @@ fn run_file_shuffle(
                         }
                         buf.clear();
                     }
-                    if total > buf.capacity().saturating_sub(buf.len()) {
-                        buf.reserve(total);
-                    }
+                    buf.reserve(total);
                     let pos = buf.len();
                     unsafe {
                         let dst = buf.as_mut_ptr().add(pos);
@@ -994,14 +981,12 @@ fn run_file_shuffle(
             const OUT_CHUNK: usize = 2 * 1024 * 1024;
             let mut buf = Vec::with_capacity(OUT_CHUNK + 256);
             for &[s, e] in offsets[..count].iter() {
-                buf.extend_from_slice(&data[s as usize..e as usize]);
+                let span = (e - s) as usize;
                 // See invariant comment in unix-stdout path above: e == data.len()
                 // uniquely identifies the unterminated last line.
                 let needs_extra = last_needs_delim && e as usize == data.len();
-                if needs_extra {
-                    buf.push(delimiter);
-                }
-                if buf.len() >= OUT_CHUNK {
+                let total = span + needs_extra as usize;
+                if buf.len() + total > OUT_CHUNK && !buf.is_empty() {
                     match checked_write_all(out, &buf) {
                         Ok(false) => return,
                         Err(err) => {
@@ -1011,6 +996,11 @@ fn run_file_shuffle(
                         _ => {}
                     }
                     buf.clear();
+                }
+                buf.reserve(total);
+                buf.extend_from_slice(&data[s as usize..e as usize]);
+                if needs_extra {
+                    buf.push(delimiter);
                 }
             }
             if !buf.is_empty() {
