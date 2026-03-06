@@ -311,6 +311,81 @@ fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> 
     output
 }
 
+/// In-memory fast path for default nl (body=NonEmpty): numbers non-blank lines,
+/// blank lines get width+sep spaces. Uses raw pointer writes for zero-overhead
+/// buffer construction.
+fn nl_number_nonempty_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> Vec<u8> {
+    let alloc = (data.len() * 2 + 256).min(128 * 1024 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(alloc);
+
+    let width = config.number_width;
+    let sep = &config.number_separator;
+    let fmt = config.number_format;
+    let mut num = *line_number;
+    let mut pos: usize = 0;
+    let mut num_buf = itoa::Buffer::new();
+    let blank_pad = width + sep.len();
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line_len = nl_pos - pos;
+        let needed = output.len() + line_len + width + sep.len() + 22;
+        if needed > output.capacity() {
+            output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
+        }
+
+        if line_len == 0 {
+            let start_pos = output.len();
+            unsafe {
+                let dst = output.as_mut_ptr().add(start_pos);
+                std::ptr::write_bytes(dst, b' ', blank_pad);
+                *dst.add(blank_pad) = b'\n';
+                output.set_len(start_pos + blank_pad + 1);
+            }
+        } else {
+            let num_str = num_buf.format(num);
+            let pad = width.saturating_sub(num_str.len());
+            unsafe {
+                write_numbered_line(
+                    &mut output,
+                    fmt,
+                    num_str,
+                    pad,
+                    sep,
+                    data.as_ptr().add(pos),
+                    line_len,
+                );
+            }
+            num += 1;
+        }
+        pos = nl_pos + 1;
+    }
+
+    if pos < data.len() {
+        let remaining = data.len() - pos;
+        let needed = output.len() + remaining + width + sep.len() + 22;
+        if needed > output.capacity() {
+            output.reserve(needed - output.capacity() + 1024);
+        }
+        let num_str = num_buf.format(num);
+        let pad = width.saturating_sub(num_str.len());
+        unsafe {
+            write_numbered_line(
+                &mut output,
+                fmt,
+                num_str,
+                pad,
+                sep,
+                data.as_ptr().add(pos),
+                remaining,
+            );
+        }
+        num += 1;
+    }
+
+    *line_number = num;
+    output
+}
+
 /// Streaming fast path for nl -b a: writes output in ~1MB batches directly to fd.
 /// Uses pre-formatted prefix in a stack-allocated buffer with in-place digit
 /// increment to avoid reformatting the number string for every single line.
@@ -931,8 +1006,15 @@ pub fn nl_stream_with_state(
         let has_delimiters = if config.section_delimiter.is_empty() {
             false
         } else {
-            // Use memmem SIMD scan — fast for typical text without backslashes.
-            memchr::memmem::find(data, &config.section_delimiter).is_some()
+            // Fast reject: single-byte memchr for the first delimiter byte.
+            // For default "\:", backslash is rare, so this rejects in ~0.3ms
+            // vs memmem's ~1ms on 10MB of typical text.
+            let first_byte = config.section_delimiter[0];
+            if memchr::memchr(first_byte, data).is_none() {
+                false
+            } else {
+                memchr::memmem::find(data, &config.section_delimiter).is_some()
+            }
         };
 
         if !has_delimiters {
@@ -958,8 +1040,13 @@ pub fn nl_to_vec_with_state(data: &[u8], config: &NlConfig, line_number: &mut i6
     // Guard: skip fast path if data contains section delimiters (rare in practice).
     let has_section_delims = !config.section_delimiter.is_empty()
         && memchr::memmem::find(data, &config.section_delimiter).is_some();
-    if is_simple_number_all(config) && !has_section_delims {
-        return nl_number_all_fast(data, config, line_number);
+    if !has_section_delims {
+        if is_simple_number_all(config) {
+            return nl_number_all_fast(data, config, line_number);
+        }
+        if is_simple_number_nonempty(config) {
+            return nl_number_nonempty_fast(data, config, line_number);
+        }
     }
 
     // Generic path: pre-allocate generously instead of counting newlines
