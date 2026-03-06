@@ -243,8 +243,8 @@ fn emit_blanks_vec(
 }
 
 /// Streaming default mode for regular tab stops without backspaces.
-/// Zero-copy for passthrough lines: consecutive lines without leading blanks
-/// are written directly from the mmap buffer, avoiding copies entirely.
+/// Buffers all output to minimize syscalls. Passthrough lines are copied
+/// into the buffer rather than written directly, trading memcpy for fewer writes.
 #[cfg(unix)]
 fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> {
     const BUF_SIZE: usize = 2 * 1024 * 1024;
@@ -252,26 +252,16 @@ fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<
     let is_pow2 = tab_size.is_power_of_two();
     let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 256 * 1024);
     let mut pos: usize = 0;
-    let mut pass_start: usize = 0;
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line = &data[pos..nl_pos];
         if line.is_empty() || (line[0] != b' ' && line[0] != b'\t') {
-            pos = nl_pos + 1;
-            continue;
+            // Passthrough: copy line + newline into buffer
+            output.extend_from_slice(&data[pos..nl_pos + 1]);
+        } else {
+            unexpand_leading_vec(line, tab_size, tab_mask, is_pow2, &mut output);
+            output.push(b'\n');
         }
-
-        // Flush passthrough run + pending output before processing this line
-        if pass_start < pos {
-            if !output.is_empty() {
-                write_all_fd(fd, &output)?;
-                output.clear();
-            }
-            write_all_fd(fd, &data[pass_start..pos])?;
-        }
-
-        unexpand_leading_vec(line, tab_size, tab_mask, is_pow2, &mut output);
-        output.push(b'\n');
 
         if output.len() >= BUF_SIZE {
             write_all_fd(fd, &output)?;
@@ -279,29 +269,20 @@ fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<
         }
 
         pos = nl_pos + 1;
-        pass_start = pos;
     }
 
+    // Handle final line without trailing newline
     if pos < data.len() {
         let line = &data[pos..];
         if !line.is_empty() && (line[0] == b' ' || line[0] == b'\t') {
-            if pass_start < pos {
-                if !output.is_empty() {
-                    write_all_fd(fd, &output)?;
-                    output.clear();
-                }
-                write_all_fd(fd, &data[pass_start..pos])?;
-                pass_start = data.len();
-            }
             unexpand_leading_vec(line, tab_size, tab_mask, is_pow2, &mut output);
+        } else {
+            output.extend_from_slice(line);
         }
     }
 
     if !output.is_empty() {
         write_all_fd(fd, &output)?;
-    }
-    if pass_start < data.len() {
-        write_all_fd(fd, &data[pass_start..data.len()])?;
     }
     Ok(())
 }
@@ -376,35 +357,32 @@ fn unexpand_line_all_vec(
 }
 
 /// Streaming -a mode for regular tab stops without backspaces.
-/// Zero-copy for passthrough lines: consecutive lines without tabs or double-spaces
-/// are written directly from the mmap buffer, avoiding copies entirely.
+/// Buffers all output to minimize syscalls. Uses bulk double-space search
+/// to find segments that need processing, copying passthrough data in bulk.
 #[cfg(unix)]
 fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> {
     const BUF_SIZE: usize = 2 * 1024 * 1024;
     let tab_mask = tab_size.wrapping_sub(1);
     let is_pow2 = tab_size.is_power_of_two();
+    let has_tabs = memchr::memchr(b'\t', data).is_some();
     let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 256 * 1024);
     let mut pos: usize = 0;
-    let mut pass_start: usize = 0;
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line = &data[pos..nl_pos];
-        if memchr::memchr(b'\t', line).is_none() && memchr::memmem::find(line, b"  ").is_none() {
-            pos = nl_pos + 1;
-            continue;
-        }
+        // Fast per-line check: skip tab scan if no tabs in entire file
+        let needs_processing = if has_tabs {
+            memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some()
+        } else {
+            memchr::memmem::find(line, b"  ").is_some()
+        };
 
-        // Flush passthrough run + pending output before processing this line
-        if pass_start < pos {
-            if !output.is_empty() {
-                write_all_fd(fd, &output)?;
-                output.clear();
-            }
-            write_all_fd(fd, &data[pass_start..pos])?;
+        if !needs_processing {
+            output.extend_from_slice(&data[pos..nl_pos + 1]);
+        } else {
+            unexpand_line_all_vec(line, tab_size, tab_mask, is_pow2, &mut output);
+            output.push(b'\n');
         }
-
-        unexpand_line_all_vec(line, tab_size, tab_mask, is_pow2, &mut output);
-        output.push(b'\n');
 
         if output.len() >= BUF_SIZE {
             write_all_fd(fd, &output)?;
@@ -412,29 +390,25 @@ fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> 
         }
 
         pos = nl_pos + 1;
-        pass_start = pos;
     }
 
+    // Handle final line without trailing newline
     if pos < data.len() {
         let line = &data[pos..];
-        if memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some() {
-            if pass_start < pos {
-                if !output.is_empty() {
-                    write_all_fd(fd, &output)?;
-                    output.clear();
-                }
-                write_all_fd(fd, &data[pass_start..pos])?;
-                pass_start = data.len();
-            }
+        let needs = if has_tabs {
+            memchr::memchr(b'\t', line).is_some() || memchr::memmem::find(line, b"  ").is_some()
+        } else {
+            memchr::memmem::find(line, b"  ").is_some()
+        };
+        if needs {
             unexpand_line_all_vec(line, tab_size, tab_mask, is_pow2, &mut output);
+        } else {
+            output.extend_from_slice(line);
         }
     }
 
     if !output.is_empty() {
         write_all_fd(fd, &output)?;
-    }
-    if pass_start < data.len() {
-        write_all_fd(fd, &data[pass_start..data.len()])?;
     }
     Ok(())
 }
