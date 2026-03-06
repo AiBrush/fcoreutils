@@ -644,6 +644,12 @@ fn pr_data_numbered<W: Write>(
                 out_buf.resize(out_buf.len() + pad, b'\n');
                 write_footer(&mut out_buf, config)?;
             }
+
+            // Flush to writer when buffer exceeds 64MB to bound memory usage.
+            if out_buf.len() >= 64 * 1024 * 1024 {
+                output.write_all(&out_buf)?;
+                out_buf.clear();
+            }
         } else {
             line_number += page_end - line_idx;
         }
@@ -652,7 +658,10 @@ fn pr_data_numbered<W: Write>(
         page_num += 1;
     }
 
-    output.write_all(&out_buf)
+    if !out_buf.is_empty() {
+        output.write_all(&out_buf)?;
+    }
+    Ok(())
 }
 
 /// Paginate a single file and write output.
@@ -803,6 +812,12 @@ fn pr_lines_generic<W: Write>(
             if !config.omit_header && !config.omit_pagination && !suppress_header {
                 write_footer(&mut out_buf, config)?;
             }
+
+            // Flush to writer when buffer exceeds 64MB to bound memory usage.
+            if out_buf.len() >= 64 * 1024 * 1024 {
+                output.write_all(&out_buf)?;
+                out_buf.clear();
+            }
         }
 
         line_idx = page_end;
@@ -813,7 +828,10 @@ fn pr_lines_generic<W: Write>(
         }
     }
 
-    output.write_all(&out_buf)
+    if !out_buf.is_empty() {
+        output.write_all(&out_buf)?;
+    }
+    Ok(())
 }
 
 /// Paginate multiple files merged side by side (-m mode).

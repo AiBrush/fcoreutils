@@ -293,6 +293,7 @@ fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<
     let is_pow2 = tab_size.is_power_of_two();
     let mut modified: Vec<u8> = Vec::with_capacity((data.len() / 4).min(FLUSH_SIZE) + 4096);
     let mut segments: Vec<(usize, usize, bool)> = Vec::with_capacity(4096);
+    let mut iovec_buf: Vec<libc::iovec> = Vec::with_capacity(4096);
 
     let mut pos: usize = 0;
     let mut pass_start: usize = 0;
@@ -318,7 +319,7 @@ fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<
         // segments grows at 24 bytes/entry vs modified at ~3 bytes for short lines,
         // so cap segments at 65536 entries (~1.5MB) to prevent unbounded growth.
         if modified.len() >= FLUSH_SIZE || segments.len() >= 65_536 {
-            flush_segments(fd, &segments, &modified, data)?;
+            flush_segments(fd, &segments, &modified, data, &mut iovec_buf)?;
             segments.clear();
             modified.clear();
         }
@@ -346,38 +347,36 @@ fn unexpand_default_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<
         segments.push((pass_start, data.len() - pass_start, false));
     }
 
-    flush_segments(fd, &segments, &modified, data)
+    flush_segments(fd, &segments, &modified, data, &mut iovec_buf)
 }
 
 /// Build iovecs from segments and flush via writev.
+/// Accepts a reusable `iovec_buf` to avoid repeated heap allocation across flushes.
 #[cfg(unix)]
 fn flush_segments(
     fd: i32,
     segments: &[(usize, usize, bool)],
     modified: &[u8],
     data: &[u8],
+    iovec_buf: &mut Vec<libc::iovec>,
 ) -> io::Result<()> {
     if segments.is_empty() {
         return Ok(());
     }
-    // SAFETY: iov_base is *mut c_void per POSIX ABI, but writev only reads
-    // through it. Both `data` (mmap/read buffer) and `modified` (local Vec)
-    // are valid for `len` bytes at `ptr` for the duration of this call.
-    let iovecs: Vec<libc::iovec> = segments
-        .iter()
-        .map(|&(start, len, is_mod)| {
-            let ptr = if is_mod {
-                modified[start..].as_ptr()
-            } else {
-                data[start..].as_ptr()
-            };
-            libc::iovec {
-                iov_base: ptr as *mut libc::c_void,
-                iov_len: len,
-            }
-        })
-        .collect();
-    writev_all_result(fd, &iovecs)
+    iovec_buf.clear();
+    iovec_buf.extend(segments.iter().map(|&(start, len, is_mod)| {
+        let ptr = if is_mod {
+            modified[start..].as_ptr()
+        } else {
+            data[start..].as_ptr()
+        };
+        libc::iovec {
+            // Safety: writev only reads through iov_base; *mut required by POSIX ABI.
+            iov_base: ptr as *mut libc::c_void,
+            iov_len: len,
+        }
+    }));
+    writev_all_result(fd, iovec_buf)
 }
 
 /// Process a single line for unexpand -a with SIMD-accelerated blank detection.
@@ -459,6 +458,7 @@ fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> 
     let is_pow2 = tab_size.is_power_of_two();
     let mut modified: Vec<u8> = Vec::with_capacity((data.len() / 4).min(FLUSH_SIZE) + 4096);
     let mut segments: Vec<(usize, usize, bool)> = Vec::with_capacity(4096);
+    let mut iovec_buf: Vec<libc::iovec> = Vec::with_capacity(4096);
 
     let mut pos: usize = 0;
     let mut pass_start: usize = 0;
@@ -481,7 +481,7 @@ fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> 
 
         // Flush when modified buffer or segments Vec exceeds threshold.
         if modified.len() >= FLUSH_SIZE || segments.len() >= 65_536 {
-            flush_segments(fd, &segments, &modified, data)?;
+            flush_segments(fd, &segments, &modified, data, &mut iovec_buf)?;
             segments.clear();
             modified.clear();
         }
@@ -507,7 +507,7 @@ fn unexpand_all_stream(data: &[u8], tab_size: usize, fd: i32) -> io::Result<()> 
         segments.push((pass_start, data.len() - pass_start, false));
     }
 
-    flush_segments(fd, &segments, &modified, data)
+    flush_segments(fd, &segments, &modified, data, &mut iovec_buf)
 }
 
 fn main() {
