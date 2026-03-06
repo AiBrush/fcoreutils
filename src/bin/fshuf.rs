@@ -536,22 +536,42 @@ fn run_string_shuffle(
         }
         for _ in 0..count {
             let idx = rng.gen_range(lines.len());
-            if !checked_write_all(out, lines[idx].as_bytes()).unwrap_or(false) {
-                return;
+            match checked_write_all(out, lines[idx].as_bytes()) {
+                Ok(false) => return,
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
             }
-            if !checked_write_all(out, &[delimiter]).unwrap_or(false) {
-                return;
+            match checked_write_all(out, &[delimiter]) {
+                Ok(false) => return,
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
             }
         }
     } else {
         shuffle(lines, rng);
         let count = head_count.unwrap_or(lines.len()).min(lines.len());
         for line in lines.iter().take(count) {
-            if !checked_write_all(out, line.as_bytes()).unwrap_or(false) {
-                return;
+            match checked_write_all(out, line.as_bytes()) {
+                Ok(false) => return,
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
             }
-            if !checked_write_all(out, &[delimiter]).unwrap_or(false) {
-                return;
+            match checked_write_all(out, &[delimiter]) {
+                Ok(false) => return,
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
             }
         }
     }
@@ -581,8 +601,13 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
             if (i + 1) % batch_size == 0 {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+                match checked_write_all(out, &buf) {
+                    Ok(false) => return,
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
                 }
                 buf.clear();
             }
@@ -590,8 +615,8 @@ fn run_range_shuffle(
         if !buf.is_empty() {
             match checked_write_all(out, &buf) {
                 Ok(false) => process::exit(0),
-                Err(e) => {
-                    eprintln!("{}: write error: {}", TOOL_NAME, e);
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
                     process::exit(1);
                 }
                 _ => {}
@@ -629,8 +654,8 @@ fn run_range_shuffle(
         }
         match checked_write_all(out, &buf) {
             Ok(false) => process::exit(0),
-            Err(e) => {
-                eprintln!("{}: write error: {}", TOOL_NAME, e);
+            Err(err) => {
+                eprintln!("{}: write error: {}", TOOL_NAME, err);
                 process::exit(1);
             }
             _ => {}
@@ -650,8 +675,13 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
             if buf.len() >= OUT_CHUNK {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+                match checked_write_all(out, &buf) {
+                    Ok(false) => return,
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
                 }
                 buf.clear();
             }
@@ -659,8 +689,8 @@ fn run_range_shuffle(
         if !buf.is_empty() {
             match checked_write_all(out, &buf) {
                 Ok(false) => process::exit(0),
-                Err(e) => {
-                    eprintln!("{}: write error: {}", TOOL_NAME, e);
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
                     process::exit(1);
                 }
                 _ => {}
@@ -683,8 +713,13 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
             if buf.len() >= OUT_CHUNK {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+                match checked_write_all(out, &buf) {
+                    Ok(false) => return,
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
                 }
                 buf.clear();
             }
@@ -692,8 +727,8 @@ fn run_range_shuffle(
         if !buf.is_empty() {
             match checked_write_all(out, &buf) {
                 Ok(false) => process::exit(0),
-                Err(e) => {
-                    eprintln!("{}: write error: {}", TOOL_NAME, e);
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
                     process::exit(1);
                 }
                 _ => {}
@@ -760,8 +795,13 @@ fn run_file_shuffle(
             let needs_extra = last_needs_delim && idx == last_idx;
             let needed = buf.len() + span + needs_extra as usize;
             if needed > CHUNK && !buf.is_empty() {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+                match checked_write_all(out, &buf) {
+                    Ok(false) => return,
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
                 }
                 buf.clear();
             }
@@ -780,8 +820,13 @@ fn run_file_shuffle(
                 }
             }
             if (i + 1) % 8192 == 0 && buf.len() >= CHUNK {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+                match checked_write_all(out, &buf) {
+                    Ok(false) => return,
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
                 }
                 buf.clear();
             }
@@ -789,8 +834,8 @@ fn run_file_shuffle(
         if !buf.is_empty() {
             match checked_write_all(out, &buf) {
                 Ok(false) => process::exit(0),
-                Err(e) => {
-                    eprintln!("{}: write error: {}", TOOL_NAME, e);
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
                     process::exit(1);
                 }
                 _ => {}
@@ -848,7 +893,10 @@ fn run_file_shuffle(
                     if buf.len() + total > BUF_SIZE && !buf.is_empty() {
                         match raw_write_all(out_fd, &buf) {
                             Ok(false) => return,
-                            Err(_) => return,
+                            Err(err) => {
+                                eprintln!("{}: write error: {}", TOOL_NAME, err);
+                                process::exit(1);
+                            }
                             _ => {}
                         }
                         buf.clear();
@@ -871,8 +919,8 @@ fn run_file_shuffle(
                 if !buf.is_empty() {
                     match raw_write_all(out_fd, &buf) {
                         Ok(false) => process::exit(0),
-                        Err(e) => {
-                            eprintln!("{}: write error: {}", TOOL_NAME, e);
+                        Err(err) => {
+                            eprintln!("{}: write error: {}", TOOL_NAME, err);
                             process::exit(1);
                         }
                         _ => {}
@@ -903,8 +951,13 @@ fn run_file_shuffle(
                     let needs_extra = last_needs_delim && e as usize == data.len();
                     let total = span + needs_extra as usize;
                     if buf.len() + total > CHUNK && !buf.is_empty() {
-                        if !checked_write_all(out, &buf).unwrap_or(false) {
-                            return;
+                        match checked_write_all(out, &buf) {
+                            Ok(false) => return,
+                            Err(err) => {
+                                eprintln!("{}: write error: {}", TOOL_NAME, err);
+                                process::exit(1);
+                            }
+                            _ => {}
                         }
                         buf.clear();
                     }
@@ -926,8 +979,8 @@ fn run_file_shuffle(
                 if !buf.is_empty() {
                     match checked_write_all(out, &buf) {
                         Ok(false) => process::exit(0),
-                        Err(e) => {
-                            eprintln!("{}: write error: {}", TOOL_NAME, e);
+                        Err(err) => {
+                            eprintln!("{}: write error: {}", TOOL_NAME, err);
                             process::exit(1);
                         }
                         _ => {}
@@ -949,8 +1002,13 @@ fn run_file_shuffle(
                     buf.push(delimiter);
                 }
                 if buf.len() >= OUT_CHUNK {
-                    if !checked_write_all(out, &buf).unwrap_or(false) {
-                        return;
+                    match checked_write_all(out, &buf) {
+                        Ok(false) => return,
+                        Err(err) => {
+                            eprintln!("{}: write error: {}", TOOL_NAME, err);
+                            process::exit(1);
+                        }
+                        _ => {}
                     }
                     buf.clear();
                 }
@@ -958,8 +1016,8 @@ fn run_file_shuffle(
             if !buf.is_empty() {
                 match checked_write_all(out, &buf) {
                     Ok(false) => process::exit(0),
-                    Err(e) => {
-                        eprintln!("{}: write error: {}", TOOL_NAME, e);
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
                         process::exit(1);
                     }
                     _ => {}
