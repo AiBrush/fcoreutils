@@ -98,8 +98,83 @@ unsafe fn write_line(buf: &mut Vec<u8>, prefix: &[u8], line: &[u8], delim: u8) {
 fn ensure_capacity(buf: &mut Vec<u8>, needed: usize) {
     let avail = buf.capacity() - buf.len();
     if avail < needed {
-        buf.reserve(needed + 4 * 1024 * 1024);
+        buf.reserve(needed + 64 * 1024);
     }
+}
+
+/// Fast path for identical inputs: all lines go to column 3.
+/// Avoids the merge loop entirely — single memchr scan with direct output.
+fn comm_identical(
+    data: &[u8],
+    config: &CommConfig,
+    delim: u8,
+    sep: &[u8],
+    out: &mut impl Write,
+) -> io::Result<CommResult> {
+    let show3 = !config.suppress_col3;
+
+    // Count lines for the result
+    let stripped = if !data.is_empty() && data.last() == Some(&delim) {
+        &data[..data.len() - 1]
+    } else {
+        data
+    };
+    let line_count = if stripped.is_empty() {
+        0
+    } else {
+        memchr::memchr_iter(delim, stripped).count() + 1
+    };
+
+    if show3 {
+        // Build column 3 prefix
+        let mut prefix = Vec::new();
+        if !config.suppress_col1 {
+            prefix.extend_from_slice(sep);
+        }
+        if !config.suppress_col2 {
+            prefix.extend_from_slice(sep);
+        }
+
+        // Stream output in 256KB chunks
+        let mut buf: Vec<u8> = Vec::with_capacity(256 * 1024);
+        let mut pos = 0;
+        for nl_pos in memchr::memchr_iter(delim, stripped) {
+            let line = &stripped[pos..nl_pos];
+            let needed = prefix.len() + line.len() + 1;
+            if buf.len() + needed > 192 * 1024 {
+                out.write_all(&buf)?;
+                buf.clear();
+            }
+            if buf.capacity() - buf.len() < needed {
+                buf.reserve(needed + 64 * 1024);
+            }
+            unsafe {
+                write_line(&mut buf, &prefix, line, delim);
+            }
+            pos = nl_pos + 1;
+        }
+        // Handle last line without trailing delimiter
+        if pos < stripped.len() {
+            let line = &stripped[pos..];
+            let needed = prefix.len() + line.len() + 1;
+            if buf.capacity() - buf.len() < needed {
+                buf.reserve(needed + 1024);
+            }
+            unsafe {
+                write_line(&mut buf, &prefix, line, delim);
+            }
+        }
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+    }
+
+    Ok(CommResult {
+        count1: 0,
+        count2: 0,
+        count3: line_count,
+        had_order_error: false,
+    })
 }
 
 /// Run the comm merge algorithm on two sorted inputs.
@@ -112,6 +187,14 @@ pub fn comm(
 ) -> io::Result<CommResult> {
     let delim = if config.zero_terminated { b'\0' } else { b'\n' };
     let sep = config.output_delimiter.as_deref().unwrap_or(b"\t");
+
+    // Fast path: identical inputs → all lines are common (column 3).
+    // Avoids per-line comparison entirely. Uses single memchr scan.
+    // Safe for all order_check modes: when all comparisons are Equal,
+    // the merge loop never enters Less/Greater branches where order is checked.
+    if data1 == data2 && !config.case_insensitive && !config.total {
+        return comm_identical(data1, config, delim, sep, out);
+    }
 
     // Build column prefixes.
     let prefix1: &[u8] = &[];
@@ -135,11 +218,13 @@ pub fn comm(
     let check_order = config.order_check != OrderCheck::None;
     let strict = config.order_check == OrderCheck::Strict;
 
-    // Pre-allocate output buffer generously
-    let total_input = data1.len() + data2.len();
-    let buf_cap = total_input.min(8 * 1024 * 1024);
+    // Use a 256KB output buffer to minimize page faults on first fill.
+    // 256KB = 64 pages — faulted once, then stays warm in L2/TLB for reuse.
+    // Flushed ~40x for 10MB output vs 2x for 4MB, but each flush is fast
+    // (~2µs) and we save ~1000 page faults * ~4µs = ~4ms.
+    let buf_cap = 256 * 1024;
     let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
-    let flush_threshold = 4 * 1024 * 1024;
+    let flush_threshold = 192 * 1024;
 
     let mut count1 = 0usize;
     let mut count2 = 0usize;
