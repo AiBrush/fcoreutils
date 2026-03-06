@@ -510,6 +510,9 @@ fn nl_number_all_stream(
             write_all_fd(fd, &output)?;
             write_pos = 0;
             if needed > output.capacity() {
+                unsafe {
+                    output.set_len(0);
+                }
                 output.reserve(needed);
                 buf_ptr = output.as_mut_ptr();
             }
@@ -592,21 +595,6 @@ fn nl_number_all_stream(
                         break;
                     }
                     idx -= 1;
-                    if prefix_buf[idx] == b' ' {
-                        let ns = num_buf.format(num);
-                        let p = width.saturating_sub(ns.len());
-                        let mut wp = 0;
-                        prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
-                        wp += ns.len();
-                        for _ in 0..p {
-                            prefix_buf[wp] = b' ';
-                            wp += 1;
-                        }
-                        num_end = wp;
-                        prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
-                        prefix_len = wp + sep.len();
-                        break;
-                    }
                 }
             }
         }
@@ -623,6 +611,9 @@ fn nl_number_all_stream(
             write_all_fd(fd, &output)?;
             write_pos = 0;
             if needed > output.capacity() {
+                unsafe {
+                    output.set_len(0);
+                }
                 output.reserve(needed);
                 buf_ptr = output.as_mut_ptr();
             }
@@ -821,21 +812,6 @@ fn nl_number_nonempty_stream(
                             break;
                         }
                         idx -= 1;
-                        if prefix_buf[idx] == b' ' {
-                            let ns = num_buf.format(num);
-                            let p = width.saturating_sub(ns.len());
-                            let mut wp = 0;
-                            prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
-                            wp += ns.len();
-                            for _ in 0..p {
-                                prefix_buf[wp] = b' ';
-                                wp += 1;
-                            }
-                            num_end = wp;
-                            prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
-                            prefix_len = wp + sep.len();
-                            break;
-                        }
                     }
                 }
             }
@@ -855,6 +831,9 @@ fn nl_number_nonempty_stream(
             write_all_fd(fd, &output)?;
             write_pos = 0;
             if needed > output.capacity() {
+                unsafe {
+                    output.set_len(0);
+                }
                 output.reserve(needed);
                 buf_ptr = output.as_mut_ptr();
             }
@@ -959,6 +938,9 @@ fn nl_number_pattern_stream(
             write_all_fd(fd, &output)?;
             write_pos = 0;
             if needed > output.capacity() {
+                unsafe {
+                    output.set_len(0);
+                }
                 output.reserve(needed);
                 buf_ptr = output.as_mut_ptr();
             }
@@ -1043,21 +1025,6 @@ fn nl_number_pattern_stream(
                             break;
                         }
                         idx -= 1;
-                        if prefix_buf[idx] == b' ' {
-                            let ns = num_buf.format(num);
-                            let p = width.saturating_sub(ns.len());
-                            let mut wp = 0;
-                            prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
-                            wp += ns.len();
-                            for _ in 0..p {
-                                prefix_buf[wp] = b' ';
-                                wp += 1;
-                            }
-                            num_end = wp;
-                            prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
-                            prefix_len = wp + sep.len();
-                            break;
-                        }
                     }
                 }
             }
@@ -1088,6 +1055,9 @@ fn nl_number_pattern_stream(
             write_all_fd(fd, &output)?;
             write_pos = 0;
             if needed > output.capacity() {
+                unsafe {
+                    output.set_len(0);
+                }
                 output.reserve(needed);
                 buf_ptr = output.as_mut_ptr();
             }
