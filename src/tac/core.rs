@@ -285,7 +285,7 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
     // Use memrchr to find the rightmost separator near the target, yielding
     // more uniform ~CHUNK_SIZE chunks (memchr would find leftmost, producing
     // potentially tiny chunks).
-    let mut chunk_bounds: Vec<usize> = Vec::new();
+    let mut chunk_bounds: Vec<usize> = Vec::with_capacity(data.len() / CHUNK_SIZE + 2);
     chunk_bounds.push(data.len());
     let mut target = data.len().saturating_sub(CHUNK_SIZE);
     while target > 0 {
