@@ -39,48 +39,6 @@ fn checked_write_all(out: &mut dyn Write, data: &[u8]) -> io::Result<bool> {
     }
 }
 
-/// Write all iovec entries using writev, handling partial writes.
-/// Returns false on BrokenPipe.
-#[cfg(unix)]
-fn writev_all(fd: i32, iovecs: &[libc::iovec]) -> bool {
-    let mut offset = 0;
-    while offset < iovecs.len() {
-        // IOV_MAX is 1024 on Linux/macOS; POSIX minimum is 16
-        let count = (iovecs.len() - offset).min(1024) as i32;
-        let n = unsafe { libc::writev(fd, iovecs[offset..].as_ptr(), count) };
-        if n < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            // BrokenPipe = reader closed (normal), any other error = real failure
-            return false;
-        }
-        let mut written = n as usize;
-        while offset < iovecs.len() && written > 0 {
-            let iov_len = iovecs[offset].iov_len;
-            if written >= iov_len {
-                written -= iov_len;
-                offset += 1;
-            } else {
-                // Partial write within an iovec — write remainder directly
-                let ptr = iovecs[offset].iov_base as *const u8;
-                let slice =
-                    unsafe { std::slice::from_raw_parts(ptr.add(written), iov_len - written) };
-                match raw_write_all(fd, slice) {
-                    Ok(false) => return false,
-                    Err(_) => return false,
-                    Ok(true) => {
-                        offset += 1;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    true
-}
-
 const TOOL_NAME: &str = "shuf";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -578,22 +536,42 @@ fn run_string_shuffle(
         }
         for _ in 0..count {
             let idx = rng.gen_range(lines.len());
-            if !checked_write_all(out, lines[idx].as_bytes()).unwrap_or(false) {
-                return;
+            match checked_write_all(out, lines[idx].as_bytes()) {
+                Ok(false) => return,
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
             }
-            if !checked_write_all(out, &[delimiter]).unwrap_or(false) {
-                return;
+            match checked_write_all(out, &[delimiter]) {
+                Ok(false) => return,
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
             }
         }
     } else {
         shuffle(lines, rng);
         let count = head_count.unwrap_or(lines.len()).min(lines.len());
         for line in lines.iter().take(count) {
-            if !checked_write_all(out, line.as_bytes()).unwrap_or(false) {
-                return;
+            match checked_write_all(out, line.as_bytes()) {
+                Ok(false) => return,
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
             }
-            if !checked_write_all(out, &[delimiter]).unwrap_or(false) {
-                return;
+            match checked_write_all(out, &[delimiter]) {
+                Ok(false) => return,
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
             }
         }
     }
@@ -623,14 +601,26 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
             if (i + 1) % batch_size == 0 {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+                match checked_write_all(out, &buf) {
+                    Ok(false) => return,
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
                 }
                 buf.clear();
             }
         }
         if !buf.is_empty() {
-            let _ = checked_write_all(out, &buf);
+            match checked_write_all(out, &buf) {
+                Ok(false) => process::exit(0),
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
+            }
         }
         return;
     }
@@ -662,7 +652,14 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
         }
-        let _ = checked_write_all(out, &buf);
+        match checked_write_all(out, &buf) {
+            Ok(false) => process::exit(0),
+            Err(err) => {
+                eprintln!("{}: write error: {}", TOOL_NAME, err);
+                process::exit(1);
+            }
+            _ => {}
+        }
     } else if hi <= u32::MAX as u64 {
         // Use u32 array when range fits — halves cache footprint for Fisher-Yates
         let lo32 = lo as u32;
@@ -678,14 +675,26 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
             if buf.len() >= OUT_CHUNK {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+                match checked_write_all(out, &buf) {
+                    Ok(false) => return,
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
                 }
                 buf.clear();
             }
         }
         if !buf.is_empty() {
-            let _ = checked_write_all(out, &buf);
+            match checked_write_all(out, &buf) {
+                Ok(false) => process::exit(0),
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
+            }
         }
     } else {
         // Dense path: generate all values and partial Fisher-Yates shuffle.
@@ -704,14 +713,26 @@ fn run_range_shuffle(
             buf.extend_from_slice(ibuf.format(val).as_bytes());
             buf.push(delimiter);
             if buf.len() >= OUT_CHUNK {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+                match checked_write_all(out, &buf) {
+                    Ok(false) => return,
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
                 }
                 buf.clear();
             }
         }
         if !buf.is_empty() {
-            let _ = checked_write_all(out, &buf);
+            match checked_write_all(out, &buf) {
+                Ok(false) => process::exit(0),
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -733,16 +754,18 @@ fn run_file_shuffle(
     // Build line index as (start, end) pairs using u32 for compactness.
     // At 8 bytes per entry (vs 16 for (usize, usize)), this halves cache footprint
     // for the Fisher-Yates shuffle where random access is the bottleneck.
+    // end is delimiter-inclusive: data[start..end] includes the trailing delimiter,
+    // enabling single-iovec output per line.
     let estimated_lines = data.len() / 40 + 64;
     let mut offsets: Vec<[u32; 2]> = Vec::with_capacity(estimated_lines);
     let mut start = 0usize;
     for pos in memchr::memchr_iter(sep, &data) {
-        if pos > start {
-            offsets.push([start as u32, pos as u32]);
-        }
+        offsets.push([start as u32, (pos + 1) as u32]);
         start = pos + 1;
     }
-    if start < data.len() {
+    // Last line without trailing delimiter
+    let last_needs_delim = start < data.len();
+    if last_needs_delim {
         offsets.push([start as u32, data.len() as u32]);
     }
 
@@ -759,39 +782,55 @@ fn run_file_shuffle(
             eprintln!("{}: no lines to repeat", TOOL_NAME);
             process::exit(1);
         }
-        const CHUNK: usize = 1024 * 1024;
+        let last_idx = offsets.len() - 1;
+        const CHUNK: usize = 2 * 1024 * 1024;
         let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + 256);
         let src = data.as_ptr();
-        for i in 0..count {
+        for _ in 0..count {
             let idx = rng.gen_range(offsets.len());
             let [s, e] = offsets[idx];
-            let line_len = (e - s) as usize;
-            let needed = buf.len() + line_len + 1;
-            if needed > buf.capacity() {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+            let span = (e - s) as usize;
+            // For delimiter-inclusive entries, span includes the delimiter.
+            // For last line without delimiter, append it manually.
+            // In the repeat path, offsets are never shuffled, so offsets[last_idx]
+            // is always the unterminated last line entry. Equivalent to
+            // `e as usize == data.len()` (see invariant in the non-repeat path),
+            // but cheaper to check.
+            let needs_extra = last_needs_delim && idx == last_idx;
+            let needed = buf.len() + span + needs_extra as usize;
+            if needed > CHUNK && !buf.is_empty() {
+                match checked_write_all(out, &buf) {
+                    Ok(false) => return,
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
                 }
                 buf.clear();
-                if line_len + 1 > buf.capacity() {
-                    buf.reserve(line_len + 1);
-                }
             }
             let pos = buf.len();
+            buf.reserve(span + needs_extra as usize);
             unsafe {
                 let dst = buf.as_mut_ptr().add(pos);
-                std::ptr::copy_nonoverlapping(src.add(s as usize), dst, line_len);
-                *dst.add(line_len) = delimiter;
-                buf.set_len(pos + line_len + 1);
-            }
-            if (i + 1) % 8192 == 0 && buf.len() >= CHUNK {
-                if !checked_write_all(out, &buf).unwrap_or(false) {
-                    return;
+                std::ptr::copy_nonoverlapping(src.add(s as usize), dst, span);
+                if needs_extra {
+                    *dst.add(span) = delimiter;
+                    buf.set_len(pos + span + 1);
+                } else {
+                    buf.set_len(pos + span);
                 }
-                buf.clear();
             }
         }
         if !buf.is_empty() {
-            let _ = checked_write_all(out, &buf);
+            match checked_write_all(out, &buf) {
+                Ok(false) => process::exit(0),
+                Err(err) => {
+                    eprintln!("{}: write error: {}", TOOL_NAME, err);
+                    process::exit(1);
+                }
+                _ => {}
+            }
         }
     } else {
         let n = offsets.len();
@@ -806,9 +845,8 @@ fn run_file_shuffle(
 
         #[cfg(unix)]
         {
-            // Zero-copy output path: use writev to write directly from mmap'd data.
-            // Avoids copying line data to an intermediate buffer — eliminates
-            // cache-miss-heavy copy_nonoverlapping on randomly accessed lines.
+            // Contiguous output buffer with raw write_all_fd.
+            // Reduces syscalls from ~3900 writev to ~50 write for 100MB output.
             let out_fd: i32 = if is_stdout {
                 let _ = out.flush();
                 1
@@ -817,15 +855,11 @@ fn run_file_shuffle(
             };
 
             if out_fd >= 0 {
-                const IOV_BATCH: usize = 512; // 512 lines = 1024 iovecs
-                let delim_buf = [delimiter];
-                let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(IOV_BATCH * 2);
+                const BUF_SIZE: usize = 2 * 1024 * 1024;
+                let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE + 256);
+                let src = data.as_ptr();
                 let offsets_slice = &offsets[..count];
-
-                // Prefetch distance for writev: prefetch the line data that will be
-                // accessed by the kernel during writev. Larger than copy path because
-                // writev batches more work per syscall.
-                const PREFETCH_DIST: usize = 32;
+                const PREFETCH_DIST: usize = 16;
 
                 for (idx, &[s, e]) in offsets_slice.iter().enumerate() {
                     if idx + PREFETCH_DIST < count {
@@ -833,35 +867,57 @@ fn run_file_shuffle(
                         #[cfg(target_arch = "x86_64")]
                         unsafe {
                             std::arch::x86_64::_mm_prefetch(
-                                data.as_ptr().add(future_s) as *const i8,
+                                src.add(future_s) as *const i8,
                                 std::arch::x86_64::_MM_HINT_T1,
                             );
                         }
                     }
 
-                    let line_len = (e - s) as usize;
-                    iovecs.push(libc::iovec {
-                        iov_base: data[s as usize..].as_ptr() as *mut libc::c_void,
-                        iov_len: line_len,
-                    });
-                    iovecs.push(libc::iovec {
-                        iov_base: delim_buf.as_ptr() as *mut libc::c_void,
-                        iov_len: 1,
-                    });
+                    let span = (e - s) as usize;
+                    // e == data.len() uniquely identifies the original unterminated last line.
+                    // No delimiter-inclusive entry can satisfy this: they have e = start + len + 1
+                    // where the +1 accounts for the delimiter byte, so e <= data.len() only if the
+                    // last byte IS the delimiter — but then last_needs_delim is false, short-circuiting.
+                    let needs_extra = last_needs_delim && e as usize == data.len();
+                    let total = span + needs_extra as usize;
 
-                    if iovecs.len() >= IOV_BATCH * 2 {
-                        if !writev_all(out_fd, &iovecs) {
-                            return;
+                    if buf.len() + total > BUF_SIZE && !buf.is_empty() {
+                        match raw_write_all(out_fd, &buf) {
+                            Ok(false) => return,
+                            Err(err) => {
+                                eprintln!("{}: write error: {}", TOOL_NAME, err);
+                                process::exit(1);
+                            }
+                            _ => {}
                         }
-                        iovecs.clear();
+                        buf.clear();
+                    }
+                    buf.reserve(total);
+                    let pos = buf.len();
+                    unsafe {
+                        let dst = buf.as_mut_ptr().add(pos);
+                        std::ptr::copy_nonoverlapping(src.add(s as usize), dst, span);
+                        if needs_extra {
+                            *dst.add(span) = delimiter;
+                            buf.set_len(pos + span + 1);
+                        } else {
+                            buf.set_len(pos + span);
+                        }
                     }
                 }
-                if !iovecs.is_empty() {
-                    writev_all(out_fd, &iovecs);
+                if !buf.is_empty() {
+                    match raw_write_all(out_fd, &buf) {
+                        Ok(false) => process::exit(0),
+                        Err(err) => {
+                            eprintln!("{}: write error: {}", TOOL_NAME, err);
+                            process::exit(1);
+                        }
+                        _ => {}
+                    }
                 }
             } else {
                 // Fallback: copy-based path for non-stdout output
-                const CHUNK: usize = 1024 * 1024;
+                const CHUNK: usize = 2 * 1024 * 1024;
                 let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + 256);
                 let src = data.as_ptr();
                 let offsets_slice = &offsets[..count];
@@ -878,47 +934,84 @@ fn run_file_shuffle(
                             );
                         }
                     }
-                    let line_len = (e - s) as usize;
-                    let needed = buf.len() + line_len + 1;
-                    if needed > buf.capacity() {
-                        if !checked_write_all(out, &buf).unwrap_or(false) {
-                            return;
+                    let span = (e - s) as usize;
+                    // See invariant comment in unix-stdout path above: e == data.len()
+                    // uniquely identifies the unterminated last line.
+                    let needs_extra = last_needs_delim && e as usize == data.len();
+                    let total = span + needs_extra as usize;
+                    if buf.len() + total > CHUNK && !buf.is_empty() {
+                        match checked_write_all(out, &buf) {
+                            Ok(false) => return,
+                            Err(err) => {
+                                eprintln!("{}: write error: {}", TOOL_NAME, err);
+                                process::exit(1);
+                            }
+                            _ => {}
                         }
                         buf.clear();
-                        if line_len + 1 > buf.capacity() {
-                            buf.reserve(line_len + 1);
-                        }
                     }
+                    buf.reserve(total);
                     let pos = buf.len();
                     unsafe {
                         let dst = buf.as_mut_ptr().add(pos);
-                        std::ptr::copy_nonoverlapping(src.add(s as usize), dst, line_len);
-                        *dst.add(line_len) = delimiter;
-                        buf.set_len(pos + line_len + 1);
+                        std::ptr::copy_nonoverlapping(src.add(s as usize), dst, span);
+                        if needs_extra {
+                            *dst.add(span) = delimiter;
+                            buf.set_len(pos + span + 1);
+                        } else {
+                            buf.set_len(pos + span);
+                        }
                     }
                 }
                 if !buf.is_empty() {
-                    let _ = checked_write_all(out, &buf);
+                    match checked_write_all(out, &buf) {
+                        Ok(false) => process::exit(0),
+                        Err(err) => {
+                            eprintln!("{}: write error: {}", TOOL_NAME, err);
+                            process::exit(1);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
 
         #[cfg(not(unix))]
         {
-            const OUT_CHUNK: usize = 1024 * 1024;
+            const OUT_CHUNK: usize = 2 * 1024 * 1024;
             let mut buf = Vec::with_capacity(OUT_CHUNK + 256);
             for &[s, e] in offsets[..count].iter() {
-                buf.extend_from_slice(&data[s as usize..e as usize]);
-                buf.push(delimiter);
-                if buf.len() >= OUT_CHUNK {
-                    if !checked_write_all(out, &buf).unwrap_or(false) {
-                        return;
+                let span = (e - s) as usize;
+                // See invariant comment in unix-stdout path above: e == data.len()
+                // uniquely identifies the unterminated last line.
+                let needs_extra = last_needs_delim && e as usize == data.len();
+                let total = span + needs_extra as usize;
+                if buf.len() + total > OUT_CHUNK && !buf.is_empty() {
+                    match checked_write_all(out, &buf) {
+                        Ok(false) => return,
+                        Err(err) => {
+                            eprintln!("{}: write error: {}", TOOL_NAME, err);
+                            process::exit(1);
+                        }
+                        _ => {}
                     }
                     buf.clear();
                 }
+                buf.reserve(total);
+                buf.extend_from_slice(&data[s as usize..e as usize]);
+                if needs_extra {
+                    buf.push(delimiter);
+                }
             }
             if !buf.is_empty() {
-                let _ = checked_write_all(out, &buf);
+                match checked_write_all(out, &buf) {
+                    Ok(false) => process::exit(0),
+                    Err(err) => {
+                        eprintln!("{}: write error: {}", TOOL_NAME, err);
+                        process::exit(1);
+                    }
+                    _ => {}
+                }
             }
         }
     }
