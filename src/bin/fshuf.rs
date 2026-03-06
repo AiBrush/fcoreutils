@@ -39,6 +39,48 @@ fn checked_write_all(out: &mut dyn Write, data: &[u8]) -> io::Result<bool> {
     }
 }
 
+/// Write all iovec entries using writev, handling partial writes.
+/// Returns false on BrokenPipe.
+#[cfg(unix)]
+fn writev_all(fd: i32, iovecs: &[libc::iovec]) -> bool {
+    let mut offset = 0;
+    while offset < iovecs.len() {
+        // IOV_MAX is 1024 on Linux/macOS; POSIX minimum is 16
+        let count = (iovecs.len() - offset).min(1024) as i32;
+        let n = unsafe { libc::writev(fd, iovecs[offset..].as_ptr(), count) };
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            // BrokenPipe = reader closed (normal), any other error = real failure
+            return false;
+        }
+        let mut written = n as usize;
+        while offset < iovecs.len() && written > 0 {
+            let iov_len = iovecs[offset].iov_len;
+            if written >= iov_len {
+                written -= iov_len;
+                offset += 1;
+            } else {
+                // Partial write within an iovec — write remainder directly
+                let ptr = iovecs[offset].iov_base as *const u8;
+                let slice =
+                    unsafe { std::slice::from_raw_parts(ptr.add(written), iov_len - written) };
+                match raw_write_all(fd, slice) {
+                    Ok(false) => return false,
+                    Err(_) => return false,
+                    Ok(true) => {
+                        offset += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 const TOOL_NAME: &str = "shuf";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -764,8 +806,9 @@ fn run_file_shuffle(
 
         #[cfg(unix)]
         {
-            // Fast output path: build contiguous output buffer with unsafe ptr copy,
-            // then flush via raw fd write (bypasses BufWriter overhead).
+            // Zero-copy output path: use writev to write directly from mmap'd data.
+            // Avoids copying line data to an intermediate buffer — eliminates
+            // cache-miss-heavy copy_nonoverlapping on randomly accessed lines.
             let out_fd: i32 = if is_stdout {
                 let _ = out.flush();
                 1
@@ -773,56 +816,88 @@ fn run_file_shuffle(
                 -1
             };
 
-            const CHUNK: usize = 1024 * 1024; // 1MB output chunks
-            let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + 256);
-            let src = data.as_ptr();
-            let offsets_slice = &offsets[..count];
-            // Prefetch distance: ~16 cache misses ahead hides DRAM latency.
-            // Uses T1 (L2) hint because shuffled access is scattered, and T0 (L1)
-            // would evict the current iteration's working set from L1.
-            // Assumes short lines (~64 bytes); for very long lines, the tail of
-            // each line will still be cold after prefetch.
-            const PREFETCH_DIST: usize = 16;
+            if out_fd >= 0 {
+                const IOV_BATCH: usize = 512; // 512 lines = 1024 iovecs
+                let delim_buf = [delimiter];
+                let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(IOV_BATCH * 2);
+                let offsets_slice = &offsets[..count];
 
-            for (idx, &[s, e]) in offsets_slice.iter().enumerate() {
-                if idx + PREFETCH_DIST < count {
-                    let future_s = offsets_slice[idx + PREFETCH_DIST][0] as usize;
-                    #[cfg(target_arch = "x86_64")]
-                    unsafe {
-                        std::arch::x86_64::_mm_prefetch(
-                            src.add(future_s) as *const i8,
-                            std::arch::x86_64::_MM_HINT_T1,
-                        );
+                // Prefetch distance for writev: prefetch the line data that will be
+                // accessed by the kernel during writev. Larger than copy path because
+                // writev batches more work per syscall.
+                const PREFETCH_DIST: usize = 32;
+
+                for (idx, &[s, e]) in offsets_slice.iter().enumerate() {
+                    if idx + PREFETCH_DIST < count {
+                        let future_s = offsets_slice[idx + PREFETCH_DIST][0] as usize;
+                        #[cfg(target_arch = "x86_64")]
+                        unsafe {
+                            std::arch::x86_64::_mm_prefetch(
+                                data.as_ptr().add(future_s) as *const i8,
+                                std::arch::x86_64::_MM_HINT_T1,
+                            );
+                        }
                     }
-                }
-                let line_len = (e - s) as usize;
-                let needed = buf.len() + line_len + 1;
-                if needed > buf.capacity() {
-                    // Flush current buffer
-                    if out_fd >= 0 {
-                        if !raw_write_all(out_fd, &buf).unwrap_or(false) {
+
+                    let line_len = (e - s) as usize;
+                    iovecs.push(libc::iovec {
+                        iov_base: data[s as usize..].as_ptr() as *mut libc::c_void,
+                        iov_len: line_len,
+                    });
+                    iovecs.push(libc::iovec {
+                        iov_base: delim_buf.as_ptr() as *mut libc::c_void,
+                        iov_len: 1,
+                    });
+
+                    if iovecs.len() >= IOV_BATCH * 2 {
+                        if !writev_all(out_fd, &iovecs) {
                             return;
                         }
-                    } else if !checked_write_all(out, &buf).unwrap_or(false) {
-                        return;
-                    }
-                    buf.clear();
-                    if line_len + 1 > buf.capacity() {
-                        buf.reserve(line_len + 1);
+                        iovecs.clear();
                     }
                 }
-                let pos = buf.len();
-                unsafe {
-                    let dst = buf.as_mut_ptr().add(pos);
-                    std::ptr::copy_nonoverlapping(src.add(s as usize), dst, line_len);
-                    *dst.add(line_len) = delimiter;
-                    buf.set_len(pos + line_len + 1);
+                if !iovecs.is_empty() {
+                    writev_all(out_fd, &iovecs);
                 }
-            }
-            if !buf.is_empty() {
-                if out_fd >= 0 {
-                    let _ = raw_write_all(out_fd, &buf);
-                } else {
+            } else {
+                // Fallback: copy-based path for non-stdout output
+                const CHUNK: usize = 1024 * 1024;
+                let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + 256);
+                let src = data.as_ptr();
+                let offsets_slice = &offsets[..count];
+                const PREFETCH_DIST: usize = 16;
+
+                for (idx, &[s, e]) in offsets_slice.iter().enumerate() {
+                    if idx + PREFETCH_DIST < count {
+                        let future_s = offsets_slice[idx + PREFETCH_DIST][0] as usize;
+                        #[cfg(target_arch = "x86_64")]
+                        unsafe {
+                            std::arch::x86_64::_mm_prefetch(
+                                src.add(future_s) as *const i8,
+                                std::arch::x86_64::_MM_HINT_T1,
+                            );
+                        }
+                    }
+                    let line_len = (e - s) as usize;
+                    let needed = buf.len() + line_len + 1;
+                    if needed > buf.capacity() {
+                        if !checked_write_all(out, &buf).unwrap_or(false) {
+                            return;
+                        }
+                        buf.clear();
+                        if line_len + 1 > buf.capacity() {
+                            buf.reserve(line_len + 1);
+                        }
+                    }
+                    let pos = buf.len();
+                    unsafe {
+                        let dst = buf.as_mut_ptr().add(pos);
+                        std::ptr::copy_nonoverlapping(src.add(s as usize), dst, line_len);
+                        *dst.add(line_len) = delimiter;
+                        buf.set_len(pos + line_len + 1);
+                    }
+                }
+                if !buf.is_empty() {
                     let _ = checked_write_all(out, &buf);
                 }
             }
