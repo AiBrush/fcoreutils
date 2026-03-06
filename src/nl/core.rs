@@ -215,6 +215,20 @@ fn is_simple_number_nonempty(config: &NlConfig) -> bool {
         && config.number_width + config.number_separator.len() <= 30
 }
 
+/// Check if config is a pattern-based numbering case (Prefix or Regex) suitable for fast path.
+#[inline]
+fn is_simple_number_pattern(config: &NlConfig) -> bool {
+    matches!(
+        config.body_style,
+        NumberingStyle::Prefix(_) | NumberingStyle::Regex(_)
+    ) && matches!(config.header_style, NumberingStyle::None)
+        && matches!(config.footer_style, NumberingStyle::None)
+        && config.join_blank_lines == 1
+        && config.line_increment == 1
+        && !config.no_renumber
+        && config.number_width + config.number_separator.len() <= 30
+}
+
 /// Inner write helper: formats number prefix + line content + newline into buffer.
 /// SAFETY: caller ensures output has capacity for total_len bytes at start_pos.
 #[inline(always)]
@@ -850,6 +864,251 @@ fn nl_number_nonempty_stream(
     Ok(())
 }
 
+/// Fast streaming path for pattern-based numbering (Prefix or Regex).
+/// Skips section delimiter checking for maximum throughput.
+/// Numbers only lines matching the pattern; others get blank padding.
+#[cfg(unix)]
+fn nl_number_pattern_stream(
+    data: &[u8],
+    config: &NlConfig,
+    line_number: &mut i64,
+    fd: i32,
+) -> std::io::Result<()> {
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
+
+    let width = config.number_width;
+    let sep = &config.number_separator;
+    let fmt = config.number_format;
+    let style = &config.body_style;
+    let mut num = *line_number;
+    let mut pos: usize = 0;
+
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 128 * 1024);
+    let mut buf_ptr = output.as_mut_ptr();
+    let mut write_pos: usize = 0;
+    let data_ptr = data.as_ptr();
+
+    let mut prefix_buf = [0u8; 32];
+    let mut prefix_len: usize;
+    let mut num_end: usize;
+    let mut num_buf = itoa::Buffer::new();
+
+    let blank_pad = width + sep.len();
+
+    // Format initial prefix
+    {
+        let num_str = num_buf.format(num);
+        let pad = width.saturating_sub(num_str.len());
+        let mut wp = 0;
+        match fmt {
+            NumberFormat::Rn => {
+                for _ in 0..pad {
+                    prefix_buf[wp] = b' ';
+                    wp += 1;
+                }
+                prefix_buf[wp..wp + num_str.len()].copy_from_slice(num_str.as_bytes());
+                wp += num_str.len();
+            }
+            NumberFormat::Rz => {
+                for _ in 0..pad {
+                    prefix_buf[wp] = b'0';
+                    wp += 1;
+                }
+                prefix_buf[wp..wp + num_str.len()].copy_from_slice(num_str.as_bytes());
+                wp += num_str.len();
+            }
+            NumberFormat::Ln => {
+                prefix_buf[wp..wp + num_str.len()].copy_from_slice(num_str.as_bytes());
+                wp += num_str.len();
+                for _ in 0..pad {
+                    prefix_buf[wp] = b' ';
+                    wp += 1;
+                }
+            }
+        }
+        num_end = wp;
+        prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
+        wp += sep.len();
+        prefix_len = wp;
+    }
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line_len = nl_pos - pos;
+        let needed = line_len + prefix_len + 2;
+        if write_pos + needed > BUF_SIZE {
+            unsafe {
+                output.set_len(write_pos);
+            }
+            write_all_fd(fd, &output)?;
+            write_pos = 0;
+            if needed > output.capacity() {
+                output.reserve(needed);
+                buf_ptr = output.as_mut_ptr();
+            }
+        }
+
+        let line = &data[pos..nl_pos];
+        if should_number(line, style) {
+            // Matching line: write numbered prefix + content + newline
+            unsafe {
+                let dst = buf_ptr.add(write_pos);
+                std::ptr::copy_nonoverlapping(prefix_buf.as_ptr(), dst, prefix_len);
+                std::ptr::copy_nonoverlapping(data_ptr.add(pos), dst.add(prefix_len), line_len);
+                *dst.add(prefix_len + line_len) = b'\n';
+            }
+            write_pos += prefix_len + line_len + 1;
+
+            num += 1;
+
+            // In-place digit increment
+            match fmt {
+                NumberFormat::Rn | NumberFormat::Rz => {
+                    let mut idx = num_end - 1;
+                    loop {
+                        if prefix_buf[idx] < b'9' {
+                            prefix_buf[idx] += 1;
+                            break;
+                        }
+                        prefix_buf[idx] = b'0';
+                        if idx == 0 {
+                            let ns = num_buf.format(num);
+                            let p = width.saturating_sub(ns.len());
+                            let pc = if fmt == NumberFormat::Rz { b'0' } else { b' ' };
+                            let mut wp = 0;
+                            for _ in 0..p {
+                                prefix_buf[wp] = pc;
+                                wp += 1;
+                            }
+                            prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
+                            wp += ns.len();
+                            num_end = wp;
+                            prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
+                            prefix_len = wp + sep.len();
+                            break;
+                        }
+                        idx -= 1;
+                        let c = prefix_buf[idx];
+                        if c == b' ' || c == b'0' {
+                            prefix_buf[idx] = b'1';
+                            break;
+                        }
+                    }
+                }
+                NumberFormat::Ln => {
+                    let mut last_digit = 0;
+                    for j in 0..num_end {
+                        if prefix_buf[j].is_ascii_digit() {
+                            last_digit = j;
+                        } else {
+                            break;
+                        }
+                    }
+                    let mut idx = last_digit;
+                    loop {
+                        if prefix_buf[idx] < b'9' {
+                            prefix_buf[idx] += 1;
+                            break;
+                        }
+                        prefix_buf[idx] = b'0';
+                        if idx == 0 {
+                            let ns = num_buf.format(num);
+                            let p = width.saturating_sub(ns.len());
+                            let mut wp = 0;
+                            prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
+                            wp += ns.len();
+                            for _ in 0..p {
+                                prefix_buf[wp] = b' ';
+                                wp += 1;
+                            }
+                            num_end = wp;
+                            prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
+                            prefix_len = wp + sep.len();
+                            break;
+                        }
+                        idx -= 1;
+                        if prefix_buf[idx] == b' ' {
+                            let ns = num_buf.format(num);
+                            let p = width.saturating_sub(ns.len());
+                            let mut wp = 0;
+                            prefix_buf[wp..wp + ns.len()].copy_from_slice(ns.as_bytes());
+                            wp += ns.len();
+                            for _ in 0..p {
+                                prefix_buf[wp] = b' ';
+                                wp += 1;
+                            }
+                            num_end = wp;
+                            prefix_buf[wp..wp + sep.len()].copy_from_slice(sep);
+                            prefix_len = wp + sep.len();
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Non-matching line: blank padding + content + newline
+            unsafe {
+                let dst = buf_ptr.add(write_pos);
+                std::ptr::write_bytes(dst, b' ', blank_pad);
+                if line_len > 0 {
+                    std::ptr::copy_nonoverlapping(data_ptr.add(pos), dst.add(blank_pad), line_len);
+                }
+                *dst.add(blank_pad + line_len) = b'\n';
+            }
+            write_pos += blank_pad + line_len + 1;
+        }
+
+        pos = nl_pos + 1;
+    }
+
+    // Handle final line without trailing newline
+    if pos < data.len() {
+        let remaining = data.len() - pos;
+        let needed = prefix_len + remaining + 2;
+        if write_pos + needed > BUF_SIZE {
+            unsafe {
+                output.set_len(write_pos);
+            }
+            write_all_fd(fd, &output)?;
+            write_pos = 0;
+            if needed > output.capacity() {
+                output.reserve(needed);
+                buf_ptr = output.as_mut_ptr();
+            }
+        }
+        let line = &data[pos..];
+        if should_number(line, style) {
+            unsafe {
+                let dst = buf_ptr.add(write_pos);
+                std::ptr::copy_nonoverlapping(prefix_buf.as_ptr(), dst, prefix_len);
+                std::ptr::copy_nonoverlapping(data_ptr.add(pos), dst.add(prefix_len), remaining);
+                *dst.add(prefix_len + remaining) = b'\n';
+            }
+            write_pos += prefix_len + remaining + 1;
+            num += 1;
+        } else {
+            unsafe {
+                let dst = buf_ptr.add(write_pos);
+                std::ptr::write_bytes(dst, b' ', blank_pad);
+                if remaining > 0 {
+                    std::ptr::copy_nonoverlapping(data_ptr.add(pos), dst.add(blank_pad), remaining);
+                }
+                *dst.add(blank_pad + remaining) = b'\n';
+            }
+            write_pos += blank_pad + remaining + 1;
+        }
+    }
+
+    if write_pos > 0 {
+        unsafe {
+            output.set_len(write_pos);
+        }
+        write_all_fd(fd, &output)?;
+    }
+
+    *line_number = num;
+    Ok(())
+}
+
 /// Streaming generic path: writes output in ~1MB batches directly to fd.
 /// Handles all numbering styles, section delimiters, and blank line joining.
 #[cfg(unix)]
@@ -1040,6 +1299,23 @@ pub fn nl_stream_with_state(
             } else {
                 nl_number_nonempty_stream(data, config, line_number, fd)
             };
+        }
+    }
+
+    // Pattern fast path: Prefix or Regex body style with simple config
+    if is_simple_number_pattern(config) {
+        let has_delimiters = if config.section_delimiter.is_empty() {
+            false
+        } else {
+            let first_byte = config.section_delimiter[0];
+            if memchr::memchr(first_byte, data).is_none() {
+                false
+            } else {
+                memchr::memmem::find(data, &config.section_delimiter).is_some()
+            }
+        };
+        if !has_delimiters {
+            return nl_number_pattern_stream(data, config, line_number, fd);
         }
     }
 
