@@ -259,6 +259,7 @@ fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> 
 
     for nl_pos in memchr::memchr_iter(b'\n', data) {
         let line_len = nl_pos - pos;
+        // +22: i64 prints at most 20 chars (sign + 19 digits), plus 1 newline = 21.
         let needed = output.len() + line_len + width + sep.len() + 22;
         if needed > output.capacity() {
             output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
@@ -311,7 +312,84 @@ fn nl_number_all_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> 
     output
 }
 
-/// Streaming fast path for nl -b a: writes output in ~1MB batches directly to fd.
+/// In-memory fast path for default nl (body=NonEmpty): numbers non-blank lines,
+/// blank lines get width+sep spaces. Uses raw pointer writes for zero-overhead
+/// buffer construction.
+fn nl_number_nonempty_fast(data: &[u8], config: &NlConfig, line_number: &mut i64) -> Vec<u8> {
+    let alloc = (data.len() * 2 + 256).min(128 * 1024 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(alloc);
+
+    let width = config.number_width;
+    let sep = &config.number_separator;
+    let fmt = config.number_format;
+    let mut num = *line_number;
+    let mut pos: usize = 0;
+    let mut num_buf = itoa::Buffer::new();
+    let blank_pad = width + sep.len();
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let line_len = nl_pos - pos;
+        // +22: i64 prints at most 20 chars (sign + 19 digits), plus 1 newline = 21.
+        let needed = output.len() + line_len + width + sep.len() + 22;
+        if needed > output.capacity() {
+            output.reserve(needed - output.capacity() + 4 * 1024 * 1024);
+        }
+
+        if line_len == 0 {
+            let start_pos = output.len();
+            unsafe {
+                let dst = output.as_mut_ptr().add(start_pos);
+                std::ptr::write_bytes(dst, b' ', blank_pad);
+                *dst.add(blank_pad) = b'\n';
+                output.set_len(start_pos + blank_pad + 1);
+            }
+        } else {
+            let num_str = num_buf.format(num);
+            let pad = width.saturating_sub(num_str.len());
+            unsafe {
+                write_numbered_line(
+                    &mut output,
+                    fmt,
+                    num_str,
+                    pad,
+                    sep,
+                    data.as_ptr().add(pos),
+                    line_len,
+                );
+            }
+            num += 1;
+        }
+        pos = nl_pos + 1;
+    }
+
+    // Handle final line without trailing newline.
+    // Always non-blank: pos < data.len() implies remaining > 0.
+    if pos < data.len() {
+        let remaining = data.len() - pos;
+        let needed = output.len() + remaining + width + sep.len() + 22;
+        if needed > output.capacity() {
+            output.reserve(needed - output.capacity() + 1024);
+        }
+        let num_str = num_buf.format(num);
+        let pad = width.saturating_sub(num_str.len());
+        unsafe {
+            write_numbered_line(
+                &mut output,
+                fmt,
+                num_str,
+                pad,
+                sep,
+                data.as_ptr().add(pos),
+                remaining,
+            );
+        }
+        num += 1;
+    }
+
+    *line_number = num;
+    output
+}
+/// Streaming fast path for nl -b a: writes output in ~2MB batches directly to fd.
 /// Uses pre-formatted prefix in a stack-allocated buffer with in-place digit
 /// increment to avoid reformatting the number string for every single line.
 /// Raw write_pos tracking eliminates per-line Vec metadata overhead.
@@ -322,7 +400,7 @@ fn nl_number_all_stream(
     line_number: &mut i64,
     fd: i32,
 ) -> std::io::Result<()> {
-    const BUF_SIZE: usize = 1024 * 1024; // 1MB output buffer
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
 
     let width = config.number_width;
     let sep = &config.number_separator;
@@ -330,7 +408,7 @@ fn nl_number_all_stream(
     let mut num = *line_number;
     let mut pos: usize = 0;
 
-    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 128 * 1024);
     let mut buf_ptr = output.as_mut_ptr();
     let mut write_pos: usize = 0;
     let data_ptr = data.as_ptr();
@@ -537,7 +615,7 @@ fn nl_number_nonempty_stream(
     line_number: &mut i64,
     fd: i32,
 ) -> std::io::Result<()> {
-    const BUF_SIZE: usize = 1024 * 1024;
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
 
     let width = config.number_width;
     let sep = &config.number_separator;
@@ -545,7 +623,7 @@ fn nl_number_nonempty_stream(
     let mut num = *line_number;
     let mut pos: usize = 0;
 
-    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 128 * 1024);
     let mut buf_ptr = output.as_mut_ptr();
     let mut write_pos: usize = 0;
     let data_ptr = data.as_ptr();
@@ -774,9 +852,9 @@ fn nl_generic_stream(
         return Ok(());
     }
 
-    const BUF_SIZE: usize = 1024 * 1024; // 1MB output buffer
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
 
-    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 64 * 1024);
+    let mut output: Vec<u8> = Vec::with_capacity(BUF_SIZE + 128 * 1024);
     let mut current_section = Section::Body;
     let mut consecutive_blanks: usize = 0;
     let mut start = 0;
@@ -931,11 +1009,21 @@ pub fn nl_stream_with_state(
         let has_delimiters = if config.section_delimiter.is_empty() {
             false
         } else {
-            // Use memmem SIMD scan — fast for typical text without backslashes.
-            memchr::memmem::find(data, &config.section_delimiter).is_some()
+            // Fast reject: single-byte memchr for the first delimiter byte.
+            // For default "\:", backslash is rare, so this rejects in ~0.3ms
+            // vs memmem's ~1ms on 10MB of typical text.
+            let first_byte = config.section_delimiter[0];
+            if memchr::memchr(first_byte, data).is_none() {
+                false
+            } else {
+                memchr::memmem::find(data, &config.section_delimiter).is_some()
+            }
         };
 
         if !has_delimiters {
+            // Always use the streaming path: 2MB output buffer has minimal page
+            // fault overhead (~1 fault) vs the in-memory path which allocates
+            // data.len()*2 (~20MB for 10MB input, ~5000 page faults).
             return if is_all {
                 nl_number_all_stream(data, config, line_number, fd)
             } else {
@@ -956,10 +1044,22 @@ pub fn nl_to_vec_with_state(data: &[u8], config: &NlConfig, line_number: &mut i6
 
     // Fast paths for common benchmark cases.
     // Guard: skip fast path if data contains section delimiters (rare in practice).
-    let has_section_delims = !config.section_delimiter.is_empty()
-        && memchr::memmem::find(data, &config.section_delimiter).is_some();
-    if is_simple_number_all(config) && !has_section_delims {
-        return nl_number_all_fast(data, config, line_number);
+    // Fast-reject: single-byte memchr for the first delimiter byte before full memmem
+    // scan — matches the optimization in nl_stream_with_state.
+    let has_section_delims = if config.section_delimiter.is_empty() {
+        false
+    } else {
+        let first_byte = config.section_delimiter[0];
+        memchr::memchr(first_byte, data).is_some()
+            && memchr::memmem::find(data, &config.section_delimiter).is_some()
+    };
+    if !has_section_delims {
+        if is_simple_number_all(config) {
+            return nl_number_all_fast(data, config, line_number);
+        }
+        if is_simple_number_nonempty(config) {
+            return nl_number_nonempty_fast(data, config, line_number);
+        }
     }
 
     // Generic path: pre-allocate generously instead of counting newlines
