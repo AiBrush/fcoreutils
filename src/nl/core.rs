@@ -199,6 +199,7 @@ fn is_simple_number_all(config: &NlConfig) -> bool {
         && matches!(config.footer_style, NumberingStyle::None)
         && config.join_blank_lines == 1
         && config.line_increment == 1
+        && config.starting_line_number >= 0
         && !config.no_renumber
         && config.number_width + config.number_separator.len() <= 30
 }
@@ -211,6 +212,7 @@ fn is_simple_number_nonempty(config: &NlConfig) -> bool {
         && matches!(config.footer_style, NumberingStyle::None)
         && config.join_blank_lines == 1
         && config.line_increment == 1
+        && config.starting_line_number >= 0
         && !config.no_renumber
         && config.number_width + config.number_separator.len() <= 30
 }
@@ -225,8 +227,23 @@ fn is_simple_number_pattern(config: &NlConfig) -> bool {
         && matches!(config.footer_style, NumberingStyle::None)
         && config.join_blank_lines == 1
         && config.line_increment == 1
+        && config.starting_line_number >= 0
         && !config.no_renumber
         && config.number_width + config.number_separator.len() <= 30
+}
+
+/// Check if the data contains any section delimiter sequences.
+/// Uses a fast single-byte memchr reject before the full memmem scan:
+/// for the default "\:" delimiter, backslash is rare in typical text, so
+/// this rejects in ~0.3ms vs memmem's ~1ms on 10MB of input.
+#[inline]
+fn data_has_section_delimiters(data: &[u8], config: &NlConfig) -> bool {
+    if config.section_delimiter.is_empty() {
+        return false;
+    }
+    let first_byte = config.section_delimiter[0];
+    memchr::memchr(first_byte, data).is_some()
+        && memchr::memmem::find(data, &config.section_delimiter).is_some()
 }
 
 /// Inner write helper: formats number prefix + line content + newline into buffer.
@@ -1275,22 +1292,7 @@ pub fn nl_stream_with_state(
     let is_nonempty = !is_all && is_simple_number_nonempty(config);
 
     if is_all || is_nonempty {
-        // Skip delimiter scan when delimiter is empty
-        let has_delimiters = if config.section_delimiter.is_empty() {
-            false
-        } else {
-            // Fast reject: single-byte memchr for the first delimiter byte.
-            // For default "\:", backslash is rare, so this rejects in ~0.3ms
-            // vs memmem's ~1ms on 10MB of typical text.
-            let first_byte = config.section_delimiter[0];
-            if memchr::memchr(first_byte, data).is_none() {
-                false
-            } else {
-                memchr::memmem::find(data, &config.section_delimiter).is_some()
-            }
-        };
-
-        if !has_delimiters {
+        if !data_has_section_delimiters(data, config) {
             // Always use the streaming path: 2MB output buffer has minimal page
             // fault overhead (~1 fault) vs the in-memory path which allocates
             // data.len()*2 (~20MB for 10MB input, ~5000 page faults).
@@ -1303,20 +1305,8 @@ pub fn nl_stream_with_state(
     }
 
     // Pattern fast path: Prefix or Regex body style with simple config
-    if is_simple_number_pattern(config) {
-        let has_delimiters = if config.section_delimiter.is_empty() {
-            false
-        } else {
-            let first_byte = config.section_delimiter[0];
-            if memchr::memchr(first_byte, data).is_none() {
-                false
-            } else {
-                memchr::memmem::find(data, &config.section_delimiter).is_some()
-            }
-        };
-        if !has_delimiters {
-            return nl_number_pattern_stream(data, config, line_number, fd);
-        }
+    if is_simple_number_pattern(config) && !data_has_section_delimiters(data, config) {
+        return nl_number_pattern_stream(data, config, line_number, fd);
     }
 
     nl_generic_stream(data, config, line_number, fd)
@@ -1331,16 +1321,7 @@ pub fn nl_to_vec_with_state(data: &[u8], config: &NlConfig, line_number: &mut i6
 
     // Fast paths for common benchmark cases.
     // Guard: skip fast path if data contains section delimiters (rare in practice).
-    // Fast-reject: single-byte memchr for the first delimiter byte before full memmem
-    // scan — matches the optimization in nl_stream_with_state.
-    let has_section_delims = if config.section_delimiter.is_empty() {
-        false
-    } else {
-        let first_byte = config.section_delimiter[0];
-        memchr::memchr(first_byte, data).is_some()
-            && memchr::memmem::find(data, &config.section_delimiter).is_some()
-    };
-    if !has_section_delims {
+    if !data_has_section_delimiters(data, config) {
         if is_simple_number_all(config) {
             return nl_number_all_fast(data, config, line_number);
         }
