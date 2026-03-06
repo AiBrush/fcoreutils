@@ -49,16 +49,20 @@ fn fold_width_zero(data: &[u8], out: &mut impl Write) -> std::io::Result<()> {
     out.write_all(&output)
 }
 
+/// Parallel threshold for fold byte mode.
+const FOLD_BYTE_PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
+
 /// Fast fold by byte count without -s flag.
 /// Uses unsafe pointer copies and a pre-allocated 1MB output buffer.
-/// For short lines (≤width), copies line+newline with a single memcpy.
+/// For files >= 32MB, uses rayon parallel processing on line-aligned chunks.
 fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
+    if data.len() >= FOLD_BYTE_PARALLEL_THRESHOLD {
+        return fold_byte_fast_parallel(data, width, out);
+    }
+
     const BUF_CAP: usize = 1024 * 1024 + 4096;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_CAP);
     let base = buf.as_mut_ptr();
-    // SAFETY: `base` stays valid across `buf.clear()` calls because clear()
-    // retains the allocation. We never push/extend through the Vec API, so no
-    // reallocation occurs; `wp < BUF_CAP` is maintained before every write.
     let src = data.as_ptr();
     let mut wp: usize = 0;
     let mut seg_start = 0usize;
@@ -67,7 +71,6 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
         let seg_len = nl_pos - seg_start;
 
         if seg_len <= width {
-            // Short line: fits without folding. Copy line + newline in one go.
             let total = seg_len + 1;
             if wp + total > BUF_CAP {
                 unsafe { buf.set_len(wp) };
@@ -80,11 +83,10 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
             }
             wp += total;
         } else {
-            // Long line: fold at width boundaries.
             let mut off = seg_start;
             let end = nl_pos;
             while off + width < end {
-                let chunk = width + 1; // width bytes + newline
+                let chunk = width + 1;
                 if wp + chunk > BUF_CAP {
                     unsafe { buf.set_len(wp) };
                     out.write_all(&buf)?;
@@ -98,8 +100,7 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
                 wp += chunk;
                 off += width;
             }
-            // Remaining bytes + newline
-            let rem = end - off + 1; // includes the newline at nl_pos
+            let rem = end - off + 1;
             if wp + rem > BUF_CAP {
                 unsafe { buf.set_len(wp) };
                 out.write_all(&buf)?;
@@ -114,9 +115,7 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
         seg_start = nl_pos + 1;
     }
 
-    // Handle final segment without trailing newline
     if seg_start < data.len() {
-        let seg_len = data.len() - seg_start;
         let mut off = seg_start;
         let end = data.len();
         while off + width < end {
@@ -147,20 +146,138 @@ fn fold_byte_fast(data: &[u8], width: usize, out: &mut impl Write) -> std::io::R
             }
             wp += rem;
         }
-        let _ = seg_len;
     }
 
     if wp > 0 {
         unsafe { buf.set_len(wp) };
         out.write_all(&buf)?;
     }
-
     Ok(())
 }
 
+/// Parallel fold by byte count. Splits at newline boundaries, processes in parallel.
+fn fold_byte_fast_parallel(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
+    use rayon::prelude::*;
+
+    let num_chunks = rayon::current_num_threads().max(2);
+    let target_chunk_size = data.len() / num_chunks;
+    let mut chunks: Vec<&[u8]> = Vec::with_capacity(num_chunks + 1);
+    let mut pos: usize = 0;
+
+    for _ in 0..num_chunks - 1 {
+        if pos >= data.len() {
+            break;
+        }
+        let target_end = (pos + target_chunk_size).min(data.len());
+        let chunk_end = if target_end >= data.len() {
+            data.len()
+        } else {
+            match memchr::memchr(b'\n', &data[target_end..]) {
+                Some(off) => target_end + off + 1,
+                None => data.len(),
+            }
+        };
+        chunks.push(&data[pos..chunk_end]);
+        pos = chunk_end;
+    }
+    if pos < data.len() {
+        chunks.push(&data[pos..]);
+    }
+
+    let results: Vec<Vec<u8>> = chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut buf = Vec::with_capacity(chunk.len() + chunk.len() / width + 256);
+            fold_byte_chunk(chunk, width, &mut buf);
+            buf
+        })
+        .collect();
+
+    for result in &results {
+        if !result.is_empty() {
+            out.write_all(result)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for fold byte mode into a Vec<u8>.
+/// Uses unsafe pointer copies for maximum throughput.
+fn fold_byte_chunk(data: &[u8], width: usize, buf: &mut Vec<u8>) {
+    if data.is_empty() {
+        return;
+    }
+
+    let needed = data.len() + data.len() / width + 256;
+    buf.reserve(needed);
+    let base = buf.as_mut_ptr();
+    let src = data.as_ptr();
+    let initial_len = buf.len();
+    let mut wp: usize = initial_len;
+    let mut seg_start = 0usize;
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let seg_len = nl_pos - seg_start;
+
+        if seg_len <= width {
+            let total = seg_len + 1;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(seg_start), base.add(wp), total);
+            }
+            wp += total;
+        } else {
+            let mut off = seg_start;
+            let end = nl_pos;
+            while off + width < end {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), width);
+                    *base.add(wp + width) = b'\n';
+                }
+                wp += width + 1;
+                off += width;
+            }
+            let rem = end - off + 1;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), rem);
+            }
+            wp += rem;
+        }
+        seg_start = nl_pos + 1;
+    }
+
+    // Handle final segment without trailing newline
+    if seg_start < data.len() {
+        let mut off = seg_start;
+        let end = data.len();
+        while off + width < end {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), width);
+                *base.add(wp + width) = b'\n';
+            }
+            wp += width + 1;
+            off += width;
+        }
+        if off < end {
+            let rem = end - off;
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.add(off), base.add(wp), rem);
+            }
+            wp += rem;
+        }
+    }
+
+    unsafe {
+        buf.set_len(wp);
+    }
+}
+
 /// Fast fold by byte count with -s (break at spaces).
-/// Buffers output into ~1MB chunks to minimize write syscalls.
+/// For files >= 32MB, uses rayon parallel processing.
 fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
+    if data.len() >= FOLD_BYTE_PARALLEL_THRESHOLD {
+        return fold_byte_spaces_parallel(data, width, out);
+    }
+
     let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
     let mut pos: usize = 0;
 
@@ -176,7 +293,6 @@ fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std
         }
     }
 
-    // Handle final segment without trailing newline
     if pos < data.len() {
         fold_segment_bytes_spaces_buffered(&data[pos..], width, &mut outbuf);
     }
@@ -187,10 +303,78 @@ fn fold_byte_fast_spaces(data: &[u8], width: usize, out: &mut impl Write) -> std
     Ok(())
 }
 
+/// Parallel fold by byte count with -s.
+fn fold_byte_spaces_parallel(
+    data: &[u8],
+    width: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    use rayon::prelude::*;
+
+    let num_chunks = rayon::current_num_threads().max(2);
+    let target_chunk_size = data.len() / num_chunks;
+    let mut chunks: Vec<&[u8]> = Vec::with_capacity(num_chunks + 1);
+    let mut pos: usize = 0;
+
+    for _ in 0..num_chunks - 1 {
+        if pos >= data.len() {
+            break;
+        }
+        let target_end = (pos + target_chunk_size).min(data.len());
+        let chunk_end = if target_end >= data.len() {
+            data.len()
+        } else {
+            match memchr::memchr(b'\n', &data[target_end..]) {
+                Some(off) => target_end + off + 1,
+                None => data.len(),
+            }
+        };
+        chunks.push(&data[pos..chunk_end]);
+        pos = chunk_end;
+    }
+    if pos < data.len() {
+        chunks.push(&data[pos..]);
+    }
+
+    let results: Vec<Vec<u8>> = chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut buf = Vec::with_capacity(chunk.len() + chunk.len() / width + 256);
+            fold_byte_spaces_chunk(chunk, width, &mut buf);
+            buf
+        })
+        .collect();
+
+    for result in &results {
+        if !result.is_empty() {
+            out.write_all(result)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for fold byte mode with -s into a Vec<u8>.
+fn fold_byte_spaces_chunk(data: &[u8], width: usize, outbuf: &mut Vec<u8>) {
+    let mut pos: usize = 0;
+
+    for nl_pos in memchr::memchr_iter(b'\n', data) {
+        let segment = &data[pos..nl_pos];
+        fold_segment_bytes_spaces_buffered(segment, width, outbuf);
+        outbuf.push(b'\n');
+        pos = nl_pos + 1;
+    }
+
+    if pos < data.len() {
+        fold_segment_bytes_spaces_buffered(&data[pos..], width, outbuf);
+    }
+}
+
+/// Parallel threshold for fold column mode.
+const FOLD_PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
+
 /// Streaming fold by column count — single-pass stream using memchr2.
-/// Processes the entire file in one scan, finding both tabs and newlines
-/// simultaneously. Avoids the overhead of per-line decomposition + per-line
-/// tab checking (two separate SIMD passes over the data).
+/// For large files (>4MB), uses rayon parallel processing on line-aligned chunks.
+/// Each chunk is processed independently since column resets at newlines.
 fn fold_column_mode_streaming(
     data: &[u8],
     width: usize,
@@ -201,21 +385,91 @@ fn fold_column_mode_streaming(
         return fold_column_mode_spaces_streaming(data, width, out);
     }
 
-    let mut outbuf: Vec<u8> = Vec::with_capacity(1024 * 1024 + 4096);
+    if data.len() >= FOLD_PARALLEL_THRESHOLD {
+        return fold_column_parallel(data, width, out);
+    }
+
+    let mut outbuf: Vec<u8> = Vec::with_capacity(data.len() + data.len() / 4);
+    fold_column_chunk(data, width, &mut outbuf);
+    if !outbuf.is_empty() {
+        out.write_all(&outbuf)?;
+    }
+    Ok(())
+}
+
+/// Parallel fold for column mode with tabs. Splits data into line-aligned chunks,
+/// processes each in parallel with rayon, writes results in order.
+fn fold_column_parallel(data: &[u8], width: usize, out: &mut impl Write) -> std::io::Result<()> {
+    use rayon::prelude::*;
+
+    let num_chunks = rayon::current_num_threads().max(2);
+    let target_chunk_size = data.len() / num_chunks;
+    let mut chunks: Vec<&[u8]> = Vec::with_capacity(num_chunks + 1);
+    let mut pos: usize = 0;
+
+    for _ in 0..num_chunks - 1 {
+        if pos >= data.len() {
+            break;
+        }
+        let target_end = (pos + target_chunk_size).min(data.len());
+        let chunk_end = if target_end >= data.len() {
+            data.len()
+        } else {
+            match memchr::memchr(b'\n', &data[target_end..]) {
+                Some(off) => target_end + off + 1,
+                None => data.len(),
+            }
+        };
+        chunks.push(&data[pos..chunk_end]);
+        pos = chunk_end;
+    }
+    if pos < data.len() {
+        chunks.push(&data[pos..]);
+    }
+
+    let results: Vec<Vec<u8>> = chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut buf = Vec::with_capacity(chunk.len() + chunk.len() / 4);
+            fold_column_chunk(chunk, width, &mut buf);
+            buf
+        })
+        .collect();
+
+    for result in &results {
+        if !result.is_empty() {
+            out.write_all(result)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process a chunk for fold column mode using unsafe pointer writes.
+/// Uses memchr2 SIMD scanning for tabs and newlines, with raw pointer output.
+fn fold_column_chunk(data: &[u8], width: usize, outbuf: &mut Vec<u8>) {
+    if data.is_empty() {
+        return;
+    }
+
+    // Worst case: every char at width boundary → output ≈ 2x input
+    let worst = data.len() * 2 + 4096;
+    outbuf.reserve(worst);
+
+    let src = data.as_ptr();
+    let out_base = outbuf.as_mut_ptr();
+    let initial_len = outbuf.len();
+    let mut wp: usize = initial_len;
     let mut col: usize = 0;
     let mut seg_start: usize = 0;
     let mut i: usize = 0;
 
     while i < data.len() {
-        // SIMD scan: skip regular bytes, find next tab or newline
         match memchr::memchr2(b'\t', b'\n', &data[i..]) {
             Some(off) => {
                 let special_pos = i + off;
                 let run_len = special_pos - i;
 
-                // Check if regular bytes before the special char cause overflow
                 if col + run_len > width {
-                    // Need line breaks within this regular-byte run
                     loop {
                         let remaining = special_pos - i;
                         let fit = width - col;
@@ -224,8 +478,17 @@ fn fold_column_mode_streaming(
                             i = special_pos;
                             break;
                         }
-                        outbuf.extend_from_slice(&data[seg_start..i + fit]);
-                        outbuf.push(b'\n');
+                        let copy_len = i + fit - seg_start;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                src.add(seg_start),
+                                out_base.add(wp),
+                                copy_len,
+                            );
+                            wp += copy_len;
+                            *out_base.add(wp) = b'\n';
+                            wp += 1;
+                        }
                         i += fit;
                         seg_start = i;
                         col = 0;
@@ -235,32 +498,42 @@ fn fold_column_mode_streaming(
                     i = special_pos;
                 }
 
-                // Handle the special character
                 if data[i] == b'\n' {
-                    outbuf.extend_from_slice(&data[seg_start..=i]);
+                    let copy_len = i + 1 - seg_start;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src.add(seg_start),
+                            out_base.add(wp),
+                            copy_len,
+                        );
+                    }
+                    wp += copy_len;
                     col = 0;
                     i += 1;
                     seg_start = i;
-                    if outbuf.len() >= 1024 * 1024 {
-                        out.write_all(&outbuf)?;
-                        outbuf.clear();
-                    }
                 } else {
-                    // Tab
                     let new_col = ((col >> 3) + 1) << 3;
                     if new_col > width && col > 0 {
-                        outbuf.extend_from_slice(&data[seg_start..i]);
-                        outbuf.push(b'\n');
+                        let copy_len = i - seg_start;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                src.add(seg_start),
+                                out_base.add(wp),
+                                copy_len,
+                            );
+                            wp += copy_len;
+                            *out_base.add(wp) = b'\n';
+                            wp += 1;
+                        }
                         seg_start = i;
                         col = 0;
-                        continue; // re-evaluate tab at col 0
+                        continue;
                     }
                     col = new_col;
                     i += 1;
                 }
             }
             None => {
-                // Remaining data is all regular bytes (no tabs or newlines)
                 let remaining = data.len() - i;
                 if col + remaining > width {
                     loop {
@@ -269,8 +542,17 @@ fn fold_column_mode_streaming(
                         if fit >= rem_now {
                             break;
                         }
-                        outbuf.extend_from_slice(&data[seg_start..i + fit]);
-                        outbuf.push(b'\n');
+                        let copy_len = i + fit - seg_start;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                src.add(seg_start),
+                                out_base.add(wp),
+                                copy_len,
+                            );
+                            wp += copy_len;
+                            *out_base.add(wp) = b'\n';
+                            wp += 1;
+                        }
                         i += fit;
                         seg_start = i;
                         col = 0;
@@ -282,13 +564,16 @@ fn fold_column_mode_streaming(
     }
 
     if seg_start < data.len() {
-        outbuf.extend_from_slice(&data[seg_start..]);
-    }
-    if !outbuf.is_empty() {
-        out.write_all(&outbuf)?;
+        let copy_len = data.len() - seg_start;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(seg_start), out_base.add(wp), copy_len);
+        }
+        wp += copy_len;
     }
 
-    Ok(())
+    unsafe {
+        outbuf.set_len(wp);
+    }
 }
 
 /// Fold a byte segment (no newlines) with -s (break at spaces), buffered output.
