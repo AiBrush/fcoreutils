@@ -206,7 +206,6 @@ fn expand_regular_single(
     let mask = tab_size.wrapping_sub(1);
 
     // Output buffer: 2MB capacity with 64KB headroom for in-progress writes.
-    // Pre-populate pages to avoid demand-paging during first iteration.
     const BUF_CAP: usize = 2 * 1024 * 1024;
     const FLUSH_AT: usize = BUF_CAP - 64 * 1024;
     let mut output: Vec<u8> = Vec::with_capacity(BUF_CAP);
@@ -220,8 +219,6 @@ fn expand_regular_single(
         let seg_len = hit - pos;
 
         // Flush if segment + max expansion would exceed buffer.
-        // Segments are typically short (< 1KB), so this check rarely triggers
-        // except at buffer boundaries.
         if wp + seg_len + tab_size > BUF_CAP {
             unsafe {
                 output.set_len(wp);
@@ -229,6 +226,35 @@ fn expand_regular_single(
             out.write_all(&output)?;
             output.clear();
             wp = 0;
+            // If the segment alone exceeds BUF_CAP, write it directly to output
+            // instead of copying into the intermediate buffer.
+            if seg_len > BUF_CAP {
+                out.write_all(&data[pos..pos + seg_len])?;
+                column += seg_len;
+                pos = hit + 1;
+                // Still need to handle the tab/newline at `hit`
+                let out_ptr = output.as_mut_ptr();
+                if unsafe { *src.add(hit) } == b'\n' {
+                    unsafe {
+                        *out_ptr.add(wp) = b'\n';
+                    }
+                    wp += 1;
+                    column = 0;
+                } else {
+                    let rem = if is_pow2 {
+                        column & mask
+                    } else {
+                        column % tab_size
+                    };
+                    let spaces = tab_size - rem;
+                    unsafe {
+                        std::ptr::write_bytes(out_ptr.add(wp), b' ', spaces);
+                    }
+                    wp += spaces;
+                    column += spaces;
+                }
+                continue;
+            }
         }
 
         let out_ptr = output.as_mut_ptr();
@@ -282,6 +308,11 @@ fn expand_regular_single(
             out.write_all(&output)?;
             output.clear();
             wp = 0;
+            // If the tail alone exceeds BUF_CAP, write it directly.
+            if tail > BUF_CAP {
+                out.write_all(&data[pos..])?;
+                return Ok(());
+            }
         }
         unsafe {
             std::ptr::copy_nonoverlapping(src.add(pos), output.as_mut_ptr().add(wp), tail);
