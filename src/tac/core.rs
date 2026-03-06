@@ -1,5 +1,11 @@
 use std::io::{self, IoSlice, Write};
 
+/// Maximum number of iovec entries per writev call.
+/// 1024 on Linux and macOS; POSIX minimum is 16 but all modern Unix systems
+/// support at least 1024. Used for both writev batching and IoSlice batching.
+#[cfg(unix)]
+const IOV_MAX: usize = 1024;
+
 const IOSLICE_BATCH_SIZE: usize = 1024;
 
 /// Reverse records separated by a single byte.
@@ -62,7 +68,7 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
         let rec_start = pos + 1;
         if rec_start < end_pos {
             let record = &data[rec_start..end_pos];
-            if buf.len() + record.len() > BUF_SIZE {
+            if buf.len() + record.len() > BUF_SIZE && !buf.is_empty() {
                 out.write_all(&buf)?;
                 buf.clear();
             }
@@ -76,7 +82,7 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
     }
     if end_pos > 0 {
         let record = &data[..end_pos];
-        if buf.len() + record.len() > BUF_SIZE {
+        if buf.len() + record.len() > BUF_SIZE && !buf.is_empty() {
             out.write_all(&buf)?;
             buf.clear();
         }
@@ -107,7 +113,7 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
     for &pos in positions.iter().rev() {
         if pos < end_pos {
             let record = &data[pos..end_pos];
-            if buf.len() + record.len() > BUF_SIZE {
+            if buf.len() + record.len() > BUF_SIZE && !buf.is_empty() {
                 out.write_all(&buf)?;
                 buf.clear();
             }
@@ -121,7 +127,7 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
     }
     if end_pos > 0 {
         let record = &data[..end_pos];
-        if buf.len() + record.len() > BUF_SIZE {
+        if buf.len() + record.len() > BUF_SIZE && !buf.is_empty() {
             out.write_all(&buf)?;
             buf.clear();
         }
@@ -166,12 +172,9 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
 }
 
 /// Write iovec batch to fd via writev, then clear the vec for reuse.
-/// IOV_MAX is 1024 on Linux and macOS; POSIX minimum is 16 but all modern
-/// Unix systems support at least 1024.
 #[cfg(unix)]
 #[inline]
 fn writev_all_fd(fd: i32, iovecs: &mut Vec<libc::iovec>) -> io::Result<()> {
-    const IOV_MAX: usize = 1024;
     if iovecs.is_empty() {
         return Ok(());
     }
@@ -233,7 +236,6 @@ fn writev_all_fd(fd: i32, iovecs: &mut Vec<libc::iovec>) -> io::Result<()> {
 #[cfg(unix)]
 fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<()> {
     const CHUNK_SIZE: usize = 1024 * 1024;
-    const BATCH: usize = 1024; // matches IOV_MAX in writev_all_fd
 
     /// Given a separator position, return the record start (after-mode: pos+1, before-mode: pos).
     #[inline(always)]
@@ -250,16 +252,17 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
         if positions.is_empty() {
             return write_all_fd(fd, data);
         }
-        let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(BATCH);
+        let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(IOV_MAX);
         let mut end_pos = data.len();
         for &pos in positions.iter().rev() {
             let rs = rec_start(pos as usize, before);
             if rs < end_pos {
                 iovecs.push(libc::iovec {
+                    // Safety: writev only reads through iov_base; *mut cast required by POSIX ABI.
                     iov_base: data[rs..].as_ptr() as *mut libc::c_void,
                     iov_len: end_pos - rs,
                 });
-                if iovecs.len() >= BATCH {
+                if iovecs.len() >= IOV_MAX {
                     writev_all_fd(fd, &mut iovecs)?;
                 }
             }
@@ -267,6 +270,7 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
         }
         if end_pos > 0 {
             iovecs.push(libc::iovec {
+                // Safety: writev only reads through iov_base; *mut cast required by POSIX ABI.
                 iov_base: data.as_ptr() as *mut libc::c_void,
                 iov_len: end_pos,
             });
@@ -286,6 +290,10 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
     let mut target = data.len().saturating_sub(CHUNK_SIZE);
     while target > 0 {
         let search_end = (target + CHUNK_SIZE).min(*chunk_bounds.last().unwrap());
+        // In after-mode boundary = offset+1, so the rightmost sep at search_end-1
+        // produces boundary == search_end which is skipped. Worst case is a 2×CHUNK_SIZE
+        // chunk when separators cluster at window edges. This is acceptable since the
+        // search window is narrow.
         if let Some(offset) = memchr::memrchr(sep, &data[target..search_end]) {
             let boundary = rec_start(target + offset, before);
             if boundary < *chunk_bounds.last().unwrap() {
@@ -300,7 +308,7 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
     // Reusable buffers across chunks. Use usize for positions in the large-data
     // path because chunk boundaries may span >4GB when separators are absent.
     let mut positions: Vec<usize> = Vec::with_capacity(CHUNK_SIZE / 40 + 64);
-    let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(BATCH);
+    let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(IOV_MAX);
 
     for ci in (0..chunk_bounds.len() - 1).rev() {
         let chunk_start = chunk_bounds[ci];
@@ -318,10 +326,11 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
             let rs = rec_start(pos, before);
             if rs < end_pos {
                 iovecs.push(libc::iovec {
+                    // Safety: writev only reads through iov_base; *mut cast required by POSIX ABI.
                     iov_base: chunk[rs..].as_ptr() as *mut libc::c_void,
                     iov_len: end_pos - rs,
                 });
-                if iovecs.len() >= BATCH {
+                if iovecs.len() >= IOV_MAX {
                     writev_all_fd(fd, &mut iovecs)?;
                 }
             }
@@ -329,6 +338,7 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
         }
         if end_pos > 0 {
             iovecs.push(libc::iovec {
+                // Safety: writev only reads through iov_base; *mut cast required by POSIX ABI.
                 iov_base: chunk.as_ptr() as *mut libc::c_void,
                 iov_len: end_pos,
             });
@@ -461,6 +471,8 @@ pub fn tac_regex_separator(
     if data.is_empty() {
         return Ok(());
     }
+    // Prepend (?m) so ^ and $ match at line boundaries, replicating GNU tac's
+    // POSIX regex behavior (re_search uses REG_NEWLINE which implies this).
     let ml_pattern = format!("(?m){}", pattern);
     let re = match regex::bytes::Regex::new(&ml_pattern) {
         Ok(r) => r,
