@@ -9,6 +9,9 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, Read, Write};
 use std::process;
 
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
+
 const TOOL_NAME: &str = "tsort";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -438,23 +441,6 @@ fn find_cycle(start: usize, adj: &[Vec<u32>], removed: &[bool]) -> Vec<usize> {
     }
 }
 
-/// Try to mmap stdin if it's a regular file.
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    use std::os::unix::io::FromRawFd;
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(0, &mut stat) } != 0
-        || (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
-        || stat.st_size <= 0
-    {
-        return None;
-    }
-    let file = unsafe { std::fs::File::from_raw_fd(0) };
-    let mmap = unsafe { memmap2::MmapOptions::new().map(&file) }.ok();
-    std::mem::forget(file);
-    mmap
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -515,7 +501,7 @@ fn main() {
     } else {
         #[cfg(unix)]
         {
-            if let Some(mmap) = try_mmap_stdin() {
+            if let Some(mmap) = try_mmap_stdin(0) {
                 let exit_code = run_bytes(&mmap, "-");
                 process::exit(exit_code);
             }

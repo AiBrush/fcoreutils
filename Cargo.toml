@@ -487,7 +487,9 @@ digest = "0.10"
 base64-simd = "0.8"
 
 # Regex for tac -r and nl -b pBRE
-regex = "1"
+# Disable unicode tables and perf-related features to minimize binary size.
+# GNU tac/nl only use POSIX BRE which doesn't need Unicode or DFA engines.
+regex = { version = "1", default-features = false, features = ["std", "perf-literal"] }
 
 # Fast integer-to-string conversion (for nl line numbers)
 itoa = "1"

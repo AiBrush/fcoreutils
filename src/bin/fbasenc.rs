@@ -3,6 +3,9 @@
 use std::io::{self, Read, Write};
 use std::process;
 
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
+
 use base64_simd::AsOut;
 
 const TOOL_NAME: &str = "basenc";
@@ -1182,27 +1185,6 @@ impl std::ops::Deref for InputData {
     }
 }
 
-/// Try to mmap stdin if it's a regular file (e.g. `fbasenc --base64 < file`).
-/// Returns None if stdin is a pipe or terminal.
-#[cfg(target_os = "linux")]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    use std::os::unix::io::FromRawFd;
-    let file = unsafe { std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(0)) };
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.len() == 0 {
-        return None;
-    }
-    let mmap = unsafe { memmap2::MmapOptions::new().map(&*file).ok()? };
-    unsafe {
-        libc::madvise(
-            mmap.as_ptr() as *mut libc::c_void,
-            mmap.len(),
-            libc::MADV_SEQUENTIAL,
-        );
-    }
-    Some(mmap)
-}
-
 /// Read all data from stdin using large-buffer reads to minimize syscall count.
 #[cfg(target_os = "linux")]
 fn read_stdin_fast() -> io::Result<Vec<u8>> {
@@ -1226,7 +1208,7 @@ fn read_input(filename: &str) -> InputData {
         #[cfg(target_os = "linux")]
         {
             // Try to mmap stdin if it's a regular file (e.g. redirected from file)
-            if let Some(mmap) = try_mmap_stdin() {
+            if let Some(mmap) = try_mmap_stdin(0) {
                 return InputData::Mmap(mmap);
             }
             match read_stdin_fast() {

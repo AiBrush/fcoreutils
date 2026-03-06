@@ -63,17 +63,6 @@ fn compare_lines(a: &[u8], b: &[u8], case_insensitive: bool) -> Ordering {
     }
 }
 
-/// Find the next line from data starting at `pos`, delimited by `delim`.
-/// Returns (line_slice, next_pos). If no delimiter found, returns remaining data.
-#[inline(always)]
-fn next_line(data: &[u8], pos: usize, delim: u8) -> (&[u8], usize) {
-    let remaining = &data[pos..];
-    match memchr::memchr(delim, remaining) {
-        Some(offset) => (&data[pos..pos + offset], pos + offset + 1),
-        std::option::Option::None => (remaining, data.len()),
-    }
-}
-
 /// Write prefix + line + delimiter to buf using unsafe raw pointer writes.
 /// Caller must ensure buf has sufficient capacity.
 #[inline(always)]
@@ -238,10 +227,6 @@ pub fn comm(
     let mut warned1 = false;
     let mut warned2 = false;
 
-    // Streaming merge: track position and previous line for each file
-    let mut pos1 = 0usize;
-    let mut pos2 = 0usize;
-
     // Strip trailing delimiter to avoid empty final line
     let len1 = if !data1.is_empty() && data1.last() == Some(&delim) {
         data1.len() - 1
@@ -254,6 +239,16 @@ pub fn comm(
         data2.len()
     };
 
+    // Use memchr_iter for amortized SIMD line scanning instead of per-line memchr.
+    // Each iterator maintains internal SIMD state across the entire file, eliminating
+    // per-line setup overhead (~150K saved function calls for 10MB files).
+    let mut iter1 = memchr::memchr_iter(delim, &data1[..len1]);
+    let mut iter2 = memchr::memchr_iter(delim, &data2[..len2]);
+    let mut pos1 = 0usize;
+    let mut pos2 = 0usize;
+    let mut end1 = iter1.next().unwrap_or(len1);
+    let mut end2 = iter2.next().unwrap_or(len2);
+
     // Previous line tracking for order checking
     let mut prev1: &[u8] = &[];
     let mut has_prev1 = false;
@@ -262,12 +257,11 @@ pub fn comm(
 
     // Main merge loop: both files have remaining lines
     while pos1 < len1 && pos2 < len2 {
-        let (line1, next1) = next_line(&data1[..len1], pos1, delim);
-        let (line2, next2) = next_line(&data2[..len2], pos2, delim);
+        let line1 = &data1[pos1..end1];
+        let line2 = &data2[pos2..end2];
 
         match compare_lines(line1, line2, ci) {
             Ordering::Less => {
-                // Check file1 order
                 if check_order
                     && !warned1
                     && has_prev1
@@ -295,10 +289,10 @@ pub fn comm(
                 count1 += 1;
                 prev1 = line1;
                 has_prev1 = true;
-                pos1 = next1;
+                pos1 = end1 + 1;
+                end1 = iter1.next().unwrap_or(len1);
             }
             Ordering::Greater => {
-                // Check file2 order
                 if check_order
                     && !warned2
                     && has_prev2
@@ -326,7 +320,8 @@ pub fn comm(
                 count2 += 1;
                 prev2 = line2;
                 has_prev2 = true;
-                pos2 = next2;
+                pos2 = end2 + 1;
+                end2 = iter2.next().unwrap_or(len2);
             }
             Ordering::Equal => {
                 if show3 {
@@ -340,8 +335,10 @@ pub fn comm(
                 has_prev1 = true;
                 prev2 = line2;
                 has_prev2 = true;
-                pos1 = next1;
-                pos2 = next2;
+                pos1 = end1 + 1;
+                end1 = iter1.next().unwrap_or(len1);
+                pos2 = end2 + 1;
+                end2 = iter2.next().unwrap_or(len2);
             }
         }
 
@@ -354,13 +351,11 @@ pub fn comm(
     // Drain remaining from file 1
     // Fast path: if showing col1 and order check is done (or disabled), bulk copy
     if pos1 < len1 && show1 && (!check_order || warned1) && prefix1.is_empty() {
-        // Bulk copy remainder — no per-line processing needed
         let remaining = &data1[pos1..len1];
         let line_count = memchr::memchr_iter(delim, remaining).count();
         let has_trailing = !remaining.is_empty() && remaining.last() != Some(&delim);
         count1 += line_count + if has_trailing { 1 } else { 0 };
 
-        // Flush current buffer, then write remainder directly
         if !buf.is_empty() {
             out.write_all(&buf)?;
             buf.clear();
@@ -372,7 +367,7 @@ pub fn comm(
         pos1 = len1;
     }
     while pos1 < len1 {
-        let (line1, next1) = next_line(&data1[..len1], pos1, delim);
+        let line1 = &data1[pos1..end1];
         if check_order && !warned1 && has_prev1 && compare_lines(line1, prev1, ci) == Ordering::Less
         {
             had_order_error = true;
@@ -397,7 +392,8 @@ pub fn comm(
         count1 += 1;
         prev1 = line1;
         has_prev1 = true;
-        pos1 = next1;
+        pos1 = end1 + 1;
+        end1 = iter1.next().unwrap_or(len1);
         if buf.len() >= flush_threshold {
             out.write_all(&buf)?;
             buf.clear();
@@ -412,7 +408,6 @@ pub fn comm(
         && (config.suppress_col1 || prefix2_owned.is_empty())
     {
         let remaining = &data2[pos2..len2];
-        // Only bulk if no prefix needed (single column output) — otherwise per-line
         if prefix2_owned.is_empty() {
             let line_count = memchr::memchr_iter(delim, remaining).count();
             let has_trailing = !remaining.is_empty() && remaining.last() != Some(&delim);
@@ -429,7 +424,7 @@ pub fn comm(
         }
     }
     while pos2 < len2 {
-        let (line2, next2) = next_line(&data2[..len2], pos2, delim);
+        let line2 = &data2[pos2..end2];
         if check_order && !warned2 && has_prev2 && compare_lines(line2, prev2, ci) == Ordering::Less
         {
             had_order_error = true;
@@ -454,7 +449,8 @@ pub fn comm(
         count2 += 1;
         prev2 = line2;
         has_prev2 = true;
-        pos2 = next2;
+        pos2 = end2 + 1;
+        end2 = iter2.next().unwrap_or(len2);
         if buf.len() >= flush_threshold {
             out.write_all(&buf)?;
             buf.clear();

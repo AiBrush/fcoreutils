@@ -5,6 +5,8 @@ use std::mem::ManuallyDrop;
 use std::os::unix::io::FromRawFd;
 use std::process;
 
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::tr;
 
@@ -214,20 +216,33 @@ fn main() {
             tr::expand_set2(set2_str, set1.len())
         };
 
-        // Streaming translate: 8MB buffer avoids full-file allocation,
-        // full-file allocation + page fault overhead of mmap path.
+        // Try mmap for regular file stdin (redirect): uses translate_mmap which
+        // processes data zero-copy from page cache, avoiding 2MB buffer allocation.
+        // Falls back to streaming translate for pipes/terminals.
+        #[cfg(unix)]
+        let stdin_mmap = try_mmap_stdin(2 * 1024 * 1024);
+
         let result = {
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             {
-                let mut reader = RawStdin;
-                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
-            }
-            #[cfg(all(unix, not(target_os = "linux")))]
-            {
-                let stdin = io::stdin();
-                let mut reader = stdin.lock();
-                tr::translate(&set1, &set2, &mut reader, &mut *raw)
+                if let Some(ref data) = stdin_mmap {
+                    let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                    tr::translate_mmap(&set1, &set2, data, &mut *raw_out)
+                } else {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let mut reader = RawStdin;
+                        let mut raw_out =
+                            unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                        tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let stdin = io::stdin();
+                        let mut reader = stdin.lock();
+                        tr::translate(&set1, &set2, &mut reader, &mut *raw)
+                    }
+                }
             }
             #[cfg(not(unix))]
             {
@@ -247,20 +262,43 @@ fn main() {
         return;
     }
 
-    // Non-translate modes (delete, squeeze, etc.): streaming for all inputs.
-    // 8MB buffer — fewer syscalls than mmap with full-file allocation.
-    #[cfg(target_os = "linux")]
-    let result = {
+    // Non-translate modes (delete, squeeze, etc.).
+    // Try mmap for regular file stdin; fall back to streaming for pipes/terminals.
+    // Parse sets and validate args first (shared between mmap and streaming paths).
+    let parsed = parse_non_translate_args(&cli, set1_str);
+
+    // Try mmap on Unix — any regular file benefits (threshold 0).
+    #[cfg(unix)]
+    let stdin_mmap = try_mmap_stdin(0);
+
+    #[cfg(unix)]
+    let mmap_result = if let Some(ref data) = stdin_mmap {
         let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        run_streaming_mode(&cli, set1_str, &mut *raw_out)
+        Some(run_mmap_mode(&parsed, data, &mut *raw_out))
+    } else {
+        None
     };
-    #[cfg(all(unix, not(target_os = "linux")))]
-    let result = run_streaming_mode(&cli, set1_str, &mut *raw);
     #[cfg(not(unix))]
-    let result = {
-        let stdout = io::stdout();
-        let mut lock = stdout.lock();
-        run_streaming_mode(&cli, set1_str, &mut lock)
+    let mmap_result: Option<io::Result<()>> = None;
+
+    let result = if let Some(r) = mmap_result {
+        r
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+            run_streaming_mode_parsed(&parsed, &mut *raw_out)
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            run_streaming_mode_parsed(&parsed, &mut *raw)
+        }
+        #[cfg(not(unix))]
+        {
+            let stdout = io::stdout();
+            let mut lock = stdout.lock();
+            run_streaming_mode_parsed(&parsed, &mut lock)
+        }
     };
     if let Err(e) = result
         && e.kind() != io::ErrorKind::BrokenPipe
@@ -270,9 +308,27 @@ fn main() {
     }
 }
 
-/// Dispatch streaming modes.
-/// Processes data in 8MB chunks — fewer read() syscalls vs small buffers.
-fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io::Result<()> {
+/// Parsed and validated non-translate mode arguments.
+/// Separates argument parsing/validation from I/O dispatch so both mmap and
+/// streaming paths can share the same parsed sets.
+enum ParsedMode {
+    /// -d -s: delete chars in set1, then squeeze chars in set2
+    DeleteSqueeze {
+        delete_set: Vec<u8>,
+        squeeze_set: Vec<u8>,
+    },
+    /// -d: delete chars in set1
+    Delete { delete_set: Vec<u8> },
+    /// -s (single set): squeeze repeats of chars in set1
+    Squeeze { squeeze_set: Vec<u8> },
+    /// -s with translate: translate set1→set2, then squeeze set2
+    TranslateSqueeze { set1: Vec<u8>, set2: Vec<u8> },
+}
+
+/// Parse and validate arguments for non-translate modes.
+/// Performs all error checking and set expansion, then returns a ParsedMode
+/// that can be dispatched to either mmap or streaming.
+fn parse_non_translate_args(cli: &Cli, set1_str: &str) -> ParsedMode {
     if cli.delete && cli.squeeze {
         if cli.sets.len() < 2 {
             eprintln!("tr: missing operand after '{}'", set1_str);
@@ -288,7 +344,10 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
         } else {
             set1
         };
-        with_stdin_reader!(reader => tr::delete_squeeze(&delete_set, &set2, &mut reader, writer))
+        ParsedMode::DeleteSqueeze {
+            delete_set,
+            squeeze_set: set2,
+        }
     } else if cli.delete {
         if cli.sets.len() > 1 {
             eprintln!("tr: extra operand '{}'", cli.sets[1]);
@@ -302,7 +361,7 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
         } else {
             set1
         };
-        with_stdin_reader!(reader => tr::delete(&delete_set, &mut reader, writer))
+        ParsedMode::Delete { delete_set }
     } else if cli.squeeze && cli.sets.len() < 2 {
         let set1 = tr::parse_set(set1_str);
         let squeeze_set = if cli.complement {
@@ -310,7 +369,7 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
         } else {
             set1
         };
-        with_stdin_reader!(reader => tr::squeeze(&squeeze_set, &mut reader, writer))
+        ParsedMode::Squeeze { squeeze_set }
     } else if cli.squeeze {
         let set2_str = &cli.sets[1];
         let (mut set1, set1_classes) = tr::parse_set_with_classes(set1_str);
@@ -336,12 +395,50 @@ fn run_streaming_mode(cli: &Cli, set1_str: &str, writer: &mut impl Write) -> io:
         } else {
             tr::expand_set2(set2_str, set1.len())
         };
-        with_stdin_reader!(reader => tr::translate_squeeze(&set1, &set2, &mut reader, writer))
+        ParsedMode::TranslateSqueeze { set1, set2 }
     } else {
         eprintln!("tr: missing operand after '{}'", set1_str);
         eprintln!("Two strings must be given when translating.");
         eprintln!("Try 'tr --help' for more information.");
         process::exit(1);
+    }
+}
+
+/// Dispatch mmap-backed non-translate modes.
+/// Called when stdin is a regular file and mmap succeeded.
+fn run_mmap_mode(parsed: &ParsedMode, data: &[u8], writer: &mut impl Write) -> io::Result<()> {
+    match parsed {
+        ParsedMode::DeleteSqueeze {
+            delete_set,
+            squeeze_set,
+        } => tr::delete_squeeze_mmap(delete_set, squeeze_set, data, writer),
+        ParsedMode::Delete { delete_set } => tr::delete_mmap(delete_set, data, writer),
+        ParsedMode::Squeeze { squeeze_set } => tr::squeeze_mmap(squeeze_set, data, writer),
+        ParsedMode::TranslateSqueeze { set1, set2 } => {
+            tr::translate_squeeze_mmap(set1, set2, data, writer)
+        }
+    }
+}
+
+/// Dispatch streaming non-translate modes using pre-parsed sets.
+/// Called when stdin is a pipe/terminal (mmap not available).
+fn run_streaming_mode_parsed(parsed: &ParsedMode, writer: &mut impl Write) -> io::Result<()> {
+    match parsed {
+        ParsedMode::DeleteSqueeze {
+            delete_set,
+            squeeze_set,
+        } => {
+            with_stdin_reader!(reader => tr::delete_squeeze(delete_set, squeeze_set, &mut reader, writer))
+        }
+        ParsedMode::Delete { delete_set } => {
+            with_stdin_reader!(reader => tr::delete(delete_set, &mut reader, writer))
+        }
+        ParsedMode::Squeeze { squeeze_set } => {
+            with_stdin_reader!(reader => tr::squeeze(squeeze_set, &mut reader, writer))
+        }
+        ParsedMode::TranslateSqueeze { set1, set2 } => {
+            with_stdin_reader!(reader => tr::translate_squeeze(set1, set2, &mut reader, writer))
+        }
     }
 }
 

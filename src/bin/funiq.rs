@@ -6,95 +6,258 @@ use std::mem::ManuallyDrop;
 use std::os::unix::io::FromRawFd;
 use std::process;
 
-use clap::Parser;
 use memmap2::MmapOptions;
 
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::uniq::{
     AllRepeatedMethod, GroupMethod, OutputMode, UniqConfig, process_uniq_bytes,
 };
 
-#[derive(Parser)]
-#[command(
-    name = "uniq",
-    about = "Report or omit repeated lines",
-    after_help = "A field is a run of blanks (usually spaces and/or TABs), then non-blank \
-                  characters. Fields are skipped before chars.\n\n\
-                  Note: 'uniq' does not detect repeated lines unless they are adjacent.\n\
-                  You may want to sort the input first, or use 'sort -u' without 'uniq'."
-)]
 struct Cli {
-    /// Prefix lines by the number of occurrences
-    #[arg(short = 'c', long = "count")]
     count: bool,
-
-    /// Only print duplicate lines, one for each group
-    #[arg(short = 'd', long = "repeated")]
     repeated: bool,
-
-    /// Print all duplicate lines
-    #[arg(short = 'D', overrides_with = "all_repeated")]
     all_duplicates: bool,
-
-    /// Print all duplicate lines, delimited with METHOD (none, prepend, separate)
-    #[arg(
-        long = "all-repeated",
-        value_name = "METHOD",
-        num_args = 0..=1,
-        default_missing_value = "none",
-        require_equals = true
-    )]
     all_repeated: Option<String>,
-
-    /// Avoid comparing the first N fields
-    #[arg(
-        short = 'f',
-        long = "skip-fields",
-        value_name = "N",
-        default_value = "0"
-    )]
     skip_fields: usize,
-
-    /// Show all items, delimited by empty line (separate, prepend, append, both)
-    #[arg(
-        long = "group",
-        value_name = "METHOD",
-        num_args = 0..=1,
-        default_missing_value = "separate",
-        require_equals = true
-    )]
     group: Option<String>,
-
-    /// Ignore differences in case when comparing
-    #[arg(short = 'i', long = "ignore-case")]
     ignore_case: bool,
-
-    /// Avoid comparing the first N characters
-    #[arg(
-        short = 's',
-        long = "skip-chars",
-        value_name = "N",
-        default_value = "0"
-    )]
     skip_chars: usize,
-
-    /// Only print unique lines
-    #[arg(short = 'u', long = "unique")]
     unique: bool,
-
-    /// Compare no more than N characters in lines
-    #[arg(short = 'w', long = "check-chars", value_name = "N")]
     check_chars: Option<usize>,
-
-    /// Line delimiter is NUL, not newline
-    #[arg(short = 'z', long = "zero-terminated")]
     zero_terminated: bool,
-
-    /// Input file (default: stdin)
     input: Option<String>,
-
-    /// Output file (default: stdout)
     output: Option<String>,
+}
+
+/// Hand-rolled argument parser — eliminates clap's ~100-200us initialization.
+fn parse_args() -> Cli {
+    let mut cli = Cli {
+        count: false,
+        repeated: false,
+        all_duplicates: false,
+        all_repeated: None,
+        skip_fields: 0,
+        group: None,
+        ignore_case: false,
+        skip_chars: 0,
+        unique: false,
+        check_chars: None,
+        zero_terminated: false,
+        input: None,
+        output: None,
+    };
+
+    let mut positionals: Vec<String> = Vec::new();
+    let mut args = std::env::args_os().skip(1);
+    #[allow(clippy::while_let_on_iterator)]
+    while let Some(arg) = args.next() {
+        let bytes = arg.as_encoded_bytes();
+        if bytes == b"--" {
+            // Everything after -- is positional
+            for a in args {
+                positionals.push(a.to_string_lossy().into_owned());
+            }
+            break;
+        }
+        if bytes.starts_with(b"--") {
+            // Long options
+            // --all-repeated, --all-repeated=METHOD
+            if bytes == b"--all-repeated" {
+                // GNU uniq: --all-repeated without = defaults to "none"; overrides -D
+                cli.all_repeated = Some("none".to_string());
+                cli.all_duplicates = true;
+            } else if bytes.starts_with(b"--all-repeated=") {
+                let val = std::str::from_utf8(&bytes[15..]).unwrap_or("").to_string();
+                cli.all_repeated = Some(val);
+                cli.all_duplicates = true;
+            // --group, --group=METHOD
+            } else if bytes == b"--group" {
+                // GNU uniq: --group without = defaults to "separate"
+                cli.group = Some("separate".to_string());
+            } else if bytes.starts_with(b"--group=") {
+                let val = std::str::from_utf8(&bytes[8..]).unwrap_or("").to_string();
+                cli.group = Some(val);
+            // --skip-fields, --skip-fields=N
+            } else if bytes.starts_with(b"--skip-fields=") {
+                let val = std::str::from_utf8(&bytes[14..]).unwrap_or("");
+                cli.skip_fields = parse_usize_arg("--skip-fields", val);
+            } else if bytes == b"--skip-fields" {
+                if let Some(v) = args.next() {
+                    let s = v.to_string_lossy();
+                    cli.skip_fields = parse_usize_arg("--skip-fields", &s);
+                } else {
+                    eprintln!("uniq: option '--skip-fields' requires an argument");
+                    eprintln!("Try 'uniq --help' for more information.");
+                    process::exit(1);
+                }
+            // --skip-chars, --skip-chars=N
+            } else if bytes.starts_with(b"--skip-chars=") {
+                let val = std::str::from_utf8(&bytes[13..]).unwrap_or("");
+                cli.skip_chars = parse_usize_arg("--skip-chars", val);
+            } else if bytes == b"--skip-chars" {
+                if let Some(v) = args.next() {
+                    let s = v.to_string_lossy();
+                    cli.skip_chars = parse_usize_arg("--skip-chars", &s);
+                } else {
+                    eprintln!("uniq: option '--skip-chars' requires an argument");
+                    eprintln!("Try 'uniq --help' for more information.");
+                    process::exit(1);
+                }
+            // --check-chars, --check-chars=N
+            } else if bytes.starts_with(b"--check-chars=") {
+                let val = std::str::from_utf8(&bytes[14..]).unwrap_or("");
+                cli.check_chars = Some(parse_usize_arg("--check-chars", val));
+            } else if bytes == b"--check-chars" {
+                if let Some(v) = args.next() {
+                    let s = v.to_string_lossy();
+                    cli.check_chars = Some(parse_usize_arg("--check-chars", &s));
+                } else {
+                    eprintln!("uniq: option '--check-chars' requires an argument");
+                    eprintln!("Try 'uniq --help' for more information.");
+                    process::exit(1);
+                }
+            } else {
+                match bytes {
+                    b"--count" => cli.count = true,
+                    b"--repeated" => cli.repeated = true,
+                    b"--ignore-case" => cli.ignore_case = true,
+                    b"--unique" => cli.unique = true,
+                    b"--zero-terminated" => cli.zero_terminated = true,
+                    b"--help" => {
+                        print!(
+                            "Usage: uniq [OPTION]... [INPUT [OUTPUT]]\n\
+                            Filter adjacent matching lines from INPUT (or standard input),\n\
+                            writing to OUTPUT (or standard output).\n\n\
+                            With no options, matching lines are merged to the first occurrence.\n\n\
+                            Mandatory arguments to long options are mandatory for short options too.\n\
+                            \x20 -c, --count           prefix lines by the number of occurrences\n\
+                            \x20 -d, --repeated        only print duplicate lines, one for each group\n\
+                            \x20 -D                    print all duplicate lines\n\
+                            \x20     --all-repeated[=METHOD]  like -D, but allow separating groups\n\
+                            \x20                                with an empty line;\n\
+                            \x20                                METHOD={{none(default),prepend,separate}}\n\
+                            \x20 -f, --skip-fields=N   avoid comparing the first N fields\n\
+                            \x20     --group[=METHOD]   show all items, outputting an empty line before\n\
+                            \x20                                each group;\n\
+                            \x20                                METHOD={{separate(default),prepend,append,both}}\n\
+                            \x20 -i, --ignore-case     ignore differences in case when comparing\n\
+                            \x20 -s, --skip-chars=N    avoid comparing the first N characters\n\
+                            \x20 -u, --unique          only print unique lines\n\
+                            \x20 -w, --check-chars=N   compare no more than N characters in lines\n\
+                            \x20 -z, --zero-terminated  line delimiter is NUL, not newline\n\
+                            \x20     --help             display this help and exit\n\
+                            \x20     --version          output version information and exit\n\n\
+                            A field is a run of blanks (usually spaces and/or TABs), then non-blank \
+                            characters. Fields are skipped before chars.\n\n\
+                            Note: 'uniq' does not detect repeated lines unless they are adjacent.\n\
+                            You may want to sort the input first, or use 'sort -u' without 'uniq'.\n"
+                        );
+                        process::exit(0);
+                    }
+                    b"--version" => {
+                        println!("uniq (fcoreutils) {}", env!("CARGO_PKG_VERSION"));
+                        process::exit(0);
+                    }
+                    _ => {
+                        eprintln!("uniq: unrecognized option '{}'", arg.to_string_lossy());
+                        eprintln!("Try 'uniq --help' for more information.");
+                        process::exit(1);
+                    }
+                }
+            }
+        } else if bytes.len() > 1 && bytes[0] == b'-' {
+            // Short options: can be combined (-ci means -c -i)
+            let mut i = 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'c' => cli.count = true,
+                    b'd' => cli.repeated = true,
+                    b'D' => {
+                        // -D is equivalent to --all-repeated=none; last-one-wins
+                        cli.all_duplicates = true;
+                        cli.all_repeated = Some("none".to_string());
+                    }
+                    b'i' => cli.ignore_case = true,
+                    b'u' => cli.unique = true,
+                    b'z' => cli.zero_terminated = true,
+                    b'f' | b's' | b'w' => {
+                        // These take a numeric value: rest of arg or next arg
+                        let flag = bytes[i];
+                        let val_str = if i + 1 < bytes.len() {
+                            // Value attached: -f1, -s2, -w3
+                            std::str::from_utf8(&bytes[i + 1..])
+                                .unwrap_or("")
+                                .to_string()
+                        } else if let Some(v) = args.next() {
+                            v.to_string_lossy().into_owned()
+                        } else {
+                            eprintln!("uniq: option requires an argument -- '{}'", flag as char);
+                            eprintln!("Try 'uniq --help' for more information.");
+                            process::exit(1);
+                        };
+                        let flag_name = match flag {
+                            b'f' => "-f",
+                            b's' => "-s",
+                            b'w' => "-w",
+                            _ => unreachable!(),
+                        };
+                        let val = parse_usize_arg(flag_name, &val_str);
+                        match flag {
+                            b'f' => cli.skip_fields = val,
+                            b's' => cli.skip_chars = val,
+                            b'w' => cli.check_chars = Some(val),
+                            _ => unreachable!(),
+                        }
+                        // Rest of bytes consumed as value
+                        i = bytes.len();
+                        continue;
+                    }
+                    _ => {
+                        eprintln!("uniq: invalid option -- '{}'", bytes[i] as char);
+                        eprintln!("Try 'uniq --help' for more information.");
+                        process::exit(1);
+                    }
+                }
+                i += 1;
+            }
+        } else {
+            positionals.push(arg.to_string_lossy().into_owned());
+        }
+    }
+
+    // Assign positional arguments: [INPUT [OUTPUT]]
+    if positionals.len() > 2 {
+        eprintln!("uniq: extra operand '{}'", positionals[2]);
+        eprintln!("Try 'uniq --help' for more information.");
+        process::exit(1);
+    }
+    if !positionals.is_empty() {
+        cli.input = Some(positionals[0].clone());
+    }
+    if positionals.len() > 1 {
+        cli.output = Some(positionals[1].clone());
+    }
+
+    cli
+}
+
+/// Parse a numeric argument, exiting with an error message on failure.
+fn parse_usize_arg(flag: &str, val: &str) -> usize {
+    match val.parse::<usize>() {
+        Ok(n) => n,
+        Err(_) => {
+            let (kind, verb) = match flag {
+                "-f" | "--skip-fields" => ("fields", "to skip"),
+                "-s" | "--skip-chars" => ("characters", "to skip"),
+                "-w" | "--check-chars" => ("characters", "to compare"),
+                _ => ("bytes", "to skip"),
+            };
+            eprintln!("uniq: invalid number of {} {}: '{}'", kind, verb, val);
+            process::exit(1);
+        }
+    }
 }
 
 fn main() {
@@ -102,7 +265,7 @@ fn main() {
 
     enlarge_stdout_pipe();
 
-    let cli = Cli::parse();
+    let cli = parse_args();
 
     // Determine output mode
     let mode = if let Some(ref method_str) = cli.group {
@@ -209,50 +372,6 @@ fn main() {
     }
 }
 
-/// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
-/// Returns None if stdin is a pipe/terminal.
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-    let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return None;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
-        return None;
-    }
-
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
-    std::mem::forget(file); // Don't close stdin
-    #[cfg(target_os = "linux")]
-    if let Some(ref m) = mmap {
-        unsafe {
-            libc::madvise(
-                m.as_ptr() as *mut libc::c_void,
-                m.len(),
-                libc::MADV_SEQUENTIAL,
-            );
-            libc::madvise(
-                m.as_ptr() as *mut libc::c_void,
-                m.len(),
-                libc::MADV_WILLNEED,
-            );
-            if m.len() >= 2 * 1024 * 1024 {
-                libc::madvise(
-                    m.as_ptr() as *mut libc::c_void,
-                    m.len(),
-                    libc::MADV_HUGEPAGE,
-                );
-            }
-        }
-    }
-    mmap
-}
-
 fn run_uniq(cli: &Cli, config: &UniqConfig, output: impl Write) {
     let result = match cli.input.as_deref() {
         Some("-") | None => {
@@ -263,7 +382,7 @@ fn run_uniq(cli: &Cli, config: &UniqConfig, output: impl Write) {
             // path uses memchr SIMD scanning, zero-copy output, and parallel dedup.
             #[cfg(unix)]
             {
-                match try_mmap_stdin() {
+                match try_mmap_stdin(0) {
                     Some(mmap) => process_uniq_bytes(&mmap, output, config),
                     None => {
                         // Use raw libc::read() via read_stdin() for piped stdin.

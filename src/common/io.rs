@@ -466,3 +466,57 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
     }
     Ok(total)
 }
+
+/// Try to mmap stdin when it's a regular file (shell redirect `< file`).
+/// Returns None if stdin is a pipe/terminal or file is too small.
+/// Only mmaps files >= `min_size` bytes to avoid mmap setup/teardown overhead.
+#[cfg(unix)]
+pub fn try_mmap_stdin(min_size: u64) -> Option<Mmap> {
+    try_mmap_stdin_with_hints(min_size, true)
+}
+
+/// Try to mmap stdin if it's a regular file above `min_size`.
+/// When `sequential` is true, applies MADV_SEQUENTIAL (forward read).
+/// When false, skips MADV_SEQUENTIAL (for tools like tac that read backward).
+/// MADV_HUGEPAGE is always applied for large mappings.
+#[cfg(unix)]
+pub fn try_mmap_stdin_with_hints(min_size: u64, sequential: bool) -> Option<Mmap> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let stdin = std::io::stdin();
+    let fd = stdin.as_raw_fd();
+
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return None;
+    }
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
+        return None;
+    }
+    if (stat.st_size as u64) < min_size {
+        return None;
+    }
+
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
+    std::mem::forget(file); // Don't close stdin
+    #[cfg(target_os = "linux")]
+    if let Some(ref m) = mmap {
+        unsafe {
+            if sequential {
+                libc::madvise(
+                    m.as_ptr() as *mut libc::c_void,
+                    m.len(),
+                    libc::MADV_SEQUENTIAL,
+                );
+            }
+            if m.len() >= 2 * 1024 * 1024 {
+                libc::madvise(
+                    m.as_ptr() as *mut libc::c_void,
+                    m.len(),
+                    libc::MADV_HUGEPAGE,
+                );
+            }
+        }
+    }
+    mmap
+}

@@ -356,10 +356,9 @@ fn multi_select_chunk(
     buf: &mut Vec<u8>,
 ) {
     // Two-level scan for small max_field: outer memchr(newline) + inner
-    // memchr(delim) with early exit at max_field. This is faster than the
-    // single-pass memchr2 approach when lines have many fields past max_field,
-    // because we skip scanning delimiters we don't need (e.g., for -f1,3,5
-    // on a 10-field CSV, we stop after delimiter 5 instead of scanning all 9).
+    // memchr(delim) with early exit at max_field. Faster than single-pass memchr2
+    // when lines have many fields past max_field (e.g., for -f1,3,5 on 8-field CSV,
+    // stops after delimiter 5 instead of scanning all 7).
     if max_field <= 64 && delim != line_delim {
         let mut mask: u64 = 0;
         for r in ranges {

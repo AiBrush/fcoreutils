@@ -6,11 +6,10 @@ use rayon::prelude::*;
 /// Linux UIO_MAXIOV is 1024; we use that as our batch limit.
 const MAX_IOV: usize = 1024;
 
-/// Stream buffer: 128KB — small enough to stay warm in L2 cache and TLB
-/// (32 pages vs 2048 for 8MB), eliminating ~2000 page faults on first touch.
-/// For piped 10MB input: ~80 read+write iterations at ~2µs/syscall = 0.16ms
-/// extra vs saving ~8ms of page fault overhead. Net win: ~7.8ms.
-const STREAM_BUF: usize = 128 * 1024;
+/// Stream buffer: 512KB — balances SIMD LUT amortization with pipeline latency.
+/// Large enough to cover SIMD setup overhead across many iterations, small enough
+/// that downstream pipeline stages aren't starved for long.
+const STREAM_BUF: usize = 512 * 1024;
 
 /// Minimum data size to engage rayon parallel processing for mmap/batch paths.
 /// For 10MB benchmark files, parallel tr translate was a 105% REGRESSION
@@ -2393,7 +2392,7 @@ fn delete_range_streaming(
 ) -> io::Result<()> {
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     loop {
-        let n = read_once(reader, &mut buf)?;
+        let n = read_full(reader, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -2592,12 +2591,11 @@ pub fn translate(
     }
 
     // General case: IN-PLACE translation on a SINGLE buffer.
-    // Process each read chunk immediately for pipelining: while ftr translates
-    // and writes chunk N, cat writes chunk N+1 to the pipe.
-    // SAFETY: all bytes are written by read_once before being translated.
+    // Fill the buffer fully before processing — SIMD translate is trivial
+    // compared to syscall overhead, so fewer larger write_all() calls win.
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     loop {
-        let n = read_once(reader, &mut buf)?;
+        let n = read_full(reader, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -2626,8 +2624,8 @@ fn translate_and_write_table(
 }
 
 /// Streaming SIMD range translation — single buffer, in-place transform.
-/// Processes each read chunk immediately for pipelining: while ftr translates
-/// and writes chunk N, upstream cat writes chunk N+1 to the pipe.
+/// Fills buffer fully before processing — SIMD translate is trivial compared
+/// to syscall overhead, so fewer larger write_all() calls win.
 /// For chunks >= PARALLEL_THRESHOLD, uses rayon par_chunks_mut for multi-core.
 fn translate_range_stream(
     lo: u8,
@@ -2638,7 +2636,7 @@ fn translate_range_stream(
 ) -> io::Result<()> {
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     loop {
-        let n = read_once(reader, &mut buf)?;
+        let n = read_full(reader, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -2669,7 +2667,7 @@ fn translate_and_write_range(
 }
 
 /// Streaming SIMD range-to-constant translation — single buffer, in-place transform.
-/// Processes each read chunk immediately for pipelining with upstream cat.
+/// Fills buffer fully before processing — fewer syscalls with larger write_all() calls.
 /// Uses blendv instead of nibble decomposition for ~10x fewer SIMD ops per vector.
 fn translate_range_to_constant_stream(
     lo: u8,
@@ -2680,7 +2678,7 @@ fn translate_range_to_constant_stream(
 ) -> io::Result<()> {
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     loop {
-        let n = read_once(reader, &mut buf)?;
+        let n = read_full(reader, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -2715,7 +2713,7 @@ fn translate_and_write_range_const(
 fn passthrough_stream(reader: &mut impl Read, writer: &mut impl Write) -> io::Result<()> {
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     loop {
-        let n = read_once(reader, &mut buf)?;
+        let n = read_full(reader, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -2738,6 +2736,24 @@ fn read_once(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Fill the buffer completely before processing. Unlike read_once which returns
+/// after a single read() for pipelining, this loops until the buffer is full or
+/// EOF is reached. Used by translate paths where the SIMD translation cost is
+/// trivial compared to syscall overhead — fewer, larger write_all() calls win.
+#[inline]
+fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        match reader.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
 }
 
 pub fn translate_squeeze(
@@ -3005,7 +3021,7 @@ pub fn delete(
     let mut outbuf = alloc_uninit_vec(STREAM_BUF);
 
     loop {
-        let n = read_once(reader, &mut buf)?;
+        let n = read_full(reader, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -3200,7 +3216,7 @@ fn delete_single_streaming(
 ) -> io::Result<()> {
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     loop {
-        let n = read_once(reader, &mut buf)?;
+        let n = read_full(reader, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -3254,7 +3270,7 @@ fn delete_multi_streaming(
 ) -> io::Result<()> {
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     loop {
-        let n = read_once(reader, &mut buf)?;
+        let n = read_full(reader, &mut buf)?;
         if n == 0 {
             break;
         }

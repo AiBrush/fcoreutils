@@ -6,51 +6,149 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-use clap::Parser;
 use memchr::memchr_iter;
 use rayon::prelude::*;
 
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
 use coreutils_rs::common::io::{FileData, file_size, read_file, read_stdin};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::wc;
 use memmap2::MmapOptions;
 
-#[derive(Parser)]
-#[command(
-    name = "wc",
-    about = "Print newline, word, and byte counts for each FILE"
-)]
 struct Cli {
-    /// Print the byte counts
-    #[arg(short = 'c', long = "bytes")]
     bytes: bool,
-
-    /// Print the character counts
-    #[arg(short = 'm', long = "chars")]
     chars: bool,
-
-    /// Print the newline counts
-    #[arg(short = 'l', long = "lines")]
     lines: bool,
-
-    /// Print the maximum display width
-    #[arg(short = 'L', long = "max-line-length")]
     max_line_length: bool,
-
-    /// Print the word counts
-    #[arg(short = 'w', long = "words")]
     words: bool,
-
-    /// Read input from the files specified by NUL-terminated names in file F
-    #[arg(long = "files0-from", value_name = "F")]
     files0_from: Option<String>,
-
-    /// When to print a line with total counts; WHEN can be: auto, always, never, only
-    #[arg(long = "total", value_name = "WHEN", default_value = "auto")]
     total: String,
-
-    /// Files to process (reads stdin if none given)
     files: Vec<String>,
+}
+
+/// Hand-rolled argument parser — eliminates clap's ~100-200µs initialization.
+fn parse_args() -> Cli {
+    let mut cli = Cli {
+        bytes: false,
+        chars: false,
+        lines: false,
+        max_line_length: false,
+        words: false,
+        files0_from: None,
+        total: "auto".to_string(),
+        files: Vec::new(),
+    };
+
+    let mut args = std::env::args_os().skip(1);
+    #[allow(clippy::while_let_on_iterator)]
+    while let Some(arg) = args.next() {
+        let bytes = arg.as_encoded_bytes();
+        if bytes == b"--" {
+            for a in args {
+                cli.files.push(a.to_string_lossy().into_owned());
+            }
+            break;
+        }
+        if bytes.starts_with(b"--") {
+            // --files0-from=F or --files0-from F
+            if bytes.starts_with(b"--files0-from=") {
+                let val = arg.to_string_lossy();
+                cli.files0_from = Some(val["--files0-from=".len()..].to_string());
+                continue;
+            }
+            // --total=WHEN or --total WHEN
+            if bytes.starts_with(b"--total=") {
+                let val = arg.to_string_lossy();
+                cli.total = val["--total=".len()..].to_string();
+                continue;
+            }
+            match bytes {
+                b"--bytes" => cli.bytes = true,
+                b"--chars" => cli.chars = true,
+                b"--lines" => cli.lines = true,
+                b"--max-line-length" => cli.max_line_length = true,
+                b"--words" => cli.words = true,
+                b"--files0-from" => {
+                    cli.files0_from = Some(
+                        args.next()
+                            .unwrap_or_else(|| {
+                                eprintln!("wc: option '--files0-from' requires an argument");
+                                process::exit(1);
+                            })
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+                b"--total" => {
+                    cli.total = args
+                        .next()
+                        .unwrap_or_else(|| {
+                            eprintln!("wc: option '--total' requires an argument");
+                            process::exit(1);
+                        })
+                        .to_string_lossy()
+                        .into_owned();
+                }
+                b"--help" => {
+                    print!(
+                        "Usage: wc [OPTION]... [FILE]...\n\
+                         \x20 or:  wc [OPTION]... --files0-from=F\n\
+                         Print newline, word, and byte counts for each FILE, and a total line if\n\
+                         more than one FILE is specified.  A word is a non-zero-length sequence of\n\
+                         printable characters delimited by white space.\n\n\
+                         With no FILE, or when FILE is -, read standard input.\n\n\
+                         The options below may be used to select which counts are printed, always in\n\
+                         the following order: newline, word, character, byte, maximum line length.\n\
+                         \x20 -c, --bytes            print the byte counts\n\
+                         \x20 -m, --chars            print the character counts\n\
+                         \x20 -l, --lines            print the newline counts\n\
+                         \x20 -L, --max-line-length  print the maximum display width\n\
+                         \x20 -w, --words            print the word counts\n\
+                         \x20     --files0-from=F    read input from the files specified by\n\
+                         \x20                          NUL-terminated names in file F;\n\
+                         \x20                          If F is - then read names from standard input\n\
+                         \x20     --total=WHEN       when to print a line with total counts;\n\
+                         \x20                          WHEN can be: auto, always, only, never\n\
+                         \x20     --help             display this help and exit\n\
+                         \x20     --version          output version information and exit\n"
+                    );
+                    process::exit(0);
+                }
+                b"--version" => {
+                    println!("wc (fcoreutils) {}", env!("CARGO_PKG_VERSION"));
+                    process::exit(0);
+                }
+                _ => {
+                    eprintln!("wc: unrecognized option '{}'", arg.to_string_lossy());
+                    eprintln!("Try 'wc --help' for more information.");
+                    process::exit(1);
+                }
+            }
+        } else if bytes.len() > 1 && bytes[0] == b'-' {
+            // Short options: -l, -w, -c, -m, -L, and combined like -lw, -lwc
+            let mut i = 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'c' => cli.bytes = true,
+                    b'm' => cli.chars = true,
+                    b'l' => cli.lines = true,
+                    b'L' => cli.max_line_length = true,
+                    b'w' => cli.words = true,
+                    _ => {
+                        eprintln!("wc: invalid option -- '{}'", bytes[i] as char);
+                        eprintln!("Try 'wc --help' for more information.");
+                        process::exit(1);
+                    }
+                }
+                i += 1;
+            }
+        } else {
+            cli.files.push(arg.to_string_lossy().into_owned());
+        }
+    }
+
+    cli
 }
 
 /// Which fields to display.
@@ -176,41 +274,9 @@ fn num_width(n: u64) -> usize {
     width
 }
 
-/// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
-/// Returns None if stdin is a pipe/terminal.
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-    let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return None;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
-        return None;
-    }
-
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
-    std::mem::forget(file); // Don't close stdin
-    #[cfg(target_os = "linux")]
-    if let Some(ref m) = mmap {
-        unsafe {
-            libc::madvise(
-                m.as_ptr() as *mut libc::c_void,
-                m.len(),
-                libc::MADV_SEQUENTIAL,
-            );
-        }
-    }
-    mmap
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
-    let cli = Cli::parse();
+    let cli = parse_args();
 
     // Detect locale once at startup
     let utf8_locale = wc::is_utf8_locale();
@@ -317,7 +383,7 @@ fn main() {
         let data: FileData = if filename == "-" {
             #[cfg(unix)]
             {
-                match try_mmap_stdin() {
+                match try_mmap_stdin(0) {
                     Some(mmap) => FileData::Mmap(mmap),
                     None => match read_stdin() {
                         Ok(d) => FileData::Owned(d),

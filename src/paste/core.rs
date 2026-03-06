@@ -463,6 +463,42 @@ pub fn paste_serial_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io
     let delims = &config.delimiters;
     let has_delims = !delims.is_empty();
 
+    // Fast path: single delimiter — bulk copy + scatter replace.
+    // Instead of copying line-by-line with extend_from_slice, copy the entire
+    // file at once and replace newlines with the delimiter in-place. This is
+    // ~5x faster for 10MB files: one memcpy + scattered byte writes vs
+    // ~150K extend_from_slice calls.
+    if has_delims && delims.len() == 1 {
+        let delim = delims[0];
+        for data in file_data {
+            if data.is_empty() {
+                raw_write_all(&[terminator])?;
+                continue;
+            }
+            // Strip trailing terminator if present (we'll add our own at the end)
+            let effective = if !data.is_empty() && *data.last().unwrap() == terminator {
+                &data[..data.len() - 1]
+            } else {
+                *data
+            };
+            if effective.is_empty() {
+                raw_write_all(&[terminator])?;
+                continue;
+            }
+            // Bulk copy the file content into a mutable buffer
+            let mut buf = Vec::with_capacity(effective.len() + 1);
+            buf.extend_from_slice(effective);
+            // Replace all terminators with the delimiter (SIMD memchr scan + scatter write)
+            let positions: Vec<usize> = memchr::memchr_iter(terminator, &buf).collect();
+            for pos in positions {
+                buf[pos] = delim;
+            }
+            buf.push(terminator);
+            raw_write_all(&buf)?;
+        }
+        return Ok(());
+    }
+
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE + 4096);
 
     for data in file_data {
@@ -477,20 +513,44 @@ pub fn paste_serial_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io
 
         let mut cursor = 0usize;
         let mut line_idx = 0usize;
+        let mut iter = memchr::memchr_iter(terminator, data);
 
-        while cursor < data.len() {
+        loop {
             // Delimiter before lines 1..N
             if line_idx > 0 && has_delims {
                 buf.push(delims[(line_idx - 1) % delims.len()]);
             }
 
-            let remaining = &data[cursor..];
-            if let Some(nl_pos) = memchr::memchr(terminator, remaining) {
-                buf.extend_from_slice(&remaining[..nl_pos]);
-                cursor += nl_pos + 1;
-            } else {
-                buf.extend_from_slice(remaining);
-                cursor = data.len();
+            match iter.next() {
+                Some(nl_pos) => {
+                    let line = &data[cursor..nl_pos];
+                    if !line.is_empty() {
+                        if buf.len() + line.len() > buf.capacity() {
+                            raw_write_all(&buf)?;
+                            buf.clear();
+                            if line.len() > buf.capacity() {
+                                buf.reserve(line.len() + 4096);
+                            }
+                        }
+                        buf.extend_from_slice(line);
+                    }
+                    cursor = nl_pos + 1;
+                }
+                None => {
+                    // No more terminators — check for trailing data
+                    if cursor < data.len() {
+                        let remaining = &data[cursor..];
+                        if buf.len() + remaining.len() > buf.capacity() {
+                            raw_write_all(&buf)?;
+                            buf.clear();
+                            if remaining.len() > buf.capacity() {
+                                buf.reserve(remaining.len() + 4096);
+                            }
+                        }
+                        buf.extend_from_slice(remaining);
+                    }
+                    break;
+                }
             }
 
             line_idx += 1;
@@ -631,15 +691,43 @@ pub fn paste_parallel_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u
 
 /// Paste files in serial mode and return the output buffer.
 /// For each file, join all lines with the delimiter list (cycling).
-/// Pre-splits lines using SIMD memchr, then iterates offset pairs.
 pub fn paste_serial_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8> {
     let terminator = if config.zero_terminated { 0u8 } else { b'\n' };
     let delims = &config.delimiters;
     let has_delims = !delims.is_empty();
 
-    // Estimate output size
     let total_input: usize = file_data.iter().map(|d| d.len()).sum();
     let mut output = Vec::with_capacity(total_input + file_data.len());
+
+    // Fast path: single delimiter — bulk copy + scatter replace.
+    // Instead of line-by-line presplit + extend_from_slice (~150K calls for 10MB),
+    // copy the entire file at once and replace terminators with the delimiter.
+    if has_delims && delims.len() == 1 {
+        let delim = delims[0];
+        for data in file_data {
+            if data.is_empty() {
+                output.push(terminator);
+                continue;
+            }
+            let effective = if !data.is_empty() && *data.last().unwrap() == terminator {
+                &data[..data.len() - 1]
+            } else {
+                *data
+            };
+            if effective.is_empty() {
+                output.push(terminator);
+                continue;
+            }
+            let start = output.len();
+            output.extend_from_slice(effective);
+            let positions: Vec<usize> = memchr::memchr_iter(terminator, &output[start..]).collect();
+            for pos in positions {
+                output[start + pos] = delim;
+            }
+            output.push(terminator);
+        }
+        return output;
+    }
 
     for data in file_data {
         if data.is_empty() {
@@ -651,10 +739,8 @@ pub fn paste_serial_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8>
             output.push(terminator);
             continue;
         }
-        // First line: no leading delimiter
         let (s, e) = lines[0];
         output.extend_from_slice(&data[s as usize..e as usize]);
-        // Subsequent lines: prepend cycling delimiter
         for (i, &(s, e)) in lines[1..].iter().enumerate() {
             if has_delims {
                 output.push(delims[i % delims.len()]);

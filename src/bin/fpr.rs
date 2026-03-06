@@ -57,6 +57,19 @@ impl Write for RawStdout {
         Ok(())
     }
 
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        if bufs.is_empty() {
+            return Ok(0);
+        }
+        let cnt = bufs.len().min(1024) as i32;
+        let ret = unsafe { libc::writev(1, bufs.as_ptr() as *const libc::iovec, cnt) };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }

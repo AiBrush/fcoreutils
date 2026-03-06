@@ -7,9 +7,8 @@ use std::path::Path;
 use std::process;
 
 #[cfg(unix)]
-use memmap2::MmapOptions;
-
-use coreutils_rs::common::io::{FileData, read_file_mmap, read_stdin};
+use coreutils_rs::common::io::try_mmap_stdin_with_hints;
+use coreutils_rs::common::io::{FileData, read_file, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::tac;
 
@@ -124,46 +123,6 @@ fn parse_args() -> Cli {
     cli
 }
 
-/// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
-/// Returns None if stdin is a pipe/terminal.
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-    let stdin = io::stdin();
-    let fd = stdin.as_raw_fd();
-
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return None;
-    }
-    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
-        return None;
-    }
-
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
-    std::mem::forget(file); // Don't close stdin
-    #[cfg(target_os = "linux")]
-    if let Some(ref m) = mmap {
-        unsafe {
-            let ptr = m.as_ptr() as *mut libc::c_void;
-            let len = m.len();
-            if len >= 2 * 1024 * 1024 {
-                libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
-            }
-            // Don't use SEQUENTIAL since tac accesses data in reverse order.
-            if len >= 4 * 1024 * 1024 {
-                if libc::madvise(ptr, len, 22 /* MADV_POPULATE_READ */) != 0 {
-                    libc::madvise(ptr, len, libc::MADV_WILLNEED);
-                }
-            } else {
-                libc::madvise(ptr, len, libc::MADV_WILLNEED);
-            }
-        }
-    }
-    mmap
-}
-
 fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
     let mut had_error = false;
 
@@ -171,7 +130,7 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
         let data: FileData = if filename == "-" {
             #[cfg(unix)]
             {
-                match try_mmap_stdin() {
+                match try_mmap_stdin_with_hints(2 * 1024 * 1024, false) {
                     Some(mmap) => FileData::Mmap(mmap),
                     None => {
                         #[cfg(target_os = "linux")]
@@ -210,7 +169,10 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
                 }
             }
         } else {
-            match read_file_mmap(Path::new(filename)) {
+            // Use read_file which auto-selects read() for <1MB and mmap for larger.
+            // read() avoids mmap setup/teardown overhead (page table creation, TLB flush)
+            // that dominates for small files. For large files, mmap enables zero-copy writev.
+            match read_file(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("tac: {}: {}", filename, io_error_msg(&e));

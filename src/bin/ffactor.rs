@@ -6,6 +6,8 @@
 use std::io::{self, BufWriter, Write};
 use std::process;
 
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
 use coreutils_rs::factor;
 
 const TOOL_NAME: &str = "factor";
@@ -210,23 +212,6 @@ fn big_to_u128(digits: &[u8]) -> Option<u128> {
         n = n.checked_mul(10)?.checked_add(d as u128)?;
     }
     Some(n)
-}
-
-/// Try to mmap stdin if it's a regular file (zero-copy, zero-allocation).
-#[cfg(unix)]
-fn try_mmap_stdin() -> Option<memmap2::Mmap> {
-    use std::os::unix::io::FromRawFd;
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(0, &mut stat) } != 0
-        || (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
-        || stat.st_size <= 0
-    {
-        return None;
-    }
-    let file = unsafe { std::fs::File::from_raw_fd(0) };
-    let mmap = unsafe { memmap2::MmapOptions::new().map(&file) }.ok();
-    std::mem::forget(file); // don't close stdin fd
-    mmap
 }
 
 /// Parse and factor a single whitespace-delimited token.
@@ -461,7 +446,7 @@ fn process_stdin(exponents: bool, out: &mut BufWriter<io::StdoutLock>) -> bool {
     // Try mmap for file redirections (zero-copy, zero-allocation input)
     #[cfg(unix)]
     {
-        if let Some(mmap) = try_mmap_stdin() {
+        if let Some(mmap) = try_mmap_stdin(0) {
             return process_bytes(&mmap, exponents, out);
         }
     }
