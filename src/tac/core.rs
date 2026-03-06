@@ -166,9 +166,12 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
 }
 
 /// Write iovec batch to fd via writev, then clear the vec for reuse.
+/// IOV_MAX is 1024 on Linux and macOS; POSIX minimum is 16 but all modern
+/// Unix systems support at least 1024.
 #[cfg(unix)]
 #[inline]
 fn writev_all_fd(fd: i32, iovecs: &mut Vec<libc::iovec>) -> io::Result<()> {
+    const IOV_MAX: usize = 1024;
     if iovecs.is_empty() {
         return Ok(());
     }
@@ -176,15 +179,17 @@ fn writev_all_fd(fd: i32, iovecs: &mut Vec<libc::iovec>) -> io::Result<()> {
     let mut partial_off: usize = 0;
     while idx < iovecs.len() {
         if partial_off > 0 {
-            // Safety: partial_off < iovecs[idx].iov_len (set only when n < iov_len
-            // in the accounting loop above), so the advance stays within the
-            // original slice. The pointer derives from a live mmap/slice region.
+            // Safety: `partial_off` is set only in the `else` branch below
+            // (line `partial_off = n;`) which executes only when `n < iov_len`,
+            // so `partial_off < iovecs[idx].iov_len`. The pointer advance and
+            // length subtraction stay within the original slice. The pointer
+            // derives from a live mmap/slice region that outlives this call.
             iovecs[idx].iov_base =
                 unsafe { (iovecs[idx].iov_base as *const u8).add(partial_off) } as *mut _;
             iovecs[idx].iov_len -= partial_off;
             partial_off = 0;
         }
-        let cnt = (iovecs.len() - idx).min(1024) as i32;
+        let cnt = (iovecs.len() - idx).min(IOV_MAX) as i32;
         let ret = unsafe { libc::writev(fd, iovecs[idx..].as_ptr(), cnt) };
         if ret > 0 {
             let mut n = ret as usize;
@@ -228,7 +233,7 @@ fn writev_all_fd(fd: i32, iovecs: &mut Vec<libc::iovec>) -> io::Result<()> {
 #[cfg(unix)]
 fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<()> {
     const CHUNK_SIZE: usize = 1024 * 1024;
-    const BATCH: usize = 1024;
+    const BATCH: usize = 1024; // matches IOV_MAX in writev_all_fd
 
     /// Given a separator position, return the record start (after-mode: pos+1, before-mode: pos).
     #[inline(always)]
@@ -292,8 +297,9 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
     chunk_bounds.push(0);
     chunk_bounds.reverse();
 
-    // Reusable buffers across chunks
-    let mut positions: Vec<u32> = Vec::with_capacity(CHUNK_SIZE / 40 + 64);
+    // Reusable buffers across chunks. Use usize for positions in the large-data
+    // path because chunk boundaries may span >4GB when separators are absent.
+    let mut positions: Vec<usize> = Vec::with_capacity(CHUNK_SIZE / 40 + 64);
     let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(BATCH);
 
     for ci in (0..chunk_bounds.len() - 1).rev() {
@@ -305,11 +311,11 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
         }
         positions.clear();
         for pos in memchr::memchr_iter(sep, chunk) {
-            positions.push(pos as u32); // safe: CHUNK_SIZE (1MB) fits in u32
+            positions.push(pos);
         }
         let mut end_pos = chunk.len();
         for &pos in positions.iter().rev() {
-            let rs = rec_start(pos as usize, before);
+            let rs = rec_start(pos, before);
             if rs < end_pos {
                 iovecs.push(libc::iovec {
                     iov_base: chunk[rs..].as_ptr() as *mut libc::c_void,
