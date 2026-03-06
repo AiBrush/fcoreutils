@@ -472,6 +472,14 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
 /// Only mmaps files >= `min_size` bytes to avoid mmap setup/teardown overhead.
 #[cfg(unix)]
 pub fn try_mmap_stdin(min_size: u64) -> Option<Mmap> {
+    try_mmap_stdin_with_hints(min_size, true)
+}
+
+/// Try to mmap stdin if it's a regular file above `min_size`.
+/// When `sequential` is true, applies MADV_SEQUENTIAL (forward read).
+/// When false, skips MADV_SEQUENTIAL (for tools like tac that read backward).
+/// MADV_HUGEPAGE is always applied for large mappings.
+pub fn try_mmap_stdin_with_hints(min_size: u64, sequential: bool) -> Option<Mmap> {
     use std::os::unix::io::{AsRawFd, FromRawFd};
     let stdin = std::io::stdin();
     let fd = stdin.as_raw_fd();
@@ -493,11 +501,13 @@ pub fn try_mmap_stdin(min_size: u64) -> Option<Mmap> {
     #[cfg(target_os = "linux")]
     if let Some(ref m) = mmap {
         unsafe {
-            libc::madvise(
-                m.as_ptr() as *mut libc::c_void,
-                m.len(),
-                libc::MADV_SEQUENTIAL,
-            );
+            if sequential {
+                libc::madvise(
+                    m.as_ptr() as *mut libc::c_void,
+                    m.len(),
+                    libc::MADV_SEQUENTIAL,
+                );
+            }
             if m.len() >= 2 * 1024 * 1024 {
                 libc::madvise(
                     m.as_ptr() as *mut libc::c_void,

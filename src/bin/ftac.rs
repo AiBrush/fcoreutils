@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process;
 
 #[cfg(unix)]
-use coreutils_rs::common::io::try_mmap_stdin;
+use coreutils_rs::common::io::try_mmap_stdin_with_hints;
 use coreutils_rs::common::io::{FileData, read_file, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::tac;
@@ -130,7 +130,7 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
         let data: FileData = if filename == "-" {
             #[cfg(unix)]
             {
-                match try_mmap_stdin(2 * 1024 * 1024) {
+                match try_mmap_stdin_with_hints(2 * 1024 * 1024, false) {
                     Some(mmap) => FileData::Mmap(mmap),
                     None => {
                         #[cfg(target_os = "linux")]

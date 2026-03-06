@@ -214,6 +214,11 @@ fn encode_wrapped_chunked(
     let max_chunk_out =
         lines_per_chunk * line_out + BASE64_ENGINE.encoded_length(bytes_per_line) + 2;
 
+    // SAFETY: out_buf is allocated to max_chunk_out bytes and set_len'd without
+    // initialization. The encode loop below writes exactly `full_lines * line_out`
+    // bytes (encode + newline per line), plus any remainder. Only the written
+    // prefix `out_buf[..total_out]` is passed to write_all — no uninitialized
+    // bytes are ever read. u8 has no drop glue, so the uninitialized tail is safe.
     let mut out_buf: Vec<u8> = Vec::with_capacity(max_chunk_out);
     #[allow(clippy::uninit_vec)]
     unsafe {

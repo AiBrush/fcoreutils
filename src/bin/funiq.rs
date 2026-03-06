@@ -65,11 +65,13 @@ fn parse_args() -> Cli {
             // Long options
             // --all-repeated, --all-repeated=METHOD
             if bytes == b"--all-repeated" {
-                // GNU uniq: --all-repeated without = defaults to "none"
+                // GNU uniq: --all-repeated without = defaults to "none"; overrides -D
                 cli.all_repeated = Some("none".to_string());
+                cli.all_duplicates = true;
             } else if bytes.starts_with(b"--all-repeated=") {
                 let val = std::str::from_utf8(&bytes[15..]).unwrap_or("").to_string();
                 cli.all_repeated = Some(val);
+                cli.all_duplicates = true;
             // --group, --group=METHOD
             } else if bytes == b"--group" {
                 // GNU uniq: --group without = defaults to "separate"
@@ -172,7 +174,11 @@ fn parse_args() -> Cli {
                 match bytes[i] {
                     b'c' => cli.count = true,
                     b'd' => cli.repeated = true,
-                    b'D' => cli.all_duplicates = true,
+                    b'D' => {
+                        // -D is equivalent to --all-repeated=none; last-one-wins
+                        cli.all_duplicates = true;
+                        cli.all_repeated = Some("none".to_string());
+                    }
                     b'i' => cli.ignore_case = true,
                     b'u' => cli.unique = true,
                     b'z' => cli.zero_terminated = true,
@@ -242,16 +248,13 @@ fn parse_usize_arg(flag: &str, val: &str) -> usize {
     match val.parse::<usize>() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!(
-                "uniq: invalid number of {} to skip: '{}'",
-                match flag {
-                    "-f" | "--skip-fields" => "fields",
-                    "-s" | "--skip-chars" => "characters",
-                    "-w" | "--check-chars" => "characters",
-                    _ => "bytes",
-                },
-                val
-            );
+            let (kind, verb) = match flag {
+                "-f" | "--skip-fields" => ("fields", "to skip"),
+                "-s" | "--skip-chars" => ("characters", "to skip"),
+                "-w" | "--check-chars" => ("characters", "to compare"),
+                _ => ("bytes", "to skip"),
+            };
+            eprintln!("uniq: invalid number of {} {}: '{}'", kind, verb, val);
             process::exit(1);
         }
     }
