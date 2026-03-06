@@ -10,7 +10,7 @@ pub enum NumberingStyle {
     /// Don't number lines.
     None,
     /// Number lines matching a basic regular expression.
-    Regex(regex::Regex),
+    Regex(regex::bytes::Regex),
 }
 
 /// Number format for line numbers.
@@ -65,7 +65,7 @@ pub fn parse_numbering_style(s: &str) -> Result<NumberingStyle, String> {
         "n" => Ok(NumberingStyle::None),
         _ if s.starts_with('p') => {
             let pattern = &s[1..];
-            match regex::Regex::new(pattern) {
+            match regex::bytes::Regex::new(pattern) {
                 Ok(re) => Ok(NumberingStyle::Regex(re)),
                 Err(e) => Err(format!("invalid regular expression: {}", e)),
             }
@@ -131,32 +131,37 @@ fn check_section_delimiter(line: &[u8], delim: &[u8]) -> Option<Section> {
 #[inline]
 fn format_number(num: i64, format: NumberFormat, width: usize, buf: &mut Vec<u8>) {
     let mut num_buf = itoa::Buffer::new();
-    let num_str = num_buf.format(num);
-
-    match format {
-        NumberFormat::Ln => {
-            buf.extend_from_slice(num_str.as_bytes());
-            let pad = width.saturating_sub(num_str.len());
-            buf.resize(buf.len() + pad, b' ');
-        }
-        NumberFormat::Rn => {
-            let pad = width.saturating_sub(num_str.len());
-            buf.resize(buf.len() + pad, b' ');
-            buf.extend_from_slice(num_str.as_bytes());
-        }
-        NumberFormat::Rz => {
-            if num < 0 {
-                buf.push(b'-');
-                let abs_str = &num_str[1..];
-                let pad = width.saturating_sub(abs_str.len() + 1);
-                buf.resize(buf.len() + pad, b'0');
-                buf.extend_from_slice(abs_str.as_bytes());
-            } else {
-                let pad = width.saturating_sub(num_str.len());
-                buf.resize(buf.len() + pad, b'0');
-                buf.extend_from_slice(num_str.as_bytes());
+    let num_str = num_buf.format(num).as_bytes();
+    let pad = width.saturating_sub(num_str.len());
+    let total = pad + num_str.len();
+    buf.reserve(total);
+    unsafe {
+        let start = buf.len();
+        let dst = buf.as_mut_ptr().add(start);
+        match format {
+            NumberFormat::Ln => {
+                std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst, num_str.len());
+                std::ptr::write_bytes(dst.add(num_str.len()), b' ', pad);
+            }
+            NumberFormat::Rn => {
+                std::ptr::write_bytes(dst, b' ', pad);
+                std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
+            }
+            NumberFormat::Rz => {
+                if num < 0 {
+                    *dst = b'-';
+                    let abs = &num_str[1..];
+                    let zpad = width.saturating_sub(abs.len() + 1);
+                    std::ptr::write_bytes(dst.add(1), b'0', zpad);
+                    std::ptr::copy_nonoverlapping(abs.as_ptr(), dst.add(1 + zpad), abs.len());
+                    buf.set_len(start + 1 + zpad + abs.len());
+                    return;
+                }
+                std::ptr::write_bytes(dst, b'0', pad);
+                std::ptr::copy_nonoverlapping(num_str.as_ptr(), dst.add(pad), num_str.len());
             }
         }
+        buf.set_len(start + total);
     }
 }
 
@@ -167,10 +172,7 @@ fn should_number(line: &[u8], style: &NumberingStyle) -> bool {
         NumberingStyle::All => true,
         NumberingStyle::NonEmpty => !line.is_empty(),
         NumberingStyle::None => false,
-        NumberingStyle::Regex(re) => match std::str::from_utf8(line) {
-            Ok(s) => re.is_match(s),
-            Err(_) => false,
-        },
+        NumberingStyle::Regex(re) => re.is_match(line),
     }
 }
 
