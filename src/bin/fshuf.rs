@@ -860,35 +860,33 @@ fn run_file_shuffle(
     // Instead: count lines, pick random indices, sort them, and extract in one pass.
     // This turns O(N) allocation + O(N) memchr+push into O(N) memchr count + O(count) work.
     // For -n 100 from 600K lines: avoids 4.8MB offset array allocation + page faults.
-    if !repeat {
-        if let Some(count) = head_count {
-            let total_lines = memchr::memchr_iter(sep, &data).count()
-                + if data.last().is_some_and(|&b| b != sep) {
-                    1
-                } else {
-                    0
-                };
-            if total_lines == 0 {
-                return;
-            }
-            let count = count.min(total_lines);
-            if count == 0 {
-                return;
-            }
-            // Use sparse path when selecting <25% of lines (avoids full offset array)
-            if (count as u64) < (total_lines as u64) / 4 {
-                run_file_shuffle_sparse(
-                    &data,
-                    sep,
-                    delimiter,
-                    total_lines,
-                    count,
-                    rng,
-                    out,
-                    is_stdout,
-                );
-                return;
-            }
+    if !repeat && let Some(count) = head_count {
+        let total_lines = memchr::memchr_iter(sep, &data).count()
+            + if data.last().is_some_and(|&b| b != sep) {
+                1
+            } else {
+                0
+            };
+        if total_lines == 0 {
+            return;
+        }
+        let count = count.min(total_lines);
+        if count == 0 {
+            return;
+        }
+        // Use sparse path when selecting <25% of lines (avoids full offset array)
+        if (count as u64) < (total_lines as u64) / 4 {
+            run_file_shuffle_sparse(
+                &data,
+                sep,
+                delimiter,
+                total_lines,
+                count,
+                rng,
+                out,
+                is_stdout,
+            );
+            return;
         }
     }
 
