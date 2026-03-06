@@ -1,12 +1,9 @@
 use std::io::{self, IoSlice, Write};
 
-/// Maximum number of iovec entries per writev call.
+/// Maximum number of iovec/IoSlice entries per writev/write_vectored call.
 /// 1024 on Linux and macOS; POSIX minimum is 16 but all modern Unix systems
 /// support at least 1024. Used for both writev batching and IoSlice batching.
-#[cfg(unix)]
 const IOV_MAX: usize = 1024;
-
-const IOSLICE_BATCH_SIZE: usize = 1024;
 
 /// Reverse records separated by a single byte.
 /// Uses forward SIMD memchr scan + streaming output.
@@ -381,13 +378,13 @@ fn tac_string_after(
     if positions.is_empty() {
         return out.write_all(data);
     }
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_MAX);
     let mut end = data.len();
     for &pos in positions.iter().rev() {
         let rec_start = pos + sep_len;
         if rec_start < end {
             slices.push(IoSlice::new(&data[rec_start..end]));
-            if slices.len() >= IOSLICE_BATCH_SIZE {
+            if slices.len() >= IOV_MAX {
                 write_all_vectored(out, &slices)?;
                 slices.clear();
             }
@@ -413,12 +410,12 @@ fn tac_string_before(
     if positions.is_empty() {
         return out.write_all(data);
     }
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOSLICE_BATCH_SIZE);
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(IOV_MAX);
     let mut end = data.len();
     for &pos in positions.iter().rev() {
         if pos < end {
             slices.push(IoSlice::new(&data[pos..end]));
-            if slices.len() >= IOSLICE_BATCH_SIZE {
+            if slices.len() >= IOV_MAX {
                 write_all_vectored(out, &slices)?;
                 slices.clear();
             }
