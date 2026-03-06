@@ -216,33 +216,22 @@ fn main() {
             tr::expand_set2(set2_str, set1.len())
         };
 
-        // Try mmap for regular file stdin (redirect): uses translate_mmap which
-        // processes data zero-copy from page cache, avoiding 2MB buffer allocation.
-        // Falls back to streaming translate for pipes/terminals.
-        #[cfg(unix)]
-        let stdin_mmap = try_mmap_stdin(2 * 1024 * 1024);
-
+        // Always use streaming translate — never mmap.
+        // mmap causes ~2600 individual page faults for 10MB (one per 4KB page),
+        // adding ~5ms of kernel time. read() avoids this by copying from page cache
+        // into an already-faulted buffer with zero demand paging overhead.
         let result = {
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             {
-                if let Some(ref data) = stdin_mmap {
-                    let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                    tr::translate_mmap(&set1, &set2, data, &mut *raw_out)
-                } else {
-                    #[cfg(target_os = "linux")]
-                    {
-                        let mut reader = RawStdin;
-                        let mut raw_out =
-                            unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                        tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        let stdin = io::stdin();
-                        let mut reader = stdin.lock();
-                        tr::translate(&set1, &set2, &mut reader, &mut *raw)
-                    }
-                }
+                let mut reader = RawStdin;
+                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
+            }
+            #[cfg(all(unix, not(target_os = "linux")))]
+            {
+                let stdin = io::stdin();
+                let mut reader = stdin.lock();
+                tr::translate(&set1, &set2, &mut reader, &mut *raw)
             }
             #[cfg(not(unix))]
             {
