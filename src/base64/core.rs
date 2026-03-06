@@ -158,6 +158,12 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
         return encode_wrapped_parallel(data, wrap_col, bytes_per_line, out);
     }
 
+    // Chunked encode for data > 1MB: process ~1MB at a time to keep the output
+    // buffer small (~1.3MB) and warm in L2. Reduces minor page faults from ~3500 to ~320.
+    if bytes_per_line.is_multiple_of(3) && data.len() > 1024 * 1024 {
+        return encode_wrapped_chunked(data, wrap_col, bytes_per_line, out);
+    }
+
     if bytes_per_line.is_multiple_of(3) {
         return encode_wrapped_expand(data, wrap_col, bytes_per_line, out);
     }
@@ -183,6 +189,107 @@ fn encode_wrapped(data: &[u8], wrap_col: usize, out: &mut impl Write) -> io::Res
     }
     let n = fuse_wrap(&enc_buf, wrap_col, &mut out_buf);
     out.write_all(&out_buf[..n])
+}
+
+/// Chunked encode+wrap for large in-memory data. Processes ~1MB input at a time,
+/// reusing a small output buffer (~1.3MB) that stays warm in L2 cache.
+/// Each chunk is aligned to bytes_per_line so it produces complete lines.
+/// Reduces page faults from ~3500 (14MB alloc) to ~320 (1.3MB alloc) for 10MB input.
+fn encode_wrapped_chunked(
+    data: &[u8],
+    wrap_col: usize,
+    bytes_per_line: usize,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    debug_assert!(bytes_per_line.is_multiple_of(3));
+
+    // ~1MB input per chunk, aligned to bytes_per_line
+    let lines_per_chunk = (1024 * 1024) / bytes_per_line;
+    let chunk_input = lines_per_chunk * bytes_per_line;
+    let line_out = wrap_col + 1;
+    let max_chunk_out =
+        lines_per_chunk * line_out + BASE64_ENGINE.encoded_length(bytes_per_line) + 2;
+
+    let mut out_buf: Vec<u8> = Vec::with_capacity(max_chunk_out);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        out_buf.set_len(max_chunk_out);
+    }
+
+    let mut pos = 0;
+    while pos < data.len() {
+        let remaining = data.len() - pos;
+        let chunk_len = remaining.min(chunk_input);
+        let chunk = &data[pos..pos + chunk_len];
+
+        let full_lines = chunk_len / bytes_per_line;
+        let remainder = chunk_len % bytes_per_line;
+
+        let dst = out_buf.as_mut_ptr();
+        let mut line_idx = 0;
+
+        // 4-line unrolled loop
+        while line_idx + 4 <= full_lines {
+            let in_base = line_idx * bytes_per_line;
+            let out_base = line_idx * line_out;
+            unsafe {
+                let s0 = std::slice::from_raw_parts_mut(dst.add(out_base), wrap_col);
+                let _ =
+                    BASE64_ENGINE.encode(&chunk[in_base..in_base + bytes_per_line], s0.as_out());
+                *dst.add(out_base + wrap_col) = b'\n';
+
+                let s1 = std::slice::from_raw_parts_mut(dst.add(out_base + line_out), wrap_col);
+                let _ = BASE64_ENGINE.encode(
+                    &chunk[in_base + bytes_per_line..in_base + 2 * bytes_per_line],
+                    s1.as_out(),
+                );
+                *dst.add(out_base + line_out + wrap_col) = b'\n';
+
+                let s2 = std::slice::from_raw_parts_mut(dst.add(out_base + 2 * line_out), wrap_col);
+                let _ = BASE64_ENGINE.encode(
+                    &chunk[in_base + 2 * bytes_per_line..in_base + 3 * bytes_per_line],
+                    s2.as_out(),
+                );
+                *dst.add(out_base + 2 * line_out + wrap_col) = b'\n';
+
+                let s3 = std::slice::from_raw_parts_mut(dst.add(out_base + 3 * line_out), wrap_col);
+                let _ = BASE64_ENGINE.encode(
+                    &chunk[in_base + 3 * bytes_per_line..in_base + 4 * bytes_per_line],
+                    s3.as_out(),
+                );
+                *dst.add(out_base + 3 * line_out + wrap_col) = b'\n';
+            }
+            line_idx += 4;
+        }
+        while line_idx < full_lines {
+            let in_off = line_idx * bytes_per_line;
+            let out_off = line_idx * line_out;
+            unsafe {
+                let s = std::slice::from_raw_parts_mut(dst.add(out_off), wrap_col);
+                let _ = BASE64_ENGINE.encode(&chunk[in_off..in_off + bytes_per_line], s.as_out());
+                *dst.add(out_off + wrap_col) = b'\n';
+            }
+            line_idx += 1;
+        }
+
+        let mut total_out = full_lines * line_out;
+
+        if remainder > 0 {
+            let in_off = full_lines * bytes_per_line;
+            let enc_len = BASE64_ENGINE.encoded_length(remainder);
+            unsafe {
+                let s = std::slice::from_raw_parts_mut(dst.add(total_out), enc_len);
+                let _ = BASE64_ENGINE.encode(&chunk[in_off..in_off + remainder], s.as_out());
+                *dst.add(total_out + enc_len) = b'\n';
+            }
+            total_out += enc_len + 1;
+        }
+
+        out.write_all(&out_buf[..total_out])?;
+        pos += chunk_len;
+    }
+
+    Ok(())
 }
 
 /// Encode with backward expansion: single contiguous SIMD encode, then expand

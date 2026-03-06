@@ -5,6 +5,9 @@ use std::mem::ManuallyDrop;
 use std::os::unix::io::FromRawFd;
 use std::process;
 
+#[cfg(unix)]
+use memmap2::MmapOptions;
+
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::tr;
 
@@ -153,6 +156,51 @@ fn raw_stdout() -> ManuallyDrop<std::fs::File> {
     unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) }
 }
 
+/// Try to mmap stdin if it's a regular file (e.g., shell redirect `< file`).
+/// Returns None if stdin is a pipe/terminal.
+#[cfg(unix)]
+fn try_mmap_stdin() -> Option<memmap2::Mmap> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return None;
+    }
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
+        return None;
+    }
+    // Only mmap files >= 2MB. For smaller files, the streaming path with a
+    // reusable buffer is faster because it avoids mmap setup/teardown overhead
+    // (VMA creation, page table entries, TLB flush on munmap).
+    if (stat.st_size as u64) < 2 * 1024 * 1024 {
+        return None;
+    }
+
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
+    std::mem::forget(file); // Don't close stdin
+    #[cfg(target_os = "linux")]
+    if let Some(ref m) = mmap {
+        unsafe {
+            libc::madvise(
+                m.as_ptr() as *mut libc::c_void,
+                m.len(),
+                libc::MADV_SEQUENTIAL,
+            );
+            if m.len() >= 2 * 1024 * 1024 {
+                libc::madvise(
+                    m.as_ptr() as *mut libc::c_void,
+                    m.len(),
+                    libc::MADV_HUGEPAGE,
+                );
+            }
+        }
+    }
+    mmap
+}
+
 /// Enlarge pipe buffers on Linux for higher throughput.
 /// Skips /proc read — directly tries decreasing sizes via fcntl.
 /// Saves ~50µs startup vs reading /proc/sys/fs/pipe-max-size.
@@ -214,20 +262,33 @@ fn main() {
             tr::expand_set2(set2_str, set1.len())
         };
 
-        // Streaming translate: 8MB buffer avoids full-file allocation,
-        // full-file allocation + page fault overhead of mmap path.
+        // Try mmap for regular file stdin (redirect): uses translate_mmap which
+        // processes data zero-copy from page cache, avoiding 2MB buffer allocation.
+        // Falls back to streaming translate for pipes/terminals.
+        #[cfg(unix)]
+        let stdin_mmap = try_mmap_stdin();
+
         let result = {
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             {
-                let mut reader = RawStdin;
-                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
-            }
-            #[cfg(all(unix, not(target_os = "linux")))]
-            {
-                let stdin = io::stdin();
-                let mut reader = stdin.lock();
-                tr::translate(&set1, &set2, &mut reader, &mut *raw)
+                if let Some(ref data) = stdin_mmap {
+                    let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                    tr::translate_mmap(&set1, &set2, data, &mut *raw_out)
+                } else {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let mut reader = RawStdin;
+                        let mut raw_out =
+                            unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                        tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let stdin = io::stdin();
+                        let mut reader = stdin.lock();
+                        tr::translate(&set1, &set2, &mut reader, &mut *raw)
+                    }
+                }
             }
             #[cfg(not(unix))]
             {

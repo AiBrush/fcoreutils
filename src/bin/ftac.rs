@@ -9,7 +9,7 @@ use std::process;
 #[cfg(unix)]
 use memmap2::MmapOptions;
 
-use coreutils_rs::common::io::{FileData, read_file_mmap, read_stdin};
+use coreutils_rs::common::io::{FileData, read_file, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::tac;
 
@@ -139,6 +139,10 @@ fn try_mmap_stdin() -> Option<memmap2::Mmap> {
     if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_size <= 0 {
         return None;
     }
+    // Skip mmap for small files (<2MB) — read() avoids mmap setup/teardown overhead
+    if (stat.st_size as u64) < 2 * 1024 * 1024 {
+        return None;
+    }
 
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     let mmap = unsafe { MmapOptions::new().map(&file) }.ok();
@@ -210,7 +214,10 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
                 }
             }
         } else {
-            match read_file_mmap(Path::new(filename)) {
+            // Use read_file which auto-selects read() for <1MB and mmap for larger.
+            // read() avoids mmap setup/teardown overhead (page table creation, TLB flush)
+            // that dominates for small files. For large files, mmap enables zero-copy writev.
+            match read_file(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("tac: {}: {}", filename, io_error_msg(&e));

@@ -10,7 +10,7 @@ use std::process;
 use memmap2::MmapOptions;
 
 use coreutils_rs::base64::core as b64;
-use coreutils_rs::common::io::read_file_mmap;
+use coreutils_rs::common::io::read_file;
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 
 /// Raw stdin reader for zero-overhead pipe reads on Linux.
@@ -292,30 +292,14 @@ fn process_stdin(cli: &Cli, out: &mut impl Write) -> io::Result<()> {
 }
 
 fn process_file(filename: &str, cli: &Cli, out: &mut impl Write) -> io::Result<()> {
+    // Use read_file (read() for <1MB, mmap for larger) for both encode and decode.
+    // For encode: avoids streaming path's 28MB buffer allocation (6146 page faults).
+    // For decode: read() for small files avoids mmap setup/teardown overhead.
+    let data = read_file(Path::new(filename))?;
     if cli.decode {
-        let data = read_file_mmap(Path::new(filename))?;
         b64::decode_to_writer(&data, cli.ignore_garbage, out)
     } else {
-        // For encode, use streaming from fd — avoids mmap page fault overhead.
-        // read() handles page faults in-kernel with batched PTE allocation (~0.5ms)
-        // vs mmap's ~2560 user-space minor faults (~2.5-5ms on CI runners).
-        // The streaming encoder (encode_stream_wrapped_fused) uses direct-to-position
-        // encoding with 4-line unrolling, which is faster than encode_wrapped_expand's
-        // backward expansion pass.
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::io::AsRawFd;
-            let file = coreutils_rs::common::io::open_noatime(Path::new(filename))?;
-            unsafe {
-                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-            }
-            b64::encode_stream(&mut &file, cli.wrap, out)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let data = read_file_mmap(Path::new(filename))?;
-            b64::encode_to_writer(&data, cli.wrap, out)
-        }
+        b64::encode_to_writer(&data, cli.wrap, out)
     }
 }
 

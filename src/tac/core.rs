@@ -19,14 +19,58 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
 }
 
 /// Stream reversed byte-separated records directly to an fd using writev zero-copy.
-/// Processes data in ~1MB chunks to keep positions Vec in L2 cache and reduce
-/// page faults. Records are written directly from the source buffer without copying.
+/// For small data (<64KB), builds a contiguous buffer and uses a single write() to
+/// avoid writev setup overhead. For medium data (<= 1MB), uses writev. For large
+/// data, processes in ~1MB chunks.
 #[cfg(unix)]
 pub fn tac_bytes_to_fd(data: &[u8], separator: u8, before: bool, fd: i32) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
+    // Fast path for small data: single contiguous write avoids writev overhead
+    const FAST_THRESHOLD: usize = 64 * 1024;
+    if data.len() <= FAST_THRESHOLD {
+        return tac_bytes_fast(data, separator, before, fd);
+    }
     tac_bytes_fd_impl(data, separator, fd, before)
+}
+
+/// Fast path for small data: scans for separator positions, builds a contiguous
+/// output buffer in reversed record order, and writes it with a single write() call.
+/// This avoids writev setup overhead (iovec allocation, kernel scatter/gather)
+/// which dominates for files with few records.
+#[cfg(unix)]
+fn tac_bytes_fast(data: &[u8], sep: u8, before: bool, fd: i32) -> io::Result<()> {
+    let mut positions: Vec<u32> = Vec::with_capacity(data.len() / 40 + 64);
+    for pos in memchr::memchr_iter(sep, data) {
+        positions.push(pos as u32);
+    }
+    if positions.is_empty() {
+        return write_all_fd(fd, data);
+    }
+    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+    let mut end_pos = data.len();
+    if !before {
+        for &pos in positions.iter().rev() {
+            let rec_start = pos as usize + 1;
+            if rec_start < end_pos {
+                buf.extend_from_slice(&data[rec_start..end_pos]);
+            }
+            end_pos = rec_start;
+        }
+    } else {
+        for &pos in positions.iter().rev() {
+            let p = pos as usize;
+            if p < end_pos {
+                buf.extend_from_slice(&data[p..end_pos]);
+            }
+            end_pos = p;
+        }
+    }
+    if end_pos > 0 {
+        buf.extend_from_slice(&data[..end_pos]);
+    }
+    write_all_fd(fd, &buf)
 }
 
 /// Reverse records of an owned Vec. Delegates to tac_bytes.
@@ -49,8 +93,10 @@ fn collect_positions_str(data: &[u8], separator: &[u8]) -> Vec<usize> {
     positions
 }
 
-/// After-separator mode: forward SIMD scan + streaming 1MB output buffer.
-/// 1MB fits within typical L2 cache (512KB-1MB), keeping hot data close.
+/// After-separator mode: forward SIMD scan + streaming output.
+/// For small data (<256KB), collects all records into a single Vec and does one
+/// write_all call, eliminating multiple write() syscalls.
+/// For large data, streams in 1MB chunks that fit in L2 cache.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
@@ -59,6 +105,25 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
     if positions.is_empty() {
         return out.write_all(data);
     }
+
+    // Small data: single allocation + single write_all avoids multiple syscalls
+    const SMALL_THRESHOLD: usize = 256 * 1024;
+    if data.len() <= SMALL_THRESHOLD {
+        let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+        let mut end_pos = data.len();
+        for &pos in positions.iter().rev() {
+            let rec_start = pos + 1;
+            if rec_start < end_pos {
+                buf.extend_from_slice(&data[rec_start..end_pos]);
+            }
+            end_pos = rec_start;
+        }
+        if end_pos > 0 {
+            buf.extend_from_slice(&data[..end_pos]);
+        }
+        return out.write_all(&buf);
+    }
+
     const BUF_SIZE: usize = 1024 * 1024;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut end_pos = data.len();
@@ -96,8 +161,10 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
     Ok(())
 }
 
-/// Before-separator mode: forward SIMD scan + streaming 1MB output buffer.
-/// 1MB fits within typical L2 cache (512KB-1MB), keeping hot data close.
+/// Before-separator mode: forward SIMD scan + streaming output.
+/// For small data (<256KB), collects all records into a single Vec and does one
+/// write_all call, eliminating multiple write() syscalls.
+/// For large data, streams in 1MB chunks that fit in L2 cache.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
@@ -106,6 +173,24 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
     if positions.is_empty() {
         return out.write_all(data);
     }
+
+    // Small data: single allocation + single write_all avoids multiple syscalls
+    const SMALL_THRESHOLD: usize = 256 * 1024;
+    if data.len() <= SMALL_THRESHOLD {
+        let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+        let mut end_pos = data.len();
+        for &pos in positions.iter().rev() {
+            if pos < end_pos {
+                buf.extend_from_slice(&data[pos..end_pos]);
+            }
+            end_pos = pos;
+        }
+        if end_pos > 0 {
+            buf.extend_from_slice(&data[..end_pos]);
+        }
+        return out.write_all(&buf);
+    }
+
     const BUF_SIZE: usize = 1024 * 1024;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut end_pos = data.len();
