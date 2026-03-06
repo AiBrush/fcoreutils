@@ -253,7 +253,8 @@ fn tac_bytes_after_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
     chunk_bounds.push(data.len());
     let mut target = data.len().saturating_sub(CHUNK_SIZE);
     while target > 0 {
-        if let Some(offset) = memchr::memchr(sep, &data[target..]) {
+        let search_end = (target + CHUNK_SIZE).min(*chunk_bounds.last().unwrap());
+        if let Some(offset) = memchr::memchr(sep, &data[target..search_end]) {
             let boundary = target + offset + 1;
             if boundary < *chunk_bounds.last().unwrap() {
                 chunk_bounds.push(boundary);
@@ -351,9 +352,10 @@ fn tac_bytes_before_fd(data: &[u8], sep: u8, fd: i32) -> io::Result<()> {
     chunk_bounds.push(data.len());
     let mut target = data.len().saturating_sub(CHUNK_SIZE);
     while target > 0 {
-        if let Some(offset) = memchr::memchr(sep, &data[target..]) {
+        let search_end = (target + CHUNK_SIZE).min(*chunk_bounds.last().unwrap());
+        if let Some(offset) = memchr::memchr(sep, &data[target..search_end]) {
             let boundary = target + offset;
-            if boundary > 0 && boundary < *chunk_bounds.last().unwrap() {
+            if boundary < *chunk_bounds.last().unwrap() {
                 chunk_bounds.push(boundary);
             }
         }
