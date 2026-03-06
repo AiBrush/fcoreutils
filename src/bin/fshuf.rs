@@ -45,6 +45,7 @@ fn checked_write_all(out: &mut dyn Write, data: &[u8]) -> io::Result<bool> {
 fn writev_all(fd: i32, iovecs: &[libc::iovec]) -> bool {
     let mut offset = 0;
     while offset < iovecs.len() {
+        // IOV_MAX is 1024 on Linux/macOS; POSIX minimum is 16
         let count = (iovecs.len() - offset).min(1024) as i32;
         let n = unsafe { libc::writev(fd, iovecs[offset..].as_ptr(), count) };
         if n < 0 {
@@ -52,7 +53,8 @@ fn writev_all(fd: i32, iovecs: &[libc::iovec]) -> bool {
             if err.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            return err.kind() != io::ErrorKind::BrokenPipe;
+            // BrokenPipe = reader closed (normal), any other error = real failure
+            return false;
         }
         let mut written = n as usize;
         while offset < iovecs.len() && written > 0 {
@@ -855,7 +857,7 @@ fn run_file_shuffle(
                     }
                 }
                 if !iovecs.is_empty() {
-                    let _ = writev_all(out_fd, &iovecs);
+                    writev_all(out_fd, &iovecs);
                 }
             } else {
                 // Fallback: copy-based path for non-stdout output
