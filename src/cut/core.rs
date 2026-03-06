@@ -10,9 +10,10 @@ const PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
 
-/// Input chunk size for sequential processing. Keeps output buffer (~256KB)
-/// hot in L2 cache and avoids full-size allocation page faults.
-const SEQ_CHUNK: usize = 256 * 1024;
+/// Input chunk size for sequential processing. 4MB reduces write_all syscalls
+/// (~3 calls for 10MB vs ~40 at 256KB). May exceed L2/L3 on smaller cores;
+/// the primary benefit is syscall reduction rather than cache residency.
+const SEQ_CHUNK: usize = 4 * 1024 * 1024;
 
 /// Process data in newline-aligned chunks, writing each chunk's output immediately.
 /// Avoids allocating a full-size output buffer (e.g. 12MB for 11MB input).
