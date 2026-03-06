@@ -669,12 +669,21 @@ fn run_range_shuffle(
             let j = i + rng.gen_range(n - i);
             values.swap(i, j);
         }
-        const OUT_CHUNK: usize = 1024 * 1024;
-        let mut buf = Vec::with_capacity(OUT_CHUNK + 32);
+        const OUT_CHUNK: usize = 2 * 1024 * 1024;
+        let mut buf: Vec<u8> = Vec::with_capacity(OUT_CHUNK + 64);
+        let mut pos = 0usize;
+        let base = buf.as_mut_ptr();
         for &val in values.iter().take(count) {
-            buf.extend_from_slice(ibuf.format(val).as_bytes());
-            buf.push(delimiter);
-            if buf.len() >= OUT_CHUNK {
+            let s = ibuf.format(val).as_bytes();
+            let slen = s.len();
+            unsafe {
+                std::ptr::copy_nonoverlapping(s.as_ptr(), base.add(pos), slen);
+                pos += slen;
+                *base.add(pos) = delimiter;
+                pos += 1;
+            }
+            if pos >= OUT_CHUNK {
+                unsafe { buf.set_len(pos) };
                 match checked_write_all(out, &buf) {
                     Ok(false) => return,
                     Err(err) => {
@@ -684,9 +693,11 @@ fn run_range_shuffle(
                     _ => {}
                 }
                 buf.clear();
+                pos = 0;
             }
         }
-        if !buf.is_empty() {
+        if pos > 0 {
+            unsafe { buf.set_len(pos) };
             match checked_write_all(out, &buf) {
                 Ok(false) => process::exit(0),
                 Err(err) => {

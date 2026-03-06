@@ -466,8 +466,9 @@ pub fn paste_serial_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io
     // Fast path: single-delimiter serial mode — chunked bulk copy + scatter replace.
     // Instead of per-line memchr + copy, copy chunks and replace newlines with the
     // delimiter in-place. Processes in BUF_SIZE chunks to avoid full-file allocation.
-    if has_delims && delims.len() == 1 && delims[0] != terminator {
+    if has_delims && delims.len() == 1 {
         let replacement = delims[0];
+        let needs_replace = replacement != terminator;
         let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE + 4096);
 
         for data in file_data {
@@ -494,10 +495,11 @@ pub fn paste_serial_stream(file_data: &[&[u8]], config: &PasteConfig) -> std::io
                 let chunk = &effective[cursor..chunk_end];
                 let start = buf.len();
                 buf.extend_from_slice(chunk);
-                // Replace terminators with delimiter. Iterate on source chunk
-                // positions (immutable) to avoid borrow conflict with buf.
-                for pos in memchr::memchr_iter(terminator, chunk) {
-                    buf[start + pos] = replacement;
+                // Replace terminators with delimiter only when they differ.
+                if needs_replace {
+                    for pos in memchr::memchr_iter(terminator, chunk) {
+                        buf[start + pos] = replacement;
+                    }
                 }
                 cursor = chunk_end;
 
@@ -723,8 +725,9 @@ pub fn paste_serial_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8>
     // Fast path: single delimiter — bulk copy + scatter replace.
     // Instead of line-by-line presplit + extend_from_slice (~150K calls for 10MB),
     // copy the entire file at once and replace terminators with the delimiter.
-    if has_delims && delims.len() == 1 && delims[0] != terminator {
+    if has_delims && delims.len() == 1 {
         let delim = delims[0];
+        let needs_replace = delim != terminator;
         for data in file_data {
             if data.is_empty() {
                 output.push(terminator);
@@ -741,10 +744,10 @@ pub fn paste_serial_to_vec(file_data: &[&[u8]], config: &PasteConfig) -> Vec<u8>
             }
             let start = output.len();
             output.extend_from_slice(effective);
-            // Replace terminators with delimiter. Iterate on source (immutable)
-            // to avoid borrow conflict with output.
-            for pos in memchr::memchr_iter(terminator, effective) {
-                output[start + pos] = delim;
+            if needs_replace {
+                for pos in memchr::memchr_iter(terminator, effective) {
+                    output[start + pos] = delim;
+                }
             }
             output.push(terminator);
         }
