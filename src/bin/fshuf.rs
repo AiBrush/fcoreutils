@@ -741,17 +741,18 @@ fn run_range_shuffle(
 /// building the full offset array. Uses partial Fisher-Yates on line indices,
 /// sorts them, then extracts lines in a single forward pass.
 /// O(count) memory instead of O(total_lines).
-#[allow(clippy::too_many_arguments)]
 fn run_file_shuffle_sparse(
     data: &[u8],
     sep: u8,
-    delimiter: u8,
     total_lines: usize,
     count: usize,
     rng: &mut RandGen,
     out: &mut impl Write,
-    is_stdout: bool,
 ) {
+    debug_assert!(
+        total_lines <= u32::MAX as usize,
+        "shuf sparse: >4B lines not supported"
+    );
     // Pick `count` unique random line indices using partial Fisher-Yates.
     // We maintain a sparse map of swapped positions to avoid O(N) array.
     let mut selected: Vec<u32> = Vec::with_capacity(count);
@@ -808,15 +809,14 @@ fn run_file_shuffle_sparse(
     // Sort by output position to restore shuffle order
     results.sort_unstable_by_key(|&(out_pos, _, _)| out_pos);
 
-    // Write output: sep == delimiter (both \n or both \0).
-    // Lines ending with sep already have the delimiter; last unterminated line needs one.
-    let _ = is_stdout;
+    // Write output: lines ending with sep already have the terminator;
+    // last unterminated line needs one appended.
     let mut buf: Vec<u8> = Vec::with_capacity(count.min(8192) * 40);
     for &(_out_pos, s, e) in &results {
         let line = &data[s as usize..e as usize];
         buf.extend_from_slice(line);
-        if line.last().copied() != Some(delimiter) {
-            buf.push(delimiter);
+        if line.last().copied() != Some(sep) {
+            buf.push(sep);
         }
         if buf.len() >= 2 * 1024 * 1024 {
             match checked_write_all(out, &buf) {
@@ -876,16 +876,7 @@ fn run_file_shuffle(
         }
         // Use sparse path when selecting <25% of lines (avoids full offset array)
         if (count as u64) < (total_lines as u64) / 4 {
-            run_file_shuffle_sparse(
-                &data,
-                sep,
-                delimiter,
-                total_lines,
-                count,
-                rng,
-                out,
-                is_stdout,
-            );
+            run_file_shuffle_sparse(&data, sep, total_lines, count, rng, out);
             return;
         }
     }
