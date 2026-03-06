@@ -190,9 +190,14 @@ pub fn comm(
 
     // Fast path: identical inputs → all lines are common (column 3).
     // Avoids per-line comparison entirely. Uses single memchr scan.
-    // Safe for all order_check modes: when all comparisons are Equal,
-    // the merge loop never enters Less/Greater branches where order is checked.
-    if data1 == data2 && !config.case_insensitive && !config.total {
+    // Only safe when order checking is disabled: for unsorted-but-identical files,
+    // GNU comm still reports a sort-order violation, so we must fall through to
+    // the merge loop which detects out-of-order adjacent lines.
+    if data1 == data2
+        && !config.case_insensitive
+        && !config.total
+        && config.order_check == OrderCheck::None
+    {
         return comm_identical(data1, config, delim, sep, out);
     }
 

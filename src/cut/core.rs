@@ -713,6 +713,12 @@ fn multi_select_twolevel(
         }
     }
 
+    debug_assert!(
+        wp <= data.len() + 1,
+        "wp={} exceeded reservation data.len()+1={}",
+        wp,
+        data.len() + 1
+    );
     unsafe {
         buf.set_len(initial_len + wp);
     }
