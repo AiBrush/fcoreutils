@@ -340,6 +340,19 @@ pub fn pr_data<W: Write>(
         return pr_data_numbered(data, output, config, filename, file_date);
     }
 
+    // Fast path: multi-column down mode without numbering, no transforms
+    if config.columns > 1
+        && !config.across
+        && config.number_lines.is_none()
+        && config.indent == 0
+        && !config.double_space
+        && !config.join_lines
+        && memchr::memchr(b'\r', data).is_none()
+        && memchr::memchr(b'\x0c', data).is_none()
+    {
+        return pr_data_multicolumn_fast(data, output, config, filename, file_date);
+    }
+
     // Normal path: split into line byte slices using SIMD memchr
     let mut lines: Vec<&[u8]> = Vec::with_capacity(data.len() / 40 + 64);
     let mut start = 0;
@@ -363,6 +376,237 @@ pub fn pr_data<W: Write>(
     }
 
     pr_lines_generic(&lines, output, config, filename, file_date)
+}
+
+/// Fast multi-column "down" paginator using unsafe pointer arithmetic.
+/// Pre-splits lines via SIMD memchr, pre-computes column padding, and builds
+/// output directly into a Vec<u8> buffer with bulk copies. Avoids the many
+/// small extend_from_slice calls of the generic multicolumn path.
+fn pr_data_multicolumn_fast<W: Write>(
+    data: &[u8],
+    output: &mut W,
+    config: &PrConfig,
+    filename: &str,
+    file_date: Option<SystemTime>,
+) -> io::Result<()> {
+    let date = file_date.unwrap_or_else(SystemTime::now);
+    let header_str = config.header.as_deref().unwrap_or(filename);
+    let date_str = format_header_date(&date, &config.date_format);
+
+    let columns = config.columns.max(1);
+    let explicit_sep = has_explicit_separator(config);
+    let col_sep = get_column_separator(config);
+    let col_sep_bytes = col_sep.as_bytes();
+    let col_width = if explicit_sep {
+        if columns > 1 {
+            (config
+                .page_width
+                .saturating_sub(col_sep.len() * (columns - 1)))
+                / columns
+        } else {
+            config.page_width
+        }
+    } else {
+        config.page_width / columns
+    };
+    let content_width = if explicit_sep {
+        col_width
+    } else {
+        col_width.saturating_sub(1)
+    };
+
+    let suppress_header = !config.omit_header
+        && !config.omit_pagination
+        && config.page_length <= HEADER_LINES + FOOTER_LINES;
+    let body_lines_per_page = if config.omit_header || config.omit_pagination {
+        if config.page_length > 0 {
+            config.page_length
+        } else {
+            DEFAULT_PAGE_LENGTH
+        }
+    } else if suppress_header {
+        config.page_length
+    } else {
+        config.page_length - HEADER_LINES - FOOTER_LINES
+    };
+    let show_header = !config.omit_header && !config.omit_pagination && !suppress_header;
+    let lines_consumed_per_page = body_lines_per_page * columns;
+
+    // Pre-split lines using SIMD memchr — store (start, len) as u32 pairs for compactness
+    let mut line_offsets: Vec<(u32, u32)> = Vec::with_capacity(data.len() / 40 + 64);
+    let mut start = 0usize;
+    for pos in memchr::memchr_iter(b'\n', data) {
+        line_offsets.push((start as u32, (pos - start) as u32));
+        start = pos + 1;
+    }
+    if start < data.len() {
+        line_offsets.push((start as u32, (data.len() - start) as u32));
+    }
+    let total_lines = line_offsets.len();
+
+    // Single output buffer
+    let out_cap = (data.len() + data.len() / 3 + 4096).min(64 * 1024 * 1024);
+    let mut out_buf: Vec<u8> = Vec::with_capacity(out_cap);
+
+    let mut line_idx = 0usize;
+    let mut page_num = 1usize;
+    let src = data.as_ptr();
+
+    while line_idx < total_lines || (line_idx == 0 && total_lines == 0) {
+        if total_lines == 0 {
+            if show_header
+                && page_num >= config.first_page
+                && (config.last_page == 0 || page_num <= config.last_page)
+            {
+                write_header(&mut out_buf, &date_str, header_str, page_num, config)?;
+                write_footer(&mut out_buf, config)?;
+            }
+            break;
+        }
+
+        let page_end = (line_idx + lines_consumed_per_page).min(total_lines);
+        let page_lines = &line_offsets[line_idx..page_end];
+        let n = page_lines.len();
+
+        if page_num >= config.first_page && (config.last_page == 0 || page_num <= config.last_page)
+        {
+            if show_header {
+                write_header(&mut out_buf, &date_str, header_str, page_num, config)?;
+            }
+
+            // Compute column layout: "down" mode distributes lines across columns
+            let base = n / columns;
+            let extra = n % columns;
+            let mut col_starts = [0u32; 33]; // support up to 32 columns
+            let max_cols = columns.min(32);
+            for col in 0..max_cols {
+                let col_lines = base + if col < extra { 1 } else { 0 };
+                col_starts[col + 1] = col_starts[col] + col_lines as u32;
+            }
+            let num_rows = if extra > 0 { base + 1 } else { base };
+
+            // Build rows directly
+            for row in 0..num_rows {
+                // Find last column with data for this row
+                let mut last_data_col = 0;
+                for col in 0..max_cols {
+                    let col_lines = (col_starts[col + 1] - col_starts[col]) as usize;
+                    if row < col_lines {
+                        last_data_col = col;
+                    }
+                }
+
+                let mut abs_pos = 0usize;
+                for col in 0..max_cols {
+                    let col_lines = (col_starts[col + 1] - col_starts[col]) as usize;
+                    if row < col_lines {
+                        let li = col_starts[col] as usize + row;
+                        let (off, len) = page_lines[li];
+                        let content_len = (len as usize).min(content_width);
+
+                        if explicit_sep && col > 0 {
+                            out_buf.extend_from_slice(col_sep_bytes);
+                            abs_pos += col_sep_bytes.len();
+                        }
+
+                        // Copy line content directly from source
+                        if content_len > 0 {
+                            let wp = out_buf.len();
+                            out_buf.reserve(content_len);
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    src.add(off as usize),
+                                    out_buf.as_mut_ptr().add(wp),
+                                    content_len,
+                                );
+                                out_buf.set_len(wp + content_len);
+                            }
+                        }
+
+                        // Strip trailing spaces from last data column (GNU compat)
+                        if col == last_data_col && !explicit_sep {
+                            while out_buf.last() == Some(&b' ') {
+                                out_buf.pop();
+                            }
+                        }
+
+                        abs_pos += content_len;
+
+                        // Pad to next column boundary
+                        if col < last_data_col && !explicit_sep {
+                            let target = (col + 1) * col_width;
+                            if abs_pos < target {
+                                write_column_padding_buf(&mut out_buf, abs_pos, target);
+                                abs_pos = target;
+                            }
+                        }
+                    } else if col <= last_data_col {
+                        // Empty column before last data column
+                        if explicit_sep {
+                            if col > 0 {
+                                out_buf.extend_from_slice(col_sep_bytes);
+                                abs_pos += col_sep_bytes.len();
+                            }
+                        } else {
+                            let target = (col + 1) * col_width;
+                            write_column_padding_buf(&mut out_buf, abs_pos, target);
+                            abs_pos = target;
+                        }
+                    }
+                }
+                out_buf.push(b'\n');
+            }
+
+            // Pad remaining body lines
+            let body_lines_written = num_rows;
+            if show_header {
+                let pad = body_lines_per_page.saturating_sub(body_lines_written);
+                out_buf.resize(out_buf.len() + pad, b'\n');
+                write_footer(&mut out_buf, config)?;
+            }
+
+            if out_buf.len() >= 64 * 1024 * 1024 {
+                output.write_all(&out_buf)?;
+                out_buf.clear();
+            }
+        }
+
+        line_idx = page_end;
+        page_num += 1;
+    }
+
+    if !out_buf.is_empty() {
+        output.write_all(&out_buf)?;
+    }
+    Ok(())
+}
+
+/// Write column padding (tabs + spaces) directly into a Vec<u8> buffer.
+/// Avoids the Write trait overhead of write_column_padding.
+#[inline]
+fn write_column_padding_buf(buf: &mut Vec<u8>, abs_pos: usize, target: usize) {
+    let n = target.saturating_sub(abs_pos);
+    if n == 0 {
+        return;
+    }
+    let next_tab = (abs_pos / 8 + 1) * 8;
+    if next_tab > target {
+        // Gap doesn't reach next tab stop — spaces only
+        buf.resize(buf.len() + n, b' ');
+        return;
+    }
+    buf.push(b'\t');
+    let mut col = next_tab;
+    while col < target {
+        let nt = (col / 8 + 1) * 8;
+        if nt <= target {
+            buf.push(b'\t');
+            col = nt;
+        } else {
+            buf.resize(buf.len() + (target - col), b' ');
+            col = target;
+        }
+    }
 }
 
 /// Ultra-fast contiguous-write paginator for single-column, no-transform mode.
