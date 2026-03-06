@@ -49,7 +49,8 @@ fn collect_positions_str(data: &[u8], separator: &[u8]) -> Vec<usize> {
     positions
 }
 
-/// After-separator mode: forward SIMD scan + streaming 2MB output buffer.
+/// After-separator mode: forward SIMD scan + streaming 1MB output buffer.
+/// 1MB fits within typical L2 cache (512KB-1MB), keeping hot data close.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
@@ -58,7 +59,7 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
     if positions.is_empty() {
         return out.write_all(data);
     }
-    const BUF_SIZE: usize = 2 * 1024 * 1024;
+    const BUF_SIZE: usize = 1024 * 1024;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut end_pos = data.len();
     for &pos in positions.iter().rev() {
@@ -95,7 +96,8 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
     Ok(())
 }
 
-/// Before-separator mode: forward SIMD scan + streaming 2MB output buffer.
+/// Before-separator mode: forward SIMD scan + streaming 1MB output buffer.
+/// 1MB fits within typical L2 cache (512KB-1MB), keeping hot data close.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
@@ -104,7 +106,7 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
     if positions.is_empty() {
         return out.write_all(data);
     }
-    const BUF_SIZE: usize = 2 * 1024 * 1024;
+    const BUF_SIZE: usize = 1024 * 1024;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut end_pos = data.len();
     for &pos in positions.iter().rev() {
@@ -179,11 +181,14 @@ fn writev_all_fd(fd: i32, iovecs: &mut Vec<libc::iovec>) -> io::Result<()> {
     let mut partial_off: usize = 0;
     while idx < iovecs.len() {
         if partial_off > 0 {
-            // Safety: `partial_off` is set only in the `else` branch below
-            // (line `partial_off = n;`) which executes only when `n < iov_len`,
-            // so `partial_off < iovecs[idx].iov_len`. The pointer advance and
-            // length subtraction stay within the original slice. The pointer
-            // derives from a live mmap/slice region that outlives this call.
+            // Safety: each partial write advances iov_base by written bytes and
+            // reduces iov_len. This maintains the invariant that
+            // iov_base..iov_base+iov_len is within the original allocation for
+            // all subsequent iterations. `partial_off` is always < the current
+            // (possibly already-mutated) iov_len at the time it was set. On
+            // EINTR after mutation, partial_off is 0 and the already-advanced
+            // iov_base is retried correctly. The pointer derives from a live
+            // mmap/slice region that outlives this call.
             iovecs[idx].iov_base =
                 unsafe { (iovecs[idx].iov_base as *const u8).add(partial_off) } as *mut _;
             iovecs[idx].iov_len -= partial_off;
@@ -235,6 +240,7 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
     const CHUNK_SIZE: usize = 1024 * 1024;
 
     /// Given a separator position, return the record start (after-mode: pos+1, before-mode: pos).
+    // Note: LLVM const-folds the `before` branch since callers pass literals.
     #[inline(always)]
     fn rec_start(pos: usize, before: bool) -> usize {
         if before { pos } else { pos + 1 }
@@ -304,7 +310,9 @@ fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<
 
     // Reusable buffers across chunks. Use usize for positions in the large-data
     // path because chunk boundaries may span >4GB when separators are absent.
-    let mut positions: Vec<usize> = Vec::with_capacity(CHUNK_SIZE / 40 + 64);
+    // Chunks can be up to 2*CHUNK_SIZE when separators cluster at window edges,
+    // so double the capacity estimate to avoid mid-loop reallocation.
+    let mut positions: Vec<usize> = Vec::with_capacity((CHUNK_SIZE * 2) / 40 + 64);
     let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(IOV_MAX);
 
     for ci in (0..chunk_bounds.len() - 1).rev() {
