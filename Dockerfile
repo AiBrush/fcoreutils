@@ -1,5 +1,5 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM rust:slim AS builder
+FROM rust:slim@sha256:d6782f2b326a10eaf593eb90cafc34a03a287b4a25fe4d0c693c90304b06f6d7 AS builder
 
 WORKDIR /build
 
@@ -32,7 +32,7 @@ RUN mkdir /dist && \
       -exec cp {} /dist/ \;
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:74d56e3931e0d5a1dd51f8c8a2466d21de84a271cd3b5a733b803aa91abf4421
 
 COPY --from=builder /dist/ /usr/local/bin/
 
