@@ -36,13 +36,15 @@ jobs:
       tag: ${{ steps.calc.outputs.tag }}
       publish_crates: ${{ steps.calc.outputs.publish_crates }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
           fetch-tags: true
 
       - name: Calculate next version
         id: calc
+        env:
+          BUMP_TYPE: ${{ inputs.bump_type || 'patch' }}
         run: |
           latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
           if [[ -z "$latest" ]]; then
@@ -53,7 +55,7 @@ jobs:
           version="${latest#v}"
           IFS='.' read -r major minor patch <<< "$version"
 
-          bump="${{ inputs.bump_type || 'patch' }}"
+          bump="$BUMP_TYPE"
           echo "Bump type: $bump"
 
           case "$bump" in
@@ -117,25 +119,29 @@ jobs:
             name: Windows x86_64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           targets: ${{ matrix.cross && matrix.target || '' }}
 
       - name: Set version
         shell: bash
+        env:
+          NEW_VERSION: ${{ needs.calculate-version.outputs.version }}
         run: |
           if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' 's/^version = ".*"/version = "${{ needs.calculate-version.outputs.version }}"/' Cargo.toml
+            sed -i '' "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
           else
-            sed -i 's/^version = ".*"/version = "${{ needs.calculate-version.outputs.version }}"/' Cargo.toml
+            sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
           fi
 
       - name: Set RUSTFLAGS for target CPU
         shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
         run: |
-          case "${{ matrix.target }}" in
+          case "$BUILD_TARGET" in
             x86_64-*)
               echo "RUSTFLAGS=-C target-cpu=x86-64-v3" >> "$GITHUB_ENV"
               ;;
@@ -150,9 +156,11 @@ jobs:
       - name: Install nasm and libssl-dev (Linux, macOS x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-apple-darwin'
         shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
         run: |
           if [[ "$OSTYPE" == "linux"* ]]; then
-            if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
+            if [[ "$BUILD_TARGET" == "x86_64-unknown-linux-gnu" ]]; then
               sudo apt-get install -y --no-install-recommends nasm libssl-dev
             else
               sudo apt-get install -y --no-install-recommends libssl-dev
@@ -163,66 +171,42 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
         run: |
           if [[ "$OSTYPE" == "linux"* ]]; then
-            OPENSSL_STATIC=1 cargo build --release --target ${{ matrix.target }}
+            OPENSSL_STATIC=1 cargo build --release --target "$BUILD_TARGET"
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --release --target "$BUILD_TARGET"
           fi
 
       - name: Create release archive
         shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_OS: ${{ matrix.os }}
         run: |
           mkdir -p release
-          BINDIR="target/${{ matrix.target }}/release"
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          BINDIR="target/$BUILD_TARGET/release"
+          if [[ "$BUILD_OS" == "windows-latest" ]]; then
             # Copy ALL f* binaries (not just a hardcoded subset)
             for bin in "${BINDIR}"/f*.exe; do
               [ -f "$bin" ] && cp "$bin" release/
             done
-            7z a fcoreutils-${{ matrix.target }}.zip release/*
+            7z a "fcoreutils-$BUILD_TARGET.zip" release/*
           else
             # Copy ALL f* binaries (not just a hardcoded subset)
             for bin in "${BINDIR}"/f*; do
               [ -f "$bin" ] && [ -x "$bin" ] && [[ "$(basename "$bin")" != *.* ]] && cp "$bin" release/
             done
-            # Disabled: assembly fyes has compat issues, ship Rust version
-            # if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
-            #   cd assembly/yes
-            #   python3 build.py --target linux-x86_64 -o ../../release/fyes \
-            #     && echo "Assembly fyes (linux-x86_64) built and placed in release/" \
-            #     || echo "Assembly build failed — shipping Rust fyes instead"
-            #   cd ../..
-            # fi
-            # if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            #   cd assembly/yes
-            #   python3 build.py --target linux-arm64 -o ../../release/fyes \
-            #     && echo "Assembly fyes (linux-arm64) built and placed in release/" \
-            #     || echo "Assembly build failed — shipping Rust fyes instead"
-            #   cd ../..
-            # fi
-            # if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
-            #   cd assembly/yes
-            #   python3 build.py --target macos-x86_64 -o ../../release/fyes \
-            #     && echo "Assembly fyes (macos-x86_64) built and placed in release/" \
-            #     || echo "Assembly build failed — shipping Rust fyes instead"
-            #   cd ../..
-            # fi
-            # if [[ "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
-            #   cd assembly/yes
-            #   python3 build.py --target macos-arm64 -o ../../release/fyes \
-            #     && echo "Assembly fyes (macos-arm64) built and placed in release/" \
-            #     || echo "Assembly build failed — shipping Rust fyes instead"
-            #   cd ../..
-            # fi
-            tar -czf fcoreutils-${{ matrix.target }}.tar.gz -C release .
+            tar -czf "fcoreutils-$BUILD_TARGET.tar.gz" -C release .
           fi
           echo "Packaged $(ls release/ | wc -l) binaries:"
           ls release/ | head -20
           echo "..."
 
       - name: Upload archive
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: release-${{ matrix.target }}
           path: fcoreutils-*
@@ -232,28 +216,33 @@ jobs:
     needs: [calculate-version, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
           fetch-tags: true
 
       - name: Create and push tag
+        env:
+          RELEASE_TAG: ${{ needs.calculate-version.outputs.tag }}
         run: |
-          git tag "${{ needs.calculate-version.outputs.tag }}"
-          git push origin "${{ needs.calculate-version.outputs.tag }}"
+          git tag "$RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         if: needs.calculate-version.outputs.publish_crates == 'true'
 
       - name: Publish to crates.io
         if: needs.calculate-version.outputs.publish_crates == 'true'
         continue-on-error: true
+        env:
+          NEW_VERSION: ${{ needs.calculate-version.outputs.version }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          sed -i 's/^version = ".*"/version = "${{ needs.calculate-version.outputs.version }}"/' Cargo.toml
-          cargo publish --allow-dirty --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+          cargo publish --allow-dirty --token "$CARGO_REGISTRY_TOKEN"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8
         with:
           path: dist
           pattern: release-*
@@ -263,14 +252,15 @@ jobs:
         run: ls -la dist/
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
           subject-path: 'dist/*'
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.calculate-version.outputs.tag }}
         run: |
-          gh release create "${{ needs.calculate-version.outputs.tag }}" dist/* \
-            --title "${{ needs.calculate-version.outputs.tag }}" \
+          gh release create "$RELEASE_TAG" dist/* \
+            --title "$RELEASE_TAG" \
             --generate-notes

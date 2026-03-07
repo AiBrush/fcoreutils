@@ -24,9 +24,9 @@ jobs:
     if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           key: lint-v1
       - name: Install nasm and libssl-dev
@@ -43,9 +43,9 @@ jobs:
     if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           shared-key: build-v2-ubuntu-latest
       - name: Install nasm and libssl-dev
@@ -65,9 +65,9 @@ jobs:
       matrix:
         cmd: [arch, b2sum, base32, base64, basename, basenc, cat, chcon, chgrp, chmod, chown, chroot, cksum, comm, cp, csplit, cut, date, dd, df, dir, dircolors, dirname, du, echo, env, expand, expr, factor, false, fmt, fold, groups, head, hostid, id, install, join, kill, link, ln, logname, ls, md5sum, mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, numfmt, od, paste, pathchk, pinky, pr, printenv, printf, ptx, pwd, readlink, realpath, rev, rm, rmdir, runcon, seq, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shred, shuf, sleep, sort, split, stat, stdbuf, stty, sum, sync, tac, tail, tee, test, timeout, touch, tr, true, truncate, tsort, tty, uname, unexpand, uniq, unlink, uptime, users, vdir, wc, who, whoami, yes]
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           shared-key: build-v2-ubuntu-latest
           save-if: false
@@ -85,9 +85,9 @@ jobs:
     if: github.event_name != 'merge_group'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           shared-key: build-v2-macos-latest
       - name: Build and compile tests
@@ -104,9 +104,9 @@ jobs:
       matrix:
         cmd: [arch, b2sum, base32, base64, basename, basenc, cat, chcon, chgrp, chmod, chown, chroot, cksum, comm, cp, csplit, cut, date, dd, df, dir, dircolors, dirname, du, echo, env, expand, expr, factor, false, fmt, fold, groups, head, hostid, id, install, join, kill, link, ln, logname, ls, md5sum, mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, numfmt, od, paste, pathchk, pinky, pr, printenv, printf, ptx, pwd, readlink, realpath, rev, rm, rmdir, runcon, seq, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shred, shuf, sleep, sort, split, stat, stdbuf, stty, sum, sync, tac, tail, tee, test, timeout, touch, tr, true, truncate, tsort, tty, uname, unexpand, uniq, unlink, uptime, users, vdir, wc, who, whoami, yes]
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           shared-key: build-v2-macos-latest
           save-if: false
@@ -122,9 +122,9 @@ jobs:
     if: github.event_name != 'merge_group'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           shared-key: build-v2-windows-latest
       - name: Build and compile tests
@@ -141,9 +141,9 @@ jobs:
       matrix:
         cmd: [arch, b2sum, base32, base64, basename, basenc, cat, chcon, chgrp, chmod, chown, chroot, cksum, comm, cp, csplit, cut, date, dd, df, dir, dircolors, dirname, du, echo, env, expand, expr, factor, false, fmt, fold, groups, head, hostid, id, install, join, kill, link, ln, logname, ls, md5sum, mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, numfmt, od, paste, pathchk, pinky, pr, printenv, printf, ptx, pwd, readlink, realpath, rev, rm, rmdir, runcon, seq, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shred, shuf, sleep, sort, split, stat, stdbuf, stty, sum, sync, tac, tail, tee, test, timeout, touch, tr, true, truncate, tsort, tty, uname, unexpand, uniq, unlink, uptime, users, vdir, wc, who, whoami, yes]
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           shared-key: build-v2-windows-latest
           save-if: false
@@ -160,17 +160,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check results
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          LINUX_RESULT: ${{ needs.test-linux-bin.result }}
+          MACOS_RESULT: ${{ needs.test-macos-bin.result }}
+          WINDOWS_RESULT: ${{ needs.test-windows-bin.result }}
+          ASSEMBLY_RESULT: ${{ needs.assembly-test.result }}
         run: |
           # On merge_group, tests are skipped (already passed on PR)
-          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+          if [[ "$EVENT_NAME" == "merge_group" ]]; then
             echo "Merge queue: skipping test checks (tests passed on PR)"
             exit 0
           fi
-          results=("${{ needs.lint.result }}" \
-                   "${{ needs.test-linux-bin.result }}" \
-                   "${{ needs.test-macos-bin.result }}" \
-                   "${{ needs.test-windows-bin.result }}" \
-                   "${{ needs.assembly-test.result }}")
+          results=("$LINT_RESULT" \
+                   "$LINUX_RESULT" \
+                   "$MACOS_RESULT" \
+                   "$WINDOWS_RESULT" \
+                   "$ASSEMBLY_RESULT")
           for r in "${results[@]}"; do
             if [[ "$r" != "success" ]]; then
               echo "Some tests failed: $r"
@@ -187,12 +194,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check result
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TEST_RESULT: ${{ needs.test-linux-bin.result }}
         run: |
-          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+          if [[ "$EVENT_NAME" == "merge_group" ]]; then
             echo "Merge queue: tests skipped (already passed on PR)"
             exit 0
           fi
-          if [[ "${{ needs.test-linux-bin.result }}" != "success" ]]; then
+          if [[ "$TEST_RESULT" != "success" ]]; then
             echo "Linux tests failed"
             exit 1
           fi
@@ -204,12 +214,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check result
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TEST_RESULT: ${{ needs.test-macos-bin.result }}
         run: |
-          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+          if [[ "$EVENT_NAME" == "merge_group" ]]; then
             echo "Merge queue: tests skipped (already passed on PR)"
             exit 0
           fi
-          if [[ "${{ needs.test-macos-bin.result }}" != "success" ]]; then
+          if [[ "$TEST_RESULT" != "success" ]]; then
             echo "macOS tests failed"
             exit 1
           fi
@@ -221,12 +234,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check result
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TEST_RESULT: ${{ needs.test-windows-bin.result }}
         run: |
-          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+          if [[ "$EVENT_NAME" == "merge_group" ]]; then
             echo "Merge queue: tests skipped (already passed on PR)"
             exit 0
           fi
-          if [[ "${{ needs.test-windows-bin.result }}" != "success" ]]; then
+          if [[ "$TEST_RESULT" != "success" ]]; then
             echo "Windows tests failed"
             exit 1
           fi
@@ -238,7 +254,7 @@ jobs:
     if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Install nasm
         run: sudo apt-get install -y --no-install-recommends nasm
       - name: Build all assembly tools
@@ -269,7 +285,7 @@ jobs:
           chmod +x assembly/arch/farch
           rm -f /tmp/farch.o
           echo "All 20 assembly tools built successfully"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: assembly-binaries
           path: |
@@ -310,8 +326,8 @@ jobs:
           - tool: yes-arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8
         if: matrix.tool != 'yes-arm64'
         with:
           name: assembly-binaries
