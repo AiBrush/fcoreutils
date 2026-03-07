@@ -225,32 +225,35 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **20 tools** are implemented in assembly — static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
 
-Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. Throughput = 10 MB / wall time for data-processing tools; `-` for tools that only print a short string.
+Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. The **better** value in each pair is **bold**.
 
-| Tool | Asm Size | C Size | Asm Throughput | C Throughput | Asm Memory | C Memory | Asm Startup | C Startup |
-|------|--------:|---------:|---------------:|-------------:|-----------:|---------:|------------:|----------:|
-| arch | 11.5 KB | 42.4 KB | - | - | 716 KB | 1,744 KB | 0.09 ms | 0.79 ms |
-| base64 | 5.7 KB | 46.4 KB | 490 MB/s | 521 MB/s | 716 KB | 1,956 KB | 0.10 ms | 0.59 ms |
-| cut | 9.3 KB | 54.4 KB | 694 MB/s | 303 MB/s | 812 KB | 1,784 KB | 0.01 ms | 1.20 ms |
-| echo | 2.9 KB | 42.4 KB | - | - | 716 KB | 1,800 KB | 0.03 ms | 0.84 ms |
-| head | 7.2 KB | 50.4 KB | - | - | 684 KB | 1,960 KB | 0.19 ms | 0.58 ms |
-| hostid | 2.5 KB | 42.4 KB | - | - | 816 KB | 2,112 KB | 0.21 ms | 1.10 ms |
-| logname | 2.6 KB | 42.4 KB | - | - | 684 KB | 2,052 KB | 0.27 ms | 1.20 ms |
-| md5sum | 9.6 KB | 54.4 KB | 317 MB/s | 435 MB/s | 716 KB | 3,996 KB | 0.02 ms | 1.80 ms |
-| pwd | 2.7 KB | 42.4 KB | - | - | 716 KB | 1,812 KB | 0.11 ms | 0.61 ms |
-| rev | 2.8 KB | 14.4 KB | 429 MB/s | 42 MB/s | 684 KB | 2,048 KB | 0.06 ms | 0.86 ms |
-| sleep | 2.6 KB | 42.4 KB | - | - | 716 KB | 1,880 KB | 0.15 ms | 0.91 ms |
-| sync | 3.1 KB | 42.4 KB | - | - | 684 KB | 1,864 KB | 0.21 ms | 0.98 ms |
-| tac | 4.6 KB | 46.4 KB | 840 MB/s | 758 MB/s | 10,116 KB | 1,932 KB | 0.04 ms | 0.94 ms |
-| tail | 7.5 KB | 78.5 KB | - | - | 716 KB | 2,036 KB | 0.13 ms | 0.59 ms |
-| tr | 9.8 KB | 58.4 KB | 820 MB/s | 980 MB/s | 1,584 KB | 1,920 KB | 0.41 ms | 0.96 ms |
-| true | 1.2 KB | 42.4 KB | - | - | 716 KB | 1,108 KB | 0.18 ms | 0.57 ms |
-| tty | 2.0 KB | 42.4 KB | - | - | 564 KB | 1,780 KB | 0.42 ms | 1.34 ms |
-| wc | 11.7 KB | 66.5 KB | 224 MB/s | 322 MB/s | 716 KB | 2,188 KB | 0.16 ms | 0.79 ms |
-| whoami | 2.2 KB | 42.4 KB | - | - | 812 KB | 2,140 KB | 0.19 ms | 1.00 ms |
-| yes | 1.8 KB | 42.4 KB | 2.3 GB/s | 2.4 GB/s | 1,912 KB | 1,948 KB | 0.93 ms | 4.30 ms |
+| Tool | Asm Size | C Size | Asm Memory | C Memory | Asm Startup | C Startup | Asm Throughput | C Throughput |
+|------|--------:|---------:|-----------:|---------:|------------:|----------:|---------------:|-------------:|
+| arch | **11.5 KB** | 42.4 KB | **716 KB** | 1,744 KB | **0.09 ms** | 0.79 ms | - | - |
+| base64 | **5.7 KB** | 46.4 KB | **716 KB** | 1,956 KB | **0.10 ms** | 0.59 ms | 490 MB/s | **521 MB/s** |
+| cut | **9.3 KB** | 54.4 KB | **812 KB** | 1,784 KB | **0.01 ms** | 1.20 ms | **694 MB/s** | 303 MB/s |
+| echo | **2.9 KB** | 42.4 KB | **716 KB** | 1,800 KB | **0.03 ms** | 0.84 ms | - | - |
+| head | **7.2 KB** | 50.4 KB | **684 KB** | 1,960 KB | **0.19 ms** | 0.58 ms | - | - |
+| hostid | **2.5 KB** | 42.4 KB | **816 KB** | 2,112 KB | **0.21 ms** | 1.10 ms | - | - |
+| logname | **2.6 KB** | 42.4 KB | **684 KB** | 2,052 KB | **0.27 ms** | 1.20 ms | - | - |
+| md5sum | **9.6 KB** | 54.4 KB | **716 KB** | 3,996 KB | **0.02 ms** | 1.80 ms | 317 MB/s | **435 MB/s** |
+| pwd | **2.7 KB** | 42.4 KB | **716 KB** | 1,812 KB | **0.11 ms** | 0.61 ms | - | - |
+| rev | **2.8 KB** | 14.4 KB | **684 KB** | 2,048 KB | **0.06 ms** | 0.86 ms | **429 MB/s** | 42 MB/s |
+| sleep | **2.6 KB** | 42.4 KB | **716 KB** | 1,880 KB | **0.15 ms** | 0.91 ms | - | - |
+| sync | **3.1 KB** | 42.4 KB | **684 KB** | 1,864 KB | **0.21 ms** | 0.98 ms | - | - |
+| tac | **4.6 KB** | 46.4 KB | 10,116 KB | **1,932 KB** | **0.04 ms** | 0.94 ms | **840 MB/s** | 758 MB/s |
+| tail | **7.5 KB** | 78.5 KB | **716 KB** | 2,036 KB | **0.13 ms** | 0.59 ms | - | - |
+| tr | **9.8 KB** | 58.4 KB | **1,584 KB** | 1,920 KB | **0.41 ms** | 0.96 ms | 820 MB/s | **980 MB/s** |
+| true | **1.2 KB** | 42.4 KB | **716 KB** | 1,108 KB | **0.18 ms** | 0.57 ms | - | - |
+| tty | **2.0 KB** | 42.4 KB | **564 KB** | 1,780 KB | **0.42 ms** | 1.34 ms | - | - |
+| wc | **11.7 KB** | 66.5 KB | **716 KB** | 2,188 KB | **0.16 ms** | 0.79 ms | 224 MB/s | **322 MB/s** |
+| whoami | **2.2 KB** | 42.4 KB | **812 KB** | 2,140 KB | **0.19 ms** | 1.00 ms | - | - |
+| yes | **1.8 KB** | 42.4 KB | **1,912 KB** | 1,948 KB | **0.93 ms** | 4.30 ms | 2.3 GB/s | **2.4 GB/s** |
 
-Assembly binaries average **5.2 KB** (vs 45.5 KB for GNU C) — **8.7x smaller**. Startup is **2–10x faster** due to zero dynamic linking overhead. Data-processing tools like **rev** (10.2x throughput) and **cut** (2.3x throughput) show significant speedups; I/O-bound tools like **yes** and **base64** converge to kernel limits.
+- **Size** — Stripped binary on disk. Assembly averages **5.2 KB** vs 45.5 KB for GNU C (8.7x smaller)
+- **Memory** — Peak resident set size (RSS) during execution, measured with `/usr/bin/time -v`
+- **Startup** — Wall-clock time to run with trivial or no input (hyperfine, 200+ runs). Assembly is faster because there is no dynamic linker, no libc init, and no relocation overhead
+- **Throughput** — Sustained data processing rate on a 10 MB file (10 MB / wall time). `-` means the tool only prints a short string and exits, so throughput is not applicable. Tools like rev (10.2x) and cut (2.3x) show large gains; I/O-bound tools (yes, base64) converge to kernel limits
 
 On **Linux x86_64** and **Linux ARM64**, releases ship assembly binaries. All other platforms (macOS, Windows) use the Rust implementation.
 
