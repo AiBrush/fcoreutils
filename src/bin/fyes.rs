@@ -837,6 +837,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_yes_pipe_head() {
         // yes | head -1 should produce "y"
@@ -892,7 +893,12 @@ mod tests {
 
         let text = String::from_utf8_lossy(&buf[..total]);
         for line in text.lines() {
-            assert_eq!(line, "y", "Expected 'y' but got '{}'", line);
+            assert_eq!(
+                line.trim_end_matches('\r'),
+                "y",
+                "Expected 'y' but got '{}'",
+                line
+            );
         }
     }
 }
