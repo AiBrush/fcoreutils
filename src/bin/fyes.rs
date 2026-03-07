@@ -346,11 +346,11 @@ fn write_error_and_exit(err: &std::io::Error) -> ! {
             }
             unsafe {
                 // Set program name to "yes" (not "fyes") to match GNU output
-                program_invocation_name = b"yes\0".as_ptr() as *mut libc::c_char;
+                program_invocation_name = c"yes".as_ptr() as *mut libc::c_char;
                 error(
                     0,
                     errno,
-                    b"standard output\0".as_ptr() as *const libc::c_char,
+                    c"standard output".as_ptr(),
                 );
                 libc::_exit(1);
             }
