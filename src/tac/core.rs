@@ -1,8 +1,6 @@
 use std::io::{self, IoSlice, Write};
 
-/// Maximum number of iovec/IoSlice entries per writev/write_vectored call.
-/// 1024 on Linux and macOS; POSIX minimum is 16 but all modern Unix systems
-/// support at least 1024. Used for both writev batching and IoSlice batching.
+/// Maximum number of IoSlice entries per write_vectored call.
 const IOV_MAX: usize = 1024;
 
 /// Reverse records separated by a single byte.
@@ -18,51 +16,95 @@ pub fn tac_bytes(data: &[u8], separator: u8, before: bool, out: &mut impl Write)
     }
 }
 
-/// Stream reversed byte-separated records directly to an fd using writev zero-copy.
-/// For small data (<64KB), builds a contiguous buffer and uses a single write() to
-/// avoid writev setup overhead. For medium data (<= 1MB), uses writev. For large
-/// data, processes in ~1MB chunks.
+/// Stream reversed byte-separated records directly to an fd using contiguous
+/// 2MB output buffer. Uses u32 positions for files ≤4GB to halve cache pressure
+/// during reverse iteration; falls back to usize for larger files.
 #[cfg(unix)]
 pub fn tac_bytes_to_fd(data: &[u8], separator: u8, before: bool, fd: i32) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
-    // Fast path for small data: single contiguous write avoids writev overhead
-    const FAST_THRESHOLD: usize = 64 * 1024;
-    if data.len() <= FAST_THRESHOLD {
-        return tac_bytes_fast(data, separator, before, fd);
+    // u32 positions for ≤4GB (halves position array cache footprint)
+    if data.len() <= u32::MAX as usize {
+        return tac_bytes_to_fd_generic::<u32>(data, separator, before, fd);
     }
-    tac_bytes_fd_impl(data, separator, fd, before)
+    // >4GB fallback
+    tac_bytes_to_fd_generic::<usize>(data, separator, before, fd)
 }
 
-/// Fast path for small data: scans for separator positions, builds a contiguous
-/// output buffer in reversed record order, and writes it with a single write() call.
-/// This avoids writev setup overhead (iovec allocation, kernel scatter/gather)
-/// which dominates for files with few records.
+/// Trait for position types used in tac reverse iteration.
+/// Allows `u32` (for ≤4GB, halves cache pressure) and `usize` (for >4GB).
+trait TacPos: Copy {
+    fn from_usize(v: usize) -> Self;
+    fn as_usize(self) -> usize;
+}
+impl TacPos for u32 {
+    #[inline(always)]
+    fn from_usize(v: usize) -> Self {
+        v as u32
+    }
+    #[inline(always)]
+    fn as_usize(self) -> usize {
+        self as usize
+    }
+}
+impl TacPos for usize {
+    #[inline(always)]
+    fn from_usize(v: usize) -> Self {
+        v
+    }
+    #[inline(always)]
+    fn as_usize(self) -> usize {
+        self
+    }
+}
+
+/// Generic contiguous-buffer reverse implementation. Parameterized over the
+/// position type (`u32` for ≤4GB to halve cache pressure, `usize` for >4GB).
+/// SIMD memchr scan → position vec → reverse iterate → extend_from_slice into
+/// 2MB buffer → write_all_fd. For a 10MB file with ~250K lines this produces
+/// ~5 write() syscalls vs ~244 writev() calls in the old approach.
 #[cfg(unix)]
-fn tac_bytes_fast(data: &[u8], sep: u8, before: bool, fd: i32) -> io::Result<()> {
-    let mut positions: Vec<u32> = Vec::with_capacity(data.len() / 40 + 64);
+fn tac_bytes_to_fd_generic<P: TacPos>(
+    data: &[u8],
+    sep: u8,
+    before: bool,
+    fd: i32,
+) -> io::Result<()> {
+    let mut positions: Vec<P> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
-        positions.push(pos as u32);
+        positions.push(P::from_usize(pos));
     }
     if positions.is_empty() {
         return write_all_fd(fd, data);
     }
-    let mut buf: Vec<u8> = Vec::with_capacity(data.len());
+
+    const FLUSH_SIZE: usize = 2 * 1024 * 1024;
+    let buf_cap = data.len().min(FLUSH_SIZE + 256 * 1024);
+    let mut buf: Vec<u8> = Vec::with_capacity(buf_cap);
     let mut end_pos = data.len();
+
     if !before {
         for &pos in positions.iter().rev() {
-            let rec_start = pos as usize + 1;
+            let rec_start = pos.as_usize() + 1;
             if rec_start < end_pos {
                 buf.extend_from_slice(&data[rec_start..end_pos]);
+                if buf.len() >= FLUSH_SIZE {
+                    write_all_fd(fd, &buf)?;
+                    buf.clear();
+                }
             }
             end_pos = rec_start;
         }
     } else {
         for &pos in positions.iter().rev() {
-            let p = pos as usize;
+            let p = pos.as_usize();
             if p < end_pos {
                 buf.extend_from_slice(&data[p..end_pos]);
+                if buf.len() >= FLUSH_SIZE {
+                    write_all_fd(fd, &buf)?;
+                    buf.clear();
+                }
             }
             end_pos = p;
         }
@@ -70,7 +112,10 @@ fn tac_bytes_fast(data: &[u8], sep: u8, before: bool, fd: i32) -> io::Result<()>
     if end_pos > 0 {
         buf.extend_from_slice(&data[..end_pos]);
     }
-    write_all_fd(fd, &buf)
+    if !buf.is_empty() {
+        write_all_fd(fd, &buf)?;
+    }
+    Ok(())
 }
 
 /// Reverse records of an owned Vec. Delegates to tac_bytes.
@@ -96,7 +141,7 @@ fn collect_positions_str(data: &[u8], separator: &[u8]) -> Vec<usize> {
 /// After-separator mode: forward SIMD scan + streaming output.
 /// For small data (<256KB), collects all records into a single Vec and does one
 /// write_all call, eliminating multiple write() syscalls.
-/// For large data, streams in 1MB chunks that fit in L2 cache.
+/// For large data, streams in 2MB chunks.
 fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
@@ -124,7 +169,7 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
         return out.write_all(&buf);
     }
 
-    const BUF_SIZE: usize = 1024 * 1024;
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut end_pos = data.len();
     for &pos in positions.iter().rev() {
@@ -164,7 +209,7 @@ fn tac_bytes_after(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()>
 /// Before-separator mode: forward SIMD scan + streaming output.
 /// For small data (<256KB), collects all records into a single Vec and does one
 /// write_all call, eliminating multiple write() syscalls.
-/// For large data, streams in 1MB chunks that fit in L2 cache.
+/// For large data, streams in 2MB chunks.
 fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()> {
     let mut positions: Vec<usize> = Vec::with_capacity(data.len() / 40 + 64);
     for pos in memchr::memchr_iter(sep, data) {
@@ -191,7 +236,7 @@ fn tac_bytes_before(data: &[u8], sep: u8, out: &mut impl Write) -> io::Result<()
         return out.write_all(&buf);
     }
 
-    const BUF_SIZE: usize = 1024 * 1024;
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
     let mut buf: Vec<u8> = Vec::with_capacity(BUF_SIZE);
     let mut end_pos = data.len();
     for &pos in positions.iter().rev() {
@@ -250,191 +295,6 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
                 continue;
             }
             return Err(err);
-        }
-    }
-    Ok(())
-}
-
-/// Write iovec batch to fd via writev, then clear the vec for reuse.
-#[cfg(unix)]
-#[inline]
-fn writev_all_fd(fd: i32, iovecs: &mut Vec<libc::iovec>) -> io::Result<()> {
-    if iovecs.is_empty() {
-        return Ok(());
-    }
-    let mut idx: usize = 0;
-    let mut partial_off: usize = 0;
-    while idx < iovecs.len() {
-        if partial_off > 0 {
-            // Safety: each partial write advances iov_base by written bytes and
-            // reduces iov_len. This maintains the invariant that
-            // iov_base..iov_base+iov_len is within the original allocation for
-            // all subsequent iterations. `partial_off` is always < the current
-            // (possibly already-mutated) iov_len at the time it was set. On
-            // EINTR after mutation, partial_off is 0 and the already-advanced
-            // iov_base is retried correctly. The pointer derives from a live
-            // mmap/slice region that outlives this call.
-            iovecs[idx].iov_base =
-                unsafe { (iovecs[idx].iov_base as *const u8).add(partial_off) } as *mut _;
-            iovecs[idx].iov_len -= partial_off;
-            partial_off = 0;
-        }
-        let cnt = (iovecs.len() - idx).min(IOV_MAX) as i32;
-        let ret = unsafe { libc::writev(fd, iovecs[idx..].as_ptr(), cnt) };
-        if ret > 0 {
-            let mut n = ret as usize;
-            while n > 0 && idx < iovecs.len() {
-                if n >= iovecs[idx].iov_len {
-                    n -= iovecs[idx].iov_len;
-                    idx += 1;
-                } else {
-                    partial_off = n;
-                    n = 0;
-                }
-            }
-        } else if ret == 0 {
-            iovecs.clear();
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "writev returned 0",
-            ));
-        } else {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            iovecs.clear();
-            return Err(err);
-        }
-    }
-    iovecs.clear();
-    Ok(())
-}
-
-/// Chunked forward SIMD scan + writev zero-copy from source buffer.
-///
-/// Processes data in ~1MB chunks (aligned to separator boundaries) to keep the
-/// positions Vec in L2 cache. Records are written directly from the source buffer
-/// via writev, eliminating all data copying. Reuses positions and iovecs Vecs
-/// across chunks.
-///
-/// When `before` is false (after-separator mode), record boundaries are at sep+1.
-/// When `before` is true, record boundaries are at the separator position itself.
-#[cfg(unix)]
-fn tac_bytes_fd_impl(data: &[u8], sep: u8, fd: i32, before: bool) -> io::Result<()> {
-    const CHUNK_SIZE: usize = 1024 * 1024;
-
-    /// Given a separator position, return the record start (after-mode: pos+1, before-mode: pos).
-    // Note: LLVM const-folds the `before` branch since callers pass literals.
-    #[inline(always)]
-    fn rec_start(pos: usize, before: bool) -> usize {
-        if before { pos } else { pos + 1 }
-    }
-
-    // For small data, single-pass is optimal
-    if data.len() <= CHUNK_SIZE {
-        let mut positions: Vec<u32> = Vec::with_capacity(data.len() / 40 + 64);
-        for pos in memchr::memchr_iter(sep, data) {
-            positions.push(pos as u32); // safe: CHUNK_SIZE (1MB) fits in u32
-        }
-        if positions.is_empty() {
-            return write_all_fd(fd, data);
-        }
-        let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(IOV_MAX);
-        let mut end_pos = data.len();
-        for &pos in positions.iter().rev() {
-            let rs = rec_start(pos as usize, before);
-            if rs < end_pos {
-                iovecs.push(libc::iovec {
-                    // Safety: writev only reads through iov_base; *mut cast required by POSIX ABI.
-                    iov_base: data[rs..].as_ptr() as *mut libc::c_void,
-                    iov_len: end_pos - rs,
-                });
-                if iovecs.len() >= IOV_MAX {
-                    writev_all_fd(fd, &mut iovecs)?;
-                }
-            }
-            end_pos = rs;
-        }
-        if end_pos > 0 {
-            iovecs.push(libc::iovec {
-                // Safety: writev only reads through iov_base; *mut cast required by POSIX ABI.
-                iov_base: data.as_ptr() as *mut libc::c_void,
-                iov_len: end_pos,
-            });
-        }
-        if !iovecs.is_empty() {
-            writev_all_fd(fd, &mut iovecs)?;
-        }
-        return Ok(());
-    }
-
-    // Large data: find chunk boundaries at separator positions.
-    // Use memrchr to find the rightmost separator near the target, yielding
-    // more uniform ~CHUNK_SIZE chunks (memchr would find leftmost, producing
-    // potentially tiny chunks).
-    let mut chunk_bounds: Vec<usize> = Vec::with_capacity(data.len() / CHUNK_SIZE + 2);
-    chunk_bounds.push(data.len());
-    let mut target = data.len().saturating_sub(CHUNK_SIZE);
-    while target > 0 {
-        let search_end = (target + CHUNK_SIZE).min(*chunk_bounds.last().unwrap());
-        // In after-mode boundary = offset+1, so the rightmost sep at search_end-1
-        // produces boundary == search_end which is skipped. Worst case is a 2×CHUNK_SIZE
-        // chunk when separators cluster at window edges. This is acceptable since the
-        // search window is narrow.
-        if let Some(offset) = memchr::memrchr(sep, &data[target..search_end]) {
-            let boundary = rec_start(target + offset, before);
-            if boundary < *chunk_bounds.last().unwrap() {
-                chunk_bounds.push(boundary);
-            }
-        }
-        target = target.saturating_sub(CHUNK_SIZE);
-    }
-    chunk_bounds.push(0);
-    chunk_bounds.reverse();
-
-    // Reusable buffers across chunks. Use usize for positions in the large-data
-    // path because chunk boundaries may span >4GB when separators are absent.
-    // Chunks can be up to 2*CHUNK_SIZE when separators cluster at window edges,
-    // so double the capacity estimate to avoid mid-loop reallocation.
-    let mut positions: Vec<usize> = Vec::with_capacity((CHUNK_SIZE * 2) / 40 + 64);
-    let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(IOV_MAX);
-
-    for ci in (0..chunk_bounds.len() - 1).rev() {
-        let chunk_start = chunk_bounds[ci];
-        let chunk_end = chunk_bounds[ci + 1];
-        let chunk = &data[chunk_start..chunk_end];
-        if chunk.is_empty() {
-            continue;
-        }
-        positions.clear();
-        for pos in memchr::memchr_iter(sep, chunk) {
-            positions.push(pos);
-        }
-        let mut end_pos = chunk.len();
-        for &pos in positions.iter().rev() {
-            let rs = rec_start(pos, before);
-            if rs < end_pos {
-                iovecs.push(libc::iovec {
-                    // Safety: writev only reads through iov_base; *mut cast required by POSIX ABI.
-                    iov_base: chunk[rs..].as_ptr() as *mut libc::c_void,
-                    iov_len: end_pos - rs,
-                });
-                if iovecs.len() >= IOV_MAX {
-                    writev_all_fd(fd, &mut iovecs)?;
-                }
-            }
-            end_pos = rs;
-        }
-        if end_pos > 0 {
-            iovecs.push(libc::iovec {
-                // Safety: writev only reads through iov_base; *mut cast required by POSIX ABI.
-                iov_base: chunk.as_ptr() as *mut libc::c_void,
-                iov_len: end_pos,
-            });
-        }
-        if !iovecs.is_empty() {
-            writev_all_fd(fd, &mut iovecs)?;
         }
     }
     Ok(())
