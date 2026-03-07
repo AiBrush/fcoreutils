@@ -6,10 +6,10 @@ use rayon::prelude::*;
 /// Linux UIO_MAXIOV is 1024; we use that as our batch limit.
 const MAX_IOV: usize = 1024;
 
-/// Stream buffer: 512KB — balances SIMD LUT amortization with pipeline latency.
-/// Large enough to cover SIMD setup overhead across many iterations, small enough
-/// that downstream pipeline stages aren't starved for long.
-const STREAM_BUF: usize = 512 * 1024;
+/// Stream buffer: 4MB — larger buffer amortizes syscall overhead across fewer
+/// iterations. For 10MB input this means ~3 read+translate+write cycles instead
+/// of ~20 with 512KB. SIMD translate is so fast that syscall count dominates.
+const STREAM_BUF: usize = 4 * 1024 * 1024;
 
 /// Minimum data size to engage rayon parallel processing for mmap/batch paths.
 /// For 10MB benchmark files, parallel tr translate was a 105% REGRESSION
@@ -2591,8 +2591,6 @@ pub fn translate(
     }
 
     // General case: IN-PLACE translation on a SINGLE buffer.
-    // Fill the buffer fully before processing — SIMD translate is trivial
-    // compared to syscall overhead, so fewer larger write_all() calls win.
     let mut buf = alloc_uninit_vec(STREAM_BUF);
     loop {
         let n = read_full(reader, &mut buf)?;
@@ -2624,8 +2622,8 @@ fn translate_and_write_table(
 }
 
 /// Streaming SIMD range translation — single buffer, in-place transform.
-/// Fills buffer fully before processing — SIMD translate is trivial compared
-/// to syscall overhead, so fewer larger write_all() calls win.
+/// Uses 4MB buffer to reduce syscall count (~3 iterations for 10MB instead of ~20).
+/// SIMD translate is trivial compared to syscall overhead, so fewer larger calls win.
 /// For chunks >= PARALLEL_THRESHOLD, uses rayon par_chunks_mut for multi-core.
 fn translate_range_stream(
     lo: u8,
@@ -3946,11 +3944,12 @@ fn translate_mmap_range(
         return writer.write_all(&buf);
     }
 
-    // Chunked SIMD translate: 2MB buffer — fewer write() syscalls for large files.
-    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
+    // Chunked SIMD translate: 2MB buffer reused across iterations.
+    // After the first iteration, buffer pages are warm (no more faults).
+    // Combined with MADV_POPULATE_READ on the input mmap, this is optimal:
+    // batched input faults + warm output buffer + minimal write() calls.
     const CHUNK: usize = 2 * 1024 * 1024;
-    let buf_size = data.len().min(CHUNK);
-    let mut buf = alloc_uninit_vec(buf_size);
+    let mut buf = alloc_uninit_vec(data.len().min(CHUNK));
     for chunk in data.chunks(CHUNK) {
         translate_range_simd(chunk, &mut buf[..chunk.len()], lo, hi, offset);
         writer.write_all(&buf[..chunk.len()])?;
@@ -3990,11 +3989,9 @@ fn translate_mmap_range_to_constant(
         return writer.write_all(&buf);
     }
 
-    // Chunked translate: 2MB buffer — fewer write() syscalls for large files.
-    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
+    // Chunked translate: 2MB buffer reused across iterations. Warm after first use.
     const CHUNK: usize = 2 * 1024 * 1024;
-    let buf_size = data.len().min(CHUNK);
-    let mut buf = alloc_uninit_vec(buf_size);
+    let mut buf = alloc_uninit_vec(data.len().min(CHUNK));
     for chunk in data.chunks(CHUNK) {
         buf[..chunk.len()].copy_from_slice(chunk);
         translate_range_to_constant_simd_inplace(&mut buf[..chunk.len()], lo, hi, replacement);
@@ -4021,11 +4018,9 @@ fn translate_mmap_table(data: &[u8], writer: &mut impl Write, table: &[u8; 256])
         return writer.write_all(&buf);
     }
 
-    // Chunked translate: 2MB buffer — fewer write() syscalls for large files.
-    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
+    // Chunked translate: 2MB buffer reused across iterations. Warm after first use.
     const CHUNK: usize = 2 * 1024 * 1024;
-    let buf_size = data.len().min(CHUNK);
-    let mut buf = alloc_uninit_vec(buf_size);
+    let mut buf = alloc_uninit_vec(data.len().min(CHUNK));
     for chunk in data.chunks(CHUNK) {
         translate_to(chunk, &mut buf[..chunk.len()], table);
         writer.write_all(&buf[..chunk.len()])?;
@@ -4324,6 +4319,20 @@ pub fn translate_squeeze_mmap(
 /// For data <= 16MB: delete into one buffer, one write syscall.
 /// For data > 16MB: chunked approach to limit memory.
 pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) -> io::Result<()> {
+    // MADV_POPULATE_READ (Linux 5.14+) batches page faults into one kernel call
+    // instead of ~2500 individual demand faults for 10MB. Returns EINVAL on older
+    // kernels — silently ignored as it is advisory.
+    #[cfg(target_os = "linux")]
+    if data.len() >= 2 * 1024 * 1024 {
+        const MADV_POPULATE_READ: libc::c_int = 22;
+        unsafe {
+            libc::madvise(
+                data.as_ptr() as *mut libc::c_void,
+                data.len(),
+                MADV_POPULATE_READ,
+            );
+        }
+    }
     if delete_chars.len() == 1 {
         return delete_single_char_mmap(delete_chars[0], data, writer);
     }
