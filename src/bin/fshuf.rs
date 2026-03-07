@@ -669,12 +669,26 @@ fn run_range_shuffle(
             let j = i + rng.gen_range(n - i);
             values.swap(i, j);
         }
-        const OUT_CHUNK: usize = 1024 * 1024;
-        let mut buf = Vec::with_capacity(OUT_CHUNK + 32);
+        const OUT_CHUNK: usize = 2 * 1024 * 1024;
+        // SAFETY: capacity has 64 bytes of headroom past OUT_CHUNK.
+        // Each iteration writes at most 11 bytes (10-digit u32 + delimiter).
+        // pos can enter an iteration at OUT_CHUNK - 1 (just below the flush
+        // threshold), so the maximum pos after the write is OUT_CHUNK + 10,
+        // an overshoot of 10 bytes — well within the 64-byte headroom.
+        let mut buf: Vec<u8> = Vec::with_capacity(OUT_CHUNK + 64);
+        let mut pos = 0usize;
+        let mut base = buf.as_mut_ptr();
         for &val in values.iter().take(count) {
-            buf.extend_from_slice(ibuf.format(val).as_bytes());
-            buf.push(delimiter);
-            if buf.len() >= OUT_CHUNK {
+            let s = ibuf.format(val).as_bytes();
+            let slen = s.len();
+            unsafe {
+                std::ptr::copy_nonoverlapping(s.as_ptr(), base.add(pos), slen);
+                pos += slen;
+                *base.add(pos) = delimiter;
+                pos += 1;
+            }
+            if pos >= OUT_CHUNK {
+                unsafe { buf.set_len(pos) };
                 match checked_write_all(out, &buf) {
                     Ok(false) => return,
                     Err(err) => {
@@ -684,9 +698,17 @@ fn run_range_shuffle(
                     _ => {}
                 }
                 buf.clear();
+                pos = 0;
+                // Re-derive base: the preceding buf.set_len(pos) and buf.clear()
+                // take &mut self, and checked_write_all takes a shared &buf borrow.
+                // All three invalidate the raw pointer under Stacked Borrows.
+                // Vec::clear() does not reallocate, so the pointer value is identical,
+                // but re-deriving resets the aliasing model.
+                base = buf.as_mut_ptr();
             }
         }
-        if !buf.is_empty() {
+        if pos > 0 {
+            unsafe { buf.set_len(pos) };
             match checked_write_all(out, &buf) {
                 Ok(false) => process::exit(0),
                 Err(err) => {
