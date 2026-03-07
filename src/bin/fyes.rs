@@ -146,21 +146,18 @@ fn main() {
     let line_bytes = line.as_bytes();
     let line_len = line_bytes.len();
 
-    // Try to increase stdout pipe buffer to 1MB for fewer context switches.
-    // Best-effort — fails silently on non-pipes or restricted environments.
-    // Read back actual pipe size to clamp write buffer accordingly.
+    // Detect whether stdout is a pipe via F_GETPIPE_SZ.
+    // When writing to a pipe, use GNU yes's BUFSIZ (8192) to match EPIPE
+    // timing exactly — this ensures error messages interleave with data
+    // identically when stderr/stdout are merged (2>&1 in test harnesses).
+    // For non-pipe targets (/dev/null, files), use the larger BUF_SIZE.
     #[cfg(target_os = "linux")]
-    let actual_pipe_sz = unsafe {
-        libc::fcntl(1, libc::F_SETPIPE_SZ, 1024 * 1024);
-        let sz = libc::fcntl(1, libc::F_GETPIPE_SZ);
-        if sz > 0 { sz as usize } else { BUF_SIZE }
-    };
+    let is_pipe = unsafe { libc::fcntl(1, libc::F_GETPIPE_SZ) > 0 };
     #[cfg(not(target_os = "linux"))]
-    let actual_pipe_sz = BUF_SIZE;
+    let is_pipe = false;
 
-    // Clamp write buffer to actual pipe size to avoid stalling on smaller pipes.
-    // On default 64KB pipes (when F_SETPIPE_SZ fails), this uses 64KB instead of 128KB.
-    let buf_target = BUF_SIZE.min(actual_pipe_sz);
+    const GNU_BUFSIZ: usize = 8192;
+    let buf_target = if is_pipe { GNU_BUFSIZ } else { BUF_SIZE };
 
     // Build a buffer filled with repeated copies of the line.
     // The buffer length is always an exact multiple of line_len so that
@@ -173,9 +170,10 @@ fn main() {
     let buf = if line_len >= buf_target {
         line_bytes.to_vec()
     } else {
-        // Number of copies that fills at least buf_target bytes,
-        // rounded up to a full line.
-        let copies = buf_target.div_ceil(line_len);
+        // Number of whole copies that fit within buf_target bytes.
+        // Uses floor division to match GNU yes's BUFSIZ/line_len behavior,
+        // ensuring identical write sizes for identical buffer targets.
+        let copies = (buf_target / line_len).max(1);
         let mut v = Vec::with_capacity(copies * line_len);
         for _ in 0..copies {
             v.extend_from_slice(line_bytes);
@@ -184,21 +182,23 @@ fn main() {
     };
     let total = buf.len();
 
-    // Raw write(2) loop — with SIGPIPE=SIG_DFL, a write to a closed pipe
-    // delivers SIGPIPE which kills the process (matching GNU yes behavior).
-    //
-    // Hot loop optimized: the fast path (full write) is a tight
-    // syscall-compare-jump loop. Error handling is in a cold #[inline(never)]
-    // function to keep the hot path's instruction footprint small.
+    // Write loop dispatch:
+    // - Pipes: use libc::write() to match GNU yes's full_write() timing
+    //   and EPIPE detection, ensuring identical error interleaving.
+    // - Non-pipes (/dev/null, files): use inline syscall for max throughput.
     let ptr = buf.as_ptr();
-    write_loop(ptr, total);
+    if is_pipe {
+        write_loop_libc(ptr, total);
+    } else {
+        write_loop_fast(ptr, total);
+    }
 }
 
-/// Hot write loop — separated from main() so the compiler can optimize it
-/// independently. Uses inline syscall on x86_64 Linux to bypass libc's
-/// PLT indirection and errno-setting overhead.
+/// Fast write loop for non-pipe targets (/dev/null, files).
+/// Uses inline syscall on x86_64 Linux to bypass libc's PLT indirection
+/// and errno-setting overhead.
 #[inline(never)]
-fn write_loop(ptr: *const u8, total: usize) -> ! {
+fn write_loop_fast(ptr: *const u8, total: usize) -> ! {
     let total_isize = total as isize;
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -260,6 +260,32 @@ fn write_loop(ptr: *const u8, total: usize) -> ! {
     }
 }
 
+/// Compat write loop for pipe targets. Uses libc::write() to match GNU
+/// yes's full_write() behavior, ensuring identical EPIPE detection timing
+/// and error message interleaving when stderr/stdout share a fd.
+#[inline(never)]
+fn write_loop_libc(ptr: *const u8, total: usize) -> ! {
+    let total_isize = total as isize;
+    loop {
+        let ret = unsafe { libc::write(1, ptr as *const libc::c_void, total as _) };
+        if ret as isize == total_isize {
+            continue;
+        }
+        if ret > 0 {
+            drain_partial(ptr, total, ret as usize);
+            continue;
+        }
+        if ret == 0 {
+            process::exit(1);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        write_error_and_exit(&err);
+    }
+}
+
 /// Drain remaining bytes after a partial write. Rare path — kept out of
 /// the hot loop to reduce instruction cache pressure.
 #[cold]
@@ -290,9 +316,48 @@ fn drain_partial(ptr: *const u8, total: usize, initial: usize) {
 
 /// Write error diagnostic to stderr and exit. Cold path — never inlined
 /// to keep the hot loop's instruction footprint minimal.
+///
+/// On Linux/glibc, uses glibc's `error()` function to exactly match GNU yes's
+/// error output pattern. GNU coreutils calls `error(EXIT_FAILURE, errno, "...")`,
+/// which internally uses multiple fprintf calls to unbuffered stderr, each
+/// becoming a separate write(2) syscall. When stderr and stdout share the same
+/// fd (via `2>&1` in test harnesses), the exact interleaving of these writes
+/// with data writes matters for reproducibility in tests.
 #[cold]
 #[inline(never)]
 fn write_error_and_exit(err: &std::io::Error) -> ! {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(errno) = err.raw_os_error() {
+            // Use glibc error() to exactly replicate GNU yes's stderr output.
+            // error(status, errnum, format, ...) writes:
+            //   program_name: format: strerror(errnum)\n
+            // using multiple write(2) syscalls to unbuffered stderr.
+            unsafe extern "C" {
+                // glibc error() from <error.h>
+                unsafe fn error(
+                    status: libc::c_int,
+                    errnum: libc::c_int,
+                    format: *const libc::c_char,
+                    ...
+                );
+                // glibc global: controls the program name shown by error()
+                static mut program_invocation_name: *mut libc::c_char;
+            }
+            unsafe {
+                // Set program name to "yes" (not "fyes") to match GNU output
+                program_invocation_name = b"yes\0".as_ptr() as *mut libc::c_char;
+                error(
+                    0,
+                    errno,
+                    b"standard output\0".as_ptr() as *const libc::c_char,
+                );
+                libc::_exit(1);
+            }
+        }
+    }
+
+    // Fallback for non-Linux or errors without an OS error code
     let msg = coreutils_rs::common::io_error_msg(err);
     let error_line = format!("{}: standard output: {}\n", TOOL_NAME, msg);
     let _ = unsafe {

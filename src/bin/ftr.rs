@@ -5,6 +5,8 @@ use std::mem::ManuallyDrop;
 use std::os::unix::io::FromRawFd;
 use std::process;
 
+#[cfg(unix)]
+use coreutils_rs::common::io::try_mmap_stdin;
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::tr;
 
@@ -214,22 +216,33 @@ fn main() {
             tr::expand_set2(set2_str, set1.len())
         };
 
-        // Always use streaming translate — never mmap.
-        // mmap causes ~2600 individual page faults for 10MB (one per 4KB page),
-        // adding ~5ms of kernel time. read() avoids this by copying from page cache
-        // into an already-faulted buffer with zero demand paging overhead.
+        // Try mmap for regular file stdin (redirect): uses translate_mmap which
+        // processes data zero-copy from page cache, avoiding 2MB buffer allocation.
+        // Falls back to streaming translate for pipes/terminals.
+        #[cfg(unix)]
+        let stdin_mmap = try_mmap_stdin(2 * 1024 * 1024);
+
         let result = {
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             {
-                let mut reader = RawStdin;
-                let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-                tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
-            }
-            #[cfg(all(unix, not(target_os = "linux")))]
-            {
-                let stdin = io::stdin();
-                let mut reader = stdin.lock();
-                tr::translate(&set1, &set2, &mut reader, &mut *raw)
+                if let Some(ref data) = stdin_mmap {
+                    let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                    tr::translate_mmap(&set1, &set2, data, &mut *raw_out)
+                } else {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let mut reader = RawStdin;
+                        let mut raw_out =
+                            unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+                        tr::translate(&set1, &set2, &mut reader, &mut *raw_out)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let stdin = io::stdin();
+                        let mut reader = stdin.lock();
+                        tr::translate(&set1, &set2, &mut reader, &mut *raw)
+                    }
+                }
             }
             #[cfg(not(unix))]
             {
@@ -250,10 +263,27 @@ fn main() {
     }
 
     // Non-translate modes (delete, squeeze, etc.).
-    // Always use streaming — mmap causes ~2500 page faults for 10MB, adding 5+ ms.
+    // Try mmap for regular file stdin; fall back to streaming for pipes/terminals.
+    // Parse sets and validate args first (shared between mmap and streaming paths).
     let parsed = parse_non_translate_args(&cli, set1_str);
 
-    let result = {
+    // Try mmap on Unix — any regular file benefits (threshold 0).
+    #[cfg(unix)]
+    let stdin_mmap = try_mmap_stdin(0);
+
+    #[cfg(unix)]
+    let mmap_result = if let Some(ref data) = stdin_mmap {
+        let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
+        Some(run_mmap_mode(&parsed, data, &mut *raw_out))
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let mmap_result: Option<io::Result<()>> = None;
+
+    let result = if let Some(r) = mmap_result {
+        r
+    } else {
         #[cfg(target_os = "linux")]
         {
             let mut raw_out = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
@@ -297,7 +327,7 @@ enum ParsedMode {
 
 /// Parse and validate arguments for non-translate modes.
 /// Performs all error checking and set expansion, then returns a ParsedMode
-/// that can be dispatched to the streaming handler.
+/// that can be dispatched to either mmap or streaming.
 fn parse_non_translate_args(cli: &Cli, set1_str: &str) -> ParsedMode {
     if cli.delete && cli.squeeze {
         if cli.sets.len() < 2 {
@@ -371,6 +401,22 @@ fn parse_non_translate_args(cli: &Cli, set1_str: &str) -> ParsedMode {
         eprintln!("Two strings must be given when translating.");
         eprintln!("Try 'tr --help' for more information.");
         process::exit(1);
+    }
+}
+
+/// Dispatch mmap-backed non-translate modes.
+/// Called when stdin is a regular file and mmap succeeded.
+fn run_mmap_mode(parsed: &ParsedMode, data: &[u8], writer: &mut impl Write) -> io::Result<()> {
+    match parsed {
+        ParsedMode::DeleteSqueeze {
+            delete_set,
+            squeeze_set,
+        } => tr::delete_squeeze_mmap(delete_set, squeeze_set, data, writer),
+        ParsedMode::Delete { delete_set } => tr::delete_mmap(delete_set, data, writer),
+        ParsedMode::Squeeze { squeeze_set } => tr::squeeze_mmap(squeeze_set, data, writer),
+        ParsedMode::TranslateSqueeze { set1, set2 } => {
+            tr::translate_squeeze_mmap(set1, set2, data, writer)
+        }
     }
 }
 
