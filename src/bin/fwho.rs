@@ -112,6 +112,11 @@ fn main() {
                     }
                 }
             }
+            s if s.starts_with("--") => {
+                eprintln!("{}: unrecognized option '{}'", TOOL_NAME, s);
+                eprintln!("Try '{} --help' for more information.", TOOL_NAME);
+                process::exit(1);
+            }
             _ => positional.push(arg.into_owned()),
         }
     }
@@ -292,5 +297,27 @@ mod tests {
     fn test_who_am_i() {
         let output = cmd().args(["am", "i"]).output().unwrap();
         assert!(output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_invalid_option_exits_nonzero() {
+        let output = cmd().arg("--invalid").output().unwrap();
+        assert!(
+            !output.status.success(),
+            "fwho --invalid should exit with non-zero status"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_who_invalid_option_stderr() {
+        let output = cmd().arg("--invalid").output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unrecognized option"),
+            "stderr should contain 'unrecognized option', got: {}",
+            stderr
+        );
     }
 }

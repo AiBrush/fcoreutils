@@ -654,14 +654,43 @@ pub fn format_heading(config: &WhoConfig) -> String {
     out.trim_end().to_string()
 }
 
-/// Read boot time from /proc/stat (Linux-specific fallback).
+/// Read boot time, preferring systemd's /run/systemd/ birth time (matches GNU who)
+/// and falling back to /proc/stat btime.
 /// Returns the boot timestamp in seconds since epoch, or None if unavailable.
 #[cfg(target_os = "linux")]
 fn read_boot_time_from_proc() -> Option<i64> {
+    // Try statx() on /run/systemd/ first — its birth time matches GNU who's
+    // systemd UserspaceTimestamp, avoiding the ~1-2s skew of /proc/stat btime.
+    if let Some(ts) = read_boot_time_from_systemd() {
+        return Some(ts);
+    }
+
     let data = std::fs::read_to_string("/proc/stat").ok()?;
     for line in data.lines() {
         if let Some(val) = line.strip_prefix("btime ") {
             return val.trim().parse::<i64>().ok();
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn read_boot_time_from_systemd() -> Option<i64> {
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+
+    let c_path = CString::new("/run/systemd/").ok()?;
+    unsafe {
+        let mut statx_buf: libc::statx = MaybeUninit::zeroed().assume_init();
+        let rc = libc::statx(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            0,
+            libc::STATX_BTIME,
+            &mut statx_buf,
+        );
+        if rc == 0 && (statx_buf.stx_mask & libc::STATX_BTIME) != 0 {
+            return Some(statx_buf.stx_btime.tv_sec);
         }
     }
     None
