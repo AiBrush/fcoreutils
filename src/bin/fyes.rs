@@ -317,41 +317,34 @@ fn drain_partial(ptr: *const u8, total: usize, initial: usize) {
 /// Write error diagnostic to stderr and exit. Cold path — never inlined
 /// to keep the hot loop's instruction footprint minimal.
 ///
-/// On Linux/glibc, uses glibc's `error()` function to exactly match GNU yes's
-/// error output pattern. GNU coreutils calls `error(EXIT_FAILURE, errno, "...")`,
-/// which internally uses multiple fprintf calls to unbuffered stderr, each
-/// becoming a separate write(2) syscall. When stderr and stdout share the same
-/// fd (via `2>&1` in test harnesses), the exact interleaving of these writes
-/// with data writes matters for reproducibility in tests.
+/// On Linux, formats the error into a single buffer and writes it with one
+/// write(2) syscall to avoid interleaving when stderr is merged with stdout
+/// (e.g. `yes 2>&1 | head`).
 #[cold]
 #[inline(never)]
 fn write_error_and_exit(err: &std::io::Error) -> ! {
     #[cfg(target_os = "linux")]
     {
         if let Some(errno) = err.raw_os_error() {
-            // Use glibc error() to exactly replicate GNU yes's stderr output.
-            // error(status, errnum, format, ...) writes:
-            //   program_name: format: strerror(errnum)\n
-            // using multiple write(2) syscalls to unbuffered stderr.
-            unsafe extern "C" {
-                // glibc error() from <error.h>
-                unsafe fn error(
-                    status: libc::c_int,
-                    errnum: libc::c_int,
-                    format: *const libc::c_char,
-                    ...
-                );
-                // glibc global: controls the program name shown by error()
-                static mut program_invocation_name: *mut libc::c_char;
-            }
+            // Use a single write(2) syscall to avoid interleaving when stderr
+            // is merged with stdout (e.g. `yes 2>&1 | head`).
             unsafe {
-                // Set program name to "yes" (not "fyes") to match GNU output
-                program_invocation_name = c"yes".as_ptr() as *mut libc::c_char;
-                error(
-                    0,
+                let mut strerr_buf = [0u8; 256];
+                let rc = libc::strerror_r(
                     errno,
-                    c"standard output".as_ptr(),
+                    strerr_buf.as_mut_ptr() as *mut libc::c_char,
+                    strerr_buf.len(),
                 );
+                let err_str = if rc == 0 {
+                    std::ffi::CStr::from_ptr(strerr_buf.as_ptr() as *const libc::c_char)
+                        .to_str()
+                        .unwrap_or("Unknown error")
+                } else {
+                    "Unknown error"
+                };
+                // Single write(2) with the full message
+                let msg = format!("yes: standard output: {}\n", err_str);
+                libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len() as _);
                 libc::_exit(1);
             }
         }
@@ -386,6 +379,14 @@ mod tests {
         path.pop();
         path.push("fyes");
         Command::new(path)
+    }
+
+    fn cmd_path() -> String {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("fyes");
+        path.to_string_lossy().into_owned()
     }
 
     #[test]
@@ -833,6 +834,65 @@ mod tests {
         assert!(lines.len() >= 2);
         for line in &lines[..2] {
             assert_eq!(*line, "--badopt");
+        }
+    }
+
+    #[test]
+    fn test_yes_pipe_head() {
+        // yes | head -1 should produce "y"
+        let output = std::process::Command::new("sh")
+            .args(["-c"])
+            .arg(format!("{} | head -1", cmd_path()))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "y");
+    }
+
+    #[test]
+    fn test_yes_epipe_clean_exit() {
+        // Pipe fyes to a process that closes early - should not panic
+        let mut child = cmd()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Read a small amount then drop to trigger EPIPE
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buf = [0u8; 64];
+        let _ = stdout.read(&mut buf);
+        drop(stdout);
+        let result = child.wait_with_output().unwrap();
+        // Should exit (not panic). Exit code may be 1 or killed by signal
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            !stderr.contains("panicked"),
+            "fyes should not panic on EPIPE, stderr: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_yes_consistent_output() {
+        // Verify output is consistently "y\n" repeated
+        let mut child = cmd().stdout(Stdio::piped()).spawn().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buf = vec![0u8; 8192];
+        let mut total = 0;
+        while total < buf.len() {
+            let n = stdout.read(&mut buf[total..]).unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        drop(stdout);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let text = String::from_utf8_lossy(&buf[..total]);
+        for line in text.lines() {
+            assert_eq!(line, "y", "Expected 'y' but got '{}'", line);
         }
     }
 }
