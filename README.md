@@ -249,6 +249,7 @@ Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. The **bett
 | wc | **11.7 KB** | 66.5 KB | **716 KB** | 2,188 KB | **0.16 ms** | 0.79 ms | 224 MB/s | **322 MB/s** |
 | whoami | **2.2 KB** | 42.4 KB | **812 KB** | 2,140 KB | **0.19 ms** | 1.00 ms | - | - |
 | yes | **1.8 KB** | 42.4 KB | **1,912 KB** | 1,948 KB | **0.93 ms** | 4.30 ms | 2.3 GB/s | **2.4 GB/s** |
+| **Average** | **5.2 KB** | 46.8 KB | **1,290 KB** | 2,003 KB | **0.20 ms** | 1.10 ms | **764 MB/s** | 720 MB/s |
 
 - **Size** — Stripped binary on disk. Assembly averages **5.2 KB** vs 45.5 KB for GNU C (8.7x smaller)
 - **Memory** — Peak resident set size (RSS) during execution, measured with `/usr/bin/time -v`
