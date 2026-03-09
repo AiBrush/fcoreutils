@@ -67,6 +67,10 @@ TOOLS = {
     "wc":      {"type": "nasm_modular", "source": "tools/fwc.asm",
                 "modules": ["lib/io.asm", "lib/str.asm"],
                 "include": "."},
+    "nl":      {"type": "nasm_subdir",  "source": "unified/fnl_unified.asm"},
+    "od":      {"type": "nasm_modular", "source": "tools/fod.asm",
+                "modules": ["lib/io.asm"],
+                "include": "."},
     "arch":    {"type": "gas_unified",  "source": "farch_unified.s"},
 }
 
