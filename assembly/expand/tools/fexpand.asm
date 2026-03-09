@@ -10,9 +10,13 @@
 ;   /N prefix on last item: repeating interval after explicit stops
 ;   +N prefix on last item: relative repeating from last explicit stop
 ;
-; SIMD: SSE2 pcmpeqb to scan 16 bytes at a time for tabs (0x09).
-;   When a chunk has no tabs AND no special chars (\n, \b), blast it
-;   straight to the output buffer. Otherwise fall back to scalar.
+; Performance optimizations:
+;   - mmap() for file input (zero-copy, kernel prefetch, no read syscalls)
+;   - SSE2 SIMD scanning for tab/newline/backspace (16 bytes at a time)
+;   - 512KB output buffer with 256KB flush threshold
+;   - Inline space fill with unrolled stores for 1-8 spaces
+;   - Power-of-2 tab width uses AND instead of DIV
+;   - Falls back to read() for stdin (pipes can't be mmap'd)
 ;
 ; Register conventions (global):
 ;   r12 = out_buf_pos (bytes in output buffer)
@@ -35,6 +39,22 @@ extern asm_close
 ; ─── Constants ───────────────────────────────────────────
 %define MAX_TAB_STOPS   256
 %define MAX_FILES        256
+
+; mmap constants
+%define PROT_READ        1
+%define MAP_PRIVATE      2
+%define MAP_POPULATE     0x08000
+%define MADV_SEQUENTIAL  2
+%define MADV_HUGEPAGE    14
+%define SYS_MADVISE      28
+
+; struct stat offsets (x86-64 Linux)
+%define STAT_SIZE        144      ; sizeof(struct stat)
+%define ST_SIZE_OFF      48       ; offset of st_size in struct stat
+
+; Large output buffer
+%define OUT_BUF_SIZE_BIG   524288
+%define FLUSH_THRESHOLD_BIG 262144
 
 global _start
 
@@ -600,29 +620,113 @@ skip_number:
     ret
 
 ; ─── open_and_process(rsi=filename) ──────────────────────
+; Opens a file, tries mmap first, falls back to read() for empty/special files
 open_and_process:
     push    rbx
-    mov     rbx, rsi
+    push    r14
+    push    r15
+    mov     rbx, rsi                ; save filename
 
+    ; Open file
     mov     rdi, rsi
     xor     esi, esi                ; O_RDONLY
     xor     edx, edx
     mov     rax, SYS_OPEN
     syscall
-
     test    rax, rax
     js      .oap_error
 
-    push    rax
-    mov     edi, eax
-    call    process_fd
-    pop     rdi
+    mov     r14d, eax               ; fd
 
+    ; fstat to get file size
+    sub     rsp, STAT_SIZE
+    mov     edi, r14d
+    mov     rsi, rsp
+    mov     rax, SYS_FSTAT
+    syscall
+    test    rax, rax
+    js      .oap_stat_failed
+
+    mov     r15, [rsp + ST_SIZE_OFF]  ; file size
+    add     rsp, STAT_SIZE
+
+    ; If size is 0, fall back to read-based processing (could be special file)
+    test    r15, r15
+    jz      .oap_use_read
+
+    ; mmap the file: mmap(NULL, size, PROT_READ, MAP_PRIVATE|MAP_POPULATE, fd, 0)
+    xor     edi, edi                ; addr = NULL
+    mov     rsi, r15                ; length = file size
+    mov     edx, PROT_READ          ; prot
+    mov     r10d, MAP_PRIVATE | MAP_POPULATE ; flags
+    mov     r8d, r14d               ; fd
+    xor     r9d, r9d                ; offset = 0
+    mov     rax, SYS_MMAP
+    syscall
+    test    rax, rax
+    js      .oap_mmap_failed
+
+    push    rax                     ; save mmap address
+    push    r15                     ; save mmap size
+
+    ; madvise(addr, len, MADV_SEQUENTIAL) — hint for sequential access
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_SEQUENTIAL
+    mov     rax, SYS_MADVISE
+    syscall
+    ; ignore madvise errors
+
+    ; Process mmap'd data: r8=start, r9=end
+    pop     r15                     ; mmap size
+    pop     rax                     ; mmap address
+    push    rax                     ; save for munmap
+    push    r15
+
+    ; Set up input pointers and process
+    mov     r8, rax                 ; input start
+    lea     r9, [rax + r15]         ; input end
+    call    process_mmap_region
+
+    ; munmap
+    pop     rsi                     ; size
+    pop     rdi                     ; addr
+    mov     rax, SYS_MUNMAP
+    syscall
+
+    ; Close fd
+    mov     edi, r14d
     mov     rax, SYS_CLOSE
     syscall
 
+    pop     r15
+    pop     r14
     pop     rbx
     ret
+
+.oap_use_read:
+    ; Fall back to read-based processing for stdin/empty/special files
+    mov     edi, r14d
+    call    process_fd
+
+    ; Close fd
+    mov     edi, r14d
+    mov     rax, SYS_CLOSE
+    syscall
+
+    pop     r15
+    pop     r14
+    pop     rbx
+    ret
+
+.oap_stat_failed:
+    add     rsp, STAT_SIZE
+    ; Close fd and fall back to read
+    jmp     .oap_use_read
+
+.oap_mmap_failed:
+    ; mmap failed, fall back to read
+    jmp     .oap_use_read
 
 .oap_error:
     neg     rax
@@ -630,31 +734,25 @@ open_and_process:
     mov     esi, eax
     call    err_file
     mov     ebp, 1
+    pop     r15
+    pop     r14
     pop     rbx
     ret
 
-; ─── process_fd(edi=fd) ─────────────────────────────────
-; Main processing: read input, expand tabs to spaces
-;
-; FAST PATH (uniform, non -i mode):
-;   Uses a tight scalar loop with tab_mask precomputed in a register.
-;   For power-of-2 tab widths, uses AND for modulo (no div).
-;   Writes directly to out_buf. Only branches on special chars.
-;   SIMD used to quickly skip regions with no special chars.
+; ─── process_mmap_region ─────────────────────────────────
+; Processes mmap'd input data directly.
+; Input: r8=start pointer, r9=end pointer (set by caller)
+; Uses same processing logic as process_fd but without read loop.
 ;
 ; Register usage:
-;   rbx = fd (callee-saved)
 ;   r13 = tab_width (callee-saved)
 ;   r14 = current column (callee-saved)
 ;   r15 = tab_mask for power-of-2, or 0 for div (callee-saved)
-;   r8  = input pointer (caller-saved — saved in BSS around calls)
-;   r9  = input end pointer (caller-saved — saved in BSS around calls)
-;   r10 = output pointer (caller-saved — saved in BSS around calls)
-;   r12 = out_buf_pos (global, callee-saved)
-;   ebp = had_error (global, callee-saved)
-;
-; IMPORTANT: r8, r9, r10 are caller-saved and WILL be clobbered by
-; flush_output → asm_write_all. We save them in BSS before calls.
+;   r8  = input pointer
+;   r9  = input end pointer
+;   r10 = output pointer
+;   r12 = out_buf_pos (global)
+;   ebp = had_error (global)
 
 ; Macro to save caller-saved registers to BSS before function calls
 %macro SAVE_PTRS 0
@@ -670,61 +768,57 @@ open_and_process:
     mov     r10, [rel save_r10]
 %endmacro
 
-process_fd:
+process_mmap_region:
     push    rbx
     push    r13
     push    r14
     push    r15
+    ; Save r8, r9 across setup (they are inputs)
+    push    r8
+    push    r9
 
-    mov     ebx, edi
     xor     r14d, r14d              ; column = 0
 
-    ; Pre-compute tab parameters in callee-saved registers
+    ; Pre-compute tab parameters
     mov     r13, [rel uniform_tab]  ; tab width
-    ; Compute mask: if power of 2, mask = tab_width - 1; else 0
     mov     rax, r13
     dec     rax
     test    rax, r13
-    jnz     .pf_not_pow2
+    jnz     .pmr_not_pow2
     mov     r15, rax                ; r15 = mask for power-of-2
-    jmp     .pf_setup_done
-.pf_not_pow2:
+    jmp     .pmr_setup_done
+.pmr_not_pow2:
     xor     r15d, r15d              ; r15 = 0 means "use div"
-.pf_setup_done:
-    mov     byte [rel init_done_flag], 0    ; initial_done for -i mode
+.pmr_setup_done:
+    mov     byte [rel init_done_flag], 0
 
-.pf_read_loop:
-    mov     edi, ebx
-    lea     rsi, [rel read_buf]
-    mov     edx, READ_BUF_SIZE
-    call    asm_read
-
-    test    rax, rax
-    js      .pf_read_error
-    jz      .pf_done
-
-    ; Set up pointers for this chunk
-    lea     r8, [rel read_buf]              ; input pointer
-    lea     r9, [r8 + rax]                  ; input end
+    pop     r9                      ; restore input end
+    pop     r8                      ; restore input start
     lea     r10, [rel out_buf]
-    add     r10, r12                        ; output pointer
+    add     r10, r12                ; output pointer
 
     ; Check which processing mode to use
     cmp     byte [rel initial_only], 1
-    je      .pf_initial_mode
+    je      .pmr_initial_mode
 
     cmp     dword [rel tab_mode], 1
-    je      .pf_list_mode
+    je      .pmr_list_mode
 
     ; ━━━ FAST PATH: uniform tabs, no -i ━━━━━━━━━━━━━━━━━━━
-    ; This is the hot loop. Minimize branches and memory accesses.
-    movdqa  xmm1, [rel tab_pattern]
-    movdqa  xmm2, [rel newline_pattern]
-    movdqa  xmm3, [rel backspace_pattern]
+    jmp     .pf_fast_simd
 
+    ; ━━━ LIST MODE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+.pmr_list_mode:
+    jmp     .pf_list_simd
+
+    ; ━━━ INITIAL MODE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+.pmr_initial_mode:
+    jmp     .pf_initial_mode
+
+; ─── FAST PATH: uniform tabs ────────────────────────────
 .pf_fast_simd:
-    ; Ensure output buffer has room (128KB slack)
-    lea     rax, [rel out_buf + FLUSH_THRESHOLD]
+    ; Ensure output buffer has room
+    lea     rax, [rel out_buf + FLUSH_THRESHOLD_BIG]
     cmp     r10, rax
     jl      .pf_fast_simd_scan
     ; Need to flush
@@ -734,34 +828,30 @@ process_fd:
     SAVE_PTRS
     call    flush_output
     RESTORE_PTRS
-    lea     r10, [rel out_buf]              ; r12 is 0 after flush
-    ; Reload SIMD patterns (may have been clobbered by syscall)
-    movdqa  xmm1, [rel tab_pattern]
-    movdqa  xmm2, [rel newline_pattern]
-    movdqa  xmm3, [rel backspace_pattern]
+    lea     r10, [rel out_buf]
 
 .pf_fast_simd_scan:
     mov     rax, r9
     sub     rax, r8
     cmp     rax, 16
-    jl      .pf_fast_scalar
+    jl      .pf_fast_scalar_loop
 
+    ; Load 16 bytes from input
     movdqu  xmm0, [r8]
-    ; Check for tab | newline | backspace
+    ; Check for tab (0x09) | newline (0x0A) | backspace (0x08)
     movdqa  xmm4, xmm0
-    pcmpeqb xmm4, xmm1
+    pcmpeqb xmm4, [rel tab_pattern]
     movdqa  xmm5, xmm0
-    pcmpeqb xmm5, xmm2
+    pcmpeqb xmm5, [rel newline_pattern]
     por     xmm4, xmm5
     movdqa  xmm5, xmm0
-    pcmpeqb xmm5, xmm3
+    pcmpeqb xmm5, [rel backspace_pattern]
     por     xmm4, xmm5
     pmovmskb eax, xmm4
     test    eax, eax
     jnz     .pf_fast_simd_special
 
     ; No special chars in 16 bytes — bulk copy
-    movdqu  xmm0, [r8]
     movdqu  [r10], xmm0
     add     r8, 16
     add     r10, 16
@@ -774,17 +864,41 @@ process_fd:
     test    ecx, ecx
     jz      .pf_fast_scalar         ; special at pos 0
 
-    ; Bulk copy ecx regular bytes before the special char
+    ; Copy ecx regular bytes before the special char using small unrolled copies
     movzx   edx, cl
     add     r14, rdx                ; column += count
-    push    rsi
-    push    rdi
-    mov     rsi, r8
-    mov     rdi, r10
-    mov     ecx, edx
-    rep movsb
-    pop     rdi
-    pop     rsi
+
+    ; Small copy: edx is 1-15 bytes
+    cmp     edx, 8
+    jl      .pf_fast_copy_small
+    ; 8-15 bytes: two overlapping 8-byte copies
+    mov     rcx, [r8]
+    mov     [r10], rcx
+    mov     rcx, [r8 + rdx - 8]
+    mov     [r10 + rdx - 8], rcx
+    jmp     .pf_fast_copy_done
+.pf_fast_copy_small:
+    cmp     edx, 4
+    jl      .pf_fast_copy_tiny
+    ; 4-7 bytes: two overlapping 4-byte copies
+    mov     ecx, [r8]
+    mov     [r10], ecx
+    mov     ecx, [r8 + rdx - 4]
+    mov     [r10 + rdx - 4], ecx
+    jmp     .pf_fast_copy_done
+.pf_fast_copy_tiny:
+    ; 1-3 bytes: byte-by-byte
+    mov     cl, [r8]
+    mov     [r10], cl
+    cmp     edx, 1
+    je      .pf_fast_copy_done
+    mov     cl, [r8+1]
+    mov     [r10+1], cl
+    cmp     edx, 2
+    je      .pf_fast_copy_done
+    mov     cl, [r8+2]
+    mov     [r10+2], cl
+.pf_fast_copy_done:
     add     r8, rdx
     add     r10, rdx
     ; Fall through to scalar for the special byte
@@ -809,6 +923,27 @@ process_fd:
     inc     r8
     jmp     .pf_fast_simd
 
+.pf_fast_scalar_loop:
+    ; Tail: process remaining bytes one by one
+    cmp     r8, r9
+    jge     .pf_fast_done
+
+    movzx   eax, byte [r8]
+
+    cmp     al, 9
+    je      .pf_fast_tab
+    cmp     al, 10
+    je      .pf_fast_newline
+    cmp     al, 8
+    je      .pf_fast_backspace
+
+    ; Regular char
+    mov     [r10], al
+    inc     r10
+    inc     r14
+    inc     r8
+    jmp     .pf_fast_scalar_loop
+
 .pf_fast_tab:
     ; Uniform tab expansion
     ; Calculate spaces: tab_width - (column % tab_width)
@@ -830,16 +965,36 @@ process_fd:
     sub     ecx, edx
 
 .pf_fast_fill_spaces:
-    ; ecx = number of spaces to write
+    ; ecx = number of spaces to write (1 to tab_width)
     add     r14, rcx               ; column += spaces
-    ; Write spaces with rep stosb
-    push    rdi
-    mov     rdi, r10
-    mov     al, ' '
-    rep stosb
-    mov     r10, rdi                ; update output pointer
-    pop     rdi
-    inc     r8                      ; skip tab in input
+    inc     r8                     ; skip tab in input
+
+    ; Inline space fill: for default tab=8, max 8 spaces
+    ; Use qword store of spaces for speed
+    cmp     ecx, 8
+    ja      .pf_fast_fill_large
+    ; 1-8 spaces: store 8 spaces, advance by ecx
+    mov     rax, 0x2020202020202020 ; 8 space chars
+    mov     [r10], rax
+    add     r10, rcx
+    jmp     .pf_fast_simd
+
+.pf_fast_fill_large:
+    ; More than 8 spaces (large tab width)
+    mov     rax, 0x2020202020202020
+.pf_fast_fill_loop:
+    cmp     ecx, 8
+    jl      .pf_fast_fill_tail
+    mov     [r10], rax
+    add     r10, 8
+    sub     ecx, 8
+    jmp     .pf_fast_fill_loop
+.pf_fast_fill_tail:
+    test    ecx, ecx
+    jz      .pf_fast_simd
+    ; Write remaining 1-7 spaces
+    mov     [r10], rax              ; overwrite is OK, we only advance by ecx
+    add     r10, rcx
     jmp     .pf_fast_simd
 
 .pf_fast_newline:
@@ -863,19 +1018,15 @@ process_fd:
     lea     rax, [rel out_buf]
     sub     r10, rax
     mov     r12, r10
-    cmp     r12, FLUSH_THRESHOLD
-    jl      .pf_read_loop
+    ; Flush if above threshold
+    cmp     r12, FLUSH_THRESHOLD_BIG
+    jl      .pmr_done
     call    flush_output
-    jmp     .pf_read_loop
+    jmp     .pmr_done
 
     ; ━━━ LIST MODE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-.pf_list_mode:
-    movdqa  xmm1, [rel tab_pattern]
-    movdqa  xmm2, [rel newline_pattern]
-    movdqa  xmm3, [rel backspace_pattern]
-
 .pf_list_simd:
-    lea     rax, [rel out_buf + FLUSH_THRESHOLD]
+    lea     rax, [rel out_buf + FLUSH_THRESHOLD_BIG]
     cmp     r10, rax
     jl      .pf_list_simd_scan
     lea     rax, [rel out_buf]
@@ -885,9 +1036,6 @@ process_fd:
     call    flush_output
     RESTORE_PTRS
     lea     r10, [rel out_buf]
-    movdqa  xmm1, [rel tab_pattern]
-    movdqa  xmm2, [rel newline_pattern]
-    movdqa  xmm3, [rel backspace_pattern]
 
 .pf_list_simd_scan:
     mov     rax, r9
@@ -897,18 +1045,17 @@ process_fd:
 
     movdqu  xmm0, [r8]
     movdqa  xmm4, xmm0
-    pcmpeqb xmm4, xmm1
+    pcmpeqb xmm4, [rel tab_pattern]
     movdqa  xmm5, xmm0
-    pcmpeqb xmm5, xmm2
+    pcmpeqb xmm5, [rel newline_pattern]
     por     xmm4, xmm5
     movdqa  xmm5, xmm0
-    pcmpeqb xmm5, xmm3
+    pcmpeqb xmm5, [rel backspace_pattern]
     por     xmm4, xmm5
     pmovmskb eax, xmm4
     test    eax, eax
     jnz     .pf_list_simd_special
 
-    movdqu  xmm0, [r8]
     movdqu  [r10], xmm0
     add     r8, 16
     add     r10, 16
@@ -922,14 +1069,33 @@ process_fd:
 
     movzx   edx, cl
     add     r14, rdx
-    push    rsi
-    push    rdi
-    mov     rsi, r8
-    mov     rdi, r10
-    mov     ecx, edx
-    rep movsb
-    pop     rdi
-    pop     rsi
+
+    ; Small copy for list mode
+    cmp     edx, 8
+    jl      .pf_list_copy_small
+    mov     rcx, [r8]
+    mov     [r10], rcx
+    mov     rcx, [r8 + rdx - 8]
+    mov     [r10 + rdx - 8], rcx
+    jmp     .pf_list_copy_done
+.pf_list_copy_small:
+    cmp     edx, 4
+    jl      .pf_list_copy_tiny
+    mov     ecx, [r8]
+    mov     [r10], ecx
+    mov     ecx, [r8 + rdx - 4]
+    mov     [r10 + rdx - 4], ecx
+    jmp     .pf_list_copy_done
+.pf_list_copy_tiny:
+    xor     ecx, ecx
+.pf_list_copy_byte:
+    cmp     ecx, edx
+    jge     .pf_list_copy_done
+    mov     al, [r8 + rcx]
+    mov     [r10 + rcx], al
+    inc     ecx
+    jmp     .pf_list_copy_byte
+.pf_list_copy_done:
     add     r8, rdx
     add     r10, rdx
 
@@ -966,12 +1132,20 @@ process_fd:
     test    ecx, ecx
     jz      .pf_list_tab_done
     add     r14, rcx
-    push    rdi
-    mov     rdi, r10
-    mov     al, ' '
-    rep stosb
-    mov     r10, rdi
-    pop     rdi
+    ; Inline space fill
+    mov     rax, 0x2020202020202020
+.pf_list_fill_loop:
+    cmp     ecx, 8
+    jl      .pf_list_fill_tail
+    mov     [r10], rax
+    add     r10, 8
+    sub     ecx, 8
+    jmp     .pf_list_fill_loop
+.pf_list_fill_tail:
+    test    ecx, ecx
+    jz      .pf_list_tab_done
+    mov     [r10], rax
+    add     r10, rcx
 .pf_list_tab_done:
     inc     r8
     jmp     .pf_list_simd
@@ -996,22 +1170,16 @@ process_fd:
     lea     rax, [rel out_buf]
     sub     r10, rax
     mov     r12, r10
-    cmp     r12, FLUSH_THRESHOLD
-    jl      .pf_read_loop
+    cmp     r12, FLUSH_THRESHOLD_BIG
+    jl      .pmr_done
     call    flush_output
-    jmp     .pf_read_loop
+    jmp     .pmr_done
 
     ; ━━━ INITIAL MODE (-i flag) ━━━━━━━━━━━━━━━━━━━━━━━━━━
-    ; Uses [rel init_done_flag] instead of a register for initial_done
-    ; since r13 is used for tab_width
 .pf_initial_mode:
-    movdqa  xmm1, [rel tab_pattern]
-    movdqa  xmm2, [rel newline_pattern]
-    movdqa  xmm3, [rel backspace_pattern]
-    movdqa  xmm6, [rel space_pattern]
 
 .pf_init_simd:
-    lea     rax, [rel out_buf + FLUSH_THRESHOLD]
+    lea     rax, [rel out_buf + FLUSH_THRESHOLD_BIG]
     cmp     r10, rax
     jl      .pf_init_simd_scan
     lea     rax, [rel out_buf]
@@ -1021,10 +1189,6 @@ process_fd:
     call    flush_output
     RESTORE_PTRS
     lea     r10, [rel out_buf]
-    movdqa  xmm1, [rel tab_pattern]
-    movdqa  xmm2, [rel newline_pattern]
-    movdqa  xmm3, [rel backspace_pattern]
-    movdqa  xmm6, [rel space_pattern]
 
 .pf_init_simd_scan:
     mov     rax, r9
@@ -1039,22 +1203,22 @@ process_fd:
     ; In initial region: check for special chars
     movdqu  xmm0, [r8]
     movdqa  xmm4, xmm0
-    pcmpeqb xmm4, xmm1
+    pcmpeqb xmm4, [rel tab_pattern]
     movdqa  xmm5, xmm0
-    pcmpeqb xmm5, xmm2
+    pcmpeqb xmm5, [rel newline_pattern]
     por     xmm4, xmm5
     movdqa  xmm5, xmm0
-    pcmpeqb xmm5, xmm3
+    pcmpeqb xmm5, [rel backspace_pattern]
     por     xmm4, xmm5
     pmovmskb eax, xmm4
     test    eax, eax
     jnz     .pf_init_simd_special
 
     ; No special chars — copy 16 bytes, check for non-space
-    movdqu  xmm0, [r8]
     movdqu  [r10], xmm0
-    movdqu  xmm5, [r8]
-    pcmpeqb xmm5, xmm6
+    ; Check if all 16 bytes are spaces
+    movdqa  xmm5, xmm0
+    pcmpeqb xmm5, [rel space_pattern]
     pmovmskb ecx, xmm5
     cmp     ecx, 0xFFFF
     je      .pf_init_all_spaces
@@ -1086,14 +1250,32 @@ process_fd:
     mov     byte [rel init_done_flag], 1
 .pf_init_pre_done:
     pop     rdx
-    push    rsi
-    push    rdi
-    mov     rsi, r8
-    mov     rdi, r10
-    mov     ecx, edx
-    rep movsb
-    pop     rdi
-    pop     rsi
+    ; Copy edx bytes
+    cmp     edx, 8
+    jl      .pf_init_copy_small
+    mov     rcx, [r8]
+    mov     [r10], rcx
+    mov     rcx, [r8 + rdx - 8]
+    mov     [r10 + rdx - 8], rcx
+    jmp     .pf_init_copy_done
+.pf_init_copy_small:
+    cmp     edx, 4
+    jl      .pf_init_copy_tiny
+    mov     ecx, [r8]
+    mov     [r10], ecx
+    mov     ecx, [r8 + rdx - 4]
+    mov     [r10 + rdx - 4], ecx
+    jmp     .pf_init_copy_done
+.pf_init_copy_tiny:
+    xor     ecx, ecx
+.pf_init_copy_byte:
+    cmp     ecx, edx
+    jge     .pf_init_copy_done
+    mov     al, [r8 + rcx]
+    mov     [r10 + rcx], al
+    inc     ecx
+    jmp     .pf_init_copy_byte
+.pf_init_copy_done:
     add     r8, rdx
     add     r10, rdx
 
@@ -1158,12 +1340,27 @@ process_fd:
     test    ecx, ecx
     jz      .pf_init_tab_done
     add     r14, rcx
-    push    rdi
-    mov     rdi, r10
-    mov     al, ' '
-    rep stosb
-    mov     r10, rdi
-    pop     rdi
+    ; Inline space fill
+    cmp     ecx, 8
+    ja      .pf_init_fill_large
+    mov     rax, 0x2020202020202020
+    mov     [r10], rax
+    add     r10, rcx
+    jmp     .pf_init_tab_done
+.pf_init_fill_large:
+    mov     rax, 0x2020202020202020
+.pf_init_fill_loop:
+    cmp     ecx, 8
+    jl      .pf_init_fill_tail
+    mov     [r10], rax
+    add     r10, 8
+    sub     ecx, 8
+    jmp     .pf_init_fill_loop
+.pf_init_fill_tail:
+    test    ecx, ecx
+    jz      .pf_init_tab_done
+    mov     [r10], rax
+    add     r10, rcx
 .pf_init_tab_done:
     inc     r8
     jmp     .pf_init_simd
@@ -1195,7 +1392,7 @@ process_fd:
 .pf_init_passthrough_simd:
     movdqu  xmm0, [r8]
     movdqa  xmm4, xmm0
-    pcmpeqb xmm4, xmm2
+    pcmpeqb xmm4, [rel newline_pattern]
     pmovmskb eax, xmm4
     test    eax, eax
     jnz     .pf_init_pt_has_nl
@@ -1212,14 +1409,32 @@ process_fd:
     jz      .pf_init_pt_nl_emit
 
     movzx   edx, cl
-    push    rsi
-    push    rdi
-    mov     rsi, r8
-    mov     rdi, r10
-    mov     ecx, edx
-    rep movsb
-    pop     rdi
-    pop     rsi
+    ; Copy edx bytes before the newline
+    cmp     edx, 8
+    jl      .pf_init_pt_copy_small
+    mov     rcx, [r8]
+    mov     [r10], rcx
+    mov     rcx, [r8 + rdx - 8]
+    mov     [r10 + rdx - 8], rcx
+    jmp     .pf_init_pt_copy_done
+.pf_init_pt_copy_small:
+    cmp     edx, 4
+    jl      .pf_init_pt_copy_tiny
+    mov     ecx, [r8]
+    mov     [r10], ecx
+    mov     ecx, [r8 + rdx - 4]
+    mov     [r10 + rdx - 4], ecx
+    jmp     .pf_init_pt_copy_done
+.pf_init_pt_copy_tiny:
+    xor     ecx, ecx
+.pf_init_pt_copy_byte:
+    cmp     ecx, edx
+    jge     .pf_init_pt_copy_done
+    mov     al, [r8 + rcx]
+    mov     [r10 + rcx], al
+    inc     ecx
+    jmp     .pf_init_pt_copy_byte
+.pf_init_pt_copy_done:
     add     r8, rdx
     add     r10, rdx
     add     r14, rdx
@@ -1236,21 +1451,642 @@ process_fd:
     lea     rax, [rel out_buf]
     sub     r10, rax
     mov     r12, r10
-    cmp     r12, FLUSH_THRESHOLD
-    jl      .pf_read_loop
+    cmp     r12, FLUSH_THRESHOLD_BIG
+    jl      .pmr_done
     call    flush_output
-    jmp     .pf_read_loop
+    jmp     .pmr_done
 
-.pf_done:
+.pmr_done:
     pop     r15
     pop     r14
     pop     r13
     pop     rbx
     ret
 
-.pf_read_error:
+; ─── process_fd(edi=fd) ─────────────────────────────────
+; Read-based processing for stdin and fallback.
+; Uses a read loop with the same SIMD processing logic.
+process_fd:
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
+
+    mov     ebx, edi
+    xor     r14d, r14d              ; column = 0
+
+    ; Pre-compute tab parameters in callee-saved registers
+    mov     r13, [rel uniform_tab]  ; tab width
+    mov     rax, r13
+    dec     rax
+    test    rax, r13
+    jnz     .fd_not_pow2
+    mov     r15, rax                ; r15 = mask for power-of-2
+    jmp     .fd_setup_done
+.fd_not_pow2:
+    xor     r15d, r15d              ; r15 = 0 means "use div"
+.fd_setup_done:
+    mov     byte [rel init_done_flag], 0
+
+.fd_read_loop:
+    mov     edi, ebx
+    lea     rsi, [rel read_buf]
+    mov     edx, READ_BUF_SIZE
+    call    asm_read
+
+    test    rax, rax
+    js      .fd_read_error
+    jz      .fd_done
+
+    ; Set up pointers for this chunk
+    lea     r8, [rel read_buf]
+    lea     r9, [r8 + rax]
+    lea     r10, [rel out_buf]
+    add     r10, r12
+
+    ; Check which processing mode to use
+    cmp     byte [rel initial_only], 1
+    je      .fd_initial_mode
+
+    cmp     dword [rel tab_mode], 1
+    je      .fd_list_mode
+
+    ; Fast path: uniform tabs
+    jmp     .fd_fast_simd
+
+.fd_fast_simd:
+    lea     rax, [rel out_buf + FLUSH_THRESHOLD_BIG]
+    cmp     r10, rax
+    jl      .fd_fast_simd_scan
+    lea     rax, [rel out_buf]
+    sub     r10, rax
+    mov     r12, r10
+    SAVE_PTRS
+    call    flush_output
+    RESTORE_PTRS
+    lea     r10, [rel out_buf]
+
+.fd_fast_simd_scan:
+    mov     rax, r9
+    sub     rax, r8
+    cmp     rax, 16
+    jl      .fd_fast_scalar
+
+    movdqu  xmm0, [r8]
+    movdqa  xmm4, xmm0
+    pcmpeqb xmm4, [rel tab_pattern]
+    movdqa  xmm5, xmm0
+    pcmpeqb xmm5, [rel newline_pattern]
+    por     xmm4, xmm5
+    movdqa  xmm5, xmm0
+    pcmpeqb xmm5, [rel backspace_pattern]
+    por     xmm4, xmm5
+    pmovmskb eax, xmm4
+    test    eax, eax
+    jnz     .fd_fast_simd_special
+
+    movdqu  [r10], xmm0
+    add     r8, 16
+    add     r10, 16
+    add     r14, 16
+    jmp     .fd_fast_simd
+
+.fd_fast_simd_special:
+    bsf     ecx, eax
+    test    ecx, ecx
+    jz      .fd_fast_scalar
+
+    movzx   edx, cl
+    add     r14, rdx
+    cmp     edx, 8
+    jl      .fd_fast_copy_small
+    mov     rcx, [r8]
+    mov     [r10], rcx
+    mov     rcx, [r8 + rdx - 8]
+    mov     [r10 + rdx - 8], rcx
+    jmp     .fd_fast_copy_done
+.fd_fast_copy_small:
+    cmp     edx, 4
+    jl      .fd_fast_copy_tiny
+    mov     ecx, [r8]
+    mov     [r10], ecx
+    mov     ecx, [r8 + rdx - 4]
+    mov     [r10 + rdx - 4], ecx
+    jmp     .fd_fast_copy_done
+.fd_fast_copy_tiny:
+    mov     cl, [r8]
+    mov     [r10], cl
+    cmp     edx, 1
+    je      .fd_fast_copy_done
+    mov     cl, [r8+1]
+    mov     [r10+1], cl
+    cmp     edx, 2
+    je      .fd_fast_copy_done
+    mov     cl, [r8+2]
+    mov     [r10+2], cl
+.fd_fast_copy_done:
+    add     r8, rdx
+    add     r10, rdx
+
+.fd_fast_scalar:
+    cmp     r8, r9
+    jge     .fd_fast_done
+
+    movzx   eax, byte [r8]
+    cmp     al, 9
+    je      .fd_fast_tab
+    cmp     al, 10
+    je      .fd_fast_newline
+    cmp     al, 8
+    je      .fd_fast_backspace
+
+    mov     [r10], al
+    inc     r10
+    inc     r14
+    inc     r8
+    jmp     .fd_fast_simd
+
+.fd_fast_tab:
+    test    r15, r15
+    jz      .fd_fast_tab_div
+    mov     eax, r14d
+    and     eax, r15d
+    mov     ecx, r13d
+    sub     ecx, eax
+    jmp     .fd_fast_fill
+.fd_fast_tab_div:
+    mov     rax, r14
+    xor     edx, edx
+    div     r13
+    mov     ecx, r13d
+    sub     ecx, edx
+.fd_fast_fill:
+    add     r14, rcx
+    inc     r8
+    cmp     ecx, 8
+    ja      .fd_fast_fill_large
+    mov     rax, 0x2020202020202020
+    mov     [r10], rax
+    add     r10, rcx
+    jmp     .fd_fast_simd
+.fd_fast_fill_large:
+    mov     rax, 0x2020202020202020
+.fd_fast_fill_loop:
+    cmp     ecx, 8
+    jl      .fd_fast_fill_tail
+    mov     [r10], rax
+    add     r10, 8
+    sub     ecx, 8
+    jmp     .fd_fast_fill_loop
+.fd_fast_fill_tail:
+    test    ecx, ecx
+    jz      .fd_fast_simd
+    mov     [r10], rax
+    add     r10, rcx
+    jmp     .fd_fast_simd
+
+.fd_fast_newline:
+    mov     byte [r10], 10
+    inc     r10
+    inc     r8
+    xor     r14d, r14d
+    jmp     .fd_fast_simd
+
+.fd_fast_backspace:
+    mov     byte [r10], 8
+    inc     r10
+    inc     r8
+    test    r14, r14
+    jz      .fd_fast_simd
+    dec     r14
+    jmp     .fd_fast_simd
+
+.fd_fast_done:
+    lea     rax, [rel out_buf]
+    sub     r10, rax
+    mov     r12, r10
+    cmp     r12, FLUSH_THRESHOLD_BIG
+    jl      .fd_read_loop
+    call    flush_output
+    jmp     .fd_read_loop
+
+    ; ━━━ LIST MODE (fd) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+.fd_list_mode:
+
+.fd_list_simd:
+    lea     rax, [rel out_buf + FLUSH_THRESHOLD_BIG]
+    cmp     r10, rax
+    jl      .fd_list_simd_scan
+    lea     rax, [rel out_buf]
+    sub     r10, rax
+    mov     r12, r10
+    SAVE_PTRS
+    call    flush_output
+    RESTORE_PTRS
+    lea     r10, [rel out_buf]
+
+.fd_list_simd_scan:
+    mov     rax, r9
+    sub     rax, r8
+    cmp     rax, 16
+    jl      .fd_list_scalar
+
+    movdqu  xmm0, [r8]
+    movdqa  xmm4, xmm0
+    pcmpeqb xmm4, [rel tab_pattern]
+    movdqa  xmm5, xmm0
+    pcmpeqb xmm5, [rel newline_pattern]
+    por     xmm4, xmm5
+    movdqa  xmm5, xmm0
+    pcmpeqb xmm5, [rel backspace_pattern]
+    por     xmm4, xmm5
+    pmovmskb eax, xmm4
+    test    eax, eax
+    jnz     .fd_list_simd_special
+
+    movdqu  [r10], xmm0
+    add     r8, 16
+    add     r10, 16
+    add     r14, 16
+    jmp     .fd_list_simd
+
+.fd_list_simd_special:
+    bsf     ecx, eax
+    test    ecx, ecx
+    jz      .fd_list_scalar
+    movzx   edx, cl
+    add     r14, rdx
+    cmp     edx, 8
+    jl      .fd_list_copy_small2
+    mov     rcx, [r8]
+    mov     [r10], rcx
+    mov     rcx, [r8 + rdx - 8]
+    mov     [r10 + rdx - 8], rcx
+    jmp     .fd_list_copy_done2
+.fd_list_copy_small2:
+    cmp     edx, 4
+    jl      .fd_list_copy_tiny2
+    mov     ecx, [r8]
+    mov     [r10], ecx
+    mov     ecx, [r8 + rdx - 4]
+    mov     [r10 + rdx - 4], ecx
+    jmp     .fd_list_copy_done2
+.fd_list_copy_tiny2:
+    xor     ecx, ecx
+.fd_list_copy_byte2:
+    cmp     ecx, edx
+    jge     .fd_list_copy_done2
+    mov     al, [r8 + rcx]
+    mov     [r10 + rcx], al
+    inc     ecx
+    jmp     .fd_list_copy_byte2
+.fd_list_copy_done2:
+    add     r8, rdx
+    add     r10, rdx
+
+.fd_list_scalar:
+    cmp     r8, r9
+    jge     .fd_list_done
+    movzx   eax, byte [r8]
+    cmp     al, 9
+    je      .fd_list_tab
+    cmp     al, 10
+    je      .fd_list_newline
+    cmp     al, 8
+    je      .fd_list_backspace
+    mov     [r10], al
+    inc     r10
+    inc     r14
+    inc     r8
+    jmp     .fd_list_simd
+
+.fd_list_tab:
+    lea     rax, [rel out_buf]
+    sub     r10, rax
+    mov     r12, r10
+    SAVE_PTRS
+    call    calc_tab_spaces
+    RESTORE_PTRS
+    lea     r10, [rel out_buf]
+    add     r10, r12
+    mov     ecx, eax
+    test    ecx, ecx
+    jz      .fd_list_tab_done
+    add     r14, rcx
+    mov     rax, 0x2020202020202020
+.fd_list_fill_loop:
+    cmp     ecx, 8
+    jl      .fd_list_fill_tail
+    mov     [r10], rax
+    add     r10, 8
+    sub     ecx, 8
+    jmp     .fd_list_fill_loop
+.fd_list_fill_tail:
+    test    ecx, ecx
+    jz      .fd_list_tab_done
+    mov     [r10], rax
+    add     r10, rcx
+.fd_list_tab_done:
+    inc     r8
+    jmp     .fd_list_simd
+
+.fd_list_newline:
+    mov     byte [r10], 10
+    inc     r10
+    inc     r8
+    xor     r14d, r14d
+    jmp     .fd_list_simd
+
+.fd_list_backspace:
+    mov     byte [r10], 8
+    inc     r10
+    inc     r8
+    test    r14, r14
+    jz      .fd_list_simd
+    dec     r14
+    jmp     .fd_list_simd
+
+.fd_list_done:
+    lea     rax, [rel out_buf]
+    sub     r10, rax
+    mov     r12, r10
+    cmp     r12, FLUSH_THRESHOLD_BIG
+    jl      .fd_read_loop
+    call    flush_output
+    jmp     .fd_read_loop
+
+    ; ━━━ INITIAL MODE (fd) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+.fd_initial_mode:
+
+.fd_init_simd:
+    lea     rax, [rel out_buf + FLUSH_THRESHOLD_BIG]
+    cmp     r10, rax
+    jl      .fd_init_simd_scan
+    lea     rax, [rel out_buf]
+    sub     r10, rax
+    mov     r12, r10
+    SAVE_PTRS
+    call    flush_output
+    RESTORE_PTRS
+    lea     r10, [rel out_buf]
+
+.fd_init_simd_scan:
+    mov     rax, r9
+    sub     rax, r8
+    cmp     rax, 16
+    jl      .fd_init_scalar
+
+    cmp     byte [rel init_done_flag], 1
+    je      .fd_init_passthrough_simd
+
+    movdqu  xmm0, [r8]
+    movdqa  xmm4, xmm0
+    pcmpeqb xmm4, [rel tab_pattern]
+    movdqa  xmm5, xmm0
+    pcmpeqb xmm5, [rel newline_pattern]
+    por     xmm4, xmm5
+    movdqa  xmm5, xmm0
+    pcmpeqb xmm5, [rel backspace_pattern]
+    por     xmm4, xmm5
+    pmovmskb eax, xmm4
+    test    eax, eax
+    jnz     .fd_init_simd_special
+
+    movdqu  [r10], xmm0
+    movdqa  xmm5, xmm0
+    pcmpeqb xmm5, [rel space_pattern]
+    pmovmskb ecx, xmm5
+    cmp     ecx, 0xFFFF
+    je      .fd_init_all_spaces
+    mov     byte [rel init_done_flag], 1
+.fd_init_all_spaces:
+    add     r8, 16
+    add     r10, 16
+    add     r14, 16
+    jmp     .fd_init_simd
+
+.fd_init_simd_special:
+    bsf     ecx, eax
+    test    ecx, ecx
+    jz      .fd_init_scalar
+    movzx   edx, cl
+    add     r14, rdx
+    push    rdx
+    xor     ecx, ecx
+.fd_init_pre_check:
+    cmp     ecx, edx
+    jge     .fd_init_pre_done
+    cmp     byte [r8 + rcx], ' '
+    jne     .fd_init_pre_nonblank
+    inc     ecx
+    jmp     .fd_init_pre_check
+.fd_init_pre_nonblank:
+    mov     byte [rel init_done_flag], 1
+.fd_init_pre_done:
+    pop     rdx
+    cmp     edx, 8
+    jl      .fd_init_copy_small
+    mov     rcx, [r8]
+    mov     [r10], rcx
+    mov     rcx, [r8 + rdx - 8]
+    mov     [r10 + rdx - 8], rcx
+    jmp     .fd_init_copy_done
+.fd_init_copy_small:
+    cmp     edx, 4
+    jl      .fd_init_copy_tiny
+    mov     ecx, [r8]
+    mov     [r10], ecx
+    mov     ecx, [r8 + rdx - 4]
+    mov     [r10 + rdx - 4], ecx
+    jmp     .fd_init_copy_done
+.fd_init_copy_tiny:
+    xor     ecx, ecx
+.fd_init_copy_byte:
+    cmp     ecx, edx
+    jge     .fd_init_copy_done
+    mov     al, [r8 + rcx]
+    mov     [r10 + rcx], al
+    inc     ecx
+    jmp     .fd_init_copy_byte
+.fd_init_copy_done:
+    add     r8, rdx
+    add     r10, rdx
+
+.fd_init_scalar:
+    cmp     r8, r9
+    jge     .fd_init_done
+    movzx   eax, byte [r8]
+    cmp     al, 9
+    je      .fd_init_tab
+    cmp     al, 10
+    je      .fd_init_newline
+    cmp     al, 8
+    je      .fd_init_backspace
+
+    mov     [r10], al
+    inc     r10
+    inc     r14
+    inc     r8
+    cmp     al, ' '
+    je      .fd_init_simd
+    mov     byte [rel init_done_flag], 1
+    jmp     .fd_init_simd
+
+.fd_init_tab:
+    cmp     byte [rel init_done_flag], 1
+    je      .fd_init_tab_pass
+    cmp     dword [rel tab_mode], 1
+    je      .fd_init_tab_list
+    test    r15, r15
+    jz      .fd_init_tab_div
+    mov     eax, r14d
+    and     eax, r15d
+    mov     ecx, r13d
+    sub     ecx, eax
+    jmp     .fd_init_tab_fill
+.fd_init_tab_div:
+    mov     rax, r14
+    xor     edx, edx
+    div     r13
+    mov     ecx, r13d
+    sub     ecx, edx
+    jmp     .fd_init_tab_fill
+.fd_init_tab_list:
+    lea     rax, [rel out_buf]
+    sub     r10, rax
+    mov     r12, r10
+    SAVE_PTRS
+    call    calc_tab_spaces
+    RESTORE_PTRS
+    lea     r10, [rel out_buf]
+    add     r10, r12
+    mov     ecx, eax
+.fd_init_tab_fill:
+    test    ecx, ecx
+    jz      .fd_init_tab_done
+    add     r14, rcx
+    cmp     ecx, 8
+    ja      .fd_init_fill_large
+    mov     rax, 0x2020202020202020
+    mov     [r10], rax
+    add     r10, rcx
+    jmp     .fd_init_tab_done
+.fd_init_fill_large:
+    mov     rax, 0x2020202020202020
+.fd_init_fill_loop:
+    cmp     ecx, 8
+    jl      .fd_init_fill_tail
+    mov     [r10], rax
+    add     r10, 8
+    sub     ecx, 8
+    jmp     .fd_init_fill_loop
+.fd_init_fill_tail:
+    test    ecx, ecx
+    jz      .fd_init_tab_done
+    mov     [r10], rax
+    add     r10, rcx
+.fd_init_tab_done:
+    inc     r8
+    jmp     .fd_init_simd
+
+.fd_init_tab_pass:
+    mov     byte [r10], 9
+    inc     r10
+    inc     r14
+    inc     r8
+    jmp     .fd_init_simd
+
+.fd_init_newline:
+    mov     byte [r10], 10
+    inc     r10
+    inc     r8
+    xor     r14d, r14d
+    mov     byte [rel init_done_flag], 0
+    jmp     .fd_init_simd
+
+.fd_init_backspace:
+    mov     byte [r10], 8
+    inc     r10
+    inc     r8
+    test    r14, r14
+    jz      .fd_init_simd
+    dec     r14
+    jmp     .fd_init_simd
+
+.fd_init_passthrough_simd:
+    movdqu  xmm0, [r8]
+    movdqa  xmm4, xmm0
+    pcmpeqb xmm4, [rel newline_pattern]
+    pmovmskb eax, xmm4
+    test    eax, eax
+    jnz     .fd_init_pt_has_nl
+    movdqu  [r10], xmm0
+    add     r8, 16
+    add     r10, 16
+    add     r14, 16
+    jmp     .fd_init_simd
+
+.fd_init_pt_has_nl:
+    bsf     ecx, eax
+    test    ecx, ecx
+    jz      .fd_init_pt_nl_emit
+    movzx   edx, cl
+    cmp     edx, 8
+    jl      .fd_init_pt_copy_small
+    mov     rcx, [r8]
+    mov     [r10], rcx
+    mov     rcx, [r8 + rdx - 8]
+    mov     [r10 + rdx - 8], rcx
+    jmp     .fd_init_pt_copy_done
+.fd_init_pt_copy_small:
+    cmp     edx, 4
+    jl      .fd_init_pt_copy_tiny
+    mov     ecx, [r8]
+    mov     [r10], ecx
+    mov     ecx, [r8 + rdx - 4]
+    mov     [r10 + rdx - 4], ecx
+    jmp     .fd_init_pt_copy_done
+.fd_init_pt_copy_tiny:
+    xor     ecx, ecx
+.fd_init_pt_copy_byte:
+    cmp     ecx, edx
+    jge     .fd_init_pt_copy_done
+    mov     al, [r8 + rcx]
+    mov     [r10 + rcx], al
+    inc     ecx
+    jmp     .fd_init_pt_copy_byte
+.fd_init_pt_copy_done:
+    add     r8, rdx
+    add     r10, rdx
+    add     r14, rdx
+
+.fd_init_pt_nl_emit:
+    mov     byte [r10], 10
+    inc     r10
+    inc     r8
+    xor     r14d, r14d
+    mov     byte [rel init_done_flag], 0
+    jmp     .fd_init_simd
+
+.fd_init_done:
+    lea     rax, [rel out_buf]
+    sub     r10, rax
+    mov     r12, r10
+    cmp     r12, FLUSH_THRESHOLD_BIG
+    jl      .fd_read_loop
+    call    flush_output
+    jmp     .fd_read_loop
+
+.fd_done:
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
+    ret
+
+.fd_read_error:
     mov     ebp, 1
-    jmp     .pf_done
+    jmp     .fd_done
 
 ; ─── calc_tab_spaces(r14=column) → eax=num_spaces ───────
 ; Uses tab_mode, uniform_tab, tab_stops[], num_tab_stops, repeat_interval
@@ -1342,7 +2178,7 @@ calc_tab_spaces:
 ; ─── emit_byte(al=byte) ─────────────────────────────────
 ; Appends one byte to out_buf, flushing if needed
 emit_byte:
-    cmp     r12, OUT_BUF_SIZE - 1
+    cmp     r12, OUT_BUF_SIZE_BIG - 1
     jl      .eb_ok
     push    rax
     call    flush_output
@@ -1354,7 +2190,7 @@ emit_byte:
     mov     [rdi + r12], al
     inc     r12
 
-    cmp     r12, FLUSH_THRESHOLD
+    cmp     r12, FLUSH_THRESHOLD_BIG
     jl      .eb_done
     call    flush_output
 .eb_done:
@@ -1369,7 +2205,7 @@ emit_newline:
 ; Ensures at least 16 bytes of space in out_buf
 ensure_out_space_16:
     lea     rax, [r12 + 16]
-    cmp     rax, OUT_BUF_SIZE
+    cmp     rax, OUT_BUF_SIZE_BIG
     jl      .eos16_ok
     call    flush_output
 .eos16_ok:
@@ -1380,7 +2216,7 @@ ensure_out_space_16:
 ensure_out_space_n:
     movzx   eax, dl
     add     rax, r12
-    cmp     rax, OUT_BUF_SIZE
+    cmp     rax, OUT_BUF_SIZE_BIG
     jl      .eosn_ok
     push    rdx
     call    flush_output
@@ -1818,7 +2654,13 @@ seen_dashdash:      resb 1
 num_files:          resd 1
 files:              resq MAX_FILES
 
+; Saved registers for function calls (r8, r9, r10 are caller-saved)
+save_r8:            resq 1
+save_r9:            resq 1
+save_r10:           resq 1
+init_done_flag:     resb 1          ; initial_done for -i mode
+
 read_buf:           resb READ_BUF_SIZE
-out_buf:            resb OUT_BUF_SIZE
+out_buf:            resb OUT_BUF_SIZE_BIG
 
 section .note.GNU-stack noalloc noexec nowrite progbits

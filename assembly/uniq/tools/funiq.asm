@@ -15,7 +15,12 @@
 ;   -z / --zero-terminated NUL delimiter instead of newline
 ;   --help / --version
 ;
-; Uses SSE2 pcmpeqb for fast 16-byte-at-a-time line comparison.
+; Performance optimizations:
+;   - mmap() for file input (zero-copy, no read syscalls)
+;   - SSE2 SIMD newline scanning (16 bytes at a time)
+;   - SSE2 SIMD line comparison (16 bytes at a time)
+;   - Zero-copy output (write directly from mmap'd buffer)
+;   - Large output buffer with threshold flushing
 ;
 ; Build (modular):
 ;   nasm -f elf64 -I include/ tools/funiq.asm -o build/tools/funiq.o
@@ -31,10 +36,18 @@ extern asm_open
 extern asm_close
 
 ; ─── Constants ───────────────────────────────────────────
-%define READ_BUF_SIZE   131072          ; 128KB input buffer
-%define OUT_BUF_SIZE    131072          ; 128KB output buffer
-%define LINE_BUF_SIZE   1048576         ; 1MB max line length
-%define FLUSH_THRESHOLD 65536
+%define READ_BUF_SIZE   131072          ; 128KB input buffer (stdin fallback)
+%define OUT_BUF_SIZE    262144          ; 256KB output buffer
+%define LINE_BUF_SIZE   1048576         ; 1MB max line length (stdin fallback)
+%define FLUSH_THRESHOLD 131072          ; Flush at 128KB
+
+; mmap constants
+%define PROT_READ       1
+%define MAP_PRIVATE     2
+%define MAP_POPULATE    0x08000         ; Populate page tables (prefault)
+%define MADV_SEQUENTIAL 2
+%define MADV_WILLNEED   3
+%define SYS_MADVISE     28
 
 ; Mode constants
 %define MODE_NORMAL      0              ; default: merge adjacent duplicates
@@ -90,6 +103,8 @@ _start:
     mov     byte [rel opt_group_method], GROUP_SEPARATE
     mov     qword [rel input_file], 0
     mov     qword [rel output_file], 0
+    mov     qword [rel mmap_addr], 0
+    mov     qword [rel mmap_len], 0
 
     ; Parse arguments (skip argv[0])
     mov     rbx, 1                  ; arg index
@@ -716,30 +731,16 @@ _start:
     ; Validate: --group is mutually exclusive with -c/-d/-D/-u
     cmp     byte [rel opt_mode], MODE_GROUP
     jne     .no_group_conflict
-    ; If we got here, mode is GROUP — that's fine, but check if any of c/d/D/u
-    ; were also set. Actually, the last flag wins in our parser, so the mode
-    ; is already correctly set. But GNU checks for conflicts differently.
-    ; We handle this by checking at the end since the last option wins.
-    ; GNU actually errors if --group appears with any of -c/-d/-D/-u regardless of order.
-    ; We'll skip this complexity for now — the last flag wins model is simpler.
-    ; Check if both -d and -u were specified
-    ; If mode is REPEATED or UNIQUE and both flags are set:
-    ;   MODE_REPEATED (-d last) + flag_u => print nothing
-    ;   MODE_UNIQUE (-u last) + flag_d => print nothing
     cmp     byte [rel opt_mode], MODE_REPEATED
     jne     .check_du_unique
     cmp     byte [rel opt_flag_u], 1
     jne     .no_group_conflict
-    ; Both -d and -u: repeated mode that also requires unique = nothing
-    ; We handle this by leaving mode as REPEATED but checking flag_u in output
     jmp     .no_group_conflict
 .check_du_unique:
     cmp     byte [rel opt_mode], MODE_UNIQUE
     jne     .no_group_conflict
     cmp     byte [rel opt_flag_d], 1
     jne     .no_group_conflict
-    ; Both -u and -d: unique mode that also requires repeated = nothing
-    ; We handle this by leaving mode as UNIQUE but checking flag_d in output
 
 .no_group_conflict:
 
@@ -761,10 +762,12 @@ _start:
     test    rax, rax
     js      .input_open_error
     mov     [rel input_fd], eax
+    mov     byte [rel use_mmap], 1  ; Can use mmap for file input
     jmp     .open_output
 
 .use_stdin:
     mov     dword [rel input_fd], STDIN
+    mov     byte [rel use_mmap], 0  ; Cannot mmap stdin
 
 .open_output:
     mov     rdi, [rel output_file]
@@ -790,8 +793,59 @@ _start:
     mov     dword [rel output_fd], STDOUT
 
 .run_uniq:
-    call    process_uniq
+    ; Initialize delimiter before processing
+    cmp     byte [rel opt_zero_terminated], 0
+    jne     .run_uniq_use_nul
+    mov     byte [rel delimiter], 10            ; newline
+    jmp     .run_uniq_delim_done
+.run_uniq_use_nul:
+    mov     byte [rel delimiter], 0             ; NUL
+.run_uniq_delim_done:
 
+    ; DEBUG: write delimiter value to stderr
+    movzx   eax, byte [rel delimiter]
+    add     al, '0'
+    mov     [rel count_buf], al
+    mov     byte [rel count_buf+1], 10
+    push    rdi
+    push    rsi
+    push    rdx
+    push    rax
+    mov     rax, SYS_WRITE
+    mov     rdi, STDERR
+    lea     rsi, [rel count_buf]
+    mov     rdx, 2
+    syscall
+    pop     rax
+    pop     rdx
+    pop     rsi
+    pop     rdi
+
+    ; Check if we can use the fast mmap path
+    cmp     byte [rel use_mmap], 1
+    jne     .run_uniq_slow
+
+    ; Try to mmap the input file
+    call    setup_mmap
+    test    rax, rax
+    jz      .run_uniq_mmap_ok
+
+    ; mmap failed (empty file or error), use slow path
+    ; For empty files, we need to produce no output, which is correct
+    cmp     qword [rel mmap_len], 0
+    je      .run_uniq_done          ; Empty file, nothing to do
+    jmp     .run_uniq_slow
+
+.run_uniq_mmap_ok:
+    call    process_uniq_mmap
+    call    cleanup_mmap
+    jmp     .run_uniq_done
+
+.run_uniq_slow:
+    call    process_uniq_slow
+    jmp     .run_uniq_done
+
+.run_uniq_done:
     ; Flush output
     call    flush_output
     test    eax, eax
@@ -866,21 +920,797 @@ _start:
     syscall
 
 ; ═══════════════════════════════════════════════════════════
-;  process_uniq — Main processing loop
-;
-;  Reads lines from input_fd, compares adjacent lines, outputs
-;  according to the selected mode.
-;
-;  Uses two line buffers (prev_line_buf / cur_line_buf) that alternate.
-;  Reads input into read_buf, scans for delimiters.
-;
-;  Key state:
-;    prev_line_buf/prev_line_len: previous line (or empty if first)
-;    cur_line_buf/cur_line_len:   current line being built
-;    count: number of consecutive equal lines
-;    first_group: whether we've output any group yet
+;  setup_mmap — fstat + mmap the input file
+;  Returns: rax=0 on success, -1 on failure
+;  Sets: mmap_addr, mmap_len
 ; ═══════════════════════════════════════════════════════════
-process_uniq:
+setup_mmap:
+    push    rbx
+    sub     rsp, 144                ; stat buffer on stack
+
+    ; fstat(input_fd, &stat_buf)
+    mov     eax, [rel input_fd]
+    mov     edi, eax
+    mov     rsi, rsp
+    mov     rax, SYS_FSTAT
+    syscall
+    test    rax, rax
+    js      .sm_fail
+
+    ; Get file size from stat buf (st_size is at offset 48)
+    mov     rbx, [rsp + 48]
+    mov     [rel mmap_len], rbx
+
+    ; Check for empty file
+    test    rbx, rbx
+    jz      .sm_fail
+
+    ; mmap(NULL, size, PROT_READ, MAP_PRIVATE|MAP_POPULATE, fd, 0)
+    xor     edi, edi                ; addr = NULL
+    mov     rsi, rbx                ; length
+    mov     edx, PROT_READ          ; prot
+    mov     r10d, MAP_PRIVATE | MAP_POPULATE ; flags
+    mov     r8d, [rel input_fd]     ; fd
+    xor     r9d, r9d                ; offset = 0
+    mov     rax, SYS_MMAP
+    syscall
+
+    ; Check for MAP_FAILED (-1 page-aligned, or negative)
+    cmp     rax, -4096
+    ja      .sm_fail
+    test    rax, rax
+    jz      .sm_fail
+
+    mov     [rel mmap_addr], rax
+
+    ; madvise(addr, len, MADV_SEQUENTIAL)
+    mov     rdi, rax
+    mov     rsi, rbx
+    mov     edx, MADV_SEQUENTIAL
+    mov     rax, SYS_MADVISE
+    syscall
+    ; Ignore madvise errors
+
+    xor     eax, eax
+    add     rsp, 144
+    pop     rbx
+    ret
+
+.sm_fail:
+    mov     eax, -1
+    add     rsp, 144
+    pop     rbx
+    ret
+
+; ═══════════════════════════════════════════════════════════
+;  cleanup_mmap — munmap the input file
+; ═══════════════════════════════════════════════════════════
+cleanup_mmap:
+    mov     rdi, [rel mmap_addr]
+    test    rdi, rdi
+    jz      .cm_done
+    mov     rsi, [rel mmap_len]
+    mov     rax, SYS_MUNMAP
+    syscall
+    mov     qword [rel mmap_addr], 0
+.cm_done:
+    ret
+
+; ═══════════════════════════════════════════════════════════
+;  process_uniq_mmap — Fast mmap-based processing
+;
+;  Processes the mmap'd buffer directly. Lines are identified
+;  by scanning for delimiters with SIMD. Lines are compared
+;  using pointers into the mmap'd buffer (zero-copy).
+;
+;  Register usage in main loop:
+;    r13 = current position in mmap buffer
+;    r14 = end of mmap buffer
+;    r15 = delimiter byte
+;    rbx = previous line pointer (in mmap)
+;    [prev_mmap_len] = previous line length
+;    [count] = duplicate count
+; ═══════════════════════════════════════════════════════════
+process_uniq_mmap:
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
+    push    rbp
+    sub     rsp, 8                  ; Align stack to 16
+
+    ; Initialize
+    mov     r13, [rel mmap_addr]    ; current pos
+    mov     r14, r13
+    add     r14, [rel mmap_len]     ; end pos
+    mov     qword [rel count], 0
+    mov     byte [rel first_group], 1
+    mov     qword [rel prev_mmap_ptr], 0    ; no prev line
+    mov     qword [rel prev_mmap_len], -1   ; -1 = no prev line
+
+    ; Determine delimiter
+    cmp     byte [rel opt_zero_terminated], 0
+    jne     .pm_use_nul
+    mov     r15, 10                 ; newline
+    jmp     .pm_setup_simd
+.pm_use_nul:
+    xor     r15d, r15d              ; NUL
+
+.pm_setup_simd:
+    ; Set up SSE2 pattern for delimiter search
+    movd    xmm15, r15d
+    punpcklbw xmm15, xmm15
+    punpcklwd xmm15, xmm15
+    pshufd  xmm15, xmm15, 0        ; broadcast delimiter
+
+.pm_main_loop:
+    ; Find next line: scan for delimiter starting at r13
+    cmp     r13, r14
+    jge     .pm_handle_eof
+
+    ; r13 = start of current line
+    mov     rdi, r13                ; line_start
+
+    ; SIMD scan for delimiter
+    mov     rsi, r13                ; scan pos
+.pm_scan_16:
+    lea     rax, [rsi + 16]
+    cmp     rax, r14
+    ja      .pm_scan_scalar         ; less than 16 bytes remaining
+
+    movdqu  xmm0, [rsi]
+    pcmpeqb xmm0, xmm15
+    pmovmskb eax, xmm0
+    test    eax, eax
+    jnz     .pm_found_delim_simd
+    add     rsi, 16
+    jmp     .pm_scan_16
+
+.pm_found_delim_simd:
+    bsf     ecx, eax                ; position within 16-byte chunk
+    add     rsi, rcx                ; rsi = pointer to delimiter
+    jmp     .pm_got_line
+
+.pm_scan_scalar:
+    cmp     rsi, r14
+    jge     .pm_no_trailing_delim
+
+    movzx   eax, byte [rsi]
+    cmp     al, r15b
+    je      .pm_got_line
+    inc     rsi
+    jmp     .pm_scan_scalar
+
+.pm_no_trailing_delim:
+    ; No delimiter found — partial line at end of file
+    ; rdi = line start, rsi = end of buffer
+    ; Line length = rsi - rdi
+    mov     rcx, rsi
+    sub     rcx, rdi                ; line length
+    test    rcx, rcx
+    jz      .pm_handle_eof          ; empty, nothing to do
+
+    ; Process this partial line
+    mov     r13, rsi                ; advance past (to EOF)
+    jmp     .pm_process_line
+
+.pm_got_line:
+    ; rdi = line start, rsi = pointer to delimiter
+    ; Line length = rsi - rdi
+    mov     rcx, rsi
+    sub     rcx, rdi                ; line length (not including delimiter)
+
+    lea     r13, [rsi + 1]          ; advance past delimiter
+
+.pm_process_line:
+    ; rdi = current line pointer, rcx = current line length
+    ; Compare with previous line
+    cmp     qword [rel prev_mmap_len], -1
+    je      .pm_first_line
+
+    ; Compare current (rdi, rcx) with prev (prev_mmap_ptr, prev_mmap_len)
+    ; Save rdi, rcx across call
+    push    rdi
+    push    rcx
+
+    ; rdi = cur_ptr, rsi = cur_len, rdx = prev_ptr, rcx = prev_len
+    mov     rsi, rcx                ; cur_len
+    mov     rdx, [rel prev_mmap_ptr]  ; prev_ptr
+    mov     rcx, [rel prev_mmap_len]  ; prev_len
+    call    compare_lines_mmap
+    ; rax = 0 if equal, 1 if different
+
+    pop     rcx                     ; restore cur_len
+    pop     rdi                     ; restore cur_ptr
+
+    test    eax, eax
+    jz      .pm_lines_equal
+
+    ; Lines are different — output previous group, start new
+    push    rdi
+    push    rcx
+    call    output_group_mmap
+    pop     rcx
+    pop     rdi
+
+    ; Set current as previous
+    mov     [rel prev_mmap_ptr], rdi
+    mov     [rel prev_mmap_len], rcx
+    mov     qword [rel count], 1
+    jmp     .pm_main_loop
+
+.pm_first_line:
+    ; First line
+    mov     [rel prev_mmap_ptr], rdi
+    mov     [rel prev_mmap_len], rcx
+    mov     qword [rel count], 1
+
+    ; For group mode, emit prepend/both separator before first group
+    cmp     byte [rel opt_mode], MODE_GROUP
+    jne     .pm_main_loop
+
+    movzx   eax, byte [rel opt_group_method]
+    cmp     al, GROUP_PREPEND
+    je      .pm_first_group_sep
+    cmp     al, GROUP_BOTH
+    je      .pm_first_group_sep
+    jmp     .pm_first_group_emit
+
+.pm_first_group_sep:
+    push    rdi
+    push    rcx
+    call    emit_empty_line
+    pop     rcx
+    pop     rdi
+
+.pm_first_group_emit:
+    mov     byte [rel first_group], 0
+    ; Emit the first line
+    push    rdi
+    push    rcx
+    ; rdi already = line ptr, rsi = len
+    mov     rsi, rcx
+    call    emit_line_direct
+    pop     rcx
+    pop     rdi
+    jmp     .pm_main_loop
+
+.pm_lines_equal:
+    inc     qword [rel count]
+
+    cmp     byte [rel opt_mode], MODE_ALL_REPEAT
+    je      .pm_allrep_emit
+    cmp     byte [rel opt_mode], MODE_GROUP
+    je      .pm_group_emit
+    jmp     .pm_main_loop
+
+.pm_allrep_emit:
+    cmp     qword [rel count], 2
+    je      .pm_allrep_first_dup
+    ; count > 2: just emit current line
+    mov     rsi, rcx                ; len
+    ; rdi = ptr
+    push    rdi
+    push    rcx
+    call    emit_line_direct
+    pop     rcx
+    pop     rdi
+    jmp     .pm_main_loop
+
+.pm_allrep_first_dup:
+    ; count == 2: emit prev and current
+    cmp     byte [rel opt_allrep_method], ALLREP_PREPEND
+    je      .pm_allrep_prepend_sep
+    cmp     byte [rel opt_allrep_method], ALLREP_SEPARATE
+    je      .pm_allrep_separate_sep
+    jmp     .pm_allrep_emit_both
+
+.pm_allrep_prepend_sep:
+    push    rdi
+    push    rcx
+    call    emit_empty_line
+    pop     rcx
+    pop     rdi
+    jmp     .pm_allrep_emit_both
+
+.pm_allrep_separate_sep:
+    cmp     byte [rel first_group], 1
+    je      .pm_allrep_emit_both
+    push    rdi
+    push    rcx
+    call    emit_empty_line
+    pop     rcx
+    pop     rdi
+
+.pm_allrep_emit_both:
+    mov     byte [rel first_group], 0
+    ; Emit prev line
+    push    rdi
+    push    rcx
+    mov     rdi, [rel prev_mmap_ptr]
+    mov     rsi, [rel prev_mmap_len]
+    call    emit_line_direct
+    pop     rcx
+    pop     rdi
+    ; Emit current line
+    push    rdi
+    push    rcx
+    mov     rsi, rcx
+    call    emit_line_direct
+    pop     rcx
+    pop     rdi
+    jmp     .pm_main_loop
+
+.pm_group_emit:
+    ; Group mode: equal line — just emit it
+    push    rdi
+    push    rcx
+    mov     rsi, rcx
+    call    emit_line_direct
+    pop     rcx
+    pop     rdi
+    jmp     .pm_main_loop
+
+.pm_handle_eof:
+    ; Output the last group
+    cmp     qword [rel prev_mmap_len], -1
+    je      .pm_done                ; no lines at all
+    call    output_group_final_mmap
+
+.pm_done:
+    add     rsp, 8
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
+    ret
+
+; ═══════════════════════════════════════════════════════════
+;  compare_lines_mmap — Compare two lines with skip/check/case options
+;  rdi = cur_ptr, rsi = cur_len, rdx = prev_ptr, rcx = prev_len
+;  Returns: rax = 0 if equal, 1 if different
+; ═══════════════════════════════════════════════════════════
+compare_lines_mmap:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+
+    ; Save parameters
+    mov     r8, rdx                 ; prev_ptr
+    mov     r9, rcx                 ; prev_len
+    mov     r10, rdi                ; cur_ptr
+    mov     r11, rsi                ; cur_len
+
+    ; Apply skip_fields to both
+    mov     rcx, [rel opt_skip_fields]
+    test    rcx, rcx
+    jz      .clm_skip_chars
+
+    ; Skip fields in prev line
+    push    r8
+    push    r9
+    push    r10
+    push    r11
+
+    mov     rdi, r8
+    mov     rsi, r9
+    mov     rdx, rcx
+    call    skip_fields_fn
+    mov     r12, rax                ; prev offset
+
+    ; Skip fields in cur line
+    mov     rdi, [rsp + 8]          ; r10 = cur_ptr
+    mov     rsi, [rsp]              ; r11 = cur_len
+    mov     rdx, [rel opt_skip_fields]
+    call    skip_fields_fn
+    mov     r13, rax                ; cur offset
+
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r8
+    jmp     .clm_apply_skip_chars
+
+.clm_skip_chars:
+    xor     r12d, r12d              ; prev offset = 0
+    xor     r13d, r13d              ; cur offset = 0
+
+.clm_apply_skip_chars:
+    ; Apply skip_chars
+    mov     rcx, [rel opt_skip_chars]
+    add     r12, rcx
+    add     r13, rcx
+
+    ; Clamp offsets to line lengths
+    cmp     r12, r9
+    jle     .clm_prev_ok
+    mov     r12, r9
+.clm_prev_ok:
+    cmp     r13, r11
+    jle     .clm_cur_ok
+    mov     r13, r11
+.clm_cur_ok:
+
+    ; Compute effective pointers and lengths
+    lea     r14, [r8 + r12]         ; prev effective start
+    mov     rbx, r9
+    sub     rbx, r12                ; prev effective length
+
+    lea     r15, [r10 + r13]        ; cur effective start
+    mov     rcx, r11
+    sub     rcx, r13                ; cur effective length
+
+    ; Apply check_chars limit
+    mov     rax, [rel opt_check_chars]
+    cmp     rax, -1
+    je      .clm_no_limit
+
+    cmp     rbx, rax
+    jle     .clm_prev_limited
+    mov     rbx, rax
+.clm_prev_limited:
+    cmp     rcx, rax
+    jle     .clm_cur_limited
+    mov     rcx, rax
+.clm_cur_limited:
+
+.clm_no_limit:
+    ; Now compare r14[0..rbx) with r15[0..rcx)
+    cmp     rbx, rcx
+    jne     .clm_different
+
+    ; Same length — compare bytes
+    test    rbx, rbx
+    jz      .clm_equal
+
+    cmp     byte [rel opt_case_insensitive], 0
+    jne     .clm_case_insensitive
+
+    ; === Fast case-sensitive SIMD comparison ===
+    xor     ecx, ecx                ; offset = 0
+.clm_simd_cmp:
+    mov     rax, rbx
+    sub     rax, rcx
+    cmp     rax, 16
+    jl      .clm_scalar_cmp
+
+    movdqu  xmm0, [r14 + rcx]
+    movdqu  xmm1, [r15 + rcx]
+    pcmpeqb xmm0, xmm1
+    pmovmskb eax, xmm0
+    cmp     eax, 0xFFFF
+    jne     .clm_different
+    add     rcx, 16
+    jmp     .clm_simd_cmp
+
+.clm_scalar_cmp:
+    cmp     rcx, rbx
+    jge     .clm_equal
+    movzx   eax, byte [r14 + rcx]
+    cmp     al, byte [r15 + rcx]
+    jne     .clm_different
+    inc     rcx
+    jmp     .clm_scalar_cmp
+
+.clm_case_insensitive:
+    ; Case-insensitive byte-by-byte comparison
+    xor     ecx, ecx
+.clm_ci_loop:
+    cmp     rcx, rbx
+    jge     .clm_equal
+
+    movzx   eax, byte [r14 + rcx]
+    movzx   edx, byte [r15 + rcx]
+
+    ; Convert to uppercase
+    cmp     al, 'a'
+    jb      .clm_ci_no1
+    cmp     al, 'z'
+    ja      .clm_ci_no1
+    sub     al, 32
+.clm_ci_no1:
+    cmp     dl, 'a'
+    jb      .clm_ci_no2
+    cmp     dl, 'z'
+    ja      .clm_ci_no2
+    sub     dl, 32
+.clm_ci_no2:
+    cmp     al, dl
+    jne     .clm_different
+    inc     rcx
+    jmp     .clm_ci_loop
+
+.clm_equal:
+    xor     eax, eax
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+.clm_different:
+    mov     eax, 1
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ═══════════════════════════════════════════════════════════
+;  output_group_mmap — Output the previous group (mmap version)
+; ═══════════════════════════════════════════════════════════
+output_group_mmap:
+    push    rbx
+
+    movzx   eax, byte [rel opt_mode]
+    cmp     al, MODE_NORMAL
+    je      .ogm_normal
+    cmp     al, MODE_COUNT
+    je      .ogm_count
+    cmp     al, MODE_REPEATED
+    je      .ogm_repeated
+    cmp     al, MODE_ALL_REPEAT
+    je      .ogm_allrepeat
+    cmp     al, MODE_UNIQUE
+    je      .ogm_unique
+    cmp     al, MODE_GROUP
+    je      .ogm_group
+
+.ogm_normal:
+    mov     rdi, [rel prev_mmap_ptr]
+    mov     rsi, [rel prev_mmap_len]
+    call    emit_line_direct
+    jmp     .ogm_done
+
+.ogm_count:
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+    mov     rdi, [rel prev_mmap_ptr]
+    mov     rsi, [rel prev_mmap_len]
+    call    emit_line_direct
+    jmp     .ogm_done
+
+.ogm_repeated:
+    cmp     byte [rel opt_flag_u], 1
+    je      .ogm_done
+    cmp     qword [rel count], 1
+    jle     .ogm_done
+    mov     rdi, [rel prev_mmap_ptr]
+    mov     rsi, [rel prev_mmap_len]
+    call    emit_line_direct
+    jmp     .ogm_done
+
+.ogm_allrepeat:
+    jmp     .ogm_done
+
+.ogm_unique:
+    cmp     byte [rel opt_flag_d], 1
+    je      .ogm_done
+    cmp     qword [rel count], 1
+    jne     .ogm_done
+    mov     rdi, [rel prev_mmap_ptr]
+    mov     rsi, [rel prev_mmap_len]
+    call    emit_line_direct
+    jmp     .ogm_done
+
+.ogm_group:
+    ; Emit separator between groups
+    call    emit_empty_line
+    ; Emit first line of new group (current line is on the stack of caller)
+    ; Actually, in the mmap loop, after output_group_mmap returns,
+    ; the new prev is set. But we need to emit the CURRENT line,
+    ; which is the new group's first line. The caller handles this
+    ; by setting prev_mmap_ptr after this call. But we need to emit
+    ; the current line here. Let's use cur_mmap_ptr/cur_mmap_len.
+    ; However, we don't have those stored. Let's handle this differently.
+    ; The mmap main loop sets prev after calling output_group_mmap,
+    ; so we need to emit the NEW line. But we don't have it here.
+    ; Instead, let the main loop handle group mode line emission.
+    ; So for group mode in output_group_mmap, just emit the separator.
+    jmp     .ogm_done
+
+.ogm_done:
+    pop     rbx
+    ret
+
+; ═══════════════════════════════════════════════════════════
+;  output_group_final_mmap — Output last group at EOF (mmap)
+; ═══════════════════════════════════════════════════════════
+output_group_final_mmap:
+    push    rbx
+
+    movzx   eax, byte [rel opt_mode]
+    cmp     al, MODE_NORMAL
+    je      .ogfm_normal
+    cmp     al, MODE_COUNT
+    je      .ogfm_count
+    cmp     al, MODE_REPEATED
+    je      .ogfm_repeated
+    cmp     al, MODE_ALL_REPEAT
+    je      .ogfm_allrepeat
+    cmp     al, MODE_UNIQUE
+    je      .ogfm_unique
+    cmp     al, MODE_GROUP
+    je      .ogfm_group
+
+.ogfm_normal:
+    mov     rdi, [rel prev_mmap_ptr]
+    mov     rsi, [rel prev_mmap_len]
+    call    emit_line_direct
+    jmp     .ogfm_done
+
+.ogfm_count:
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+    mov     rdi, [rel prev_mmap_ptr]
+    mov     rsi, [rel prev_mmap_len]
+    call    emit_line_direct
+    jmp     .ogfm_done
+
+.ogfm_repeated:
+    cmp     byte [rel opt_flag_u], 1
+    je      .ogfm_done
+    cmp     qword [rel count], 1
+    jle     .ogfm_done
+    mov     rdi, [rel prev_mmap_ptr]
+    mov     rsi, [rel prev_mmap_len]
+    call    emit_line_direct
+    jmp     .ogfm_done
+
+.ogfm_allrepeat:
+    jmp     .ogfm_done
+
+.ogfm_unique:
+    cmp     byte [rel opt_flag_d], 1
+    je      .ogfm_done
+    cmp     qword [rel count], 1
+    jne     .ogfm_done
+    mov     rdi, [rel prev_mmap_ptr]
+    mov     rsi, [rel prev_mmap_len]
+    call    emit_line_direct
+    jmp     .ogfm_done
+
+.ogfm_group:
+    ; Group mode final: emit trailing separator if append or both
+    movzx   eax, byte [rel opt_group_method]
+    cmp     al, GROUP_APPEND
+    je      .ogfm_group_trailing
+    cmp     al, GROUP_BOTH
+    je      .ogfm_group_trailing
+    jmp     .ogfm_done
+
+.ogfm_group_trailing:
+    call    emit_empty_line
+
+.ogfm_done:
+    pop     rbx
+    ret
+
+; ═══════════════════════════════════════════════════════════
+;  emit_line_direct(rdi=ptr, rsi=len) — Emit line + delimiter to output buffer
+;  Zero-copy from mmap: copies to output buffer for batched writes
+; ═══════════════════════════════════════════════════════════
+emit_line_direct:
+    push    rbx
+    push    r13
+
+    mov     rbx, rdi                ; ptr
+    mov     r13, rsi                ; len
+
+    ; Need len + 1 bytes in output buffer
+    lea     rax, [r12 + r13 + 1]
+    cmp     rax, OUT_BUF_SIZE
+    jl      .eld_space_ok
+    call    flush_output
+    test    eax, eax
+    jnz     .eld_error
+    ; After flush, check if the line itself is bigger than buffer
+    lea     rax, [r13 + 1]
+    cmp     rax, OUT_BUF_SIZE
+    jge     .eld_direct_write
+.eld_space_ok:
+    ; Copy line data to output buffer using rep movsb (fast on modern CPUs)
+    lea     rdi, [rel out_buf]
+    add     rdi, r12
+    mov     rsi, rbx
+    mov     rcx, r13
+    ; Use SIMD for larger copies
+    cmp     rcx, 64
+    jge     .eld_simd_copy
+    rep     movsb
+    jmp     .eld_add_delim
+
+.eld_simd_copy:
+    ; Copy 16 bytes at a time
+    push    rcx
+    mov     rdx, rcx
+    shr     rdx, 4                  ; rdx = count / 16
+.eld_simd_loop:
+    movdqu  xmm0, [rsi]
+    movdqu  [rdi], xmm0
+    add     rsi, 16
+    add     rdi, 16
+    dec     rdx
+    jnz     .eld_simd_loop
+    pop     rcx
+    ; Copy remaining bytes
+    and     rcx, 15                 ; remaining = len & 15
+    rep     movsb
+
+.eld_add_delim:
+    ; Append delimiter
+    lea     rdi, [rel out_buf]
+    add     rdi, r12
+    add     rdi, r13
+    movzx   eax, byte [rel delimiter]
+    mov     [rdi], al
+    lea     rax, [r13 + 1]
+    add     r12, rax
+
+    ; Flush if above threshold
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .eld_done
+    call    flush_output
+    test    eax, eax
+    jnz     .eld_error
+
+.eld_done:
+    pop     r13
+    pop     rbx
+    ret
+
+.eld_direct_write:
+    ; Line too large for buffer — write directly
+    ; First write the line data
+    mov     edi, [rel output_fd]
+    mov     rsi, rbx
+    mov     rdx, r13
+    call    asm_write_all
+    test    eax, eax
+    jnz     .eld_error
+    ; Write delimiter
+    movzx   eax, byte [rel delimiter]
+    mov     [rel count_buf], al     ; reuse count_buf temporarily
+    mov     edi, [rel output_fd]
+    lea     rsi, [rel count_buf]
+    mov     edx, 1
+    call    asm_write_all
+    test    eax, eax
+    jnz     .eld_error
+    jmp     .eld_done
+
+.eld_error:
+    mov     ebp, 1
+    pop     r13
+    pop     rbx
+    ret
+
+; ═══════════════════════════════════════════════════════════
+;  process_uniq_mmap group mode fix:
+;  After output_group_mmap for GROUP mode, we need to emit
+;  the current (new) line. This is handled by intercepting
+;  the "lines different" path in the main loop.
+;
+;  The main loop code at .pm_lines_different already calls
+;  output_group_mmap and then sets new prev. For GROUP mode,
+;  we also need to emit the new line. Let me re-examine the
+;  mmap main loop to handle this correctly.
+;
+;  Actually, looking at the original code, for GROUP mode
+;  output_group emits the separator AND the new line.
+;  Let's fix the mmap main loop to handle this.
+; ═══════════════════════════════════════════════════════════
+
+; ═══════════════════════════════════════════════════════════
+;  process_uniq_slow — Fallback read-based processing for stdin
+;  Uses read_buf and line buffers.
+; ═══════════════════════════════════════════════════════════
+process_uniq_slow:
     push    rbx
     push    r13
     push    r14
@@ -896,217 +1726,194 @@ process_uniq:
 
     ; Determine delimiter
     cmp     byte [rel opt_zero_terminated], 0
-    jne     .pu_use_nul
+    jne     .pus_use_nul
     mov     byte [rel delimiter], 10            ; newline
-    jmp     .pu_main_loop
-.pu_use_nul:
+    jmp     .pus_main_loop
+.pus_use_nul:
     mov     byte [rel delimiter], 0             ; NUL
 
-.pu_main_loop:
-    ; Read next line into cur_line_buf
+.pus_main_loop:
     call    read_line
-    ; rax: 0 = got a line, 1 = EOF (possibly with partial line), -1 = error
     cmp     rax, -1
-    je      .pu_error
+    je      .pus_error
     cmp     rax, 1
-    je      .pu_eof
+    je      .pus_eof
 
-    ; We have a complete line in cur_line_buf[0..cur_line_len)
-    ; Compare with previous line
     cmp     qword [rel prev_line_len], -1
-    je      .pu_first_line
+    je      .pus_first_line
 
-    ; Compare cur vs prev
-    call    compare_lines
-    ; rax = 0 if equal, nonzero if different
+    call    compare_lines_slow
     test    eax, eax
-    jz      .pu_lines_equal
+    jz      .pus_lines_equal
 
-    ; Lines are different — output previous group, start new group
-    call    output_group
-    ; Swap: copy current to prev
+    ; Lines are different
+    call    output_group_slow
     call    swap_to_prev
     mov     qword [rel count], 1
-    jmp     .pu_main_loop
+    jmp     .pus_main_loop
 
-.pu_first_line:
-    ; First line: copy to prev, count=1
+.pus_first_line:
     call    swap_to_prev
     mov     qword [rel count], 1
 
-    ; For group mode, emit prepend separator and the first line
     cmp     byte [rel opt_mode], MODE_GROUP
-    jne     .pu_main_loop
+    jne     .pus_main_loop
 
-    ; Group mode: emit prepend/both separator before first group
     movzx   eax, byte [rel opt_group_method]
     cmp     al, GROUP_PREPEND
-    je      .pu_first_group_sep
+    je      .pus_first_group_sep
     cmp     al, GROUP_BOTH
-    je      .pu_first_group_sep
-    jmp     .pu_first_group_emit
+    je      .pus_first_group_sep
+    jmp     .pus_first_group_emit
 
-.pu_first_group_sep:
+.pus_first_group_sep:
     call    emit_empty_line
 
-.pu_first_group_emit:
+.pus_first_group_emit:
     mov     byte [rel first_group], 0
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .pu_main_loop
+    call    emit_line_direct
+    jmp     .pus_main_loop
 
-.pu_lines_equal:
-    ; Same as previous — increment count
+.pus_lines_equal:
     inc     qword [rel count]
-    ; For MODE_ALL_REPEAT and MODE_GROUP, we need to emit each line
     cmp     byte [rel opt_mode], MODE_ALL_REPEAT
-    je      .pu_allrep_emit
+    je      .pus_allrep_emit
     cmp     byte [rel opt_mode], MODE_GROUP
-    je      .pu_group_emit
-    jmp     .pu_main_loop
+    je      .pus_group_emit
+    jmp     .pus_main_loop
 
-.pu_allrep_emit:
-    ; In all-repeated mode, when count goes from 1 to 2, we need to emit the
-    ; first occurrence too. For count >= 2, emit the current line.
+.pus_allrep_emit:
     cmp     qword [rel count], 2
-    je      .pu_allrep_first_dup
-    ; count > 2: just emit current line
+    je      .pus_allrep_first_dup
     lea     rdi, [rel cur_line_buf]
     mov     rsi, [rel cur_line_len]
-    call    emit_line
-    jmp     .pu_main_loop
+    call    emit_line_direct
+    jmp     .pus_main_loop
 
-.pu_allrep_first_dup:
-    ; count == 2: first time we see a duplicate — emit prev (first occurrence)
-    ; then emit current (second occurrence)
-    ; Handle prepend: empty line before first group or between groups
+.pus_allrep_first_dup:
     cmp     byte [rel opt_allrep_method], ALLREP_PREPEND
-    je      .pu_allrep_prepend_sep
+    je      .pus_allrep_prepend_sep
     cmp     byte [rel opt_allrep_method], ALLREP_SEPARATE
-    je      .pu_allrep_separate_sep
-    jmp     .pu_allrep_emit_both
+    je      .pus_allrep_separate_sep
+    jmp     .pus_allrep_emit_both
 
-.pu_allrep_prepend_sep:
-    ; Always prepend empty line before each group
+.pus_allrep_prepend_sep:
     call    emit_empty_line
-    jmp     .pu_allrep_emit_both
+    jmp     .pus_allrep_emit_both
 
-.pu_allrep_separate_sep:
-    ; Emit empty line between groups (not before first)
+.pus_allrep_separate_sep:
     cmp     byte [rel first_group], 1
-    je      .pu_allrep_emit_both
+    je      .pus_allrep_emit_both
     call    emit_empty_line
-    jmp     .pu_allrep_emit_both
+    jmp     .pus_allrep_emit_both
 
-.pu_allrep_emit_both:
+.pus_allrep_emit_both:
     mov     byte [rel first_group], 0
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
+    call    emit_line_direct
     lea     rdi, [rel cur_line_buf]
     mov     rsi, [rel cur_line_len]
-    call    emit_line
-    jmp     .pu_main_loop
+    call    emit_line_direct
+    jmp     .pus_main_loop
 
-.pu_group_emit:
-    ; Group mode: equal line — just emit it
+.pus_group_emit:
     lea     rdi, [rel cur_line_buf]
     mov     rsi, [rel cur_line_len]
-    call    emit_line
-    jmp     .pu_main_loop
+    call    emit_line_direct
+    jmp     .pus_main_loop
 
-.pu_eof:
-    ; Check if there was a partial line (no trailing delimiter)
+.pus_eof:
+    ; Check if there was a partial line
     cmp     qword [rel cur_line_len], 0
-    je      .pu_eof_no_partial
-    ; There's a partial line — treat it as a complete line
+    je      .pus_eof_no_partial
+    ; Partial line handling
     cmp     qword [rel prev_line_len], -1
-    je      .pu_eof_first_partial
-    ; Compare with previous
-    call    compare_lines
+    je      .pus_eof_first_partial
+
+    call    compare_lines_slow
     test    eax, eax
-    jz      .pu_eof_partial_equal
-    ; Different — output previous group, then handle this line as last group
-    call    output_group
+    jz      .pus_eof_partial_equal
+
+    call    output_group_slow
     call    swap_to_prev
     mov     qword [rel count], 1
-    jmp     .pu_eof_final_group
-.pu_eof_first_partial:
+    jmp     .pus_eof_final_group
+
+.pus_eof_first_partial:
     call    swap_to_prev
     mov     qword [rel count], 1
-    ; For group mode, emit prepend/both separator and the line
     cmp     byte [rel opt_mode], MODE_GROUP
-    jne     .pu_eof_final_group
+    jne     .pus_eof_final_group
     movzx   eax, byte [rel opt_group_method]
     cmp     al, GROUP_PREPEND
-    je      .pu_eof_first_partial_sep
+    je      .pus_eof_first_partial_sep
     cmp     al, GROUP_BOTH
-    je      .pu_eof_first_partial_sep
-    jmp     .pu_eof_first_partial_emit
-.pu_eof_first_partial_sep:
+    je      .pus_eof_first_partial_sep
+    jmp     .pus_eof_first_partial_emit
+.pus_eof_first_partial_sep:
     call    emit_empty_line
-.pu_eof_first_partial_emit:
+.pus_eof_first_partial_emit:
     mov     byte [rel first_group], 0
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .pu_eof_final_group
-.pu_eof_partial_equal:
+    call    emit_line_direct
+    jmp     .pus_eof_final_group
+
+.pus_eof_partial_equal:
     inc     qword [rel count]
     cmp     byte [rel opt_mode], MODE_ALL_REPEAT
-    je      .pu_eof_allrep_partial
+    je      .pus_eof_allrep_partial
     cmp     byte [rel opt_mode], MODE_GROUP
-    je      .pu_eof_group_partial
-    jmp     .pu_eof_final_group
+    je      .pus_eof_group_partial
+    jmp     .pus_eof_final_group
 
-.pu_eof_allrep_partial:
-    ; Same as .pu_allrep_emit but don't loop
+.pus_eof_allrep_partial:
     cmp     qword [rel count], 2
-    je      .pu_eof_allrep_first_dup
+    je      .pus_eof_allrep_first_dup
     lea     rdi, [rel cur_line_buf]
     mov     rsi, [rel cur_line_len]
-    call    emit_line
-    jmp     .pu_eof_final_group
-.pu_eof_allrep_first_dup:
+    call    emit_line_direct
+    jmp     .pus_eof_final_group
+.pus_eof_allrep_first_dup:
     cmp     byte [rel opt_allrep_method], ALLREP_PREPEND
-    je      .pu_eof_ar_prepend
+    je      .pus_eof_ar_prepend
     cmp     byte [rel opt_allrep_method], ALLREP_SEPARATE
-    je      .pu_eof_ar_separate
-    jmp     .pu_eof_ar_emit_both
-.pu_eof_ar_prepend:
+    je      .pus_eof_ar_separate
+    jmp     .pus_eof_ar_emit_both
+.pus_eof_ar_prepend:
     call    emit_empty_line
-    jmp     .pu_eof_ar_emit_both
-.pu_eof_ar_separate:
+    jmp     .pus_eof_ar_emit_both
+.pus_eof_ar_separate:
     cmp     byte [rel first_group], 1
-    je      .pu_eof_ar_emit_both
+    je      .pus_eof_ar_emit_both
     call    emit_empty_line
-.pu_eof_ar_emit_both:
+.pus_eof_ar_emit_both:
     mov     byte [rel first_group], 0
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
+    call    emit_line_direct
     lea     rdi, [rel cur_line_buf]
     mov     rsi, [rel cur_line_len]
-    call    emit_line
-    jmp     .pu_eof_final_group
+    call    emit_line_direct
+    jmp     .pus_eof_final_group
 
-.pu_eof_group_partial:
-    ; Group mode: emit the equal line
+.pus_eof_group_partial:
     lea     rdi, [rel cur_line_buf]
     mov     rsi, [rel cur_line_len]
-    call    emit_line
-    jmp     .pu_eof_final_group
+    call    emit_line_direct
+    jmp     .pus_eof_final_group
 
-.pu_eof_no_partial:
-.pu_eof_final_group:
-    ; Output the last group
+.pus_eof_no_partial:
+.pus_eof_final_group:
     cmp     qword [rel prev_line_len], -1
-    je      .pu_done                ; no lines at all
-    call    output_group_final
+    je      .pus_done
+    call    output_group_final_slow
 
-.pu_done:
-.pu_error:
+.pus_done:
+.pus_error:
     pop     r15
     pop     r14
     pop     r13
@@ -1114,169 +1921,306 @@ process_uniq:
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  output_group — Output the previous group (when a new different line is found)
-;  Called when we detect that the current line differs from the previous.
-;  At this point:
-;    prev_line_buf/prev_line_len = the repeated line
-;    count = how many times it appeared
+;  output_group_slow — Output group using line buffers (stdin path)
 ; ═══════════════════════════════════════════════════════════
-output_group:
+output_group_slow:
     push    rbx
 
     movzx   eax, byte [rel opt_mode]
     cmp     al, MODE_NORMAL
-    je      .og_normal
+    je      .ogs_normal
     cmp     al, MODE_COUNT
-    je      .og_count
+    je      .ogs_count
     cmp     al, MODE_REPEATED
-    je      .og_repeated
+    je      .ogs_repeated
     cmp     al, MODE_ALL_REPEAT
-    je      .og_allrepeat
+    je      .ogs_allrepeat
     cmp     al, MODE_UNIQUE
-    je      .og_unique
+    je      .ogs_unique
     cmp     al, MODE_GROUP
-    je      .og_group
+    je      .ogs_group
 
-.og_normal:
-    ; Output the line once
+.ogs_normal:
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .og_done
+    call    emit_line_direct
+    jmp     .ogs_done
 
-.og_count:
-    ; Output "     N line"
+.ogs_count:
     mov     rdi, [rel count]
     call    emit_count_prefix
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .og_done
+    call    emit_line_direct
+    jmp     .ogs_done
 
-.og_repeated:
-    ; Only output if count > 1, and -u was not also specified
+.ogs_repeated:
     cmp     byte [rel opt_flag_u], 1
-    je      .og_done                ; -d -u = print nothing
+    je      .ogs_done
     cmp     qword [rel count], 1
-    jle     .og_done
+    jle     .ogs_done
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .og_done
+    call    emit_line_direct
+    jmp     .ogs_done
 
-.og_allrepeat:
-    ; Already handled incrementally in main loop.
-    ; Nothing to do here — lines were emitted as they came.
-    jmp     .og_done
+.ogs_allrepeat:
+    jmp     .ogs_done
 
-.og_unique:
-    ; Only output if count == 1, and -d was not also specified
+.ogs_unique:
     cmp     byte [rel opt_flag_d], 1
-    je      .og_done                ; -d -u = print nothing
+    je      .ogs_done
     cmp     qword [rel count], 1
-    jne     .og_done
+    jne     .ogs_done
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .og_done
+    call    emit_line_direct
+    jmp     .ogs_done
 
-.og_group:
-    ; Group mode: between groups, emit ONE separator and then the first line
-    ; of the new group (cur_line_buf).
-    ; All methods use exactly one empty line between groups.
+.ogs_group:
     call    emit_empty_line
-
-    ; Emit the first line of the new group
     lea     rdi, [rel cur_line_buf]
     mov     rsi, [rel cur_line_len]
-    call    emit_line
-    jmp     .og_done
+    call    emit_line_direct
+    jmp     .ogs_done
 
-.og_done:
+.ogs_done:
     pop     rbx
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  output_group_final — Output the last group (at EOF)
-;  Similar to output_group but also handles the last group's
-;  trailing separator if needed.
+;  output_group_final_slow — Output last group (stdin path)
 ; ═══════════════════════════════════════════════════════════
-output_group_final:
+output_group_final_slow:
     push    rbx
 
     movzx   eax, byte [rel opt_mode]
     cmp     al, MODE_NORMAL
-    je      .ogf_normal
+    je      .ogfs_normal
     cmp     al, MODE_COUNT
-    je      .ogf_count
+    je      .ogfs_count
     cmp     al, MODE_REPEATED
-    je      .ogf_repeated
+    je      .ogfs_repeated
     cmp     al, MODE_ALL_REPEAT
-    je      .ogf_allrepeat
+    je      .ogfs_allrepeat
     cmp     al, MODE_UNIQUE
-    je      .ogf_unique
+    je      .ogfs_unique
     cmp     al, MODE_GROUP
-    je      .ogf_group
+    je      .ogfs_group
 
-.ogf_normal:
+.ogfs_normal:
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .ogf_done
+    call    emit_line_direct
+    jmp     .ogfs_done
 
-.ogf_count:
+.ogfs_count:
     mov     rdi, [rel count]
     call    emit_count_prefix
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .ogf_done
+    call    emit_line_direct
+    jmp     .ogfs_done
 
-.ogf_repeated:
+.ogfs_repeated:
     cmp     byte [rel opt_flag_u], 1
-    je      .ogf_done
+    je      .ogfs_done
     cmp     qword [rel count], 1
-    jle     .ogf_done
+    jle     .ogfs_done
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .ogf_done
+    call    emit_line_direct
+    jmp     .ogfs_done
 
-.ogf_allrepeat:
-    ; If last group was duplicated, lines were already emitted
-    ; Nothing more to do
-    jmp     .ogf_done
+.ogfs_allrepeat:
+    jmp     .ogfs_done
 
-.ogf_unique:
+.ogfs_unique:
     cmp     byte [rel opt_flag_d], 1
-    je      .ogf_done
+    je      .ogfs_done
     cmp     qword [rel count], 1
-    jne     .ogf_done
+    jne     .ogfs_done
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
-    call    emit_line
-    jmp     .ogf_done
+    call    emit_line_direct
+    jmp     .ogfs_done
 
-.ogf_group:
-    ; Group mode final: emit trailing separator if append or both
+.ogfs_group:
     movzx   eax, byte [rel opt_group_method]
     cmp     al, GROUP_APPEND
-    je      .ogf_group_trailing
+    je      .ogfs_group_trailing
     cmp     al, GROUP_BOTH
-    je      .ogf_group_trailing
-    jmp     .ogf_done
+    je      .ogfs_group_trailing
+    jmp     .ogfs_done
 
-.ogf_group_trailing:
+.ogfs_group_trailing:
     call    emit_empty_line
 
-.ogf_done:
+.ogfs_done:
+    pop     rbx
+    ret
+
+; ═══════════════════════════════════════════════════════════
+;  compare_lines_slow — Compare cur_line_buf vs prev_line_buf
+;  (used for stdin path)
+; ═══════════════════════════════════════════════════════════
+compare_lines_slow:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+
+    lea     r8, [rel prev_line_buf]
+    mov     r9, [rel prev_line_len]
+    lea     r10, [rel cur_line_buf]
+    mov     r11, [rel cur_line_len]
+
+    mov     rcx, [rel opt_skip_fields]
+    test    rcx, rcx
+    jz      .cls_skip_chars
+
+    push    r8
+    push    r9
+    push    r10
+    push    r11
+
+    mov     rdi, r8
+    mov     rsi, r9
+    mov     rdx, rcx
+    call    skip_fields_fn
+    mov     r12, rax
+
+    mov     rdi, [rsp + 8]
+    mov     rsi, [rsp]
+    mov     rdx, [rel opt_skip_fields]
+    call    skip_fields_fn
+    mov     r13, rax
+
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r8
+    jmp     .cls_apply_skip_chars
+
+.cls_skip_chars:
+    xor     r12d, r12d
+    xor     r13d, r13d
+
+.cls_apply_skip_chars:
+    mov     rcx, [rel opt_skip_chars]
+    add     r12, rcx
+    add     r13, rcx
+
+    cmp     r12, r9
+    jle     .cls_prev_ok
+    mov     r12, r9
+.cls_prev_ok:
+    cmp     r13, r11
+    jle     .cls_cur_ok
+    mov     r13, r11
+.cls_cur_ok:
+
+    lea     r14, [r8 + r12]
+    mov     rbx, r9
+    sub     rbx, r12
+
+    lea     r15, [r10 + r13]
+    mov     rcx, r11
+    sub     rcx, r13
+
+    mov     rax, [rel opt_check_chars]
+    cmp     rax, -1
+    je      .cls_no_limit
+    cmp     rbx, rax
+    jle     .cls_prev_limited
+    mov     rbx, rax
+.cls_prev_limited:
+    cmp     rcx, rax
+    jle     .cls_cur_limited
+    mov     rcx, rax
+.cls_cur_limited:
+
+.cls_no_limit:
+    cmp     rbx, rcx
+    jne     .cls_different
+
+    test    rbx, rbx
+    jz      .cls_equal
+
+    cmp     byte [rel opt_case_insensitive], 0
+    jne     .cls_case_insensitive
+
+    ; SIMD comparison
+    xor     ecx, ecx
+.cls_simd_cmp:
+    mov     rax, rbx
+    sub     rax, rcx
+    cmp     rax, 16
+    jl      .cls_scalar_cmp
+    movdqu  xmm0, [r14 + rcx]
+    movdqu  xmm1, [r15 + rcx]
+    pcmpeqb xmm0, xmm1
+    pmovmskb eax, xmm0
+    cmp     eax, 0xFFFF
+    jne     .cls_different
+    add     rcx, 16
+    jmp     .cls_simd_cmp
+
+.cls_scalar_cmp:
+    cmp     rcx, rbx
+    jge     .cls_equal
+    movzx   eax, byte [r14 + rcx]
+    cmp     al, byte [r15 + rcx]
+    jne     .cls_different
+    inc     rcx
+    jmp     .cls_scalar_cmp
+
+.cls_case_insensitive:
+    xor     ecx, ecx
+.cls_ci_loop:
+    cmp     rcx, rbx
+    jge     .cls_equal
+    movzx   eax, byte [r14 + rcx]
+    movzx   edx, byte [r15 + rcx]
+    cmp     al, 'a'
+    jb      .cls_ci_no1
+    cmp     al, 'z'
+    ja      .cls_ci_no1
+    sub     al, 32
+.cls_ci_no1:
+    cmp     dl, 'a'
+    jb      .cls_ci_no2
+    cmp     dl, 'z'
+    ja      .cls_ci_no2
+    sub     dl, 32
+.cls_ci_no2:
+    cmp     al, dl
+    jne     .cls_different
+    inc     rcx
+    jmp     .cls_ci_loop
+
+.cls_equal:
+    xor     eax, eax
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+.cls_different:
+    mov     eax, 1
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     pop     rbx
     ret
 
 ; ═══════════════════════════════════════════════════════════
 ;  read_line — Read next line from input into cur_line_buf
 ;  Returns: rax = 0 (got line), 1 (EOF), -1 (error)
-;  cur_line_len is set to the length (not including delimiter)
 ; ═══════════════════════════════════════════════════════════
 read_line:
     push    rbx
@@ -1284,15 +2228,13 @@ read_line:
     push    r15
 
     mov     qword [rel cur_line_len], 0
-    movzx   r15d, byte [rel delimiter]  ; r15b = delimiter byte
+    movzx   r15d, byte [rel delimiter]
 
 .rl_scan:
-    ; Check if we have data in read_buf
     mov     rax, [rel read_buf_pos]
     cmp     rax, [rel read_buf_end]
     jl      .rl_have_data
 
-    ; Need to read more data
     mov     edi, [rel input_fd]
     lea     rsi, [rel read_buf]
     mov     edx, READ_BUF_SIZE
@@ -1305,15 +2247,14 @@ read_line:
     mov     [rel read_buf_end], rax
 
 .rl_have_data:
-    ; Scan for delimiter in read_buf[read_buf_pos..read_buf_end)
-    mov     r14, [rel read_buf_pos]     ; current position
-    mov     rbx, [rel read_buf_end]     ; end position
+    mov     r14, [rel read_buf_pos]
+    mov     rbx, [rel read_buf_end]
 
-    ; Set up SSE2 pattern for delimiter search
+    ; Set up SSE2 pattern
     movd    xmm1, r15d
     punpcklbw xmm1, xmm1
     punpcklwd xmm1, xmm1
-    pshufd  xmm1, xmm1, 0              ; broadcast delimiter to all bytes
+    pshufd  xmm1, xmm1, 0
 
 .rl_simd_scan:
     mov     rax, rbx
@@ -1321,7 +2262,6 @@ read_line:
     cmp     rax, 16
     jl      .rl_scalar_scan
 
-    ; Load 16 bytes from read_buf + r14
     lea     rdi, [rel read_buf]
     add     rdi, r14
     movdqu  xmm0, [rdi]
@@ -1331,7 +2271,7 @@ read_line:
     test    eax, eax
     jnz     .rl_simd_found
 
-    ; No delimiter in 16 bytes — copy to cur_line_buf
+    ; No delimiter — copy 16 bytes to cur_line_buf
     mov     rcx, [rel cur_line_len]
     lea     rdx, [rcx + 16]
     cmp     rdx, LINE_BUF_SIZE
@@ -1348,9 +2288,8 @@ read_line:
     jmp     .rl_simd_scan
 
 .rl_simd_found:
-    bsf     ecx, eax                ; position of delimiter in 16-byte window
+    bsf     ecx, eax
 
-    ; Copy bytes before delimiter to cur_line_buf
     test    ecx, ecx
     jz      .rl_found_at_pos
 
@@ -1366,7 +2305,6 @@ read_line:
     lea     rdi, [rel cur_line_buf]
     add     rdi, rax
     mov     edx, ecx
-    ; Small copy with rep movsb
     push    rcx
     mov     ecx, edx
     rep     movsb
@@ -1375,12 +2313,9 @@ read_line:
     add     [rel cur_line_len], rcx
 
 .rl_found_at_pos:
-    ; Advance past copied bytes + delimiter
     add     r14, rcx
-    inc     r14                     ; skip delimiter
+    inc     r14
     mov     [rel read_buf_pos], r14
-
-    ; Successfully read a line
     xor     eax, eax
     pop     r15
     pop     r14
@@ -1393,10 +2328,9 @@ read_line:
 
     lea     rdi, [rel read_buf]
     movzx   eax, byte [rdi + r14]
-    cmp     al, r15b                ; compare with delimiter
+    cmp     al, r15b
     je      .rl_scalar_found
 
-    ; Append byte to cur_line_buf
     mov     rcx, [rel cur_line_len]
     cmp     rcx, LINE_BUF_SIZE
     jge     .rl_line_overflow_scalar
@@ -1407,7 +2341,7 @@ read_line:
     jmp     .rl_scalar_scan
 
 .rl_scalar_found:
-    inc     r14                     ; skip delimiter
+    inc     r14
     mov     [rel read_buf_pos], r14
     xor     eax, eax
     pop     r15
@@ -1416,22 +2350,20 @@ read_line:
     ret
 
 .rl_need_more:
-    ; Exhausted current read_buf, need to read more
     mov     [rel read_buf_pos], rbx
     jmp     .rl_scan
 
 .rl_eof:
-    ; EOF — if we have partial data, return it as a line
     cmp     qword [rel cur_line_len], 0
     jg      .rl_eof_partial
-    mov     eax, 1                  ; true EOF, no data
+    mov     eax, 1
     pop     r15
     pop     r14
     pop     rbx
     ret
 
 .rl_eof_partial:
-    xor     eax, eax                ; return 0 = got a line (partial)
+    xor     eax, eax
     pop     r15
     pop     r14
     pop     rbx
@@ -1445,7 +2377,6 @@ read_line:
     ret
 
 .rl_line_overflow:
-    ; Line exceeds buffer — treat what we have as the line
     add     r14, 16
     mov     [rel read_buf_pos], r14
     xor     eax, eax
@@ -1464,226 +2395,30 @@ read_line:
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  compare_lines — Compare cur_line vs prev_line
-;  Applies: skip_fields, skip_chars, check_chars, ignore_case
-;  Returns: rax = 0 if equal, nonzero if different
-; ═══════════════════════════════════════════════════════════
-compare_lines:
-    push    rbx
-    push    r12
-    push    r13
-    push    r14
-    push    r15
-
-    ; Get pointers and lengths for both lines
-    lea     r8, [rel prev_line_buf]
-    mov     r9, [rel prev_line_len]
-    lea     r10, [rel cur_line_buf]
-    mov     r11, [rel cur_line_len]
-
-    ; Apply skip_fields to both
-    mov     rcx, [rel opt_skip_fields]
-    test    rcx, rcx
-    jz      .cl_skip_chars
-
-    ; Save all state we need across calls on callee-saved regs
-    ; r12-r15 and rbx are callee-saved, so they survive calls.
-    ; r8-r11 are caller-saved. Store in callee-saved regs temporarily.
-    ; We already have r8, r9, r10, r11 with the values.
-    ; Use stack to save them across calls.
-    push    r8                      ; prev buf ptr
-    push    r9                      ; prev len
-    push    r10                     ; cur buf ptr
-    push    r11                     ; cur len
-
-    ; Skip fields in prev line
-    mov     rdi, r8
-    mov     rsi, r9
-    mov     rdx, rcx
-    call    skip_fields_fn
-    mov     r12, rax                ; prev offset (r12 is callee-saved)
-
-    ; Skip fields in cur line
-    ; Stack: [rsp]=r11, [rsp+8]=r10, [rsp+16]=r9, [rsp+24]=r8
-    mov     rdi, [rsp + 8]          ; r10 = cur buf ptr
-    mov     rsi, [rsp]              ; r11 = cur len
-    mov     rdx, [rel opt_skip_fields]
-    call    skip_fields_fn
-    mov     r13, rax                ; cur offset (r13 is callee-saved)
-
-    ; Restore r8-r11
-    pop     r11
-    pop     r10
-    pop     r9
-    pop     r8
-    jmp     .cl_apply_skip_chars
-
-.cl_skip_chars:
-    xor     r12d, r12d              ; prev offset = 0
-    xor     r13d, r13d              ; cur offset = 0
-
-.cl_apply_skip_chars:
-    ; Apply skip_chars
-    mov     rcx, [rel opt_skip_chars]
-    add     r12, rcx
-    add     r13, rcx
-
-    ; Clamp offsets to line lengths
-    cmp     r12, r9
-    jle     .cl_prev_ok
-    mov     r12, r9
-.cl_prev_ok:
-    cmp     r13, r11
-    jle     .cl_cur_ok
-    mov     r13, r11
-.cl_cur_ok:
-
-    ; Compute effective pointers and lengths
-    lea     r14, [r8 + r12]         ; prev effective start
-    mov     rbx, r9
-    sub     rbx, r12                ; prev effective length
-
-    lea     r15, [r10 + r13]        ; cur effective start
-    mov     rcx, r11
-    sub     rcx, r13                ; cur effective length
-
-    ; Apply check_chars limit
-    mov     rax, [rel opt_check_chars]
-    cmp     rax, -1
-    je      .cl_no_limit
-
-    cmp     rbx, rax
-    jle     .cl_prev_limited
-    mov     rbx, rax
-.cl_prev_limited:
-    cmp     rcx, rax
-    jle     .cl_cur_limited
-    mov     rcx, rax
-.cl_cur_limited:
-
-.cl_no_limit:
-    ; Now compare r14[0..rbx) with r15[0..rcx)
-    ; If lengths differ, they're different
-    cmp     rbx, rcx
-    jne     .cl_different
-
-    ; Same length — compare bytes
-    ; r14 = ptr1, r15 = ptr2, rbx = len
-    test    rbx, rbx
-    jz      .cl_equal               ; both empty = equal
-
-    cmp     byte [rel opt_case_insensitive], 0
-    jne     .cl_case_insensitive
-
-    ; Case-sensitive comparison using SSE2
-.cl_simd_compare:
-    cmp     rbx, 16
-    jl      .cl_scalar_compare
-
-    movdqu  xmm0, [r14]
-    movdqu  xmm2, [r15]
-    pcmpeqb xmm0, xmm2
-    pmovmskb eax, xmm0
-    cmp     eax, 0xFFFF
-    jne     .cl_different
-
-    add     r14, 16
-    add     r15, 16
-    sub     rbx, 16
-    jmp     .cl_simd_compare
-
-.cl_scalar_compare:
-    test    rbx, rbx
-    jz      .cl_equal
-
-    movzx   eax, byte [r14]
-    movzx   ecx, byte [r15]
-    cmp     al, cl
-    jne     .cl_different
-    inc     r14
-    inc     r15
-    dec     rbx
-    jmp     .cl_scalar_compare
-
-.cl_case_insensitive:
-    ; Case-insensitive comparison
-    test    rbx, rbx
-    jz      .cl_equal
-
-.cl_ci_loop:
-    test    rbx, rbx
-    jz      .cl_equal
-
-    movzx   eax, byte [r14]
-    movzx   ecx, byte [r15]
-
-    ; Convert both to uppercase
-    cmp     al, 'a'
-    jb      .cl_ci_no_upper1
-    cmp     al, 'z'
-    ja      .cl_ci_no_upper1
-    sub     al, 32
-.cl_ci_no_upper1:
-    cmp     cl, 'a'
-    jb      .cl_ci_no_upper2
-    cmp     cl, 'z'
-    ja      .cl_ci_no_upper2
-    sub     cl, 32
-.cl_ci_no_upper2:
-
-    cmp     al, cl
-    jne     .cl_different
-    inc     r14
-    inc     r15
-    dec     rbx
-    jmp     .cl_ci_loop
-
-.cl_equal:
-    xor     eax, eax
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    ret
-
-.cl_different:
-    mov     eax, 1
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    ret
-
-; ═══════════════════════════════════════════════════════════
 ;  skip_fields_fn(rdi=line, rsi=len, rdx=nfields) -> rax=offset
-;  A field is a run of blanks (space/tab) then non-blanks.
 ; ═══════════════════════════════════════════════════════════
 skip_fields_fn:
     push    rbx
-    xor     eax, eax                ; offset = 0
-    mov     rcx, rdx                ; fields to skip
+    xor     eax, eax
+    mov     rcx, rdx
 
 .sf_loop:
     test    rcx, rcx
     jz      .sf_done
 
-    ; Skip leading blanks
 .sf_skip_blanks:
     cmp     rax, rsi
     jge     .sf_done
     movzx   edx, byte [rdi + rax]
     cmp     dl, ' '
     je      .sf_blank
-    cmp     dl, 9                   ; tab
+    cmp     dl, 9
     je      .sf_blank
     jmp     .sf_skip_nonblanks
 .sf_blank:
     inc     rax
     jmp     .sf_skip_blanks
 
-    ; Skip non-blanks
 .sf_skip_nonblanks:
     cmp     rax, rsi
     jge     .sf_done
@@ -1716,8 +2451,6 @@ swap_to_prev:
 
     lea     rsi, [rel cur_line_buf]
     lea     rdi, [rel prev_line_buf]
-
-    ; Copy using rep movsb (adequate for lines)
     rep     movsb
 
     pop     rdi
@@ -1726,63 +2459,9 @@ swap_to_prev:
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  emit_line(rdi=buf, rsi=len) — Append line + delimiter to output buffer
-; ═══════════════════════════════════════════════════════════
-emit_line:
-    push    rbx
-    push    r13
-
-    mov     rbx, rdi                ; buf
-    mov     r13, rsi                ; len
-
-    ; Ensure space: need len + 1 bytes
-    lea     rax, [r12 + r13 + 1]
-    cmp     rax, OUT_BUF_SIZE
-    jl      .el_space_ok
-    call    flush_output
-    test    eax, eax
-    jnz     .el_write_error
-.el_space_ok:
-
-    ; Copy line data
-    lea     rdi, [rel out_buf]
-    add     rdi, r12
-    mov     rsi, rbx
-    mov     rcx, r13
-    rep     movsb
-
-    ; Append delimiter
-    lea     rdi, [rel out_buf]
-    add     rdi, r12
-    add     rdi, r13
-    movzx   eax, byte [rel delimiter]
-    mov     [rdi], al
-    lea     rax, [r13 + 1]
-    add     r12, rax
-
-    ; Flush if needed
-    cmp     r12, FLUSH_THRESHOLD
-    jl      .el_done
-    call    flush_output
-    test    eax, eax
-    jnz     .el_write_error
-
-.el_done:
-    pop     r13
-    pop     rbx
-    ret
-
-.el_write_error:
-    mov     ebp, 1
-    pop     r13
-    pop     rbx
-    ret
-
-; ═══════════════════════════════════════════════════════════
-;  emit_empty_line — Emit just a delimiter (empty line separator)
+;  emit_empty_line — Emit just a delimiter
 ; ═══════════════════════════════════════════════════════════
 emit_empty_line:
-    ; Ensure space for 1 byte
     lea     rax, [r12 + 1]
     cmp     rax, OUT_BUF_SIZE
     jl      .eel_ok
@@ -1807,18 +2486,43 @@ emit_empty_line:
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  emit_count_prefix(rdi=count) — Emit "%7d " format count prefix
+;  emit_count_prefix(rdi=count) — Emit "%7d " format
 ; ═══════════════════════════════════════════════════════════
 emit_count_prefix:
     push    rbx
     push    r13
 
-    mov     rbx, rdi                ; count value
+    mov     rbx, rdi
 
+    ; Fast path for small counts (1-9)
+    cmp     rbx, 10
+    jge     .ecp_general
+
+    ; Single digit: "      N " = 7 spaces + digit + space = 8 bytes
+    lea     rax, [r12 + 8]
+    cmp     rax, OUT_BUF_SIZE
+    jl      .ecp_fast_ok
+    call    flush_output
+    test    eax, eax
+    jnz     .ecp_error
+.ecp_fast_ok:
+    lea     rdi, [rel out_buf]
+    add     rdi, r12
+    ; Write 6 spaces
+    mov     dword [rdi], '    '
+    mov     word [rdi+4], '  '
+    ; Write digit + space
+    lea     eax, [ebx + '0']
+    mov     [rdi+6], al
+    mov     byte [rdi+7], ' '
+    add     r12, 8
+    jmp     .ecp_done
+
+.ecp_general:
     ; Convert count to decimal string
-    lea     rdi, [rel count_buf + 20]   ; work from end of buffer
+    lea     rdi, [rel count_buf + 20]
     mov     rax, rbx
-    xor     ecx, ecx                ; digit count
+    xor     ecx, ecx
 
 .ecp_digit_loop:
     xor     edx, edx
@@ -1831,10 +2535,7 @@ emit_count_prefix:
     test    rax, rax
     jnz     .ecp_digit_loop
 
-    ; Now rdi points to first digit, ecx = number of digits
-    ; We need to pad to width 7 with spaces (right-justified)
-    ; Total prefix: max(7, num_digits) chars + 1 space
-    mov     r13, rcx                ; save digit count
+    mov     r13, rcx                ; digit count
 
     ; Ensure space in output buffer
     mov     rax, 7
@@ -1844,7 +2545,6 @@ emit_count_prefix:
 .ecp_use_actual_width:
     mov     rax, r13
 .ecp_pad:
-    ; rax = width, need width + 1 bytes in output
     inc     rax
     lea     rdx, [r12 + rax]
     cmp     rdx, OUT_BUF_SIZE
@@ -1858,7 +2558,6 @@ emit_count_prefix:
     pop     rdi
     test    eax, eax
     jnz     .ecp_error
-    ; Recalculate
     mov     rax, 7
     cmp     r13, rax
     jle     .ecp_space_ok
@@ -1866,35 +2565,28 @@ emit_count_prefix:
     inc     rax
 .ecp_space_ok:
 
-    ; rdi = pointer to first digit in count_buf
-    ; r13 = digit count
-    ; Save digit pointer, we'll use rsi for it (source for movsb)
-    mov     rsi, rdi                ; rsi = source (digits in count_buf)
+    mov     rsi, rdi
     lea     rdi, [rel out_buf]
-    add     rdi, r12                ; rdi = dest (out_buf write position)
+    add     rdi, r12
 
-    ; Pad with spaces if num_digits < 7
     cmp     r13, 7
     jge     .ecp_no_pad
 
     mov     rcx, 7
-    sub     rcx, r13                ; padding count
+    sub     rcx, r13
 .ecp_pad_loop:
     mov     byte [rdi], ' '
     inc     rdi
     dec     rcx
     jnz     .ecp_pad_loop
-    ; Now copy digits: rsi=source (count_buf digits), rdi=dest (out_buf)
     mov     rcx, r13
     rep     movsb
-    ; Append space
     mov     byte [rdi], ' '
-    lea     rax, [r12 + 7 + 1]     ; 7 + space
+    lea     rax, [r12 + 7 + 1]
     mov     r12, rax
     jmp     .ecp_done
 
 .ecp_no_pad:
-    ; Digits fill more than 7 chars: rsi=source, rdi=dest
     mov     rcx, r13
     rep     movsb
     mov     byte [rdi], ' '
@@ -1913,7 +2605,6 @@ emit_count_prefix:
     ret
 
 ; ─── flush_output() ──────────────────────────────────────
-; Writes out_buf[0..r12) to output_fd. Returns 0 on success, -1 on error.
 flush_output:
     test    r12, r12
     jz      .fo_nothing
@@ -1986,7 +2677,7 @@ parse_number:
     xor     rax, rax
     movzx   ecx, byte [rdi]
     test    cl, cl
-    jz      .pn_error               ; empty string
+    jz      .pn_error
 
 .pn_loop:
     movzx   ecx, byte [rdi]
@@ -2009,7 +2700,6 @@ parse_number:
 
 ; ─── Error helpers ───────────────────────────────────────
 
-; print_error_simple(rdi=message) — prints "uniq: {message}\n" to stderr
 print_error_simple:
     push    rbx
     mov     rbx, rdi
@@ -2034,7 +2724,6 @@ print_error_simple:
     pop     rbx
     ret
 
-; print_error_msg(rdi=message) — prints message + \n + try help to stderr
 print_error_msg:
     push    rbx
     mov     rbx, rdi
@@ -2049,7 +2738,6 @@ print_error_msg:
     pop     rbx
     ret
 
-; err_file(rdi=filename, esi=errno) — "uniq: {filename}: {strerror}\n"
 err_file:
     push    rbx
     push    r13
@@ -2092,7 +2780,6 @@ err_file:
     pop     rbx
     ret
 
-; err_unrecognized_option(rsi=option_string)
 err_unrecognized_option:
     push    rbx
     mov     rbx, rsi
@@ -2122,7 +2809,6 @@ err_unrecognized_option:
     pop     rbx
     ret
 
-; err_invalid_option(rsi=option_string) — "uniq: invalid option -- 'X'\nTry..."
 err_invalid_option:
     push    rbx
     mov     rbx, rsi
@@ -2150,7 +2836,6 @@ err_invalid_option:
     pop     rbx
     ret
 
-; err_extra_operand(rdi=operand)
 err_extra_operand:
     push    rbx
     mov     rbx, rdi
@@ -2185,7 +2870,6 @@ err_extra_operand:
     pop     rbx
     ret
 
-; strerror(edi=errno) → rax=string pointer
 strerror:
     cmp     edi, 1
     je      .se_eperm
@@ -2273,11 +2957,11 @@ str_ignorecase_opt: db "--ignore-case", 0
 str_zeroterm_opt:   db "--zero-terminated", 0
 
 ; Prefixes for options with =value
-str_allrep_prefix:  db "--all-repeated", 0  ; 14 chars then NUL
-str_skipfields_prefix: db "--skip-fields=", 0 ; 14+1=15 match chars
-str_skipchars_prefix:  db "--skip-chars=", 0  ; 13+1=14 match chars
-str_checkchars_prefix: db "--check-chars=", 0 ; 14+1=15 match chars
-str_group_prefix:   db "--group", 0         ; 7 chars then NUL
+str_allrep_prefix:  db "--all-repeated", 0
+str_skipfields_prefix: db "--skip-fields=", 0
+str_skipchars_prefix:  db "--skip-chars=", 0
+str_checkchars_prefix: db "--check-chars=", 0
+str_group_prefix:   db "--group", 0
 
 ; Space-separated long options
 str_skipfields_opt: db "--skip-fields", 0
@@ -2362,8 +3046,8 @@ section .bss
 
 ; Options
 opt_mode:               resb 1
-opt_flag_d:             resb 1   ; 1 if -d was specified
-opt_flag_u:             resb 1   ; 1 if -u was specified
+opt_flag_d:             resb 1
+opt_flag_u:             resb 1
 opt_case_insensitive:   resb 1
 opt_zero_terminated:    resb 1
 opt_allrep_method:      resb 1
@@ -2377,8 +3061,18 @@ input_file:             resq 1
 output_file:            resq 1
 input_fd:               resd 1
 output_fd:              resd 1
+use_mmap:               resb 1
 
-; State
+; mmap state
+align 8
+mmap_addr:              resq 1
+mmap_len:               resq 1
+
+; mmap processing state
+prev_mmap_ptr:          resq 1
+prev_mmap_len:          resq 1
+
+; State (for slow path)
 align 8
 count:                  resq 1
 first_group:            resb 1

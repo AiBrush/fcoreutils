@@ -3645,4 +3645,11 @@ line_content_buf: resb 4096
 ; Previous line buffer
 prev_line_buf:  resb 4096
 
+; Previous raw line (for fast-path duplicate detection)
+prev_raw_line:  resb 256
+
+; mmap tracking
+mmap_base_save: resq 1
+mmap_len_save:  resq 1
+
 section .note.GNU-stack noalloc noexec nowrite progbits

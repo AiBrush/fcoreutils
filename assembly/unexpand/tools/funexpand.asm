@@ -2,6 +2,7 @@
 ;
 ; Converts sequences of spaces to tabs, writing to standard output.
 ; Faithfully replicates the GNU coreutils unexpand algorithm.
+; SIMD-optimized: SSE2 scanning, range check (byte <= 0x20) for specials.
 ;
 ; Global register conventions:
 ;   r12  = out_pos (bytes in output buffer)
@@ -24,8 +25,8 @@ extern asm_close
 
 ; ─── Constants ────────────────────────────────────────────
 %define READ_BUF_SIZE   131072
-%define OUT_BUF_SIZE    262144
-%define FLUSH_THRESHOLD 131072
+%define OUT_BUF_SIZE    1048576
+%define FLUSH_THRESHOLD 524288
 %define MAX_TAB_STOPS   256
 %define MAX_FILES       256
 %define PENDING_SIZE    65536
@@ -310,6 +311,21 @@ _start:
     jne     .check_files
     mov     byte [convert_entire_line], 0
 .check_files:
+    ; Precompute pow2 tab optimization
+    mov     byte [tab_is_pow2], 0
+    mov     dword [tab_pow2_mask], 0
+    cmp     byte [tab_list_mode], 0
+    jne     .check_files_go
+    mov     eax, [default_tab]
+    test    eax, eax
+    jz      .check_files_go
+    mov     ecx, eax
+    dec     ecx
+    test    eax, ecx
+    jnz     .check_files_go
+    mov     byte [tab_is_pow2], 1
+    mov     [tab_pow2_mask], ecx
+.check_files_go:
     cmp     dword [num_files], 0
     jne     .process_files
     mov     edi, STDIN
@@ -382,9 +398,8 @@ open_and_process:
     syscall
     test    rax, rax
     js      .oap_error
-    mov     r14, rax                ; fd
+    mov     r14, rax
 
-    ; fstat
     sub     rsp, STAT_STRUCT_SIZE
     mov     rdi, r14
     mov     rsi, rsp
@@ -398,7 +413,6 @@ open_and_process:
     test    r15, r15
     jle     .oap_read_fallback
 
-    ; mmap
     xor     edi, edi
     mov     rsi, r15
     mov     edx, PROT_READ
@@ -457,10 +471,7 @@ process_fd:
     push    rbx
     push    r13
     mov     ebx, edi
-
-    ; Initialize per-file state
     call    init_line_state
-
 .pf_read:
     mov     edi, ebx
     lea     rsi, [read_buf]
@@ -469,12 +480,10 @@ process_fd:
     test    rax, rax
     js      .pf_error
     jz      .pf_eof
-
     lea     rdi, [read_buf]
     mov     rsi, rax
     call    unexpand_core
     jmp     .pf_read
-
 .pf_eof:
     call    flush_pending_blanks
     pop     r13
@@ -493,36 +502,37 @@ process_fd:
 process_buffer:
     push    rbx
     push    r13
-
     call    init_line_state
     call    unexpand_core
     call    flush_pending_blanks
-
     pop     r13
     pop     rbx
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  init_line_state — reset per-line state for start of file
+;  init_line_state
 ; ═══════════════════════════════════════════════════════════
 init_line_state:
-    mov     byte [st_convert], 1    ; start in convert mode
+    mov     byte [st_convert], 1
     mov     dword [st_column], 0
     mov     dword [st_next_tab_col], 0
     mov     dword [st_tab_index], 0
     mov     byte [st_one_blank_before], 0
-    mov     byte [st_prev_blank], 1  ; as if preceded by blank
+    mov     byte [st_prev_blank], 1
     mov     dword [st_pending], 0
     ret
 
 ; ═══════════════════════════════════════════════════════════
 ;  unexpand_core(rdi=data, rsi=len)
 ;
-;  Faithfully implements the GNU unexpand algorithm:
-;  - prev_blank starts true (as if line preceded by blank)
-;  - When a blank lands on a tab stop with prev_blank true: emit tab
-;  - Otherwise buffer blanks, with one_blank_before_tab_stop tracking
-;  - Flush buffered blanks on non-blank, converting if applicable
+;  Three execution modes:
+;  1. Verbatim (not converting): SSE2 bulk copy, only scan for newline
+;  2. Convert SIMD: check for bytes <= 0x20 (one comparison catches all specials)
+;  3. Scalar: byte-by-byte GNU algorithm for spaces/tabs/specials
+;
+;  Key SIMD trick: all special bytes (0x08=BS, 0x09=TAB, 0x0A=NL, 0x20=SPACE)
+;  are <= 0x20, and all printable ASCII is > 0x20. We use pminub + pcmpeqb
+;  against 0x20 to detect "any byte <= 0x20" in a single comparison.
 ; ═══════════════════════════════════════════════════════════
 unexpand_core:
     push    rbx
@@ -532,15 +542,149 @@ unexpand_core:
 
     mov     rbx, rdi                ; data ptr
     mov     r13, rsi                ; remaining
+    lea     r15, [out_buf]          ; cache base
+
+    ; Load SIMD constants into registers (avoid memory loads in hot loop)
+    movdqa  xmm6, [simd_space]     ; 0x20 x16 for range check
+    movdqa  xmm7, [simd_nl]        ; 0x0a x16 for verbatim path
 
 .uc_loop:
     test    r13, r13
     jle     .uc_done
 
-    ; Fast path: if not converting, copy bytes verbatim until newline
     cmp     byte [st_convert], 0
     je      .uc_verbatim
 
+    ; ── Convert mode: SIMD scan for specials (any byte <= 0x20) ──
+    cmp     r13, 16
+    jl      .uc_scalar
+
+    lea     rax, [r12 + 16]
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .uc_simd_go
+    call    flush_output_save
+    lea     r15, [out_buf]
+
+.uc_simd_go:
+    movdqu  xmm0, [rbx]
+    ; Check: any byte <= 0x20?
+    ; pminub(x, 0x20) == 0x20 means the byte was >= 0x20.
+    ; If byte < 0x20, pminub gives the byte itself which != 0x20.
+    ; If byte == 0x20 (space), pminub gives 0x20 which == 0x20 -> match!
+    ; Wait, we want to detect <= 0x20. pminub(byte, 0x20) == 0x20 only when byte >= 0x20.
+    ; For byte < 0x20, min is byte < 0x20 != 0x20. For byte > 0x20, min is 0x20 == 0x20.
+    ; For byte == 0x20, min is 0x20 == 0x20.
+    ; So pcmpeqb(pminub(x, 0x20), 0x20) gives 0xFF for bytes >= 0x20, 0x00 for bytes < 0x20.
+    ; That's the OPPOSITE of what we want.
+    ;
+    ; Alternative approach: Use unsigned comparison via saturating subtract.
+    ; psubusb(0x20, x): if x <= 0x20, result is 0x20-x >= 0; if x > 0x20, result is 0.
+    ; Wait, psubusb saturates to 0: psubusb(a,b) = max(a-b, 0).
+    ; psubusb(0x20, x): for x <= 0x20, gives 0x20-x (which is >= 0, could be 0 if x==0x20).
+    ; for x > 0x20, gives 0.
+    ; Hmm, we want "x <= 0x20". With psubusb(x, 0x20): for x <= 0x20, gives 0.
+    ; For x > 0x20, gives x - 0x20 > 0. Then pcmpeqb against zero gives 0xFF for <= 0x20.
+    ; That works!
+    movdqa  xmm1, xmm0
+    psubusb xmm1, xmm6              ; saturated sub: x - 0x20, clamped to 0
+    pxor    xmm2, xmm2
+    pcmpeqb xmm1, xmm2             ; == 0 means original byte was <= 0x20
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .uc_simd_has_special
+
+    ; No specials in 16 bytes
+    cmp     dword [st_pending], 0
+    jne     .uc_simd_flush_pending
+
+.uc_simd_copy16:
+    movdqu  xmm4, [rbx]
+    movdqu  [r15 + r12], xmm4
+    add     r12, 16
+    add     dword [st_column], 16
+    mov     byte [st_prev_blank], 0
+    cmp     byte [convert_entire_line], 0
+    jne     .uc_simd_advance
+    mov     byte [st_convert], 0
+.uc_simd_advance:
+    add     rbx, 16
+    sub     r13, 16
+
+    ; Tight inner loop for consecutive non-special chunks
+    cmp     byte [st_convert], 0
+    je      .uc_loop
+    cmp     r13, 16
+    jl      .uc_loop
+    lea     rax, [r12 + 16]
+    cmp     rax, FLUSH_THRESHOLD
+    jge     .uc_loop
+
+    movdqu  xmm0, [rbx]
+    movdqa  xmm1, xmm0
+    psubusb xmm1, xmm6
+    pxor    xmm2, xmm2
+    pcmpeqb xmm1, xmm2
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .uc_loop
+    jmp     .uc_simd_copy16
+
+.uc_simd_flush_pending:
+    push    rbx
+    push    r13
+    call    flush_pending_blanks
+    pop     r13
+    pop     rbx
+    lea     r15, [out_buf]
+    lea     rax, [r12 + 16]
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .uc_simd_copy16
+    call    flush_output_save
+    lea     r15, [out_buf]
+    jmp     .uc_simd_copy16
+
+.uc_simd_has_special:
+    bsf     ecx, eax
+    test    ecx, ecx
+    jz      .uc_scalar
+
+    ; Copy ecx non-special bytes
+    cmp     dword [st_pending], 0
+    je      .uc_simd_partial_nopend
+    push    rcx
+    push    rbx
+    push    r13
+    call    flush_pending_blanks
+    pop     r13
+    pop     rbx
+    pop     rcx
+    lea     r15, [out_buf]
+.uc_simd_partial_nopend:
+    lea     rax, [r12 + rcx]
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .uc_simd_partial_copy
+    push    rcx
+    call    flush_output_save
+    pop     rcx
+    lea     r15, [out_buf]
+.uc_simd_partial_copy:
+    lea     rdi, [r15 + r12]
+    mov     rsi, rbx
+    mov     edx, ecx
+    rep     movsb
+    add     r12, rdx
+    add     dword [st_column], edx
+    mov     byte [st_prev_blank], 0
+    cmp     byte [convert_entire_line], 0
+    jne     .uc_simd_partial_adv
+    mov     byte [st_convert], 0
+.uc_simd_partial_adv:
+    add     rbx, rdx
+    sub     r13, rdx
+    jmp     .uc_loop
+
+; ── Scalar path ──
+.uc_scalar:
     movzx   eax, byte [rbx]
 
     cmp     al, ' '
@@ -552,47 +696,55 @@ unexpand_core:
     cmp     al, 8
     je      .uc_backspace
 
-    ; ─── Non-blank, non-special character ─────────────
-    ; Flush pending blanks
+    ; Other non-blank char (below 0x20 but not special — unlikely but handle)
     call    flush_pending_blanks
-
-    ; Emit the character
+    lea     r15, [out_buf]
     movzx   eax, byte [rbx]
-    call    emit_byte
-
-    ; column++
+    mov     [r15 + r12], al
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_nb_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_nb_nf:
     inc     dword [st_column]
-
-    ; prev_blank = false
     mov     byte [st_prev_blank], 0
-
-    ; convert &= convert_entire_line (since this is non-blank)
     cmp     byte [convert_entire_line], 0
-    jne     .uc_non_blank_next
+    jne     .uc_nb_next
     mov     byte [st_convert], 0
-.uc_non_blank_next:
+.uc_nb_next:
     inc     rbx
     dec     r13
     jmp     .uc_loop
 
 ; ─── Space ────────────────────────────────────────────────
 .uc_space:
-    ; Get next tab column
     mov     edi, [st_column]
+    cmp     byte [tab_is_pow2], 0
+    je      .uc_space_slow_tab
+    mov     eax, edi
+    or      eax, [tab_pow2_mask]
+    inc     eax
+    xor     edx, edx
+    jmp     .uc_space_got_tab
+.uc_space_slow_tab:
     mov     esi, [st_tab_index]
     call    get_next_tab_column
-    ; eax = next_tab_column, edx = last_tab flag
+.uc_space_got_tab:
     mov     [st_next_tab_col], eax
-
-    ; If last_tab, stop converting
     test    edx, edx
     jz      .uc_space_convert
 
     mov     byte [st_convert], 0
-    ; Flush pending, emit space literally
     call    flush_pending_blanks
-    mov     al, ' '
-    call    emit_byte
+    lea     r15, [out_buf]
+    mov     byte [r15 + r12], ' '
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_space_last_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_space_last_nf:
     inc     dword [st_column]
     mov     byte [st_prev_blank], 1
     inc     rbx
@@ -600,219 +752,50 @@ unexpand_core:
     jmp     .uc_loop
 
 .uc_space_convert:
-    ; column++
     mov     eax, [st_column]
     inc     eax
     mov     [st_column], eax
-
-    ; Check: prev_blank && column == next_tab_column
     cmp     byte [st_prev_blank], 0
     je      .uc_space_no_convert
-
     cmp     eax, [st_next_tab_col]
     jne     .uc_space_no_convert
 
-    ; prev_blank=true AND column==next_tab_column:
-    ; Replace pending blanks by a tab
-    ; pending_blank[0] = '\t'
     lea     rdi, [pending_buf]
     mov     byte [rdi], 9
-
-    ; c = '\t' (we'll output tab via the pending flush)
-    ; pending = one_blank_before_tab_stop
     movzx   eax, byte [st_one_blank_before]
     mov     [st_pending], eax
-
-    ; Advance tab_index
     mov     eax, [st_tab_index]
     inc     eax
     mov     [st_tab_index], eax
 
-    ; Now flush pending blanks + output the tab
-    ; But GNU does: pending = one_blank_before; then falls through to
-    ; the flush section which outputs pending_blank[0..pending).
-    ; Then putchar(c) where c='\t'.
-    ; Actually looking more carefully: after the conversion, code falls
-    ; to line 206: pending = one_blank_before_tab_stop;
-    ; Then line 224: if (pending) fwrite + pending=0 + one_blank=false
-    ; Then putchar(c='\t')
-
-    ; So we need to:
-    ; 1. If old one_blank_before was true: pending=1, pending_buf[0]='\t'
-    ;    -> write out the tab (for the one_blank_before portion)
-    ; 2. Then putchar('\t') for the current character
-
-    ; Actually wait. Let me re-read:
-    ; Line 201: pending_blank[0] = c = '\t';
-    ; Line 206: pending = one_blank_before_tab_stop;
-    ;
-    ; Then at line 224-230:
-    ; if (pending) {
-    ;   if (pending > 1 && one_blank_before_tab_stop)
-    ;     pending_blank[0] = '\t';
-    ;   fwrite(pending_blank, 1, pending, stdout);
-    ;   pending = 0;
-    ;   one_blank_before = false;
-    ; }
-    ;
-    ; Then putchar(c)  // c is '\t'
-
-    ; So: pending was set to one_blank_before (0 or 1).
-    ; If pending is 1: fwrite 1 byte which is pending_blank[0]='\t'
-    ;   (the check pending>1 is false, so pending_blank[0] stays as '\t')
-    ; Then putchar('\t')
-    ; So output would be: '\t' (from pending) + '\t' (from putchar)
-    ; That would be 2 tabs. That seems wrong for a 2-space run...
-
-    ; Wait, one_blank_before_tab_stop only becomes true when a PREVIOUS
-    ; blank hit the tab stop without prev_blank being true. So in the
-    ; case of 2 spaces hitting tab stop:
-    ; - First space: prev_blank=true, column=1, next_tab=8 (say).
-    ;   column!=next_tab, so falls to: if(column==next_tab) -> no.
-    ;   pending_blank[0]=' ', pending=1, prev_blank=true. continue.
-    ; - Second space: prev_blank=true, column=2, next_tab=8.
-    ;   column!=next_tab, so same. pending_blank[1]=' ', pending=2. continue.
-    ; ... continues until the space that hits the tab stop.
-    ; - Nth space hitting tab stop: prev_blank=true, column=8=next_tab.
-    ;   YES: pending_blank[0]='\t', c='\t'.
-    ;   pending = one_blank_before (which is false=0).
-    ;   Then at 224: pending=0, skip.
-    ;   putchar('\t'). Output: '\t'.
-
-    ; So only one tab is output. The pending blanks are all discarded
-    ; and replaced by a single tab. Good.
-
-    ; Now for a case where one_blank_before IS true:
-    ; Example: 9 spaces with tabstop 8.
-    ; Spaces 1-7: pending grows to 7. When space 8 (col=8=next_tab):
-    ;   prev_blank=true: pending_blank[0]='\t', c='\t'.
-    ;   pending = one_blank_before (false) = 0.
-    ;   putchar('\t').
-    ; Space 9: now column=8, prev_blank=true (set at line 235).
-    ;   get_next_tab_column(8) = 16. column++ = 9.
-    ;   prev_blank && column==next_tab? true && 9==16? NO.
-    ;   column==next_tab? 9==16? NO.
-    ;   pending_blank[0]=' ', pending=1.
-    ;   prev_blank=true. continue.
-    ; Then 'x': flush pending.
-    ;   pending=1. pending>1? no. fwrite 1 space. putchar('x').
-    ; Result: '\t' + ' ' + 'x'. Correct!
-
-    ; So the right implementation:
-    ; After line 201-206, pending = one_blank_before (0 or 1).
-    ; We need to emit that pending (if any), then emit '\t' as the char.
-
-    ; Flush the old one_blank_before pending (if 1, it's a tab)
-    mov     eax, [st_pending]
-    test    eax, eax
-    jz      .uc_space_conv_emit
-
-    ; There's 1 pending byte (which is '\t' from line 201 / original logic)
-    ; But wait, line 227: if(pending>1 && one_blank_before) pending_blank[0]='\t'
-    ; pending is 1 here (=one_blank_before), so pending>1 is FALSE.
-    ; So pending_blank[0] is whatever it was... it was set to '\t' at line 201.
-    ; Hmm actually line 201 sets pending_blank[0]='\t' regardless.
-    ; And pending = one_blank_before = 1. So we write 1 byte = '\t'.
-    ; Then putchar('\t').
-    ; That would be 2 tabs. Let me trace a concrete example.
-
-    ; Actually, one_blank_before_tab_stop only becomes true on this path:
-    ; Line 193: if (column == next_tab_column) one_blank_before = true;
-    ; This happens when a space hits the tab stop but prev_blank is false.
-    ; So in that case, prev_blank was false, meaning the character before
-    ; was NOT a blank. Then the next blank with prev_blank=true goes to
-    ; the conversion path. But one_blank_before is true.
-    ;
-    ; Example: "ab      x" with tabstop 8.
-    ; a: column=1, prev_blank=false
-    ; b: column=2, prev_blank=false
-    ; ' ': prev_blank=false. column=3, next_tab=8. 3!=8.
-    ;   column!=next_tab (3!=8). pending_blank[0]=' ', pending=1. prev_blank=true.
-    ; ' ': prev_blank=true. column=4, next_tab=8. 4!=8. column!=next_tab.
-    ;   pending_blank[1]=' ', pending=2. prev_blank=true.
-    ; ... continues to column=7:
-    ; ' ': prev_blank=true. column=8, next_tab=8. YES!
-    ;   pending_blank[0]='\t', c='\t'. pending = one_blank_before (false) = 0.
-    ;   putchar('\t'). Result so far: "ab\t"
-    ;
-    ; Now "abcdefg  x" with tabstop 8:
-    ; a-g: column=7, prev_blank=false
-    ; ' ': prev_blank=false. column=8, next_tab=8.
-    ;   prev_blank && column==next_tab: false. NO conversion.
-    ;   column==next_tab (8==8): one_blank_before = true.
-    ;   pending_blank[0]=' ', pending=1. prev_blank=true.
-    ; ' ': prev_blank=true. column=9, next_tab=16 (new tab stop).
-    ;   prev_blank && column==next_tab: true && 9==16. NO.
-    ;   column==next_tab: 9==16. NO.
-    ;   pending_blank[1]=' ', pending=2. prev_blank=true.
-    ; 'x': flush pending.
-    ;   pending=2. pending>1 && one_blank_before: true!
-    ;   pending_blank[0]='\t'. fwrite 2 bytes: '\t', ' '. putchar('x').
-    ;   Result: "abcdefg\t x". Hmm that's 3 chars for 2 spaces?
-    ;   Wait, the tab at col 8 goes to col 16, and we have an extra ' '?
-    ;   No: pending_blank[0]='\t', pending_blank[1]=' '.
-    ;   fwrite outputs '\t' then ' '. That goes: col 8 -> tab to 16 -> space to 17.
-    ;   But the input only went to col 9 (2 spaces from col 7).
-    ;   Something is wrong with my trace... Actually the second space:
-    ;   After processing the first space, column=8 and we continue.
-    ;   The second space: get_next_tab_column(8, &tab_index) might
-    ;   return 16. column++ = 9. That's correct. pending=2 now.
-    ;   On 'x': pending_blank = [' ', ' '] (but then [0] gets overwritten to '\t')
-    ;   -> fwrite('\t', ' ') -> but that's tab(8->16) + space = col 17, not 9.
-    ;   That's clearly wrong... unless I'm misunderstanding the code.
-
-    ; Hmm, let me re-check the actual GNU behavior:
-
-    ; OK wait, I think the key insight is: the pending buffer stores the ORIGINAL
-    ; characters. The tab_index is NOT incremented when we just buffer.
-    ; get_next_tab_column is called for each blank. The tab_index can change.
-    ; Let me look at get_next_tab_column more carefully.
-
-    ; Actually, I realize I need to step back and just faithfully replicate
-    ; the GNU algorithm character by character instead of trying to optimize.
-    ; Let me simplify.
-
-    ; For NOW: just do it the simple way.
-
-    ; Emit the pending (which is one_blank_before count)
     cmp     dword [st_pending], 0
     je      .uc_space_conv_emit
-    ; pending is 1, and pending_buf[0] was set to '\t' above
     lea     rsi, [pending_buf]
     mov     ecx, [st_pending]
     call    emit_bytes
+    lea     r15, [out_buf]
     mov     dword [st_pending], 0
 
 .uc_space_conv_emit:
-    ; Output the tab character
-    mov     al, 9
-    call    emit_byte
-
-    ; one_blank_before = false
+    mov     byte [r15 + r12], 9
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_space_conv_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_space_conv_nf:
     mov     byte [st_one_blank_before], 0
-    ; prev_blank = true (it's a blank char)
     mov     byte [st_prev_blank], 1
-
-    ; Update tab_index (advance past this tab stop)
-    ; Actually in GNU code, the tab_index was already advanced by
-    ; get_next_tab_column. We just need to track that.
-
-    ; convert &= convert_entire_line || blank (blank=true, so convert stays)
     inc     rbx
     dec     r13
     jmp     .uc_loop
 
 .uc_space_no_convert:
-    ; We are here when: NOT(prev_blank && column == next_tab_column)
-    ; Check: column == next_tab_column ?
     mov     eax, [st_column]
     cmp     eax, [st_next_tab_col]
     jne     .uc_space_just_buffer
-    ; Yes: one_blank_before_tab_stop = true
     mov     byte [st_one_blank_before], 1
-
 .uc_space_just_buffer:
-    ; Buffer this space
     mov     eax, [st_pending]
     cmp     eax, PENDING_SIZE
     jge     .uc_space_pending_overflow
@@ -820,16 +803,14 @@ unexpand_core:
     mov     byte [rdi + rax], ' '
     inc     eax
     mov     [st_pending], eax
-
     mov     byte [st_prev_blank], 1
-    ; convert stays true (blank char)
     inc     rbx
     dec     r13
     jmp     .uc_loop
 
 .uc_space_pending_overflow:
-    ; Flush and buffer
     call    flush_pending_blanks
+    lea     r15, [out_buf]
     lea     rdi, [pending_buf]
     mov     byte [rdi], ' '
     mov     dword [st_pending], 1
@@ -840,21 +821,32 @@ unexpand_core:
 
 ; ─── Tab character ────────────────────────────────────────
 .uc_tab_char:
-    ; Get next tab column
     mov     edi, [st_column]
+    cmp     byte [tab_is_pow2], 0
+    je      .uc_tab_slow
+    mov     eax, edi
+    or      eax, [tab_pow2_mask]
+    inc     eax
+    xor     edx, edx
+    jmp     .uc_tab_got
+.uc_tab_slow:
     mov     esi, [st_tab_index]
     call    get_next_tab_column
+.uc_tab_got:
     mov     [st_next_tab_col], eax
-
-    ; If last_tab, stop converting
     test    edx, edx
     jz      .uc_tab_convert
 
     mov     byte [st_convert], 0
     call    flush_pending_blanks
-    mov     al, 9
-    call    emit_byte
-    ; column = next_tab_col (since tab advances to next stop)
+    lea     r15, [out_buf]
+    mov     byte [r15 + r12], 9
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_tab_last_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_tab_last_nf:
     mov     eax, [st_next_tab_col]
     mov     [st_column], eax
     mov     byte [st_prev_blank], 1
@@ -863,37 +855,33 @@ unexpand_core:
     jmp     .uc_loop
 
 .uc_tab_convert:
-    ; column = next_tab_column
     mov     eax, [st_next_tab_col]
     mov     [st_column], eax
-
-    ; If pending, pending_blank[0] = '\t'
     cmp     dword [st_pending], 0
     je      .uc_tab_no_pending
     lea     rdi, [pending_buf]
     mov     byte [rdi], 9
-
 .uc_tab_no_pending:
-    ; pending = one_blank_before_tab_stop
     movzx   eax, byte [st_one_blank_before]
     mov     [st_pending], eax
-
-    ; Advance tab_index
     mov     eax, [st_tab_index]
     inc     eax
     mov     [st_tab_index], eax
-
-    ; Now flush pending + emit tab (same as space conversion path)
     cmp     dword [st_pending], 0
     je      .uc_tab_emit
     lea     rsi, [pending_buf]
     mov     ecx, [st_pending]
     call    emit_bytes
+    lea     r15, [out_buf]
     mov     dword [st_pending], 0
-
 .uc_tab_emit:
-    mov     al, 9
-    call    emit_byte
+    mov     byte [r15 + r12], 9
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_tab_emit_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_tab_emit_nf:
     mov     byte [st_one_blank_before], 0
     mov     byte [st_prev_blank], 1
     inc     rbx
@@ -903,10 +891,14 @@ unexpand_core:
 ; ─── Newline ──────────────────────────────────────────────
 .uc_newline:
     call    flush_pending_blanks
-    mov     al, 10
-    call    emit_byte
-
-    ; Reset line state
+    lea     r15, [out_buf]
+    mov     byte [r15 + r12], 10
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_nl_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_nl_nf:
     mov     byte [st_convert], 1
     mov     dword [st_column], 0
     mov     dword [st_next_tab_col], 0
@@ -914,7 +906,6 @@ unexpand_core:
     mov     byte [st_one_blank_before], 0
     mov     byte [st_prev_blank], 1
     mov     dword [st_pending], 0
-
     inc     rbx
     dec     r13
     jmp     .uc_loop
@@ -922,19 +913,21 @@ unexpand_core:
 ; ─── Backspace ────────────────────────────────────────────
 .uc_backspace:
     call    flush_pending_blanks
-    mov     al, 8
-    call    emit_byte
-
-    ; column -= !!column
+    lea     r15, [out_buf]
+    mov     byte [r15 + r12], 8
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_bs_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_bs_nf:
     mov     eax, [st_column]
     test    eax, eax
     jz      .uc_bs_no_dec
     dec     eax
     mov     [st_column], eax
 .uc_bs_no_dec:
-    ; next_tab_column = column
     mov     [st_next_tab_col], eax
-    ; tab_index -= !!tab_index
     mov     eax, [st_tab_index]
     test    eax, eax
     jz      .uc_bs_no_tidx
@@ -942,78 +935,142 @@ unexpand_core:
     mov     [st_tab_index], eax
 .uc_bs_no_tidx:
     mov     byte [st_prev_blank], 0
-    ; convert stays as-is
     inc     rbx
     dec     r13
     jmp     .uc_loop
 
 ; ─── Verbatim copy (not converting) ──────────────────────
 .uc_verbatim:
-    ; Copy until newline, scanning with SSE2
+    cmp     r13, 64
+    jl      .uc_verb_small
+
+    lea     rax, [r12 + 64]
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .uc_verb_64
+    call    flush_output_save
+    lea     r15, [out_buf]
+
+.uc_verb_64:
+    ; Load 64 bytes and scan for newlines using xmm7
+    movdqu  xmm0, [rbx]
+    movdqu  xmm1, [rbx + 16]
+    movdqu  xmm2, [rbx + 32]
+    movdqu  xmm3, [rbx + 48]
+
+    movdqa  xmm4, xmm0
+    pcmpeqb xmm4, xmm7
+    pmovmskb eax, xmm4
+
+    movdqa  xmm4, xmm1
+    pcmpeqb xmm4, xmm7
+    pmovmskb ecx, xmm4
+    shl     ecx, 16
+    or      eax, ecx
+
+    movdqa  xmm4, xmm2
+    pcmpeqb xmm4, xmm7
+    pmovmskb ecx, xmm4
+
+    movdqa  xmm4, xmm3
+    pcmpeqb xmm4, xmm7
+    pmovmskb edx, xmm4
+    shl     edx, 16
+    or      ecx, edx
+
+    ; Combine into 64-bit mask
+    mov     rdx, rcx
+    shl     rdx, 32
+    or      rdx, rax
+    test    rdx, rdx
+    jnz     .uc_verb_64_has_nl
+
+    ; No newlines: copy 64 bytes
+    lea     rdi, [r15 + r12]
+    movdqu  [rdi], xmm0
+    movdqu  [rdi + 16], xmm1
+    movdqu  [rdi + 32], xmm2
+    movdqu  [rdi + 48], xmm3
+    add     r12, 64
+    add     rbx, 64
+    sub     r13, 64
+    jmp     .uc_verbatim
+
+.uc_verb_64_has_nl:
+    bsf     rdx, rdx               ; position of first newline
+    test    edx, edx
+    jz      .uc_verb_64_emit_nl
+
+    ; Copy bytes before newline
+    lea     rdi, [r15 + r12]
+    mov     rsi, rbx
+    mov     ecx, edx
+    rep     movsb
+    add     r12, rdx
+    add     rbx, rdx
+    sub     r13, rdx
+
+.uc_verb_64_emit_nl:
+    mov     byte [r15 + r12], 10
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_verb_64_nl_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_verb_64_nl_nf:
+    mov     byte [st_convert], 1
+    mov     dword [st_column], 0
+    mov     dword [st_next_tab_col], 0
+    mov     dword [st_tab_index], 0
+    mov     byte [st_one_blank_before], 0
+    mov     byte [st_prev_blank], 1
+    mov     dword [st_pending], 0
+    inc     rbx
+    dec     r13
+    jmp     .uc_loop
+
+.uc_verb_small:
     cmp     r13, 16
     jl      .uc_verb_scalar
-
+    lea     rax, [r12 + 16]
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .uc_verb_16
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_verb_16:
     movdqu  xmm0, [rbx]
-    pcmpeqb xmm0, [nl_pattern]
-    pmovmskb eax, xmm0
+    movdqa  xmm4, xmm0
+    pcmpeqb xmm4, xmm7
+    pmovmskb eax, xmm4
     test    eax, eax
     jnz     .uc_verb_found_nl
 
-    ; No newline: bulk copy 16 bytes
-    lea     rdi, [out_buf]
-    add     rdi, r12
-    lea     rcx, [r12 + 16]
-    cmp     rcx, FLUSH_THRESHOLD
-    jl      .uc_verb_nf
-    push    rbx
-    push    r13
-    call    flush_output
-    pop     r13
-    pop     rbx
-    lea     rdi, [out_buf]
-    add     rdi, r12
-.uc_verb_nf:
-    movdqu  xmm1, [rbx]
-    movdqu  [rdi], xmm1
+    lea     rdi, [r15 + r12]
+    movdqu  [rdi], xmm0
     add     r12, 16
-    add     dword [st_column], 16
     add     rbx, 16
     sub     r13, 16
-    jmp     .uc_verbatim
+    jmp     .uc_verb_small
 
 .uc_verb_found_nl:
     bsf     ecx, eax
     test    ecx, ecx
     jz      .uc_verb_emit_nl
-
-    ; Copy ecx bytes before newline
-    push    rcx
-    lea     rdi, [out_buf]
-    add     rdi, r12
-    lea     rax, [r12 + rcx]
-    cmp     rax, FLUSH_THRESHOLD
-    jl      .uc_verb_nl_nf
-    push    rbx
-    push    r13
-    call    flush_output
-    pop     r13
-    pop     rbx
-    lea     rdi, [out_buf]
-    add     rdi, r12
-.uc_verb_nl_nf:
+    lea     rdi, [r15 + r12]
     mov     rsi, rbx
-    pop     rcx
     push    rcx
     rep     movsb
     pop     rcx
     add     r12, rcx
-    add     [st_column], ecx
     add     rbx, rcx
     sub     r13, rcx
-
 .uc_verb_emit_nl:
-    mov     al, 10
-    call    emit_byte
+    mov     byte [r15 + r12], 10
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_verb_nl_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_verb_nl_nf:
     mov     byte [st_convert], 1
     mov     dword [st_column], 0
     mov     dword [st_next_tab_col], 0
@@ -1031,8 +1088,13 @@ unexpand_core:
     movzx   eax, byte [rbx]
     cmp     al, 10
     je      .uc_verb_emit_nl
-    call    emit_byte
-    inc     dword [st_column]
+    mov     [r15 + r12], al
+    inc     r12
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .uc_verb_sc_nf
+    call    flush_output_save
+    lea     r15, [out_buf]
+.uc_verb_sc_nf:
     inc     rbx
     dec     r13
     jmp     .uc_verb_scalar
@@ -1046,14 +1108,11 @@ unexpand_core:
 
 ; ═══════════════════════════════════════════════════════════
 ;  get_next_tab_column(edi=column, esi=tab_index)
-;  -> eax=next_tab_column, edx=last_tab (1 if past all stops)
-;  Also updates [st_tab_index]
+;  -> eax=next_tab_column, edx=last_tab
 ; ═══════════════════════════════════════════════════════════
 get_next_tab_column:
     cmp     byte [tab_list_mode], 0
     jne     .gntc_list
-
-    ; Uniform tab stops: next = ((col / tab) + 1) * tab
     mov     eax, edi
     xor     edx, edx
     mov     ecx, [default_tab]
@@ -1064,95 +1123,57 @@ get_next_tab_column:
     inc     eax
     imul    eax, ecx
     pop     rdi
-    xor     edx, edx                ; never last_tab for uniform
+    xor     edx, edx
     ret
-
 .gntc_fallback:
     lea     eax, [edi + 1]
     xor     edx, edx
     ret
-
 .gntc_list:
-    ; Tab stop list: find first stop > col using tab_index hint
-    mov     ecx, esi                ; start from tab_index
+    mov     ecx, esi
     mov     edx, [num_tab_stops]
-
 .gntc_scan:
     cmp     ecx, edx
     jge     .gntc_beyond
-
     lea     rax, [tab_stops]
     mov     eax, [rax + rcx*4]
     cmp     eax, edi
     jg      .gntc_found
     inc     ecx
     jmp     .gntc_scan
-
 .gntc_found:
-    ; Update tab_index
     mov     [st_tab_index], ecx
-    xor     edx, edx                ; not last_tab
+    xor     edx, edx
     ret
-
 .gntc_beyond:
-    ; Past all tab stops: last_tab = true
     mov     eax, 0x7FFFFFFF
     mov     edx, 1
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  flush_pending_blanks — write buffered blanks to output
-;  Implements the GNU logic:
-;    if (pending > 1 && one_blank_before_tab_stop)
-;      pending_blank[0] = '\t';
-;    fwrite(pending_blank, 1, pending, stdout);
-;    pending = 0; one_blank_before = false;
+;  flush_pending_blanks
 ; ═══════════════════════════════════════════════════════════
 flush_pending_blanks:
     mov     eax, [st_pending]
     test    eax, eax
     jz      .fpb_done
-
-    ; Check if we should convert first blank to tab
     cmp     eax, 1
     jle     .fpb_no_tab_convert
     cmp     byte [st_one_blank_before], 0
     je      .fpb_no_tab_convert
-    ; pending > 1 && one_blank_before: convert first to tab
     lea     rdi, [pending_buf]
     mov     byte [rdi], 9
-
 .fpb_no_tab_convert:
-    ; Write pending bytes
     lea     rsi, [pending_buf]
     mov     ecx, eax
     call    emit_bytes
-
     mov     dword [st_pending], 0
     mov     byte [st_one_blank_before], 0
-
 .fpb_done:
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  emit_byte — append AL to output buffer
-; ═══════════════════════════════════════════════════════════
-emit_byte:
-    lea     rdi, [out_buf]
-    mov     [rdi + r12], al
-    inc     r12
-    cmp     r12, FLUSH_THRESHOLD
-    jl      .eb_ret
-    push    rbx
-    push    r13
-    call    flush_output
-    pop     r13
-    pop     rbx
-.eb_ret:
-    ret
-
-; ═══════════════════════════════════════════════════════════
-;  emit_bytes — append ecx bytes from rsi to output buffer
+;  emit_bytes
 ; ═══════════════════════════════════════════════════════════
 emit_bytes:
     test    ecx, ecx
@@ -1162,11 +1183,7 @@ emit_bytes:
     jl      .ebs_copy
     push    rcx
     push    rsi
-    push    rbx
-    push    r13
-    call    flush_output
-    pop     r13
-    pop     rbx
+    call    flush_output_save
     pop     rsi
     pop     rcx
 .ebs_copy:
@@ -1180,7 +1197,7 @@ emit_bytes:
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  flush_output — write out_buf to stdout
+;  flush_output / flush_output_save
 ; ═══════════════════════════════════════════════════════════
 flush_output:
     test    r12, r12
@@ -1195,10 +1212,17 @@ flush_output:
     xor     eax, eax
     ret
 
+flush_output_save:
+    push    rbx
+    push    r13
+    call    flush_output
+    pop     r13
+    pop     rbx
+    ret
+
 ; ═══════════════════════════════════════════════════════════
 ;  String utilities
 ; ═══════════════════════════════════════════════════════════
-
 strcmp:
 .sc_l:
     movzx   eax, byte [rdi]
@@ -1278,7 +1302,6 @@ parse_number:
 ; ═══════════════════════════════════════════════════════════
 ;  Error helpers
 ; ═══════════════════════════════════════════════════════════
-
 print_error_msg:
     push    rbx
     mov     rbx, rdi
@@ -1433,8 +1456,14 @@ strerror:
 section .data
 
 align 16
-nl_pattern:
-    times 16 db 10
+simd_space:
+    times 16 db 0x20
+align 16
+simd_nl:
+    times 16 db 0x0a
+align 16
+simd_bs:
+    times 16 db 0x08
 
 str_prefix:     db "unexpand: "
 str_prefix_len equ $ - str_prefix
@@ -1523,18 +1552,19 @@ pending_buf:        resb PENDING_SIZE
 convert_entire_line: resb 1
 first_only:         resb 1
 tab_list_mode:      resb 1
-                    resb 1              ; padding
+tab_is_pow2:        resb 1
 default_tab:        resd 1
+tab_pow2_mask:      resd 1
 num_tab_stops:      resd 1
 tab_stops:          resd MAX_TAB_STOPS
 num_files:          resd 1
 file_list:          resq MAX_FILES
 
-; Per-line state (GNU algorithm)
+; Per-line state
 st_convert:         resb 1
 st_prev_blank:      resb 1
 st_one_blank_before: resb 1
-                    resb 1              ; padding
+                    resb 1
 st_column:          resd 1
 st_next_tab_col:    resd 1
 st_tab_index:       resd 1

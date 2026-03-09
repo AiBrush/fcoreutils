@@ -51,10 +51,11 @@ extern asm_memcpy
 
 %define MAX_FILES       256
 %define MAX_KEYS        32
-%define OUTBUF_SIZE     131072      ; 128KB output buffer
-%define INITIAL_BUF     (4*1024*1024) ; 4MB initial input buffer
-%define INITIAL_LINES   (256*1024)    ; initial line array (256K entries)
-%define LINE_ENTRY_SIZE 16          ; ptr(8) + len(8) per line
+%define OUTBUF_SIZE     262144          ; 256KB output buffer
+%define INITIAL_BUF     (4*1024*1024)   ; 4MB initial input buffer
+%define INITIAL_LINES   (256*1024)      ; initial line array (256K entries)
+%define LINE_ENTRY_SIZE 16              ; ptr(8) + len(8) per line
+%define INSERTION_THRESH 32             ; threshold for insertion sort
 
 ; Option flags (bit positions in flag_bits)
 %define FLAG_REVERSE    0x0001
@@ -86,13 +87,16 @@ extern asm_memcpy
 %define KEY_HUMAN       0x0100
 %define KEY_VERSION     0x0200
 
-; Key definition structure (32 bytes each)
+; Key definition structure (40 bytes each)
 ; [0]  qword  start_field  (1-based)
 ; [8]  qword  start_char   (1-based, 0 = whole field)
 ; [16] qword  end_field    (1-based, 0 = end of line)
 ; [24] qword  end_char     (1-based, 0 = end of field)
 ; [32] qword  flags        (KEY_* flags)
 %define KEY_STRUCT_SIZE  40
+
+; Flag combos for fast-path detection
+%define ALL_SPECIAL_FLAGS (FLAG_NUMERIC | FLAG_GEN_NUM | FLAG_MONTH | FLAG_HUMAN | FLAG_VERSION | FLAG_FOLD_CASE | FLAG_DICT | FLAG_IGNORE_NP | FLAG_BLANKS)
 
 ; ═══════════════════════════════════════════════════════════════════
 ; Data section
@@ -283,7 +287,7 @@ nkeys:          resq 1
 keys:           resb MAX_KEYS * KEY_STRUCT_SIZE
 
 ; Input data
-input_buf:      resq 1              ; pointer to input buffer (mmap'd)
+input_buf:      resq 1              ; pointer to input buffer
 input_size:     resq 1              ; total input size in bytes
 input_cap:      resq 1              ; capacity of input buffer
 
@@ -302,6 +306,9 @@ stat_buf:       resb STAT_STRUCT_SIZE
 ; Merge sort temp array
 merge_temp:     resq 1              ; temp line array for merge sort
 
+; Flag for fast-path comparison
+use_simple_cmp: resq 1             ; 1 if default lexicographic, no keys, no flags
+
 ; Temp buffer for error messages
 errbuf:         resb 512
 
@@ -315,43 +322,53 @@ global _start
 ;                           ENTRY POINT
 ; ============================================================================
 _start:
-    ; ── Block SIGPIPE so write() returns -EPIPE instead of killing us ──
+    ; -- Block SIGPIPE --
     sub     rsp, 16
-    mov     qword [rsp], 0x2000     ; sigset: bit 13 = SIGPIPE
+    mov     qword [rsp], 0x2000
     mov     eax, SYS_RT_SIGPROCMASK
-    xor     edi, edi                ; SIG_BLOCK = 0
+    xor     edi, edi
     mov     rsi, rsp
     xor     edx, edx
     mov     r10d, 8
     syscall
     add     rsp, 16
 
-    ; ── Save argc/argv ──
-    mov     rax, [rsp]              ; argc
+    ; -- Save argc/argv --
+    mov     rax, [rsp]
     mov     [rel argc], rax
     lea     rax, [rsp + 8]
     mov     [rel argv], rax
 
-    ; ── Initialize defaults ──
+    ; -- Initialize defaults --
     mov     qword [rel flag_bits], 0
     mov     qword [rel nfiles], 0
     mov     qword [rel output_file], 0
     mov     qword [rel output_fd], STDOUT
     mov     byte [rel has_separator], 0
-    mov     byte [rel line_delim], 10      ; newline by default
+    mov     byte [rel line_delim], 10
     mov     qword [rel nkeys], 0
     mov     qword [rel outbuf_pos], 0
+    mov     qword [rel use_simple_cmp], 0
 
-    ; ── Parse arguments ──
+    ; -- Parse arguments --
     call    parse_args
 
-    ; ── If -z flag, change line delimiter ──
+    ; -- If -z flag, change line delimiter --
     test    qword [rel flag_bits], FLAG_ZERO_TERM
     jz      .no_zero
     mov     byte [rel line_delim], 0
 .no_zero:
 
-    ; ── If no files, use stdin ──
+    ; -- Determine if we can use fast-path comparison --
+    cmp     qword [rel nkeys], 0
+    jne     .no_fast_cmp
+    mov     rax, [rel flag_bits]
+    test    rax, ALL_SPECIAL_FLAGS
+    jnz     .no_fast_cmp
+    mov     qword [rel use_simple_cmp], 1
+.no_fast_cmp:
+
+    ; -- If no files, use stdin --
     cmp     qword [rel nfiles], 0
     jne     .have_files
     lea     rax, [rel str_dash]
@@ -359,7 +376,7 @@ _start:
     mov     qword [rel nfiles], 1
 .have_files:
 
-    ; ── Open output file if specified ──
+    ; -- Open output file if specified --
     cmp     qword [rel output_file], 0
     je      .no_output_file
     mov     rdi, [rel output_file]
@@ -371,16 +388,16 @@ _start:
     mov     [rel output_fd], rax
 .no_output_file:
 
-    ; ── Check mode? ──
+    ; -- Check mode? --
     mov     rax, [rel flag_bits]
     test    rax, FLAG_CHECK | FLAG_CHECK_Q
     jnz     .do_check
 
-    ; ── Merge mode? ──
+    ; -- Merge mode? --
     test    rax, FLAG_MERGE
     jnz     .do_merge
 
-    ; ── Normal sort mode ──
+    ; -- Normal sort mode --
     call    read_all_input
     test    rax, rax
     js      .read_error
@@ -391,12 +408,9 @@ _start:
 
 .do_check:
     call    check_sorted
-    ; check_sorted exits directly
     jmp     .exit_success
 
 .do_merge:
-    ; For merge, we read all input and sort — same as normal for simplicity
-    ; A real merge would do k-way merge but the sorted input makes it correct
     call    read_all_input
     test    rax, rax
     js      .read_error
@@ -410,7 +424,6 @@ _start:
     call    asm_exit
 
 .output_open_error:
-    ; Print error for output file
     mov     rdi, STDERR
     lea     rsi, [rel str_sort_prefix]
     mov     edx, str_sort_prefix_len
@@ -429,9 +442,7 @@ _start:
     call    asm_exit
 
 .exit_success:
-    ; Flush output buffer
     call    flush_outbuf
-    ; Close output fd if not stdout
     cmp     qword [rel output_fd], STDOUT
     je      .skip_close
     mov     rdi, [rel output_fd]
@@ -453,216 +464,184 @@ parse_args:
 
     mov     r12, [rel argv]
     mov     r13, [rel argc]
-    mov     r14, 1                  ; arg index (skip argv[0])
-    xor     r15d, r15d              ; end-of-options flag
+    mov     r14, 1
+    xor     r15d, r15d
 
 .arg_loop:
     cmp     r14, r13
     jge     .done
 
-    mov     rbx, [r12 + r14*8]     ; rbx = argv[i]
+    mov     rbx, [r12 + r14*8]
 
-    ; If end-of-options seen, treat as file
     test    r15d, r15d
     jnz     .is_file
 
-    ; Check for "--"
     cmp     byte [rbx], '-'
     jne     .is_file
     cmp     byte [rbx+1], 0
-    je      .is_file               ; bare "-" is stdin
+    je      .is_file
 
     cmp     byte [rbx+1], '-'
     jne     .short_opts
 
-    ; Long option
     cmp     byte [rbx+2], 0
     jne     .long_opt
-    ; "--" end of options
     mov     r15d, 1
     jmp     .next_arg
 
 .long_opt:
-    ; --help
     mov     rdi, rbx
     lea     rsi, [rel opt_help]
     call    str_equal
     test    eax, eax
     jnz     .do_help
 
-    ; --version
     mov     rdi, rbx
     lea     rsi, [rel opt_version]
     call    str_equal
     test    eax, eax
     jnz     .do_version
 
-    ; --reverse
     mov     rdi, rbx
     lea     rsi, [rel opt_reverse]
     call    str_equal
     test    eax, eax
     jnz     .set_reverse
 
-    ; --unique
     mov     rdi, rbx
     lea     rsi, [rel opt_unique]
     call    str_equal
     test    eax, eax
     jnz     .set_unique
 
-    ; --numeric-sort
     mov     rdi, rbx
     lea     rsi, [rel opt_numeric]
     call    str_equal
     test    eax, eax
     jnz     .set_numeric
 
-    ; --stable
     mov     rdi, rbx
     lea     rsi, [rel opt_stable]
     call    str_equal
     test    eax, eax
     jnz     .set_stable
 
-    ; --check
     mov     rdi, rbx
     lea     rsi, [rel opt_check]
     call    str_equal
     test    eax, eax
     jnz     .set_check
 
-    ; --check=...
     mov     rdi, rbx
     lea     rsi, [rel opt_check_eq]
     call    str_starts_with
     test    eax, eax
     jnz     .parse_check_eq
 
-    ; --ignore-case
     mov     rdi, rbx
     lea     rsi, [rel opt_ignore_case]
     call    str_equal
     test    eax, eax
     jnz     .set_fold_case
 
-    ; --dictionary-order
     mov     rdi, rbx
     lea     rsi, [rel opt_dictionary]
     call    str_equal
     test    eax, eax
     jnz     .set_dict
 
-    ; --ignore-nonprinting
     mov     rdi, rbx
     lea     rsi, [rel opt_ignore_np]
     call    str_equal
     test    eax, eax
     jnz     .set_ignore_np
 
-    ; --ignore-leading-blanks
     mov     rdi, rbx
     lea     rsi, [rel opt_ignore_blanks]
     call    str_equal
     test    eax, eax
     jnz     .set_blanks
 
-    ; --merge
     mov     rdi, rbx
     lea     rsi, [rel opt_merge]
     call    str_equal
     test    eax, eax
     jnz     .set_merge
 
-    ; --zero-terminated
     mov     rdi, rbx
     lea     rsi, [rel opt_zero_terminated]
     call    str_equal
     test    eax, eax
     jnz     .set_zero_term
 
-    ; --output=FILE
     mov     rdi, rbx
     lea     rsi, [rel opt_output_eq]
     call    str_starts_with
     test    eax, eax
     jnz     .parse_output_eq
 
-    ; --output FILE
     mov     rdi, rbx
     lea     rsi, [rel opt_output]
     call    str_equal
     test    eax, eax
     jnz     .parse_output_next
 
-    ; --key=KEYDEF
     mov     rdi, rbx
     lea     rsi, [rel opt_key_eq]
     call    str_starts_with
     test    eax, eax
     jnz     .parse_key_eq
 
-    ; --key KEYDEF
     mov     rdi, rbx
     lea     rsi, [rel opt_key]
     call    str_equal
     test    eax, eax
     jnz     .parse_key_next
 
-    ; --field-separator=SEP
     mov     rdi, rbx
     lea     rsi, [rel opt_field_sep_eq]
     call    str_starts_with
     test    eax, eax
     jnz     .parse_sep_eq
 
-    ; --field-separator SEP
     mov     rdi, rbx
     lea     rsi, [rel opt_field_sep]
     call    str_equal
     test    eax, eax
     jnz     .parse_sep_next
 
-    ; --general-numeric-sort
     mov     rdi, rbx
     lea     rsi, [rel opt_gen_numeric]
     call    str_equal
     test    eax, eax
     jnz     .set_gen_numeric
 
-    ; --month-sort
     mov     rdi, rbx
     lea     rsi, [rel opt_month_sort]
     call    str_equal
     test    eax, eax
     jnz     .set_month
 
-    ; --human-numeric-sort
     mov     rdi, rbx
     lea     rsi, [rel opt_human_sort]
     call    str_equal
     test    eax, eax
     jnz     .set_human
 
-    ; --version-sort
     mov     rdi, rbx
     lea     rsi, [rel opt_version_sort]
     call    str_equal
     test    eax, eax
     jnz     .set_version_sort
 
-    ; Unrecognized long option — error
     jmp     .error_unrec
 
 .short_opts:
-    ; Parse short options from argv[i] starting at position 1
-    lea     rbx, [rbx + 1]         ; skip '-'
-
+    lea     rbx, [rbx + 1]
 .short_loop:
     movzx   eax, byte [rbx]
     test    al, al
     jz      .next_arg
-
     cmp     al, 'b'
     je      .short_blanks
     cmp     al, 'c'
@@ -701,96 +680,77 @@ parse_args:
     je      .short_version_sort
     cmp     al, 'z'
     je      .short_zero
-
-    ; Unknown short option
     jmp     .error_inval
 
 .short_blanks:
     or      qword [rel flag_bits], FLAG_BLANKS
     inc     rbx
     jmp     .short_loop
-
 .short_check:
     or      qword [rel flag_bits], FLAG_CHECK
     inc     rbx
     jmp     .short_loop
-
 .short_check_q:
     or      qword [rel flag_bits], FLAG_CHECK_Q
     inc     rbx
     jmp     .short_loop
-
 .short_dict:
     or      qword [rel flag_bits], FLAG_DICT
     inc     rbx
     jmp     .short_loop
-
 .short_fold:
     or      qword [rel flag_bits], FLAG_FOLD_CASE
     inc     rbx
     jmp     .short_loop
-
 .short_gen_numeric:
     or      qword [rel flag_bits], FLAG_GEN_NUM
     inc     rbx
     jmp     .short_loop
-
 .short_human:
     or      qword [rel flag_bits], FLAG_HUMAN
     inc     rbx
     jmp     .short_loop
-
 .short_ignore_np:
     or      qword [rel flag_bits], FLAG_IGNORE_NP
     inc     rbx
     jmp     .short_loop
-
 .short_month:
     or      qword [rel flag_bits], FLAG_MONTH
     inc     rbx
     jmp     .short_loop
-
 .short_numeric:
     or      qword [rel flag_bits], FLAG_NUMERIC
     inc     rbx
     jmp     .short_loop
-
 .short_reverse:
     or      qword [rel flag_bits], FLAG_REVERSE
     inc     rbx
     jmp     .short_loop
-
 .short_stable:
     or      qword [rel flag_bits], FLAG_STABLE
     inc     rbx
     jmp     .short_loop
-
 .short_unique:
     or      qword [rel flag_bits], FLAG_UNIQUE
     inc     rbx
     jmp     .short_loop
-
 .short_zero:
     or      qword [rel flag_bits], FLAG_ZERO_TERM
     inc     rbx
     jmp     .short_loop
-
 .short_merge:
     or      qword [rel flag_bits], FLAG_MERGE
     inc     rbx
     jmp     .short_loop
-
 .short_version_sort:
     or      qword [rel flag_bits], FLAG_VERSION
     inc     rbx
     jmp     .short_loop
 
 .short_key:
-    ; -k KEYDEF: rest of this arg or next arg
     inc     rbx
     cmp     byte [rbx], 0
     jne     .parse_key_inline
-    ; next arg
     inc     r14
     cmp     r14, r13
     jge     .error_missing_k
@@ -801,11 +761,9 @@ parse_args:
     jmp     .next_arg
 
 .short_output:
-    ; -o FILE: rest of this arg or next arg
     inc     rbx
     cmp     byte [rbx], 0
     jne     .set_output_inline
-    ; next arg
     inc     r14
     cmp     r14, r13
     jge     .error_missing_o
@@ -815,11 +773,9 @@ parse_args:
     jmp     .next_arg
 
 .short_sep:
-    ; -t SEP: rest of this arg or next arg
     inc     rbx
     cmp     byte [rbx], 0
     jne     .set_sep_inline
-    ; next arg
     inc     r14
     cmp     r14, r13
     jge     .error_missing_t
@@ -830,7 +786,6 @@ parse_args:
     mov     byte [rel has_separator], 1
     jmp     .next_arg
 
-; ── Flag setters for long options ──
 .set_reverse:
     or      qword [rel flag_bits], FLAG_REVERSE
     jmp     .next_arg
@@ -878,8 +833,7 @@ parse_args:
     jmp     .next_arg
 
 .parse_check_eq:
-    ; --check=quiet or --check=silent or --check=diagnose-first
-    lea     rdi, [rbx + 8]         ; skip "--check="
+    lea     rdi, [rbx + 8]
     lea     rsi, [rel opt_check_quiet]
     call    str_equal
     test    eax, eax
@@ -894,19 +848,17 @@ parse_args:
     call    str_equal
     test    eax, eax
     jnz     .set_check
-    jmp     .set_check             ; default to diagnose-first
+    jmp     .set_check
 .set_check_q:
     or      qword [rel flag_bits], FLAG_CHECK_Q
     jmp     .next_arg
 
 .parse_output_eq:
-    ; --output=FILE
-    lea     rax, [rbx + 9]         ; skip "--output="
+    lea     rax, [rbx + 9]
     mov     [rel output_file], rax
     jmp     .next_arg
 
 .parse_output_next:
-    ; --output FILE
     inc     r14
     cmp     r14, r13
     jge     .error_missing_o
@@ -915,13 +867,11 @@ parse_args:
     jmp     .next_arg
 
 .parse_key_eq:
-    ; --key=KEYDEF
-    lea     rdi, [rbx + 6]         ; skip "--key="
+    lea     rdi, [rbx + 6]
     call    parse_key
     jmp     .next_arg
 
 .parse_key_next:
-    ; --key KEYDEF
     inc     r14
     cmp     r14, r13
     jge     .error_missing_k
@@ -930,15 +880,13 @@ parse_args:
     jmp     .next_arg
 
 .parse_sep_eq:
-    ; --field-separator=SEP
-    lea     rax, [rbx + 18]        ; skip "--field-separator="
+    lea     rax, [rbx + 18]
     movzx   eax, byte [rax]
     mov     [rel separator], al
     mov     byte [rel has_separator], 1
     jmp     .next_arg
 
 .parse_sep_next:
-    ; --field-separator SEP
     inc     r14
     cmp     r14, r13
     jge     .error_missing_t
@@ -949,10 +897,9 @@ parse_args:
     jmp     .next_arg
 
 .is_file:
-    ; Add to file list
     mov     rcx, [rel nfiles]
     cmp     rcx, MAX_FILES
-    jge     .next_arg               ; silently ignore overflow
+    jge     .next_arg
     lea     rax, [rel files]
     mov     [rax + rcx*8], rbx
     inc     qword [rel nfiles]
@@ -970,7 +917,6 @@ parse_args:
     pop     rbx
     ret
 
-; ── Error handlers ──
 .do_help:
     mov     rdi, STDOUT
     lea     rsi, [rel str_help]
@@ -988,7 +934,6 @@ parse_args:
     call    asm_exit
 
 .error_inval:
-    ; "sort: invalid option -- 'X'"
     push    rax
     mov     rdi, STDERR
     lea     rsi, [rel str_sort_prefix]
@@ -999,7 +944,6 @@ parse_args:
     mov     edx, 19
     call    asm_write_all
     pop     rax
-    ; write the bad char
     sub     rsp, 8
     mov     [rsp], al
     mov     rdi, STDERR
@@ -1027,7 +971,6 @@ parse_args:
     lea     rsi, [rel str_unrec_opt]
     mov     edx, 21
     call    asm_write_all
-    ; Print the bad option
     mov     rdi, rbx
     call    asm_strlen
     mov     rdx, rax
@@ -1108,7 +1051,6 @@ parse_args:
 
 ; ============================================================================
 ;  parse_key — Parse a -k KEYDEF string
-;  Input: rdi = KEYDEF string (e.g., "2,2" or "1.3,1.5n" or "2nr,2")
 ; ============================================================================
 parse_key:
     push    rbx
@@ -1117,73 +1059,63 @@ parse_key:
     push    r14
     push    r15
 
-    mov     r12, rdi                ; save KEYDEF string pointer
+    mov     r12, rdi
     mov     r13, [rel nkeys]
     cmp     r13, MAX_KEYS
-    jge     .pk_done                ; too many keys
+    jge     .pk_done
 
-    ; Calculate offset into keys array
     imul    r14, r13, KEY_STRUCT_SIZE
     lea     r15, [rel keys]
-    add     r15, r14                ; r15 = pointer to this key struct
+    add     r15, r14
 
-    ; Initialize key with defaults
-    mov     qword [r15], 0          ; start_field
-    mov     qword [r15+8], 0        ; start_char
-    mov     qword [r15+16], 0       ; end_field
-    mov     qword [r15+24], 0       ; end_char
-    mov     qword [r15+32], 0       ; flags
+    mov     qword [r15], 0
+    mov     qword [r15+8], 0
+    mov     qword [r15+16], 0
+    mov     qword [r15+24], 0
+    mov     qword [r15+32], 0
 
-    ; Parse start field number
     mov     rdi, r12
     call    parse_number
-    mov     [r15], rax              ; start_field
-    mov     r12, rdi                ; updated pointer
+    mov     [r15], rax
+    mov     r12, rdi
 
-    ; Check for .C (start char)
     cmp     byte [r12], '.'
     jne     .pk_start_opts
     inc     r12
     mov     rdi, r12
     call    parse_number
-    mov     [r15+8], rax            ; start_char
+    mov     [r15+8], rax
     mov     r12, rdi
 
 .pk_start_opts:
-    ; Parse start-key options
     mov     rdi, r12
-    lea     rsi, [r15+32]           ; flags pointer
+    lea     rsi, [r15+32]
     call    parse_key_opts
     mov     r12, rdi
 
-    ; Check for comma (end spec)
     cmp     byte [r12], ','
     jne     .pk_no_end
     inc     r12
 
-    ; Parse end field
     mov     rdi, r12
     call    parse_number
-    mov     [r15+16], rax           ; end_field
+    mov     [r15+16], rax
     mov     r12, rdi
 
-    ; Check for .C (end char)
     cmp     byte [r12], '.'
     jne     .pk_end_opts
     inc     r12
     mov     rdi, r12
     call    parse_number
-    mov     [r15+24], rax           ; end_char
+    mov     [r15+24], rax
     mov     r12, rdi
 
 .pk_end_opts:
-    ; Parse end-key options
     mov     rdi, r12
     lea     rsi, [r15+32]
     call    parse_key_opts
 
 .pk_no_end:
-    ; Increment key count
     inc     qword [rel nkeys]
 
 .pk_done:
@@ -1196,9 +1128,7 @@ parse_key:
 
 
 ; ============================================================================
-;  parse_number — Parse decimal digits from string
-;  Input: rdi = string pointer
-;  Output: rax = number, rdi = updated pointer past digits
+;  parse_number / parse_key_opts
 ; ============================================================================
 parse_number:
     xor     eax, eax
@@ -1215,12 +1145,6 @@ parse_number:
 .done:
     ret
 
-
-; ============================================================================
-;  parse_key_opts — Parse single-letter key options (bdfgiMhnrRV)
-;  Input: rdi = string pointer, rsi = pointer to flags qword
-;  Output: rdi = updated pointer
-; ============================================================================
 parse_key_opts:
 .loop:
     movzx   eax, byte [rdi]
@@ -1243,11 +1167,10 @@ parse_key_opts:
     cmp     al, 'r'
     je      .set_r
     cmp     al, 'R'
-    je      .done                   ; -R (random) not fully implemented
+    je      .done
     cmp     al, 'V'
     je      .set_V
     jmp     .done
-
 .set_b:
     or      qword [rsi], KEY_BLANKS
     inc     rdi
@@ -1293,8 +1216,9 @@ parse_key_opts:
 
 
 ; ============================================================================
-;  read_all_input — Read all input files into a single contiguous buffer
-;  Returns: rax = 0 on success, -1 on error
+;  read_all_input — Read all input files into a contiguous buffer
+;  Single regular file: mmap with MAP_POPULATE for zero-copy
+;  Multi-file/stdin: read() into anonymous mmap buffer
 ; ============================================================================
 read_all_input:
     push    rbx
@@ -1303,13 +1227,95 @@ read_all_input:
     push    r14
     push    r15
 
-    ; Allocate initial input buffer via mmap
-    xor     edi, edi                ; addr = NULL
-    mov     rsi, INITIAL_BUF        ; length
+    ; Single-file mmap fast path
+    cmp     qword [rel nfiles], 1
+    jne     .rai_multi_file
+    lea     rax, [rel files]
+    mov     rbx, [rax]
+    cmp     byte [rbx], '-'
+    jne     .rai_try_mmap
+    cmp     byte [rbx+1], 0
+    je      .rai_multi_file
+
+.rai_try_mmap:
+    mov     rdi, rbx
+    xor     esi, esi
+    xor     edx, edx
+    call    asm_open
+    test    rax, rax
+    js      .rai_file_error_single
+    mov     r13, rax
+
+    mov     rdi, r13
+    lea     rsi, [rel stat_buf]
+    FSTAT   rdi, rsi
+    test    rax, rax
+    js      .rai_close_fallback
+
+    mov     r14, [rel stat_buf + STAT_SIZE]
+    test    r14, r14
+    jz      .rai_empty_file
+
+    ; mmap the file read-only with MAP_POPULATE for kernel readahead
+    xor     edi, edi
+    mov     rsi, r14
+    mov     edx, PROT_READ | PROT_WRITE  ; need WRITE for in-place NUL termination guard
+    mov     r10d, MAP_PRIVATE | MAP_POPULATE
+    mov     r8, r13
+    xor     r9d, r9d
+    mov     eax, SYS_MMAP
+    syscall
+    test    rax, rax
+    js      .rai_close_fallback
+
+    mov     [rel input_buf], rax
+    mov     [rel input_size], r14
+    mov     [rel input_cap], r14
+
+    mov     rdi, r13
+    call    asm_close
+
+    xor     eax, eax
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+.rai_empty_file:
+    mov     rdi, r13
+    call    asm_close
+    mov     qword [rel input_size], 0
+    xor     edi, edi
+    mov     esi, 4096
     mov     edx, PROT_READ | PROT_WRITE
     mov     r10d, MAP_PRIVATE | MAP_ANONYMOUS
-    mov     r8, -1                  ; fd = -1
-    xor     r9d, r9d                ; offset = 0
+    mov     r8, -1
+    xor     r9d, r9d
+    mov     eax, SYS_MMAP
+    syscall
+    mov     [rel input_buf], rax
+    mov     qword [rel input_cap], 4096
+    xor     eax, eax
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+.rai_close_fallback:
+    mov     rdi, r13
+    call    asm_close
+
+.rai_multi_file:
+    xor     edi, edi
+    mov     rsi, INITIAL_BUF
+    mov     edx, PROT_READ | PROT_WRITE
+    mov     r10d, MAP_PRIVATE | MAP_ANONYMOUS
+    mov     r8, -1
+    xor     r9d, r9d
     mov     eax, SYS_MMAP
     syscall
     test    rax, rax
@@ -1318,73 +1324,54 @@ read_all_input:
     mov     qword [rel input_size], 0
     mov     qword [rel input_cap], INITIAL_BUF
 
-    ; Process each file
-    xor     r12d, r12d              ; file index
+    xor     r12d, r12d
 
 .rai_file_loop:
     cmp     r12, [rel nfiles]
     jge     .rai_done
 
-    ; Get filename
     lea     rax, [rel files]
     mov     rbx, [rax + r12*8]
 
-    ; Check if it's stdin ("-")
     cmp     byte [rbx], '-'
     jne     .rai_open_file
     cmp     byte [rbx+1], 0
     jne     .rai_open_file
-    ; stdin
-    xor     r13d, r13d              ; fd = 0 (stdin)
+    xor     r13d, r13d
     jmp     .rai_read_fd
 
 .rai_open_file:
-    ; Try to mmap the file
     mov     rdi, rbx
-    xor     esi, esi                ; O_RDONLY
+    xor     esi, esi
     xor     edx, edx
     call    asm_open
     test    rax, rax
     js      .rai_file_error
-    mov     r13, rax                ; fd
+    mov     r13, rax
 
-    ; fstat to get size
     mov     rdi, r13
     lea     rsi, [rel stat_buf]
     FSTAT   rdi, rsi
     test    rax, rax
-    js      .rai_close_read
+    js      .rai_read_fd
 
-    ; Get file size
     mov     r14, [rel stat_buf + STAT_SIZE]
     test    r14, r14
-    jz      .rai_close_next         ; empty file
+    jz      .rai_close_next
 
-    ; Ensure buffer has room
     mov     rax, [rel input_size]
     add     rax, r14
     cmp     rax, [rel input_cap]
-    jbe     .rai_mmap_file
-
-    ; Grow buffer via mremap
+    jbe     .rai_read_fd
     call    grow_input_buffer
 
-.rai_mmap_file:
-    ; Read file into buffer (we use read, not mmap, for simplicity with concat)
-    ; This also handles pipes, devices, etc.
-    jmp     .rai_read_fd
-
-.rai_close_read:
-    ; fallthrough to read-based approach
 .rai_read_fd:
-    ; Read from fd r13 into input_buf + input_size
 .rai_read_loop:
     mov     rax, [rel input_size]
     mov     rcx, [rel input_cap]
     sub     rcx, rax
     cmp     rcx, 65536
     jge     .rai_do_read
-    ; Need more space
     push    r13
     call    grow_input_buffer
     pop     r13
@@ -1395,9 +1382,8 @@ read_all_input:
 .rai_do_read:
     mov     rdi, r13
     mov     rsi, [rel input_buf]
-    add     rsi, rax                ; buf + input_size
-    mov     rdx, rcx                ; remaining capacity
-    ; Cap read size at 1MB to avoid blocking too long
+    add     rsi, rax
+    mov     rdx, rcx
     cmp     rdx, 1048576
     jbe     .rai_read_ok
     mov     rdx, 1048576
@@ -1405,12 +1391,11 @@ read_all_input:
     call    asm_read
     test    rax, rax
     js      .rai_read_err
-    jz      .rai_read_eof           ; EOF
+    jz      .rai_read_eof
     add     [rel input_size], rax
     jmp     .rai_read_loop
 
 .rai_read_eof:
-    ; Close fd if not stdin
     test    r13, r13
     jz      .rai_next_file
     mov     rdi, r13
@@ -1434,14 +1419,20 @@ read_all_input:
     pop     rbx
     ret
 
-.rai_file_error:
-    ; Print error: "sort: open failed: FILENAME"
+.rai_file_error_single:
     push    r12
+    xor     r12d, r12d
+    jmp     .rai_file_error_print
+
+.rai_file_error:
+    push    r12
+.rai_file_error_print:
     mov     rdi, STDERR
     lea     rsi, [rel str_sort_prefix]
     mov     edx, str_sort_prefix_len
     call    asm_write_all
     lea     rax, [rel files]
+    mov     r12, [rsp]
     mov     rdi, [rax + r12*8]
     call    asm_strlen
     mov     rdx, rax
@@ -1454,7 +1445,6 @@ read_all_input:
     mov     edx, 28
     call    asm_write_all
     pop     r12
-    ; Continue with next file (like GNU sort)
     inc     r12
     jmp     .rai_file_loop
 
@@ -1476,7 +1466,7 @@ grow_input_buffer:
     mov     rdi, [rel input_buf]
     mov     rsi, [rel input_cap]
     mov     rdx, rsi
-    shl     rdx, 1                  ; new_size = old_size * 2
+    shl     rdx, 1
     mov     r10d, MREMAP_MAYMOVE
     mov     eax, SYS_MREMAP
     syscall
@@ -1488,20 +1478,19 @@ grow_input_buffer:
     mov     [rel input_cap], rax
     ret
 .gib_fail:
-    ; Fatal: can't grow buffer
     mov     edi, 2
     call    asm_exit
 
 
 ; ============================================================================
-;  scan_lines — Scan input buffer and build line pointer array
-;  Populates line_array, line_count
+;  scan_lines — SSE2-accelerated newline scanning to build line pointer array
 ; ============================================================================
 scan_lines:
     push    rbx
     push    r12
     push    r13
     push    r14
+    push    r15
 
     ; Allocate line pointer array
     mov     rsi, INITIAL_LINES * LINE_ENTRY_SIZE
@@ -1518,54 +1507,150 @@ scan_lines:
     mov     qword [rel line_count], 0
     mov     qword [rel line_cap], INITIAL_LINES
 
-    ; Scan the input
-    mov     r12, [rel input_buf]    ; current position
-    mov     r13, r12
-    add     r13, [rel input_size]   ; end of input
-    movzx   r14d, byte [rel line_delim]  ; delimiter
+    mov     r12, [rel input_buf]
+    mov     r13, [rel input_size]
+    movzx   r14d, byte [rel line_delim]
 
-    ; Handle empty input
-    cmp     r12, r13
-    je      .sl_done
+    test    r13, r13
+    jz      .sl_done
 
-.sl_line_loop:
-    cmp     r12, r13
-    jge     .sl_check_final
+    mov     rsi, r12                ; scan pointer
+    lea     r15, [r12 + r13]        ; end of input
 
-    ; Start of a new line
-    mov     rbx, r12                ; line start
+    ; For newline delimiter, use SSE2
+    cmp     r14d, 10
+    jne     .sl_scalar_scan
 
-    ; Scan for delimiter
-.sl_scan:
-    cmp     r12, r13
-    jge     .sl_found_end
-    movzx   eax, byte [r12]
+    ; Fill xmm0 with newline byte
+    movd    xmm0, r14d
+    punpcklbw xmm0, xmm0
+    punpcklwd xmm0, xmm0
+    pshufd  xmm0, xmm0, 0
+
+    mov     rbx, r12                ; line_start
+
+    ; Safe end for SSE2 (need at least 16 bytes)
+    mov     rcx, r15
+    sub     rcx, 16
+    cmp     rsi, rcx
+    jg      .sl_tail
+
+.sl_sse_loop:
+    movdqu  xmm1, [rsi]
+    pcmpeqb xmm1, xmm0
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .sl_sse_found
+    add     rsi, 16
+    cmp     rsi, rcx
+    jle     .sl_sse_loop
+    jmp     .sl_tail
+
+.sl_sse_found:
+    ; Process all newlines in this 16-byte chunk
+.sl_sse_extract:
+    bsf     edx, eax
+    ; Line: rbx .. (rsi+edx), length = (rsi+edx) - rbx
+    lea     r8, [rsi + rdx]
+    mov     r9, r8
+    sub     r9, rbx
+
+    ; Inline add_line for speed
+    mov     r10, [rel line_count]
+    cmp     r10, [rel line_cap]
+    jb      .sl_sse_store_ok
+    push    rax
+    push    rcx
+    push    rbx
+    push    rsi
+    push    r8
+    push    r9
+    call    grow_line_array
+    pop     r9
+    pop     r8
+    pop     rsi
+    pop     rbx
+    pop     rcx
+    pop     rax
+    mov     r10, [rel line_count]
+.sl_sse_store_ok:
+    mov     r11, [rel line_array]
+    shl     r10, 4
+    mov     [r11 + r10], rbx       ; ptr
+    mov     [r11 + r10 + 8], r9    ; len
+    inc     qword [rel line_count]
+
+    lea     rbx, [r8 + 1]          ; next line starts after newline
+    btr     eax, edx
+    test    eax, eax
+    jnz     .sl_sse_extract
+
+    add     rsi, 16
+    cmp     rsi, rcx
+    jle     .sl_sse_loop
+
+.sl_tail:
+    cmp     rbx, r15
+    jge     .sl_done
+
+.sl_tail_loop:
+    cmp     rsi, r15
+    jge     .sl_tail_end
+    movzx   eax, byte [rsi]
     cmp     eax, r14d
-    je      .sl_found_delim
-    inc     r12
-    jmp     .sl_scan
+    je      .sl_tail_found
+    inc     rsi
+    jmp     .sl_tail_loop
 
-.sl_found_delim:
-    ; Line from rbx to r12 (not including delimiter)
+.sl_tail_found:
     mov     rdi, rbx
-    mov     rsi, r12
-    sub     rsi, rbx                ; length
-    call    add_line
-    inc     r12                     ; skip delimiter
-    jmp     .sl_line_loop
+    mov     r9, rsi
+    sub     r9, rbx
+    call    add_line_fast
+    lea     rbx, [rsi + 1]
+    inc     rsi
+    jmp     .sl_tail_loop
 
-.sl_found_end:
-    ; Last line without trailing delimiter
-    cmp     rbx, r13
-    je      .sl_done                ; no trailing content
+.sl_tail_end:
+    cmp     rbx, r15
+    jge     .sl_done
     mov     rdi, rbx
-    mov     rsi, r13
-    sub     rsi, rbx
-    call    add_line
+    mov     r9, r15
+    sub     r9, rbx
+    call    add_line_fast
     jmp     .sl_done
 
-.sl_check_final:
+.sl_scalar_scan:
+    mov     rbx, r12
+    mov     rsi, r12
+.sl_scalar_loop:
+    cmp     rsi, r15
+    jge     .sl_scalar_end
+    movzx   eax, byte [rsi]
+    cmp     eax, r14d
+    je      .sl_scalar_found
+    inc     rsi
+    jmp     .sl_scalar_loop
+
+.sl_scalar_found:
+    mov     rdi, rbx
+    mov     r9, rsi
+    sub     r9, rbx
+    call    add_line_fast
+    lea     rbx, [rsi + 1]
+    inc     rsi
+    jmp     .sl_scalar_loop
+
+.sl_scalar_end:
+    cmp     rbx, r15
+    jge     .sl_done
+    mov     rdi, rbx
+    mov     r9, r15
+    sub     r9, rbx
+    call    add_line_fast
+
 .sl_done:
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
@@ -1577,63 +1662,64 @@ scan_lines:
     call    asm_exit
 
 
-; ============================================================================
-;  add_line — Add a line entry to the line array
-;  Input: rdi = line pointer, rsi = line length
-; ============================================================================
-add_line:
-    push    rbx
-    mov     rcx, [rel line_count]
-    cmp     rcx, [rel line_cap]
-    jb      .al_ok
-
-    ; Grow line array via mremap
+add_line_fast:
+    mov     rax, [rel line_count]
+    cmp     rax, [rel line_cap]
+    jb      .alf_ok
     push    rdi
-    push    rsi
+    push    r9
+    call    grow_line_array
+    pop     r9
+    pop     rdi
+    mov     rax, [rel line_count]
+.alf_ok:
+    mov     rcx, [rel line_array]
+    shl     rax, 4
+    mov     [rcx + rax], rdi
+    mov     [rcx + rax + 8], r9
+    inc     qword [rel line_count]
+    ret
+
+
+grow_line_array:
     mov     rdi, [rel line_array]
     mov     rsi, [rel line_cap]
     imul    rsi, LINE_ENTRY_SIZE
     mov     rdx, rsi
-    shl     rdx, 1                  ; double
+    shl     rdx, 1
     mov     r10d, MREMAP_MAYMOVE
     mov     eax, SYS_MREMAP
     syscall
     test    rax, rax
-    js      .al_fail
+    js      .gla_fail
     mov     [rel line_array], rax
     shl     qword [rel line_cap], 1
-    pop     rsi
-    pop     rdi
-    mov     rcx, [rel line_count]
-
-.al_ok:
-    mov     rax, [rel line_array]
-    mov     r10, rcx
-    shl     r10, 4                  ; r10 = rcx * 16
-    mov     [rax + r10], rdi        ; pointer
-    mov     [rax + r10 + 8], rsi    ; length
-    inc     qword [rel line_count]
-    pop     rbx
     ret
-
-.al_fail:
+.gla_fail:
     mov     edi, 2
     call    asm_exit
 
 
 ; ============================================================================
-;  sort_lines — Sort the line array using merge sort
+;  sort_lines — Bottom-up merge sort with insertion sort for small runs
 ; ============================================================================
 sort_lines:
     push    rbx
     push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    rbp
 
     mov     rcx, [rel line_count]
     cmp     rcx, 2
-    jl      .sort_done              ; 0 or 1 lines = already sorted
+    jl      .sort_done
 
-    ; Allocate temp array for merge sort
-    mov     rsi, rcx
+    mov     r12, [rel line_array]
+    mov     r13, rcx
+
+    ; Allocate temp array
+    mov     rsi, r13
     imul    rsi, LINE_ENTRY_SIZE
     xor     edi, edi
     mov     edx, PROT_READ | PROT_WRITE
@@ -1645,22 +1731,158 @@ sort_lines:
     test    rax, rax
     js      .sort_fail
     mov     [rel merge_temp], rax
+    mov     r14, rax
 
-    ; Call merge sort
-    mov     rdi, [rel line_array]
-    mov     rsi, [rel merge_temp]
-    xor     edx, edx                ; left = 0
-    mov     rcx, [rel line_count]   ; right = line_count
-    call    merge_sort
+    ; Phase 1: Insertion sort blocks of INSERTION_THRESH
+    xor     ebx, ebx
+.isort_block_loop:
+    cmp     rbx, r13
+    jge     .isort_done
 
-    ; Free temp array
+    lea     rcx, [rbx + INSERTION_THRESH]
+    cmp     rcx, r13
+    jbe     .isort_end_ok
+    mov     rcx, r13
+.isort_end_ok:
+    ; Insertion sort array[rbx..rcx)
+    lea     rax, [rbx + 1]
+.isort_i_loop:
+    cmp     rax, rcx
+    jge     .isort_next_block
+    push    rax
+    push    rcx
+
+    ; Load element i
+    mov     r8, rax
+    shl     r8, 4
+    mov     r10, [r12 + r8]
+    mov     r11, [r12 + r8 + 8]
+
+    pop     rcx
+    pop     rax
+    push    rax
+    push    rcx
+    lea     r9, [rax - 1]
+
+.isort_j_loop:
+    cmp     r9, rbx
+    jl      .isort_insert
+
+    push    r9
+    push    r10
+    push    r11
+    push    rbx
+    push    rcx
+
+    mov     rax, r9
+    shl     rax, 4
+    mov     rdi, [r12 + rax]
+    mov     rsi, [r12 + rax + 8]
+    mov     rdx, r10
+    mov     rcx, r11
+    call    compare_lines
+
+    pop     rcx
+    pop     rbx
+    pop     r11
+    pop     r10
+    pop     r9
+
+    test    eax, eax
+    jle     .isort_insert
+
+    ; Shift array[j] right
+    mov     rax, r9
+    shl     rax, 4
+    mov     r8, [r12 + rax]
+    mov     [r12 + rax + 16], r8
+    mov     r8, [r12 + rax + 8]
+    mov     [r12 + rax + 24], r8
+    dec     r9
+    jmp     .isort_j_loop
+
+.isort_insert:
+    lea     rax, [r9 + 1]
+    shl     rax, 4
+    mov     [r12 + rax], r10
+    mov     [r12 + rax + 8], r11
+
+    pop     rcx
+    pop     rax
+    inc     rax
+    jmp     .isort_i_loop
+
+.isort_next_block:
+    add     rbx, INSERTION_THRESH
+    jmp     .isort_block_loop
+
+.isort_done:
+
+    ; Phase 2: Bottom-up merge passes
+    mov     rbp, INSERTION_THRESH
+
+.merge_width_loop:
+    cmp     rbp, r13
+    jge     .sort_cleanup
+
+    xor     ebx, ebx
+
+.merge_pair_loop:
+    cmp     rbx, r13
+    jge     .merge_width_next
+
+    mov     rax, rbx
+    add     rax, rbp
+    cmp     rax, r13
+    jbe     .merge_mid_ok
+    mov     rax, r13
+.merge_mid_ok:
+    mov     rcx, rax
+
+    lea     rax, [rbx + rbp*2]
+    cmp     rax, r13
+    jbe     .merge_right_ok
+    mov     rax, r13
+.merge_right_ok:
+    mov     r8, rax
+
+    cmp     rcx, r8
+    jge     .merge_pair_next
+
+    push    rbx
+    push    rbp
+    push    r13
+
+    mov     rdi, r12
+    mov     rsi, r14
+    mov     edx, ebx
+    ; ecx = mid, r8d = right
+    call    merge_bottom_up
+
+    pop     r13
+    pop     rbp
+    pop     rbx
+
+.merge_pair_next:
+    lea     rbx, [rbx + rbp*2]
+    jmp     .merge_pair_loop
+
+.merge_width_next:
+    shl     rbp, 1
+    jmp     .merge_width_loop
+
+.sort_cleanup:
     mov     rdi, [rel merge_temp]
-    mov     rsi, [rel line_count]
+    mov     rsi, r13
     imul    rsi, LINE_ENTRY_SIZE
     mov     eax, SYS_MUNMAP
     syscall
 
 .sort_done:
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
     pop     r12
     pop     rbx
     ret
@@ -1671,113 +1893,10 @@ sort_lines:
 
 
 ; ============================================================================
-;  merge_sort — Recursive merge sort on line array
-;  Input: rdi = array, rsi = temp, edx = left, ecx = right (exclusive)
-;  Sorts array[left..right) in place
-; ============================================================================
-merge_sort:
-    ; Base case: 1 or 0 elements
-    mov     eax, ecx
-    sub     eax, edx
-    cmp     eax, 2
-    jl      .ms_ret
-
-    ; For 2 elements, just compare and swap
-    cmp     eax, 2
-    jne     .ms_recurse
-    ; Compare array[left] vs array[left+1]
-    push    rdi
-    push    rsi
-    push    rdx
-    push    rcx
-    ; Get pointers to the two line entries
-    mov     r8, rdx
-    imul    r8, LINE_ENTRY_SIZE
-    add     r8, rdi                 ; &array[left]
-    mov     r9, r8
-    add     r9, LINE_ENTRY_SIZE     ; &array[left+1]
-    ; Compare
-    push    r8
-    push    r9
-    mov     rdi, [r8]              ; ptr1
-    mov     rsi, [r8+8]            ; len1
-    mov     rdx, [r9]              ; ptr2
-    mov     rcx, [r9+8]            ; len2
-    call    compare_lines
-    pop     r9
-    pop     r8
-    test    eax, eax
-    jle     .ms_2_ok
-    ; Swap the two entries
-    mov     rax, [r8]
-    mov     rbx, [r8+8]
-    mov     rcx, [r9]
-    mov     rdx, [r9+8]
-    mov     [r8], rcx
-    mov     [r8+8], rdx
-    mov     [r9], rax
-    mov     [r9+8], rbx
-.ms_2_ok:
-    pop     rcx
-    pop     rdx
-    pop     rsi
-    pop     rdi
-.ms_ret:
-    ret
-
-.ms_recurse:
-    push    rbp
-    mov     rbp, rsp
-    push    rdi                     ; [rbp-8]  array
-    push    rsi                     ; [rbp-16] temp
-    push    rdx                     ; [rbp-24] left (as qword)
-    push    rcx                     ; [rbp-32] right (as qword)
-
-    ; mid = (left + right) / 2
-    mov     eax, edx
-    add     eax, ecx
-    shr     eax, 1
-    push    rax                     ; [rbp-40] mid
-
-    ; Sort left half: merge_sort(array, temp, left, mid)
-    mov     rdi, [rbp-8]
-    mov     rsi, [rbp-16]
-    mov     edx, [rbp-24]
-    mov     ecx, eax
-    call    merge_sort
-
-    ; Sort right half: merge_sort(array, temp, mid, right)
-    mov     rdi, [rbp-8]
-    mov     rsi, [rbp-16]
-    mov     edx, [rbp-40]
-    mov     ecx, [rbp-32]
-    call    merge_sort
-
-    ; Merge: merge(array, temp, left, mid, right)
-    mov     rdi, [rbp-8]
-    mov     rsi, [rbp-16]
-    mov     edx, [rbp-24]
-    mov     ecx, [rbp-40]
-    mov     r8d, [rbp-32]
-    call    merge
-
-    add     rsp, 8                  ; pop mid
-    pop     rcx
-    pop     rdx
-    pop     rsi
-    pop     rdi
-    pop     rbp
-    ret
-
-
-; ============================================================================
-;  merge — Merge two sorted halves
+;  merge_bottom_up — Merge two adjacent sorted runs
 ;  Input: rdi=array, rsi=temp, edx=left, ecx=mid, r8d=right
 ; ============================================================================
-; merge — Merge two sorted halves back into array
-;  Input: rdi=array, rsi=temp, edx=left, ecx=mid, r8d=right
-;  Uses temp[left..right) as scratch space
-merge:
+merge_bottom_up:
     push    rbp
     mov     rbp, rsp
     push    rbx
@@ -1785,70 +1904,57 @@ merge:
     push    r13
     push    r14
     push    r15
-    sub     rsp, 40                 ; local vars
+    sub     rsp, 8
 
-    ; Save parameters into callee-saved registers and locals
-    mov     r12, rdi                ; array base
-    mov     r13, rsi                ; temp base
-    mov     [rbp-48], edx           ; left (also i_start)
-    mov     [rbp-52], ecx           ; mid
-    mov     [rbp-56], r8d           ; right
+    mov     r12, rdi
+    mov     r13, rsi
 
-    ; Copy array[left..right) into temp[left..right)
-    mov     eax, r8d
-    sub     eax, edx                ; count = right - left
-    mov     r14d, eax
+    movsxd  r9, edx
+    movsxd  r10, ecx
+    movsxd  r11, r8d
 
-    push    rdx
-    push    rcx
-    push    r8
-    movsxd  rax, edx
-    imul    rax, LINE_ENTRY_SIZE
-    lea     rdi, [r13 + rax]        ; dest = temp + left*ENTRY
-    lea     rsi, [r12 + rax]        ; src  = array + left*ENTRY
-    movsxd  rdx, r14d
-    imul    rdx, LINE_ENTRY_SIZE
-    mov     rcx, rdx
-    rep movsb                       ; fast copy
-    pop     r8
-    pop     rcx
-    pop     rdx
+    ; Copy array[left..right) into temp
+    mov     rax, r9
+    shl     rax, 4
+    lea     rdi, [r13 + rax]
+    lea     rsi, [r12 + rax]
+    mov     rcx, r11
+    sub     rcx, r9
+    shl     rcx, 4
+    rep movsb
 
-    ; i = left, j = mid, k = left
-    movsxd  r14, dword [rbp-48]     ; i (index into left half of temp)
-    movsxd  r15, dword [rbp-52]     ; j (index into right half of temp)
-    movsxd  rbx, dword [rbp-48]     ; k (output index into array)
-    movsxd  r8, dword [rbp-52]      ; mid (boundary)
-    movsxd  r9, dword [rbp-56]      ; right (end boundary)
+    mov     r14, r9
+    mov     r15, r10
+    mov     rbx, r9
 
-.merge_loop:
-    ; If both halves exhausted, done
-    cmp     r14, r8
-    jge     .merge_copy_right
-    cmp     r15, r9
-    jge     .merge_copy_left
+.mbu_loop:
+    cmp     r14, r10
+    jge     .mbu_copy_right
+    cmp     r15, r11
+    jge     .mbu_copy_left
 
-    ; Compare temp[i] with temp[j]
-    push    r8
+    ; Compare temp[i] vs temp[j]
     push    r9
-    push    rbx
+    push    r10
+    push    r11
+
     mov     rax, r14
     shl     rax, 4
-    mov     rdi, [r13 + rax]            ; temp[i].ptr
-    mov     rsi, [r13 + rax + 8]        ; temp[i].len
+    mov     rdi, [r13 + rax]
+    mov     rsi, [r13 + rax + 8]
     mov     rax, r15
     shl     rax, 4
-    mov     rdx, [r13 + rax]            ; temp[j].ptr
-    mov     rcx, [r13 + rax + 8]        ; temp[j].len
+    mov     rdx, [r13 + rax]
+    mov     rcx, [r13 + rax + 8]
     call    compare_lines
-    pop     rbx
+
+    pop     r11
+    pop     r10
     pop     r9
-    pop     r8
 
     test    eax, eax
-    jg      .merge_take_right
+    jg      .mbu_take_right
 
-    ; Take from left half (temp[i]) — also handles equal case for stability
     mov     rax, r14
     shl     rax, 4
     mov     rcx, [r13 + rax]
@@ -1859,10 +1965,9 @@ merge:
     mov     [r12 + rax + 8], rdx
     inc     r14
     inc     rbx
-    jmp     .merge_loop
+    jmp     .mbu_loop
 
-.merge_take_right:
-    ; Take from right half (temp[j])
+.mbu_take_right:
     mov     rax, r15
     shl     rax, 4
     mov     rcx, [r13 + rax]
@@ -1873,12 +1978,11 @@ merge:
     mov     [r12 + rax + 8], rdx
     inc     r15
     inc     rbx
-    jmp     .merge_loop
+    jmp     .mbu_loop
 
-.merge_copy_left:
-    ; Left half still has elements; copy remaining
-    cmp     r14, r8
-    jge     .merge_done
+.mbu_copy_left:
+    cmp     r14, r10
+    jge     .mbu_done
     mov     rax, r14
     shl     rax, 4
     mov     rcx, [r13 + rax]
@@ -1889,12 +1993,11 @@ merge:
     mov     [r12 + rax + 8], rdx
     inc     r14
     inc     rbx
-    jmp     .merge_copy_left
+    jmp     .mbu_copy_left
 
-.merge_copy_right:
-    ; Right half still has elements; copy remaining
-    cmp     r15, r9
-    jge     .merge_done
+.mbu_copy_right:
+    cmp     r15, r11
+    jge     .mbu_done
     mov     rax, r15
     shl     rax, 4
     mov     rcx, [r13 + rax]
@@ -1905,10 +2008,10 @@ merge:
     mov     [r12 + rax + 8], rdx
     inc     r15
     inc     rbx
-    jmp     .merge_copy_right
+    jmp     .mbu_copy_right
 
-.merge_done:
-    add     rsp, 40
+.mbu_done:
+    add     rsp, 8
     pop     r15
     pop     r14
     pop     r13
@@ -1919,11 +2022,103 @@ merge:
 
 
 ; ============================================================================
-;  compare_lines — Compare two lines according to sort options
+;  compare_lines — Compare two lines
 ;  Input: rdi=ptr1, rsi=len1, rdx=ptr2, rcx=len2
-;  Output: eax = <0 if line1<line2, 0 if equal, >0 if line1>line2
+;  Output: eax = <0, 0, >0
+;
+;  FAST PATH: plain lexicographic (no keys, no flags except -r/-u/-s)
+;  Uses qword-at-a-time + bsf for first differing byte
 ; ============================================================================
 compare_lines:
+    cmp     qword [rel use_simple_cmp], 0
+    je      .cl_slow_path
+
+    ; ======== FAST PATH ========
+    push    r12
+    push    r13
+
+    mov     r8, rdi
+    mov     r9, rsi
+    mov     r10, rdx
+    mov     r11, rcx
+
+    ; min_len
+    mov     rcx, r9
+    cmp     rcx, r11
+    jbe     .fast_min_ok
+    mov     rcx, r11
+.fast_min_ok:
+    test    rcx, rcx
+    jz      .fast_len_diff
+
+    ; Compare 8 bytes at a time
+.fast_qword_loop:
+    cmp     rcx, 8
+    jb      .fast_byte_loop
+    mov     rax, [r8]
+    cmp     rax, [r10]
+    jne     .fast_qword_diff
+    add     r8, 8
+    add     r10, 8
+    sub     rcx, 8
+    jmp     .fast_qword_loop
+
+.fast_qword_diff:
+    ; XOR to find first differing byte (little-endian: bsf finds lowest address byte first)
+    xor     rax, [r10]
+    bsf     rax, rax
+    shr     eax, 3                  ; byte position
+    movzx   r12d, byte [r8 + rax]
+    movzx   r13d, byte [r10 + rax]
+    mov     eax, r12d
+    sub     eax, r13d
+    pop     r13
+    pop     r12
+    test    qword [rel flag_bits], FLAG_REVERSE
+    jz      .fast_ret
+    neg     eax
+.fast_ret:
+    ret
+
+.fast_byte_loop:
+    test    rcx, rcx
+    jz      .fast_len_diff
+    movzx   eax, byte [r8]
+    movzx   edx, byte [r10]
+    sub     eax, edx
+    jnz     .fast_byte_done
+    inc     r8
+    inc     r10
+    dec     rcx
+    jmp     .fast_byte_loop
+
+.fast_len_diff:
+    mov     rax, r9
+    sub     rax, r11
+    test    rax, rax
+    jz      .fast_equal
+    js      .fast_neg
+    mov     eax, 1
+    jmp     .fast_byte_done
+.fast_neg:
+    mov     eax, -1
+.fast_byte_done:
+    pop     r13
+    pop     r12
+    test    qword [rel flag_bits], FLAG_REVERSE
+    jz      .fast_ret2
+    neg     eax
+.fast_ret2:
+    ret
+
+.fast_equal:
+    xor     eax, eax
+    pop     r13
+    pop     r12
+    ret
+
+    ; ======== SLOW PATH ========
+.cl_slow_path:
     push    rbx
     push    r12
     push    r13
@@ -1931,76 +2126,65 @@ compare_lines:
     push    r15
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 64                 ; local storage
+    sub     rsp, 64
 
-    ; Save line info
-    mov     [rbp-8], rdi            ; ptr1
-    mov     [rbp-16], rsi           ; len1
-    mov     [rbp-24], rdx           ; ptr2
-    mov     [rbp-32], rcx           ; len2
+    mov     [rbp-8], rdi
+    mov     [rbp-16], rsi
+    mov     [rbp-24], rdx
+    mov     [rbp-32], rcx
 
-    ; If we have sort keys, use them
     cmp     qword [rel nkeys], 0
     jne     .cl_with_keys
 
-    ; No explicit keys — compare whole lines
     mov     rdi, [rbp-8]
     mov     rsi, [rbp-16]
     mov     rdx, [rbp-24]
     mov     rcx, [rbp-32]
     mov     r8, [rel flag_bits]
     call    compare_fields
-    ; Apply global reverse
     test    qword [rel flag_bits], FLAG_REVERSE
     jz      .cl_done
     neg     eax
     jmp     .cl_done
 
 .cl_with_keys:
-    ; Iterate over each key
-    xor     r12d, r12d              ; key index
+    xor     r12d, r12d
 
 .cl_key_loop:
     cmp     r12, [rel nkeys]
     jge     .cl_keys_equal
 
-    ; Get key definition
     imul    r14, r12, KEY_STRUCT_SIZE
     lea     r15, [rel keys]
     add     r15, r14
 
-    ; Extract fields for line 1
-    mov     rdi, [rbp-8]           ; ptr1
-    mov     rsi, [rbp-16]          ; len1
-    mov     rdx, [r15]             ; start_field
-    mov     rcx, [r15+8]           ; start_char
-    mov     r8, [r15+16]           ; end_field
-    mov     r9, [r15+24]           ; end_char
+    mov     rdi, [rbp-8]
+    mov     rsi, [rbp-16]
+    mov     rdx, [r15]
+    mov     rcx, [r15+8]
+    mov     r8, [r15+16]
+    mov     r9, [r15+24]
     call    extract_key
-    mov     [rbp-40], rax           ; key1_ptr
-    mov     [rbp-48], rdx           ; key1_len
+    mov     [rbp-40], rax
+    mov     [rbp-48], rdx
 
-    ; Extract fields for line 2
-    mov     rdi, [rbp-24]          ; ptr2
-    mov     rsi, [rbp-32]          ; len2
-    mov     rdx, [r15]             ; start_field
-    mov     rcx, [r15+8]           ; start_char
-    mov     r8, [r15+16]           ; end_field
-    mov     r9, [r15+24]           ; end_char
+    mov     rdi, [rbp-24]
+    mov     rsi, [rbp-32]
+    mov     rdx, [r15]
+    mov     rcx, [r15+8]
+    mov     r8, [r15+16]
+    mov     r9, [r15+24]
     call    extract_key
-    ; rax = key2_ptr, rdx = key2_len
 
-    ; Compare keys: key1 (saved) vs key2 (in rax/rdx)
-    mov     rdi, [rbp-40]          ; key1_ptr
-    mov     rsi, [rbp-48]          ; key1_len
-    mov     rcx, rdx               ; key2_len (save before overwriting rdx)
-    mov     rdx, rax               ; key2_ptr
+    mov     rdi, [rbp-40]
+    mov     rsi, [rbp-48]
+    mov     rcx, rdx
+    mov     rdx, rax
 
-    ; Determine flags for this key
-    mov     r8, [r15+32]           ; key flags
+    mov     r8, [r15+32]
     test    r8, r8
     jnz     .cl_use_key_flags
-    mov     r8, [rel flag_bits]    ; use global flags if no per-key flags
+    mov     r8, [rel flag_bits]
 .cl_use_key_flags:
     call    compare_fields
 
@@ -2011,7 +2195,6 @@ compare_lines:
     jmp     .cl_key_loop
 
 .cl_key_diff:
-    ; Apply per-key or global reverse
     mov     r8, [r15+32]
     test    r8, r8
     jnz     .cl_check_key_rev
@@ -2023,18 +2206,15 @@ compare_lines:
     jmp     .cl_done
 
 .cl_keys_equal:
-    ; All keys equal — if not stable, do last-resort comparison
     test    qword [rel flag_bits], FLAG_STABLE
     jnz     .cl_return_zero
 
-    ; Last resort: full line byte comparison (no flags)
     mov     rdi, [rbp-8]
     mov     rsi, [rbp-16]
     mov     rdx, [rbp-24]
     mov     rcx, [rbp-32]
-    xor     r8d, r8d               ; no flags for last-resort
+    xor     r8d, r8d
     call    compare_fields
-    ; Apply global reverse to last-resort
     test    qword [rel flag_bits], FLAG_REVERSE
     jz      .cl_done
     neg     eax
@@ -2056,8 +2236,6 @@ compare_lines:
 
 ; ============================================================================
 ;  compare_fields — Compare two byte ranges with given flags
-;  Input: rdi=ptr1, rsi=len1, rdx=ptr2, rcx=len2, r8=flags
-;  Output: eax = comparison result
 ; ============================================================================
 compare_fields:
     push    rbx
@@ -2066,23 +2244,21 @@ compare_fields:
     push    r14
     push    r15
 
-    mov     r12, rdi                ; ptr1
-    mov     r13, rsi                ; len1
-    mov     r14, rdx                ; ptr2
-    mov     r15, rcx                ; len2
-    mov     rbx, r8                 ; flags
+    mov     r12, rdi
+    mov     r13, rsi
+    mov     r14, rdx
+    mov     r15, rcx
+    mov     rbx, r8
 
-    ; Check for -b (ignore leading blanks)
     test    rbx, FLAG_BLANKS | KEY_BLANKS
     jz      .cf_no_blanks
 
-    ; Skip leading blanks in both
 .cf_skip_blanks1:
     test    r13, r13
     jz      .cf_no_blanks
     cmp     byte [r12], ' '
     je      .cf_sb1
-    cmp     byte [r12], 9           ; tab
+    cmp     byte [r12], 9
     je      .cf_sb1
     jmp     .cf_skip_blanks2
 .cf_sb1:
@@ -2104,49 +2280,36 @@ compare_fields:
     jmp     .cf_skip_blanks2
 
 .cf_no_blanks:
-    ; Check for numeric sort
     test    rbx, FLAG_NUMERIC | KEY_NUMERIC
     jnz     .cf_numeric
-
-    ; Check for general numeric sort
     test    rbx, FLAG_GEN_NUM | KEY_GEN_NUM
     jnz     .cf_numeric
-
-    ; Check for month sort
     test    rbx, FLAG_MONTH | KEY_MONTH
     jnz     .cf_month
-
-    ; Check for human numeric sort
     test    rbx, FLAG_HUMAN | KEY_HUMAN
     jnz     .cf_numeric
-
-    ; Check for version sort
     test    rbx, FLAG_VERSION | KEY_VERSION
     jnz     .cf_version
 
-    ; Lexicographic comparison
-    ; Check for -f (fold case), -d (dictionary), -i (ignore non-printing)
     test    rbx, FLAG_FOLD_CASE | KEY_FOLD_CASE | FLAG_DICT | KEY_DICT | FLAG_IGNORE_NP | KEY_IGNORE_NP
     jnz     .cf_filtered_cmp
 
-    ; Simple byte-by-byte comparison (most common case)
+    ; Simple byte comparison
     mov     rcx, r13
     cmp     rcx, r15
     jbe     .cf_min_ok
     mov     rcx, r15
 .cf_min_ok:
-    ; Fast memcmp loop
     xor     eax, eax
     test    rcx, rcx
     jz      .cf_len_diff
 
-    ; Compare 8 bytes at a time when possible
 .cf_fast_loop:
     cmp     rcx, 8
     jb      .cf_byte_loop
     mov     rax, [r12]
     cmp     rax, [r14]
-    jne     .cf_byte_loop           ; mismatch in this qword, fall to byte
+    jne     .cf_byte_loop
     add     r12, 8
     add     r14, 8
     sub     rcx, 8
@@ -2165,10 +2328,8 @@ compare_fields:
     jmp     .cf_byte_loop
 
 .cf_len_diff:
-    ; Equal up to min length — shorter is less
     mov     rax, r13
     sub     rax, r15
-    ; Clamp to -1/0/+1
     test    rax, rax
     jz      .cf_return_zero
     js      .cf_return_neg
@@ -2187,21 +2348,17 @@ compare_fields:
     pop     rbx
     ret
 
-; ── Filtered comparison (fold case, dictionary, ignore non-printing) ──
 .cf_filtered_cmp:
-    ; Walk both strings, applying filters
-    xor     r8d, r8d                ; i1
-    xor     r9d, r9d                ; i2
+    xor     r8d, r8d
+    xor     r9d, r9d
 
 .cf_filt_loop:
-    ; Get next valid char from string 1
 .cf_get_c1:
     cmp     r8, r13
     jge     .cf_filt_s1_end
     movzx   eax, byte [r12 + r8]
     inc     r8
 
-    ; Apply -d (dictionary): skip if not blank/alnum
     test    rbx, FLAG_DICT | KEY_DICT
     jz      .cf_filt_no_d1
     call    is_dict_char
@@ -2210,7 +2367,6 @@ compare_fields:
     movzx   eax, byte [r12 + r8 - 1]
 .cf_filt_no_d1:
 
-    ; Apply -i (ignore non-printing): skip if < 0x20 or > 0x7E
     test    rbx, FLAG_IGNORE_NP | KEY_IGNORE_NP
     jz      .cf_filt_no_i1
     cmp     al, 0x20
@@ -2219,7 +2375,6 @@ compare_fields:
     ja      .cf_get_c1
 .cf_filt_no_i1:
 
-    ; Apply -f (fold case): toupper
     test    rbx, FLAG_FOLD_CASE | KEY_FOLD_CASE
     jz      .cf_filt_no_f1
     cmp     al, 'a'
@@ -2228,16 +2383,14 @@ compare_fields:
     ja      .cf_filt_no_f1
     sub     al, 32
 .cf_filt_no_f1:
-    mov     cl, al                  ; c1
+    mov     cl, al
 
-    ; Get next valid char from string 2
 .cf_get_c2:
     cmp     r9, r15
     jge     .cf_filt_s2_end_with_c1
     movzx   eax, byte [r14 + r9]
     inc     r9
 
-    ; Apply -d
     test    rbx, FLAG_DICT | KEY_DICT
     jz      .cf_filt_no_d2
     call    is_dict_char
@@ -2246,7 +2399,6 @@ compare_fields:
     movzx   eax, byte [r14 + r9 - 1]
 .cf_filt_no_d2:
 
-    ; Apply -i
     test    rbx, FLAG_IGNORE_NP | KEY_IGNORE_NP
     jz      .cf_filt_no_i2
     cmp     al, 0x20
@@ -2255,7 +2407,6 @@ compare_fields:
     ja      .cf_get_c2
 .cf_filt_no_i2:
 
-    ; Apply -f
     test    rbx, FLAG_FOLD_CASE | KEY_FOLD_CASE
     jz      .cf_filt_no_f2
     cmp     al, 'a'
@@ -2265,18 +2416,15 @@ compare_fields:
     sub     al, 32
 .cf_filt_no_f2:
 
-    ; Compare c1 vs c2
     cmp     cl, al
     jb      .cf_filt_less
     ja      .cf_filt_greater
     jmp     .cf_filt_loop
 
 .cf_filt_s1_end:
-    ; String 1 exhausted — check if string 2 also exhausted
 .cf_filt_s1_check:
     cmp     r9, r15
-    jge     .cf_return_zero         ; both exhausted
-    ; String 2 has more chars — check if they are all filtered out
+    jge     .cf_return_zero
     movzx   eax, byte [r14 + r9]
     inc     r9
     test    rbx, FLAG_DICT | KEY_DICT
@@ -2284,7 +2432,7 @@ compare_fields:
     call    is_dict_char
     test    eax, eax
     jz      .cf_filt_s1_check
-    jmp     .cf_filt_less           ; s2 has valid char, s1 doesn't
+    jmp     .cf_filt_less
 .cf_filt_s1_chk_i:
     test    rbx, FLAG_IGNORE_NP | KEY_IGNORE_NP
     jz      .cf_filt_less
@@ -2296,7 +2444,6 @@ compare_fields:
     jmp     .cf_filt_less
 
 .cf_filt_s2_end_with_c1:
-    ; String 2 exhausted but string 1 still has c1
     mov     eax, 1
     jmp     .cf_return
 
@@ -2307,29 +2454,23 @@ compare_fields:
     mov     eax, 1
     jmp     .cf_return
 
-; ── Numeric comparison ──
 .cf_numeric:
-    ; Parse string 1 as number
     mov     rdi, r12
     mov     rsi, r13
-    call    parse_sort_number       ; rax = int1, rdx = frac1
-    push    rax                     ; save num1 on stack
-    push    rdx                     ; save frac1 on stack
+    call    parse_sort_number
+    push    rax
+    push    rdx
 
-    ; Parse string 2 as number (r14/r15 are callee-saved, safe across call)
     mov     rdi, r14
     mov     rsi, r15
-    call    parse_sort_number       ; rax = int2, rdx = frac2
+    call    parse_sort_number
 
-    ; Now: rax=num2, rdx=frac2, stack: [frac1, num1]
-    pop     rcx                     ; frac1
-    pop     r8                      ; num1
+    pop     rcx
+    pop     r8
 
-    ; Compare: r8=num1 vs rax=num2
     cmp     r8, rax
     jl      .cf_num_less
     jg      .cf_num_greater
-    ; Integer parts equal, compare fractional parts
     cmp     rcx, rdx
     jl      .cf_num_less
     jg      .cf_num_greater
@@ -2342,29 +2483,23 @@ compare_fields:
     mov     eax, 1
     jmp     .cf_return
 
-; ── Month comparison ──
 .cf_month:
     mov     rdi, r12
     mov     rsi, r13
     call    parse_month
-    mov     r8d, eax               ; month1 (0=unknown, 1-12)
-
+    mov     r8d, eax
     mov     rdi, r14
     mov     rsi, r15
     call    parse_month
-    ; eax = month2
-
     cmp     r8d, eax
     jl      .cf_num_less
     jg      .cf_num_greater
     xor     eax, eax
     jmp     .cf_return
 
-; ── Version sort ──
 .cf_version:
-    ; Version sort: compare digit runs as numbers, rest as bytes
-    xor     r8d, r8d               ; i1
-    xor     r9d, r9d               ; i2
+    xor     r8d, r8d
+    xor     r9d, r9d
 
 .cf_ver_loop:
     cmp     r8, r13
@@ -2375,7 +2510,6 @@ compare_fields:
     movzx   eax, byte [r12 + r8]
     movzx   ecx, byte [r14 + r9]
 
-    ; Check if both are digits
     sub     eax, '0'
     cmp     eax, 9
     ja      .cf_ver_not_digit1
@@ -2383,8 +2517,6 @@ compare_fields:
     cmp     ecx, 9
     ja      .cf_ver_mixed
 
-    ; Both digits — compare numeric runs
-    ; Skip leading zeros
     push    r8
     push    r9
 .cf_ver_skip0_1:
@@ -2396,7 +2528,6 @@ compare_fields:
     jmp     .cf_ver_skip0_1
 
 .cf_ver_num_cmp:
-    ; Count digits remaining in s1
     mov     rax, r8
 .cf_ver_cnt1:
     cmp     rax, r13
@@ -2409,7 +2540,7 @@ compare_fields:
     jmp     .cf_ver_cnt1
 .cf_ver_cnt1_done:
     mov     r10, rax
-    sub     r10, r8                 ; digit count 1
+    sub     r10, r8
 
     pop     r9
     push    r9
@@ -2434,14 +2565,12 @@ compare_fields:
     jmp     .cf_ver_cnt2_loop
 .cf_ver_cnt2_done:
     mov     r11, rax
-    sub     r11, r9                 ; digit count 2
+    sub     r11, r9
 
-    ; Longer digit sequence = larger number
     cmp     r10, r11
     jg      .cf_ver_pop_greater
     jl      .cf_ver_pop_less
 
-    ; Same length — compare digit by digit
 .cf_ver_digit_cmp:
     test    r10, r10
     jz      .cf_ver_digits_equal
@@ -2458,7 +2587,6 @@ compare_fields:
 .cf_ver_digits_equal:
     pop     r9
     pop     r8
-    ; Advance past the digit runs
 .cf_ver_adv1:
     cmp     r8, r13
     jge     .cf_ver_loop
@@ -2482,8 +2610,7 @@ compare_fields:
     jmp     .cf_return
 
 .cf_ver_not_digit1:
-    add     eax, '0'               ; restore
-    ; Not a digit in s1 — compare as bytes
+    add     eax, '0'
     cmp     al, cl
     jb      .cf_filt_less
     ja      .cf_filt_greater
@@ -2492,7 +2619,6 @@ compare_fields:
     jmp     .cf_ver_loop
 
 .cf_ver_mixed:
-    ; s1 is digit, s2 is not — digit > non-digit for version sort
     add     ecx, '0'
     add     eax, '0'
     cmp     al, cl
@@ -2514,21 +2640,18 @@ compare_fields:
 
 
 ; ============================================================================
-;  parse_sort_number — Parse a string as a number for -n sort
-;  Input: rdi=ptr, rsi=len
-;  Output: rax = integer part (signed), rdx = fractional comparison value
+;  parse_sort_number
 ; ============================================================================
 parse_sort_number:
     push    rbx
     push    r12
 
-    mov     r12, rdi               ; ptr
-    mov     rbx, rsi               ; len
-    xor     eax, eax               ; result
-    xor     edx, edx               ; frac
-    xor     ecx, ecx               ; negative flag
+    mov     r12, rdi
+    mov     rbx, rsi
+    xor     eax, eax
+    xor     edx, edx
+    xor     ecx, ecx
 
-    ; Skip leading whitespace
 .psn_skip_ws:
     test    rbx, rbx
     jz      .psn_done
@@ -2560,7 +2683,6 @@ parse_sort_number:
     dec     rbx
 
 .psn_digits:
-    ; Parse integer digits
 .psn_int_loop:
     test    rbx, rbx
     jz      .psn_apply_sign
@@ -2579,27 +2701,7 @@ parse_sort_number:
     jne     .psn_apply_sign
     inc     r12
     dec     rbx
-
-    ; Parse fractional digits (up to 9 digits, scaled to compare as integers)
-    mov     r8, 1000000000          ; scale factor
-.psn_frac_loop:
-    test    rbx, rbx
-    jz      .psn_apply_sign
-    movzx   r9d, byte [r12]
-    sub     r9d, '0'
-    cmp     r9d, 9
-    ja      .psn_apply_sign
-    ; frac = frac * 10 + digit (but we want fixed point)
-    ; Actually, compute: frac = frac + digit * (scale / 10)
-    xor     edx, edx
-    mov     rax, r8
-    mov     r10, 10
-    div     r10                     ; rax = scale/10
-    mov     r8, rax                 ; new scale
-    imul    r9, rax
-    add     rdx, r9                 ; Hmm, rdx was clobbered by div
-    ; Let me redo this more carefully
-    jmp     .psn_apply_sign         ; Skip frac for now — integer comparison is sufficient
+    jmp     .psn_apply_sign
 
 .psn_apply_sign:
     test    ecx, ecx
@@ -2614,16 +2716,7 @@ parse_sort_number:
 
 
 ; ============================================================================
-;  parse_numeric_value — stub (same as parse_sort_number)
-; ============================================================================
-parse_numeric_value:
-    ret
-
-
-; ============================================================================
-;  parse_month — Parse a month name from the start of a string
-;  Input: rdi=ptr, rsi=len
-;  Output: eax = month number (0=unknown, 1-12)
+;  parse_month
 ; ============================================================================
 parse_month:
     push    rbx
@@ -2633,7 +2726,6 @@ parse_month:
     mov     r12, rdi
     mov     r13, rsi
 
-    ; Skip leading blanks
 .pm_skip:
     test    r13, r13
     jz      .pm_unknown
@@ -2651,7 +2743,6 @@ parse_month:
     cmp     r13, 3
     jb      .pm_unknown
 
-    ; Load first 3 chars and uppercase them
     movzx   eax, byte [r12]
     call    to_upper_al
     mov     bl, al
@@ -2662,9 +2753,8 @@ parse_month:
     call    to_upper_al
     mov     cl, al
 
-    ; Compare against month names
     lea     rdx, [rel month_names]
-    mov     r8d, 1                  ; month counter
+    mov     r8d, 1
 
 .pm_cmp_loop:
     cmp     r8d, 13
@@ -2675,7 +2765,6 @@ parse_month:
     jne     .pm_next
     cmp     cl, [rdx+2]
     jne     .pm_next
-    ; Match
     mov     eax, r8d
     pop     r13
     pop     r12
@@ -2683,7 +2772,7 @@ parse_month:
     ret
 
 .pm_next:
-    add     rdx, 4                  ; each entry is 3 chars + NUL
+    add     rdx, 4
     inc     r8d
     jmp     .pm_cmp_loop
 
@@ -2695,9 +2784,6 @@ parse_month:
     ret
 
 
-; ============================================================================
-;  to_upper_al — Convert AL to uppercase
-; ============================================================================
 to_upper_al:
     cmp     al, 'a'
     jb      .tu_done
@@ -2708,16 +2794,7 @@ to_upper_al:
     ret
 
 
-; ============================================================================
-;  is_dict_char — Check if AL is a dictionary-order character
-;  Input: AL = character (from caller's context)
-;  Output: eax = 1 if dict char (blank or alnum), 0 otherwise
-;  Preserves: rbx, r8-r15
-; ============================================================================
 is_dict_char:
-    ; Need to re-read the character since AL might be clobbered
-    ; Actually the caller should pass the char. Let's use the character that was loaded.
-    ; For the filtered comparison, the character is in AL
     cmp     al, ' '
     je      .idc_yes
     cmp     al, 9
@@ -2743,11 +2820,7 @@ is_dict_char:
 
 
 ; ============================================================================
-;  extract_key — Extract a sort key substring from a line
-;  Input: rdi=line_ptr, rsi=line_len,
-;         rdx=start_field (1-based), rcx=start_char (1-based, 0=whole),
-;         r8=end_field (0=EOL), r9=end_char (0=end of field)
-;  Output: rax=key_ptr, rdx=key_len
+;  extract_key / find_field_start / find_field_end
 ; ============================================================================
 extract_key:
     push    rbx
@@ -2756,55 +2829,45 @@ extract_key:
     push    r14
     push    r15
 
-    mov     r12, rdi               ; line_ptr
-    mov     r13, rsi               ; line_len
-    mov     r14, rdx               ; start_field
-    mov     r15, rcx               ; start_char
+    mov     r12, rdi
+    mov     r13, rsi
+    mov     r14, rdx
+    mov     r15, rcx
 
-    ; If start_field == 0, use whole line
     test    r14, r14
     jz      .ek_whole_line
 
-    ; Find start of field
     mov     rdi, r12
     mov     rsi, r13
     mov     rdx, r14
     call    find_field_start
-    ; rax = offset to field start
-    mov     rbx, rax               ; field_start offset
+    mov     rbx, rax
 
-    ; Apply start_char offset
     test    r15, r15
     jz      .ek_no_start_char
-    dec     r15                    ; 1-based to 0-based
+    dec     r15
     add     rbx, r15
-    ; Clamp to line length
     cmp     rbx, r13
     jbe     .ek_no_start_char
     mov     rbx, r13
 .ek_no_start_char:
 
-    ; Find end position
-    cmp     r8, 0                  ; end_field
+    cmp     r8, 0
     je      .ek_to_eol
 
-    ; Find end field
     mov     rdi, r12
     mov     rsi, r13
     mov     rdx, r8
     call    find_field_end
-    ; rax = offset past end of field
-    mov     rcx, rax               ; field_end offset
+    mov     rcx, rax
 
-    ; Apply end_char
     test    r9, r9
     jz      .ek_end_ok
-    ; end position = start of end_field + end_char
     mov     rdi, r12
     mov     rsi, r13
     mov     rdx, r8
     call    find_field_start
-    add     rax, r9                ; start + end_char
+    add     rax, r9
     cmp     rax, r13
     jbe     .ek_use_end_char
     mov     rax, r13
@@ -2812,7 +2875,6 @@ extract_key:
     mov     rcx, rax
 
 .ek_end_ok:
-    ; Key = line[rbx..rcx)
     cmp     rbx, rcx
     jge     .ek_empty
     lea     rax, [r12 + rbx]
@@ -2835,7 +2897,7 @@ extract_key:
     jmp     .ek_done
 
 .ek_empty:
-    lea     rax, [r12 + r13]       ; point past end
+    lea     rax, [r12 + r13]
     xor     edx, edx
 
 .ek_done:
@@ -2847,32 +2909,20 @@ extract_key:
     ret
 
 
-; ============================================================================
-;  find_field_start — Find the start offset of field N (1-based) in a line
-;  Input: rdi=line_ptr, rsi=line_len, rdx=field_num (1-based)
-;  Output: rax=offset to field start
-; ============================================================================
 find_field_start:
     push    rbx
     push    r12
 
-    mov     r12, rdx               ; target field
-    xor     eax, eax               ; current offset
-    mov     rbx, 1                  ; current field number
+    mov     r12, rdx
+    xor     eax, eax
+    mov     rbx, 1
 
-    ; Field 1 starts at the beginning (or after leading blanks)
     cmp     r12, 1
     jle     .ffs_done
 
-    ; Check if we have a custom separator
     cmp     byte [rel has_separator], 1
     je      .ffs_sep_loop
 
-    ; Default: fields separated by runs of blanks
-.ffs_blank_loop:
-    cmp     rax, rsi
-    jge     .ffs_done
-    ; Skip non-blanks (field content)
 .ffs_skip_content:
     cmp     rax, rsi
     jge     .ffs_done
@@ -2884,7 +2934,6 @@ find_field_start:
     jmp     .ffs_skip_content
 
 .ffs_in_blanks:
-    ; Skip blanks (separator)
 .ffs_skip_blanks:
     cmp     rax, rsi
     jge     .ffs_done
@@ -2904,7 +2953,6 @@ find_field_start:
     jmp     .ffs_skip_content
 
 .ffs_sep_loop:
-    ; Custom separator: fields separated by single char
     movzx   ecx, byte [rel separator]
 .ffs_sep_scan:
     cmp     rax, rsi
@@ -2915,7 +2963,7 @@ find_field_start:
     jmp     .ffs_sep_scan
 
 .ffs_sep_found:
-    inc     rax                     ; skip separator
+    inc     rax
     inc     rbx
     cmp     rbx, r12
     jge     .ffs_done
@@ -2927,25 +2975,16 @@ find_field_start:
     ret
 
 
-; ============================================================================
-;  find_field_end — Find the end offset of field N (1-based)
-;  Input: rdi=line_ptr, rsi=line_len, rdx=field_num (1-based)
-;  Output: rax=offset past end of field
-; ============================================================================
 find_field_end:
     push    rbx
     push    r12
 
-    ; First find field start
     mov     r12, rdx
     call    find_field_start
-    ; rax = start of field
 
-    ; Now find end of this field
     cmp     byte [rel has_separator], 1
     je      .ffe_sep
 
-    ; Default: end at next blank
 .ffe_blank_end:
     cmp     rax, rsi
     jge     .ffe_done
@@ -2957,7 +2996,6 @@ find_field_end:
     jmp     .ffe_blank_end
 
 .ffe_sep:
-    ; End at next separator or EOL
     movzx   ecx, byte [rel separator]
 .ffe_sep_scan:
     cmp     rax, rsi
@@ -2981,16 +3019,16 @@ write_output:
     push    r12
     push    r13
     push    r14
+    push    r15
 
     mov     r12, [rel line_array]
     mov     r13, [rel line_count]
-    xor     r14d, r14d              ; line index
+    xor     r14d, r14d
     movzx   ebx, byte [rel line_delim]
 
     test    r13, r13
     jz      .wo_done
 
-    ; Check for -u (unique)
     test    qword [rel flag_bits], FLAG_UNIQUE
     jnz     .wo_unique_loop
 
@@ -2998,14 +3036,12 @@ write_output:
     cmp     r14, r13
     jge     .wo_done
 
-    ; Write line
     mov     rax, r14
     shl     rax, 4
-    mov     rdi, [r12 + rax]        ; ptr
-    mov     rsi, [r12 + rax + 8]    ; len
+    mov     rdi, [r12 + rax]
+    mov     rsi, [r12 + rax + 8]
     call    outbuf_write
 
-    ; Write delimiter
     lea     rdi, [rel line_delim]
     mov     rsi, 1
     call    outbuf_write
@@ -3017,27 +3053,23 @@ write_output:
     cmp     r14, r13
     jge     .wo_done
 
-    ; Write current line
     mov     rax, r14
     shl     rax, 4
     mov     rdi, [r12 + rax]
     mov     rsi, [r12 + rax + 8]
     call    outbuf_write
 
-    ; Write delimiter
     lea     rdi, [rel line_delim]
     mov     rsi, 1
     call    outbuf_write
 
-    ; Skip duplicates
 .wo_skip_dup:
     mov     rax, r14
     inc     rax
     cmp     rax, r13
     jge     .wo_uniq_next
 
-    ; Compare current with next
-    push    rax                     ; save next index
+    push    rax
     mov     rcx, r14
     shl     rcx, 4
     mov     rdi, [r12 + rcx]
@@ -3047,8 +3079,8 @@ write_output:
     mov     rdx, [r12 + rcx]
     mov     rcx, [r12 + rcx + 8]
     call    compare_lines
-    mov     ecx, eax                ; save comparison result
-    pop     rax                     ; restore next index
+    mov     ecx, eax
+    pop     rax
     test    ecx, ecx
     jnz     .wo_uniq_next
     mov     r14, rax
@@ -3060,6 +3092,7 @@ write_output:
     jl      .wo_unique_loop
 
 .wo_done:
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
@@ -3068,15 +3101,14 @@ write_output:
 
 
 ; ============================================================================
-;  outbuf_write — Buffered write to output
-;  Input: rdi=data_ptr, rsi=data_len
+;  outbuf_write / flush_outbuf
 ; ============================================================================
 outbuf_write:
     push    rbx
     push    r12
 
-    mov     rbx, rdi               ; data ptr
-    mov     r12, rsi               ; data len
+    mov     rbx, rdi
+    mov     r12, rsi
 
 .obw_loop:
     test    r12, r12
@@ -3084,21 +3116,18 @@ outbuf_write:
 
     mov     rax, [rel outbuf_pos]
     mov     rcx, OUTBUF_SIZE
-    sub     rcx, rax               ; space remaining
+    sub     rcx, rax
 
-    ; How much to copy this iteration
     mov     rdx, r12
     cmp     rdx, rcx
     jbe     .obw_copy
-    mov     rdx, rcx               ; copy only what fits
+    mov     rdx, rcx
 
 .obw_copy:
-    ; Copy rdx bytes from rbx to outbuf + outbuf_pos
     push    rdx
     lea     rdi, [rel outbuf]
     add     rdi, [rel outbuf_pos]
     mov     rsi, rbx
-    ; Inline memcpy for small copies
     mov     rcx, rdx
     rep movsb
     pop     rdx
@@ -3107,7 +3136,6 @@ outbuf_write:
     add     rbx, rdx
     sub     r12, rdx
 
-    ; Flush if buffer is full
     cmp     qword [rel outbuf_pos], OUTBUF_SIZE
     jb      .obw_loop
     call    flush_outbuf
@@ -3119,9 +3147,6 @@ outbuf_write:
     ret
 
 
-; ============================================================================
-;  flush_outbuf — Flush the output buffer
-; ============================================================================
 flush_outbuf:
     mov     rdx, [rel outbuf_pos]
     test    rdx, rdx
@@ -3135,13 +3160,12 @@ flush_outbuf:
 .fob_done:
     ret
 .fob_error:
-    ; Write error (likely EPIPE) — exit 2
     mov     edi, 2
     call    asm_exit
 
 
 ; ============================================================================
-;  check_sorted — Check if input is sorted (-c / -C)
+;  check_sorted
 ; ============================================================================
 check_sorted:
     push    rbx
@@ -3150,7 +3174,6 @@ check_sorted:
     push    r14
     push    r15
 
-    ; Read all input
     call    read_all_input
     test    rax, rax
     js      .cs_error
@@ -3160,16 +3183,14 @@ check_sorted:
     mov     r13, [rel line_count]
 
     cmp     r13, 2
-    jl      .cs_sorted             ; 0 or 1 lines = sorted
+    jl      .cs_sorted
 
-    ; Compare adjacent lines
-    mov     r14, 1                  ; start from second line
+    mov     r14, 1
 
 .cs_loop:
     cmp     r14, r13
     jge     .cs_sorted
 
-    ; Compare line[r14-1] with line[r14]
     mov     rax, r14
     dec     rax
     shl     rax, 4
@@ -3181,8 +3202,6 @@ check_sorted:
     mov     rcx, [r12 + rax + 8]
     call    compare_lines
 
-    ; With -u: must be strictly less (result < 0)
-    ; Without -u: must be less or equal (result <= 0)
     test    qword [rel flag_bits], FLAG_UNIQUE
     jnz     .cs_strict
     test    eax, eax
@@ -3198,21 +3217,18 @@ check_sorted:
     jmp     .cs_loop
 
 .cs_sorted:
-    xor     edi, edi               ; exit 0
+    xor     edi, edi
     call    asm_exit
 
 .cs_unsorted:
-    ; Check if quiet check (-C)
     test    qword [rel flag_bits], FLAG_CHECK_Q
     jnz     .cs_unsorted_exit
 
-    ; Print disorder message: "sort: -:N: disorder: LINE"
     mov     rdi, STDERR
     lea     rsi, [rel str_sort_prefix]
     mov     edx, str_sort_prefix_len
     call    asm_write_all
 
-    ; Print filename
     lea     rax, [rel files]
     mov     rdi, [rax]
     call    asm_strlen
@@ -3222,13 +3238,11 @@ check_sorted:
     mov     rdi, STDERR
     call    asm_write_all
 
-    ; Print ":" (no space before line number — GNU format: "sort: -:2: disorder:")
     mov     rdi, STDERR
     lea     rsi, [rel str_colon]
     mov     edx, 1
     call    asm_write_all
 
-    ; Print line number (r14 + 1, since r14 is 0-based line index)
     lea     rdi, [r14 + 1]
     lea     rsi, [rel errbuf]
     call    asm_itoa_local
@@ -3237,13 +3251,11 @@ check_sorted:
     lea     rsi, [rel errbuf]
     call    asm_write_all
 
-    ; Print ": disorder: "
     mov     rdi, STDERR
     lea     rsi, [rel str_disorder_sep]
     mov     edx, str_disorder_sep_len
     call    asm_write_all
 
-    ; Print the offending line
     mov     rdi, STDERR
     mov     rax, r14
     shl     rax, 4
@@ -3251,7 +3263,6 @@ check_sorted:
     mov     rdx, [r12 + rax + 8]
     call    asm_write_all
 
-    ; Print newline
     mov     rdi, STDERR
     lea     rsi, [rel str_newline]
     mov     edx, 1
@@ -3267,14 +3278,12 @@ check_sorted:
 
 
 ; ============================================================================
-;  asm_itoa_local — Convert integer to decimal string (local version)
-;  Input: rdi=value, rsi=buf
-;  Output: rax=length
+;  asm_itoa_local
 ; ============================================================================
 asm_itoa_local:
     push    rbx
-    mov     rax, rdi            ; value
-    mov     rbx, rsi            ; buf start
+    mov     rax, rdi
+    mov     rbx, rsi
 
     test    rax, rax
     jnz     .ail_convert
@@ -3298,7 +3307,6 @@ asm_itoa_local:
     mov     rax, rsi
     sub     rax, r8
 
-    ; Reverse
     dec     rsi
     mov     rdi, r8
 .ail_rev:
@@ -3318,9 +3326,7 @@ asm_itoa_local:
 
 
 ; ============================================================================
-;  str_equal — Compare two NUL-terminated strings
-;  Input: rdi=str1, rsi=str2
-;  Output: eax=1 if equal, 0 if not
+;  str_equal / str_starts_with
 ; ============================================================================
 str_equal:
 .loop:
@@ -3341,16 +3347,11 @@ str_equal:
     ret
 
 
-; ============================================================================
-;  str_starts_with — Check if str1 starts with str2
-;  Input: rdi=str1, rsi=prefix
-;  Output: eax=1 if starts with, 0 if not
-; ============================================================================
 str_starts_with:
 .loop:
     movzx   ecx, byte [rsi]
     test    cl, cl
-    jz      .yes                    ; prefix exhausted = match
+    jz      .yes
     movzx   eax, byte [rdi]
     cmp     al, cl
     jne     .no

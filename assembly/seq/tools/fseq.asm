@@ -63,6 +63,13 @@ _start:
     mov     qword [rel sep_len], 0
     mov     qword [rel fmt_ptr], 0
     mov     qword [rel outbuf_pos], 0
+    ; Explicitly zero number storage
+    mov     qword [rel num_ints], 0
+    mov     qword [rel num_ints+8], 0
+    mov     qword [rel num_ints+16], 0
+    mov     qword [rel first_val], 0
+    mov     qword [rel incr_val], 0
+    mov     qword [rel last_val], 0
 
     ; ── Parse arguments ──
     call    parse_args
@@ -602,56 +609,236 @@ seq_integer:
 
     ; Determine direction
     test    r13, r13
-    jz      .int_done                   ; zero increment = done (shouldn't reach here)
+    jz      .int_done                   ; zero increment = done
 
     ; Check if -w flag
     cmp     byte [rel flag_w], 0
-    je      .int_loop_setup
+    je      .int_check_fastpath
 
     ; Calculate pad width = max(width(first), width(last))
     mov     rdi, r12
     call    int_width
-    mov     ebx, eax                    ; width of first
-
+    mov     ebx, eax
     mov     rdi, r14
     call    int_width
     cmp     eax, ebx
-    cmovg   ebx, eax                   ; max width
-    mov     r15d, ebx                   ; pad_width
+    cmovg   ebx, eax
+    mov     r15d, ebx
 
-.int_loop_setup:
-    ; Check direction
+.int_check_fastpath:
+    ; ── FAST PATH: incr==1, no -w, sep is default newline, val >= 0 ──
+    cmp     r13, 1
+    jne     .int_slow_path
+    cmp     r15d, 0
+    jne     .int_slow_path
+    ; Check separator is exactly "\n" (length 1, byte 0x0a)
+    cmp     qword [rel sep_len], 1
+    jne     .int_slow_path
+    mov     rax, [rel sep_ptr]
+    cmp     byte [rax], 10
+    jne     .int_slow_path
+    test    r12, r12
+    js      .int_slow_path
+    ; All conditions met → ultra-fast positive integer path
+    ; Register allocation for hot loop:
+    ;   r12 = current value
+    ;   r14 = last value
+    ;   rbx = output buffer write pointer
+    ;   rbp = output buffer flush threshold (end - 32)
+    lea     rbx, [rel outbuf]
+    add     rbx, [rel outbuf_pos]
+    lea     rbp, [rel outbuf + OUTBUF_SIZE - 32]
+
+.fast_loop:
+    cmp     r12, r14
+    jg      .fast_done
+
+    ; ── Fast inline itoa for non-negative integers ──
+    ; Uses multiply-by-reciprocal instead of div (3 cycles vs 35)
+    mov     rax, r12
+    ; For small numbers (0-9), single-digit fast path
+    cmp     rax, 10
+    jb      .fast_1digit
+
+    cmp     rax, 100
+    jb      .fast_2digit
+
+    cmp     rax, 10000
+    jb      .fast_3_4digit
+
+    ; 5+ digits: use general path (backwards itoa with digit pairs)
+    jmp     .fast_general
+
+.fast_1digit:
+    add     al, '0'
+    mov     [rbx], al
+    mov     byte [rbx+1], 10            ; newline
+    add     rbx, 2
+    jmp     .fast_next
+
+.fast_2digit:
+    ; val = q*10 + r; use lookup table
+    lea     rsi, [rel digit_pairs]
+    movzx   ecx, word [rsi + rax*2]
+    mov     [rbx], cx
+    mov     byte [rbx+2], 10
+    add     rbx, 3
+    jmp     .fast_next
+
+.fast_3_4digit:
+    ; Divide by 100 using multiply-by-reciprocal (avoids slow div)
+    ; q = (n * 0x51EB851F) >> 37  for n < 10000
+    mov     ecx, eax                    ; save n
+    mov     edx, 0x51EB851F
+    imul    rdx, rax
+    shr     rdx, 37                     ; q = n/100
+    imul    r8d, edx, 100
+    sub     ecx, r8d                    ; r = n - q*100
+    lea     rsi, [rel digit_pairs]
+    cmp     edx, 10
+    jb      .fast_3d
+    ; 4 digits: pair(q) + pair(r) + '\n'
+    movzx   eax, word [rsi + rdx*2]
+    mov     [rbx], ax
+    movzx   eax, word [rsi + rcx*2]
+    mov     [rbx+2], ax
+    mov     byte [rbx+4], 10
+    add     rbx, 5
+    jmp     .fast_next
+.fast_3d:
+    ; 3 digits: single(q) + pair(r) + '\n'
+    lea     eax, [edx + '0']
+    mov     [rbx], al
+    movzx   eax, word [rsi + rcx*2]
+    mov     [rbx+1], ax
+    mov     byte [rbx+3], 10
+    add     rbx, 4
+    jmp     .fast_next
+
+.fast_general:
+    ; General itoa for 5+ digit numbers
+    ; Write digits backwards into itoa_buf, then 8/16-byte copy to outbuf
+    mov     rax, r12
+    lea     rdi, [rel itoa_buf + ITOA_BUF_SIZE - 1]
+    mov     byte [rdi], 10              ; newline
+    lea     rsi, [rel digit_pairs]
+
+    ; If >= 2^32, bring into range with 64-bit div
+    cmp     rax, 0x100000000
+    jb      .fast_gen_32bit
+    xor     edx, edx
+    mov     rcx, 100
+    div     rcx
+    sub     rdi, 2
+    movzx   ecx, word [rsi + rdx*2]
+    mov     [rdi], cx
+    cmp     rax, 0x100000000
+    jb      .fast_gen_32bit
+    xor     edx, edx
+    mov     rcx, 100
+    div     rcx
+    sub     rdi, 2
+    movzx   ecx, word [rsi + rdx*2]
+    mov     [rdi], cx
+
+.fast_gen_32bit:
+    ; eax < 2^32: multiply-by-reciprocal for /100
+.fast_gen_mul_loop:
+    cmp     eax, 100
+    jb      .fast_gen_last
+    mov     ecx, eax
+    mov     edx, 0x51EB851F
+    imul    rdx, rax
+    shr     rdx, 37
+    imul    r8d, edx, 100
+    sub     ecx, r8d
+    sub     rdi, 2
+    movzx   r8d, word [rsi + rcx*2]
+    mov     [rdi], r8w
+    mov     eax, edx
+    jmp     .fast_gen_mul_loop
+.fast_gen_last:
+    cmp     eax, 10
+    jb      .fast_gen_1
+    sub     rdi, 2
+    movzx   ecx, word [rsi + rax*2]
+    mov     [rdi], cx
+    jmp     .fast_gen_copy
+.fast_gen_1:
+    dec     rdi
+    add     al, '0'
+    mov     [rdi], al
+.fast_gen_copy:
+    ; Copy from rdi to rbx — always <= 21 bytes (max int64 + newline)
+    ; Use qword loads for speed
+    lea     rcx, [rel itoa_buf + ITOA_BUF_SIZE]
+    sub     rcx, rdi                    ; length
+    mov     rax, [rdi]
+    mov     [rbx], rax                  ; first 8 bytes
+    cmp     rcx, 8
+    jbe     .fast_gen_adv
+    mov     rax, [rdi+8]
+    mov     [rbx+8], rax                ; next 8 bytes
+    cmp     rcx, 16
+    jbe     .fast_gen_adv
+    mov     eax, [rdi+16]
+    mov     [rbx+16], eax              ; last 4 bytes (max 20 digits + newline = 21)
+.fast_gen_adv:
+    add     rbx, rcx
+    jmp     .fast_next
+
+.fast_next:
+    ; Check if buffer nearly full
+    cmp     rbx, rbp
+    jae     .fast_flush
+    inc     r12
+    jmp     .fast_loop
+
+.fast_flush:
+    ; Calculate bytes written
+    lea     rax, [rel outbuf]
+    mov     rcx, rbx
+    sub     rcx, rax                    ; bytes in buffer
+    mov     [rel outbuf_pos], rcx
+    call    flush_outbuf
+    test    rax, rax
+    js      .int_done                   ; EPIPE
+    lea     rbx, [rel outbuf]           ; reset write pointer
+    inc     r12
+    jmp     .fast_loop
+
+.fast_done:
+    ; Update outbuf_pos
+    lea     rax, [rel outbuf]
+    sub     rbx, rax
+    mov     [rel outbuf_pos], rbx
+    jmp     .int_done
+
+    ; ── SLOW PATH: handles -w, custom separator, negative values ──
+.int_slow_path:
     cmp     r13, 0
     jg      .int_loop_pos
     jmp     .int_loop_neg
 
 .int_loop_pos:
-    ; Positive increment loop
     cmp     r12, r14
     jg      .int_done
 
 .int_emit_pos:
-    ; Convert current value to string and append to buffer
     mov     rdi, r12
-    mov     esi, r15d                   ; pad_width (0 = no padding)
+    mov     esi, r15d
     call    emit_integer
-
-    ; Check for write error (EPIPE)
     test    rax, rax
     js      .int_done
-
-    ; Add increment, check overflow
     mov     rax, r12
     add     rax, r13
-    jo      .int_done                   ; overflow = done
+    jo      .int_done
     mov     r12, rax
-
     cmp     r12, r14
     jle     .int_emit_pos
     jmp     .int_done
 
 .int_loop_neg:
-    ; Negative increment loop
     cmp     r12, r14
     jl      .int_done
 
@@ -659,15 +846,12 @@ seq_integer:
     mov     rdi, r12
     mov     esi, r15d
     call    emit_integer
-
     test    rax, rax
     js      .int_done
-
     mov     rax, r12
     add     rax, r13
     jo      .int_done
     mov     r12, rax
-
     cmp     r12, r14
     jge     .int_emit_neg
 
@@ -2421,6 +2605,7 @@ parse_int64:
     or      al, 0x20
     cmp     al, 'x'
     je      .pi_do_hex
+    xor     eax, eax                    ; restore accumulator (was clobbered by hex check)
 .pi_not_hex:
 
     ; Check first digit
@@ -2879,6 +3064,21 @@ str_prefix:
 ; ============================================================================
 
 section .data
+
+; ── Digit pair lookup table for fast itoa ──
+; Each entry is 2 ASCII chars: "00", "01", ..., "99"
+align 16
+digit_pairs:
+    db "00010203040506070809"
+    db "10111213141516171819"
+    db "20212223242526272829"
+    db "30313233343536373839"
+    db "40414243444546474849"
+    db "50515253545556575859"
+    db "60616263646566676869"
+    db "70717273747576777879"
+    db "80818283848586878889"
+    db "90919293949596979899"
 
 align 16
 const_ten:      dq 10.0

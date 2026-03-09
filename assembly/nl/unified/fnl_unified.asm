@@ -1,3 +1,216 @@
+; fnl_unified.asm — Unified single-file build of fnl
+; Auto-merged from modular source — DO NOT EDIT
+; Edit tools/fnl.asm and lib/io.asm instead
+; Build: nasm -f bin unified/fnl_unified.asm -o fnl_tiny && chmod +x fnl_tiny
+
+BITS 64
+org 0x400000
+
+; ── ELF Header ──
+ehdr:
+    db 0x7f, "ELF"          ; e_ident[EI_MAG]
+    db 2                     ; EI_CLASS = 64-bit
+    db 1                     ; EI_DATA = little-endian
+    db 1                     ; EI_VERSION
+    db 0                     ; EI_OSABI = SYSV
+    dq 0                     ; EI_ABIVERSION + padding
+    dw 2                     ; e_type = ET_EXEC
+    dw 0x3E                  ; e_machine = x86-64
+    dd 1                     ; e_version
+    dq _start                ; e_entry
+    dq phdr - ehdr           ; e_phoff
+    dq 0                     ; e_shoff
+    dd 0                     ; e_flags
+    dw ehdr_size             ; e_ehsize
+    dw phdr_size             ; e_phentsize
+    dw 2                     ; e_phnum
+    dw 0                     ; e_shentsize
+    dw 0                     ; e_shnum
+    dw 0                     ; e_shstrndx
+ehdr_size equ $ - ehdr
+
+; ── Program Headers ──
+phdr:
+    ; LOAD segment (text + data)
+    dd 1                     ; p_type = PT_LOAD
+    dd 5                     ; p_flags = PF_R | PF_X
+    dq 0                     ; p_offset
+    dq 0x400000              ; p_vaddr
+    dq 0x400000              ; p_paddr
+    dq file_end - ehdr       ; p_filesz
+    dq file_end - ehdr       ; p_memsz
+    dq 0x1000                ; p_align
+phdr_size equ $ - phdr
+
+    ; LOAD segment (BSS)
+    dd 1                     ; p_type = PT_LOAD
+    dd 6                     ; p_flags = PF_R | PF_W
+    dq 0                     ; p_offset
+    dq 0x600000              ; p_vaddr
+    dq 0x600000              ; p_paddr
+    dq 0                     ; p_filesz
+    dq BSS_SIZE              ; p_memsz
+    dq 0x1000                ; p_align
+
+; ── Linux syscall numbers and constants ──
+; linux.inc — Linux x86-64 syscall numbers and constants
+; Shared across all fcoreutils assembly tools
+
+
+; ── Syscall Numbers ──
+%define SYS_READ            0
+%define SYS_WRITE           1
+%define SYS_OPEN            2
+%define SYS_CLOSE           3
+%define SYS_FSTAT           5
+%define SYS_LSEEK           8
+%define SYS_MMAP            9
+%define SYS_MUNMAP         11
+%define SYS_BRK            12
+%define SYS_RT_SIGACTION   13
+%define SYS_RT_SIGPROCMASK 14
+%define SYS_IOCTL          16
+%define SYS_ACCESS         21
+%define SYS_PIPE           22
+%define SYS_DUP2           33
+%define SYS_NANOSLEEP      35
+%define SYS_GETPID         39
+%define SYS_FORK           57
+%define SYS_EXECVE         59
+%define SYS_EXIT           60
+%define SYS_UNAME          63
+%define SYS_GETCWD         79
+%define SYS_GETUID        102
+%define SYS_GETGID        104
+%define SYS_GETEUID       107
+%define SYS_GETEGID       108
+%define SYS_SYNC          162
+%define SYS_OPENAT        257
+
+; ── File Descriptors ──
+%define STDIN               0
+%define STDOUT              1
+%define STDERR              2
+
+; ── Open Flags ──
+%define O_RDONLY            0
+
+; ── Signal Numbers ──
+%define SIGPIPE            13
+%define SIG_BLOCK           0
+
+; ── Error Codes (negated) ──
+%define EINTR              -4
+%define EPIPE             -32
+%define ENOENT             -2
+%define EACCES            -13
+
+; ── Buffer Sizes ──
+%define BUF_SIZE        65536
+
+
+; ── Macros ──
+; macros.inc — Reusable assembly macros for fcoreutils
+; Shared across all fcoreutils assembly tools
+
+
+; WRITE fd, buf, len — raw write syscall
+%macro WRITE 3
+    mov     rax, SYS_WRITE
+    mov     rdi, %1
+    mov     rsi, %2
+    mov     rdx, %3
+    syscall
+%endmacro
+
+; READ fd, buf, len — raw read syscall
+%macro READ 3
+    mov     rax, SYS_READ
+    mov     rdi, %1
+    mov     rsi, %2
+    mov     rdx, %3
+    syscall
+%endmacro
+
+; EXIT code — exit process
+%macro EXIT 1
+    mov     rax, SYS_EXIT
+    mov     rdi, %1
+    syscall
+%endmacro
+
+; OPEN path, flags, mode — open file
+%macro OPEN 3
+    mov     rax, SYS_OPEN
+    mov     rdi, %1
+    mov     rsi, %2
+    mov     rdx, %3
+    syscall
+%endmacro
+
+; CLOSE fd — close file descriptor
+%macro CLOSE 1
+    mov     rax, SYS_CLOSE
+    mov     rdi, %1
+    syscall
+%endmacro
+
+; BLOCK_SIGPIPE — block SIGPIPE so write returns EPIPE instead of killing us
+%macro BLOCK_SIGPIPE 0
+    sub     rsp, 16
+    mov     qword [rsp], (1 << (SIGPIPE - 1))
+    mov     eax, SYS_RT_SIGPROCMASK
+    xor     edi, edi            ; SIG_BLOCK
+    mov     rsi, rsp
+    xor     edx, edx            ; old_set = NULL
+    mov     r10d, 8             ; sigsetsize
+    syscall
+    add     rsp, 16
+%endmacro
+
+
+; ── BSS Variables (at 0x600000, zero-filled by kernel) ──
+read_buf equ 0x600000 + 0
+out_buf equ 0x600000 + 262144
+line_buf equ 0x600000 + 524288
+line_buf_used equ 0x600000 + 1572864
+itoa_buf equ 0x600000 + 1572872
+prefix_buf equ 0x600000 + 1572904
+prefix_valid equ 0x600000 + 1572968
+prefix_total_len equ 0x600000 + 1572969
+prefix_digit_start equ 0x600000 + 1572977
+prefix_digit_end equ 0x600000 + 1572985
+separator equ 0x600000 + 1572993
+body_style equ 0x600000 + 1573249
+header_style equ 0x600000 + 1573250
+footer_style equ 0x600000 + 1573251
+num_format equ 0x600000 + 1573252
+no_renumber equ 0x600000 + 1573253
+cur_section equ 0x600000 + 1573254
+delim_char1 equ 0x600000 + 1573255
+delim_char2 equ 0x600000 + 1573256
+delim_len equ 0x600000 + 1573257
+pad_bss equ 0x600000 + 1573258
+line_number equ 0x600000 + 1573265
+line_incr equ 0x600000 + 1573273
+join_blank equ 0x600000 + 1573281
+start_num equ 0x600000 + 1573289
+num_width equ 0x600000 + 1573297
+sep_len equ 0x600000 + 1573305
+blank_count equ 0x600000 + 1573313
+num_files equ 0x600000 + 1573321
+argv_base equ 0x600000 + 1573325
+argv_count equ 0x600000 + 1573333
+arg_index equ 0x600000 + 1573341
+line_start equ 0x600000 + 1573349
+line_ptr equ 0x600000 + 1573357
+line_len equ 0x600000 + 1573365
+mmap_base equ 0x600000 + 1573373
+mmap_size equ 0x600000 + 1573381
+seen_dashdash equ 0x600000 + 1573389
+BSS_SIZE equ 1573390
+
+; ── fnl tool code ──
 ; fnl.asm — GNU-compatible "nl" in x86-64 Linux assembly
 ;
 ; A drop-in replacement for GNU coreutils `nl`. Pure x86-64 assembly,
@@ -6,9 +219,8 @@
 ;   -n FORMAT, -p, -s STRING, -v NUMBER, -w NUMBER, --help, --version
 ;
 ; Section delimiter detection (header/body/footer boundaries).
-; Streaming line-by-line processing with 256KB output buffer.
+; Streaming line-by-line processing with 128KB output buffer.
 ; SIMD pcmpeqb+pmovmskb for fast newline scanning.
-; Fast-path for default options: mmap + inline number formatting + SIMD copy.
 ;
 ; Register conventions (global state):
 ;   r12 = out_buf_used (bytes currently in output buffer)
@@ -20,21 +232,14 @@
 ;   nasm -f elf64 -I include/ lib/io.asm -o build/lib/io.o
 ;   ld --gc-sections -n build/tools/fnl.o build/lib/io.o -o fnl
 
-%include "include/linux.inc"
-%include "include/macros.inc"
 
-default rel
 
-extern asm_write_all
-extern asm_read
-extern asm_open
-extern asm_close
 
 ; ─── Constants ───────────────────────────────────────────
 %define READ_BUF_SIZE   262144
 %define OUT_BUF_SIZE    262144
 %define LINE_BUF_SIZE   1048576
-%define FLUSH_THRESHOLD 131072
+%define FLUSH_THRESHOLD 65536
 %define MAX_SEP_LEN     256
 %define MAX_FILES       256
 
@@ -53,17 +258,8 @@ extern asm_close
 %define SECTION_BODY    1
 %define SECTION_FOOTER  2
 
-; mmap flags
-%define MAP_PRIVATE     2
-%define MAP_POPULATE    0x08000
-%define PROT_READ       1
-%define MADV_SEQUENTIAL 2
-%define MADV_HUGEPAGE   14
-%define SYS_MADVISE     28
-
 global _start
 
-section .text
 
 ; ─── Entry Point ─────────────────────────────────────────
 _start:
@@ -105,7 +301,6 @@ _start:
     mov     dword [num_files], 0
     mov     qword [line_buf_used], 0
     mov     byte [prefix_valid], 0
-    mov     byte [is_default_opts], 1           ; assume default until proven otherwise
 
     ; Store argv info in globals for option parsing helpers
     mov     [argv_base], r15        ; &argv[1]
@@ -148,7 +343,7 @@ _start:
     je      .set_dashdash           ; exactly "--"
 
     ; Check --help
-    lea     rdi, [rel str_help_flag]
+    lea     rdi, [str_help_flag]
     call    strcmp
     test    eax, eax
     jz      .do_help
@@ -157,7 +352,7 @@ _start:
     mov     rbx, [arg_index]
     mov     rcx, [argv_base]
     mov     rsi, [rcx + rbx*8]
-    lea     rdi, [rel str_version_flag]
+    lea     rdi, [str_version_flag]
     call    strcmp
     test    eax, eax
     jz      .do_version
@@ -245,7 +440,7 @@ _start:
     syscall
 
 .write_error_exit:
-    lea     rdi, [rel str_write_error]
+    lea     rdi, [str_write_error]
     call    print_error_simple
     mov     rdi, 1
     mov     rax, SYS_EXIT
@@ -255,7 +450,7 @@ _start:
 .do_help:
     call    flush_output
     mov     rdi, STDOUT
-    lea     rsi, [rel help_text]
+    lea     rsi, [help_text]
     mov     rdx, help_text_len
     call    asm_write_all
     xor     edi, edi
@@ -266,7 +461,7 @@ _start:
 .do_version:
     call    flush_output
     mov     rdi, STDOUT
-    lea     rsi, [rel version_text]
+    lea     rsi, [version_text]
     mov     rdx, version_text_len
     call    asm_write_all
     xor     edi, edi
@@ -321,7 +516,6 @@ parse_short_options:
 
 .pso_p:
     mov     byte [no_renumber], 1
-    mov     byte [is_default_opts], 0
     inc     r14
     jmp     .pso_loop
 
@@ -341,10 +535,6 @@ parse_short_options:
     test    eax, eax
     js      .pso_invalid_style
     mov     [body_style], al
-    ; Check if still default (body_style=STYLE_NONEMPTY)
-    cmp     al, STYLE_NONEMPTY
-    je      .pso_consumed
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_f:
@@ -361,10 +551,6 @@ parse_short_options:
     test    eax, eax
     js      .pso_invalid_style
     mov     [footer_style], al
-    ; footer style NONE is default
-    cmp     al, STYLE_NONE
-    je      .pso_consumed
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_h:
@@ -381,10 +567,6 @@ parse_short_options:
     test    eax, eax
     js      .pso_invalid_style
     mov     [header_style], al
-    ; header style NONE is default
-    cmp     al, STYLE_NONE
-    je      .pso_consumed
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_d:
@@ -406,23 +588,14 @@ parse_short_options:
     jz      .pso_d_one_char
     mov     [delim_char2], al
     mov     byte [delim_len], 2
-    ; Check if still default (\:)
-    cmp     byte [delim_char1], '\'
-    jne     .pso_d_non_default
-    cmp     byte [delim_char2], ':'
-    je      .pso_consumed
-.pso_d_non_default:
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 .pso_d_one_char:
     mov     byte [delim_char2], ':'  ; implicit ':'
     mov     byte [delim_len], 2
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 .pso_d_empty:
     ; Empty delimiter disables section matching
     mov     byte [delim_len], 0
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_n:
@@ -439,9 +612,6 @@ parse_short_options:
     test    eax, eax
     js      .pso_invalid_format
     mov     [num_format], al
-    cmp     al, FMT_RN
-    je      .pso_consumed
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_i:
@@ -458,9 +628,6 @@ parse_short_options:
     test    rdx, rdx
     jnz     .pso_invalid_number
     mov     [line_incr], rax
-    cmp     rax, 1
-    je      .pso_consumed
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_l:
@@ -477,9 +644,6 @@ parse_short_options:
     test    rdx, rdx
     jnz     .pso_invalid_number
     mov     [join_blank], rax
-    cmp     rax, 1
-    je      .pso_consumed
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_v:
@@ -497,9 +661,6 @@ parse_short_options:
     jnz     .pso_invalid_number
     mov     [start_num], rax
     mov     [line_number], rax
-    cmp     rax, 1
-    je      .pso_consumed
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_w:
@@ -516,9 +677,6 @@ parse_short_options:
     test    rdx, rdx
     jnz     .pso_invalid_number
     mov     [num_width], rax
-    cmp     rax, 6
-    je      .pso_consumed
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_s:
@@ -538,26 +696,18 @@ parse_short_options:
     mov     [sep_len], rax
     ; Copy bytes
     mov     rsi, r14
-    lea     rdi, [rel separator]
+    lea     rdi, [separator]
     mov     rcx, rax
     rep     movsb
-    ; Check if still default (single tab)
-    cmp     qword [sep_len], 1
-    jne     .pso_s_non_default
-    cmp     byte [separator], 9
-    je      .pso_consumed
-.pso_s_non_default:
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_s_too_long:
     mov     rax, MAX_SEP_LEN
     mov     [sep_len], rax
     mov     rsi, r14
-    lea     rdi, [rel separator]
+    lea     rdi, [separator]
     mov     rcx, MAX_SEP_LEN
     rep     movsb
-    mov     byte [is_default_opts], 0
     jmp     .pso_consumed
 
 .pso_consumed:
@@ -572,19 +722,19 @@ parse_short_options:
 .pso_missing_arg:
     ; Print "nl: option requires an argument -- 'X'"
     ; The option letter is at [r14 - 1]
-    lea     rdi, [rel str_prefix]
+    lea     rdi, [str_prefix]
     mov     rsi, str_prefix_len
     call    write_stderr
-    lea     rdi, [rel str_opt_requires_arg]
+    lea     rdi, [str_opt_requires_arg]
     mov     rsi, str_opt_requires_arg_len
     call    write_stderr
     lea     rdi, [r14 - 1]
     mov     rsi, 1
     call    write_stderr
-    lea     rdi, [rel str_quote_nl]
+    lea     rdi, [str_quote_nl]
     mov     rsi, 2
     call    write_stderr
-    lea     rdi, [rel str_try_help]
+    lea     rdi, [str_try_help]
     mov     rsi, str_try_help_len
     call    write_stderr
     mov     ebp, 1
@@ -594,10 +744,10 @@ parse_short_options:
 
 .pso_invalid_style:
     ; Print error about invalid style
-    lea     rdi, [rel str_prefix]
+    lea     rdi, [str_prefix]
     mov     rsi, str_prefix_len
     call    write_stderr
-    lea     rdi, [rel str_invalid_style]
+    lea     rdi, [str_invalid_style]
     mov     rsi, str_invalid_style_len
     call    write_stderr
     mov     rdi, r14
@@ -605,10 +755,10 @@ parse_short_options:
     mov     rsi, rax
     mov     rdi, r14
     call    write_stderr
-    lea     rdi, [rel str_quote_nl]
+    lea     rdi, [str_quote_nl]
     mov     rsi, 2
     call    write_stderr
-    lea     rdi, [rel str_try_help]
+    lea     rdi, [str_try_help]
     mov     rsi, str_try_help_len
     call    write_stderr
     mov     ebp, 1
@@ -617,10 +767,10 @@ parse_short_options:
     syscall
 
 .pso_invalid_format:
-    lea     rdi, [rel str_prefix]
+    lea     rdi, [str_prefix]
     mov     rsi, str_prefix_len
     call    write_stderr
-    lea     rdi, [rel str_invalid_format]
+    lea     rdi, [str_invalid_format]
     mov     rsi, str_invalid_format_len
     call    write_stderr
     mov     rdi, r14
@@ -628,10 +778,10 @@ parse_short_options:
     mov     rsi, rax
     mov     rdi, r14
     call    write_stderr
-    lea     rdi, [rel str_quote_nl]
+    lea     rdi, [str_quote_nl]
     mov     rsi, 2
     call    write_stderr
-    lea     rdi, [rel str_try_help]
+    lea     rdi, [str_try_help]
     mov     rsi, str_try_help_len
     call    write_stderr
     mov     ebp, 1
@@ -640,10 +790,10 @@ parse_short_options:
     syscall
 
 .pso_invalid_number:
-    lea     rdi, [rel str_prefix]
+    lea     rdi, [str_prefix]
     mov     rsi, str_prefix_len
     call    write_stderr
-    lea     rdi, [rel str_invalid_number]
+    lea     rdi, [str_invalid_number]
     mov     rsi, str_invalid_number_len
     call    write_stderr
     mov     rdi, r14
@@ -651,10 +801,10 @@ parse_short_options:
     mov     rsi, rax
     mov     rdi, r14
     call    write_stderr
-    lea     rdi, [rel str_quote_nl]
+    lea     rdi, [str_quote_nl]
     mov     rsi, 2
     call    write_stderr
-    lea     rdi, [rel str_try_help]
+    lea     rdi, [str_try_help]
     mov     rsi, str_try_help_len
     call    write_stderr
     mov     ebp, 1
@@ -692,77 +842,77 @@ parse_long_option:
 
     ; Try each long option
     ; --body-numbering=STYLE or --body-numbering STYLE
-    lea     rdi, [rel str_lo_body]
+    lea     rdi, [str_lo_body]
     call    match_long_opt          ; returns rax=value_ptr or 0
     test    rax, rax
     jnz     .plo_body
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_footer]
+    lea     rdi, [str_lo_footer]
     call    match_long_opt
     test    rax, rax
     jnz     .plo_footer
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_header]
+    lea     rdi, [str_lo_header]
     call    match_long_opt
     test    rax, rax
     jnz     .plo_header
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_delim]
+    lea     rdi, [str_lo_delim]
     call    match_long_opt
     test    rax, rax
     jnz     .plo_delim
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_incr]
+    lea     rdi, [str_lo_incr]
     call    match_long_opt
     test    rax, rax
     jnz     .plo_incr
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_join]
+    lea     rdi, [str_lo_join]
     call    match_long_opt
     test    rax, rax
     jnz     .plo_join
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_numfmt]
+    lea     rdi, [str_lo_numfmt]
     call    match_long_opt
     test    rax, rax
     jnz     .plo_numfmt
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_norenumber]
+    lea     rdi, [str_lo_norenumber]
     call    match_long_opt_flag
     test    eax, eax
     jz      .plo_norenumber
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_sep]
+    lea     rdi, [str_lo_sep]
     call    match_long_opt
     test    rax, rax
     jnz     .plo_sep
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_startnum]
+    lea     rdi, [str_lo_startnum]
     call    match_long_opt
     test    rax, rax
     jnz     .plo_startnum
 
     mov     rsi, r14
     add     rsi, 2
-    lea     rdi, [rel str_lo_width]
+    lea     rdi, [str_lo_width]
     call    match_long_opt
     test    rax, rax
     jnz     .plo_width
@@ -780,9 +930,6 @@ parse_long_option:
     test    eax, eax
     js      .plo_invalid_style
     mov     [body_style], al
-    cmp     al, STYLE_NONEMPTY
-    je      .plo_ok
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_footer:
@@ -791,9 +938,6 @@ parse_long_option:
     test    eax, eax
     js      .plo_invalid_style
     mov     [footer_style], al
-    cmp     al, STYLE_NONE
-    je      .plo_ok
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_header:
@@ -802,9 +946,6 @@ parse_long_option:
     test    eax, eax
     js      .plo_invalid_style
     mov     [header_style], al
-    cmp     al, STYLE_NONE
-    je      .plo_ok
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_delim:
@@ -818,16 +959,13 @@ parse_long_option:
     jz      .plo_d_one
     mov     [delim_char2], al
     mov     byte [delim_len], 2
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 .plo_d_one:
     mov     byte [delim_char2], ':'
     mov     byte [delim_len], 2
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 .plo_d_empty:
     mov     byte [delim_len], 0
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_incr:
@@ -836,9 +974,6 @@ parse_long_option:
     test    rdx, rdx
     jnz     .plo_invalid_num
     mov     [line_incr], rax
-    cmp     rax, 1
-    je      .plo_ok
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_join:
@@ -847,9 +982,6 @@ parse_long_option:
     test    rdx, rdx
     jnz     .plo_invalid_num
     mov     [join_blank], rax
-    cmp     rax, 1
-    je      .plo_ok
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_numfmt:
@@ -858,14 +990,10 @@ parse_long_option:
     test    eax, eax
     js      .plo_invalid_fmt
     mov     [num_format], al
-    cmp     al, FMT_RN
-    je      .plo_ok
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_norenumber:
     mov     byte [no_renumber], 1
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_sep:
@@ -876,18 +1004,16 @@ parse_long_option:
     jge     .plo_sep_trunc
     mov     [sep_len], rax
     mov     rsi, r14
-    lea     rdi, [rel separator]
+    lea     rdi, [separator]
     mov     rcx, rax
     rep     movsb
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 .plo_sep_trunc:
     mov     qword [sep_len], MAX_SEP_LEN
     mov     rsi, r14
-    lea     rdi, [rel separator]
+    lea     rdi, [separator]
     mov     rcx, MAX_SEP_LEN
     rep     movsb
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_startnum:
@@ -897,9 +1023,6 @@ parse_long_option:
     jnz     .plo_invalid_num
     mov     [start_num], rax
     mov     [line_number], rax
-    cmp     rax, 1
-    je      .plo_ok
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_width:
@@ -908,9 +1031,6 @@ parse_long_option:
     test    rdx, rdx
     jnz     .plo_invalid_num
     mov     [num_width], rax
-    cmp     rax, 6
-    je      .plo_ok
-    mov     byte [is_default_opts], 0
     jmp     .plo_ok
 
 .plo_ok:
@@ -1193,11 +1313,11 @@ open_and_process:
     test    r15, r15
     jz      .oap_empty_file         ; empty file, nothing to do
 
-    ; mmap the file with MAP_POPULATE for prefaulting
+    ; mmap the file
     xor     edi, edi                ; addr = NULL
     mov     rsi, r15                ; length = file_size
-    mov     edx, PROT_READ          ; PROT_READ
-    mov     r10d, MAP_PRIVATE | MAP_POPULATE  ; MAP_PRIVATE | MAP_POPULATE
+    mov     edx, 1                  ; PROT_READ
+    mov     r10d, 2                 ; MAP_PRIVATE
     mov     r8, r14                 ; fd
     xor     r9d, r9d                ; offset = 0
     mov     rax, SYS_MMAP
@@ -1212,30 +1332,11 @@ open_and_process:
     push    rax                     ; save mmap address
     push    r15                     ; save file size
 
-    ; madvise SEQUENTIAL for readahead
-    mov     rdi, rax
-    mov     rsi, r15
-    mov     edx, MADV_SEQUENTIAL
-    mov     rax, SYS_MADVISE
-    syscall
-
-    ; Restore mmap address from stack (madvise clobbered rdi)
-    mov     rax, [rsp + 8]          ; mmap address is at rsp+8 after push rax; push r15
-
-    ; Process the entire mmap'd buffer
+    ; Process the entire mmap'd buffer as a single "read chunk"
     mov     [mmap_base], rax
     mov     [mmap_size], r15
-
-    ; Check if we can use fast path
-    cmp     byte [is_default_opts], 1
-    jne     .oap_slow_mmap
-    call    process_mmap_fast
-    jmp     .oap_mmap_done
-
-.oap_slow_mmap:
     call    process_mmap
 
-.oap_mmap_done:
     ; munmap
     pop     r15
     pop     rax
@@ -1296,710 +1397,7 @@ open_and_process:
     ret
 
 ; ═══════════════════════════════════════════════════════════
-; process_mmap_fast — Ultra-fast path for default options on mmap'd files
-;
-; Default: -b t -n rn -w 6 -s '\t' -i 1 -v 1 -d '\:'
-; Means: number non-empty lines, right-justified 6-digit, tab separator
-;
-; For each line:
-;   - Non-empty: "     1\t<content>\n" (6-char number field + tab + content + newline)
-;   - Empty:     "       \t\n"         (7 spaces + tab + newline... wait no)
-;
-; Actually for empty lines with -b t (default): just "       \n" = width+sep_len spaces + newline
-; Wait, GNU nl default for unnumbered lines: width + separator_len spaces.
-; Default width=6, sep=\t(1 char), so 7 spaces total for blank prefix.
-;
-; Register allocation:
-;   rsi = current read position in mmap'd data
-;   r8  = end of mmap'd data
-;   r12 = out_buf_used (global)
-;   r9  = line_number (local fast copy)
-;   rdi = out_buf write pointer (r12-relative)
-;
-; Strategy:
-;   1. SIMD scan for newlines (16 bytes at a time)
-;   2. For each newline found, emit number+tab+content+newline inline
-;   3. Use fast itoa (digit pairs) for number formatting
-;   4. Bulk memcpy line content with SIMD
-;   5. Flush output when buffer gets close to full
-; ═══════════════════════════════════════════════════════════
-process_mmap_fast:
-    push    rbx
-    push    r13
-    push    r14
-    push    r15
-    push    rbp
-
-    mov     rsi, [mmap_base]        ; rsi = current read position
-    mov     r8, rsi
-    add     r8, [mmap_size]         ; r8 = end of data
-    mov     r9, [line_number]       ; r9 = current line number (fast local)
-    lea     r15, [rel out_buf]      ; r15 = base of output buffer
-
-    ; Preload SIMD newline pattern
-    movdqa  xmm15, [rel newline_pattern]
-
-    ; Quick check: is there section delimiter \: in the file?
-    ; For the fast path, we still need to handle section delimiters.
-    ; But in the common case (base64 data, etc.) there are no delimiters.
-    ; We'll check per-line only if the line length matches a delimiter pattern (2, 4, or 6 bytes).
-
-    ; r14 = line start pointer
-    mov     r14, rsi                ; line starts at current position
-
-.pmf_scan_loop:
-    ; Check if we need to flush output buffer
-    cmp     r12, FLUSH_THRESHOLD
-    jb      .pmf_no_flush
-    ; Flush output
-    push    rsi
-    push    r8
-    push    r9
-    push    r14
-    call    flush_output
-    pop     r14
-    pop     r9
-    pop     r8
-    pop     rsi
-
-.pmf_no_flush:
-    ; SIMD scan for newline
-    mov     rax, r8
-    sub     rax, rsi
-    cmp     rax, 16
-    jl      .pmf_scalar_scan
-
-    movdqu  xmm0, [rsi]
-    pcmpeqb xmm0, xmm15
-    pmovmskb eax, xmm0
-    test    eax, eax
-    jnz     .pmf_found_newlines
-
-    ; No newline in 16 bytes, advance
-    add     rsi, 16
-    jmp     .pmf_scan_loop
-
-.pmf_found_newlines:
-    ; Process all newlines in this 16-byte window using bsf+btr
-.pmf_nl_loop:
-    test    eax, eax
-    jz      .pmf_nl_loop_done
-
-    bsf     ecx, eax                ; ecx = position of first newline
-    btr     eax, ecx                ; clear that bit
-
-    ; Line is [r14 .. rsi+ecx)
-    ; Line length = rsi + ecx - r14
-    lea     rdx, [rsi + rcx]        ; rdx = pointer to newline char
-    mov     rbx, rdx
-    sub     rbx, r14                ; rbx = line length (excluding newline)
-
-    ; Check if line is empty (blank)
-    test    rbx, rbx
-    jz      .pmf_empty_line
-
-    ; Check for section delimiter (only if line length matches: 2, 4, or 6)
-    cmp     rbx, 6
-    ja      .pmf_nonempty_line      ; too long to be a delimiter
-    cmp     rbx, 2
-    jb      .pmf_nonempty_line      ; too short (1 byte, not a delimiter pair)
-    test    rbx, 1
-    jnz     .pmf_nonempty_line      ; odd length, can't be delimiter pairs
-    ; Could be delimiter: check
-    push    rax
-    push    rcx
-    push    rdx
-    push    rsi
-    ; Save line info
-    mov     [line_ptr], r14
-    mov     [line_len], rbx
-    call    check_section_delimiter_direct_inline
-    cmp     eax, -1
-    pop     rsi
-    pop     rdx
-    pop     rcx
-    pop     rax                     ; restore rax (remaining newline bits)
-    je      .pmf_nonempty_line      ; not a delimiter, treat as normal line
-
-    ; It IS a section delimiter — emit blank line, reset line number
-    ; eax = section type
-    mov     [cur_section], al
-    mov     r9, [start_num]         ; reset line number
-    mov     qword [blank_count], 0
-
-    ; Emit just a newline
-    lea     rdi, [r15 + r12]
-    mov     byte [rdi], 10
-    inc     r12
-
-    ; Advance past this newline
-    lea     r14, [rdx + 1]          ; next line starts after newline
-    jmp     .pmf_nl_loop
-
-.pmf_nonempty_line:
-    ; Non-empty line: emit number prefix + tab + content + newline
-    ; Fast itoa for r9 (line number) into 6-char field, right-justified with spaces
-
-    ; Ensure enough output space: 6 (width) + 1 (tab) + rbx (content) + 1 (newline) + 16 (safety)
-    lea     rdi, [r12 + rbx]
-    add     rdi, 24                 ; 6+1+1+16
-    cmp     rdi, OUT_BUF_SIZE
-    jb      .pmf_ne_have_space
-    ; Need to flush
-    push    rax
-    push    rcx
-    push    rdx
-    push    rsi
-    push    rbx
-    push    r14
-    call    flush_output
-    pop     r14
-    pop     rbx
-    pop     rsi
-    pop     rdx
-    pop     rcx
-    pop     rax
-
-.pmf_ne_have_space:
-    lea     rdi, [r15 + r12]        ; rdi = write position in out_buf
-
-    ; Fast itoa: format r9 as right-justified 6-digit number
-    ; Use reciprocal multiply instead of div for speed
-    push    rax                     ; save remaining newline bitmask
-    push    rdx                     ; save newline pointer (mul clobbers rdx)
-    mov     rax, r9                 ; number to format
-
-    ; For numbers 1-999999 (fits in 6 digits), format directly
-    ; We'll use the digit-pair lookup table
-    cmp     rax, 999999
-    ja      .pmf_big_number
-
-    ; Format using digit pairs from right to left in itoa_scratch
-    ; Then copy with space padding to output
-
-    ; We need to extract digits. Use multiply-by-reciprocal for /100:
-    ; n/100 can be done as (n * 0x51EB851F) >> 37 for n < 2^32
-    ; But simpler: just use a small loop with imul/sub trick
-
-    ; Store digits right-to-left in a small buffer on stack
-    ; Actually, let's do it directly into the output buffer
-    ; First fill 6 bytes with spaces
-    mov     dword [rdi], 0x20202020   ; 4 spaces
-    mov     word [rdi+4], 0x2020      ; 2 more spaces
-
-    ; Now write digits from right to left
-    lea     r10, [rdi + 5]          ; r10 points to last digit position (index 5)
-
-    ; Digit extraction using multiply trick to avoid div
-    ; For each digit: d = n % 10, n = n / 10
-    ; n / 10 = (n * 0xCCCCCCCCCCCCCCCD) >> 67 ... actually let's use a simpler approach
-    ; Use the fact that for small numbers, imul + shift works
-
-    ; Extract digits using multiply by magic number
-    ; n / 10 = (n * 0xCCCCCCCD) >> 35 for n < 2^32
-.pmf_digit_loop:
-    ; rax = remaining number
-    test    rax, rax
-    jz      .pmf_digits_done
-
-    ; Compute rax / 10 and rax % 10
-    mov     rcx, rax
-    mov     rdx, 0xCCCCCCCCCCCCCCCD
-    mul     rdx                     ; rdx:rax = rax * magic
-    shr     rdx, 3                  ; rdx = rax / 10
-    ; remainder = rcx - rdx * 10
-    lea     r11, [rdx + rdx*4]      ; r11 = rdx * 5
-    add     r11, r11                ; r11 = rdx * 10
-    sub     rcx, r11                ; rcx = remainder (digit)
-    add     cl, '0'
-    mov     [r10], cl
-    dec     r10
-    mov     rax, rdx                ; continue with quotient
-    jmp     .pmf_digit_loop
-
-.pmf_digits_done:
-    ; Add tab separator after number
-    mov     byte [rdi + 6], 9       ; tab
-    add     rdi, 7                  ; advance past number+tab
-
-    ; Copy line content using SIMD
-    ; Source: r14, Length: rbx
-    mov     rcx, rbx
-    mov     r10, r14                ; source pointer
-    cmp     rcx, 64
-    jb      .pmf_copy_small
-
-    ; Large copy: 64 bytes at a time
-.pmf_copy_64:
-    cmp     rcx, 64
-    jb      .pmf_copy_tail
-    movdqu  xmm0, [r10]
-    movdqu  xmm1, [r10 + 16]
-    movdqu  xmm2, [r10 + 32]
-    movdqu  xmm3, [r10 + 48]
-    movdqu  [rdi], xmm0
-    movdqu  [rdi + 16], xmm1
-    movdqu  [rdi + 32], xmm2
-    movdqu  [rdi + 48], xmm3
-    add     r10, 64
-    add     rdi, 64
-    sub     rcx, 64
-    jmp     .pmf_copy_64
-
-.pmf_copy_tail:
-    cmp     rcx, 16
-    jb      .pmf_copy_small_tail
-    movdqu  xmm0, [r10]
-    movdqu  [rdi], xmm0
-    add     r10, 16
-    add     rdi, 16
-    sub     rcx, 16
-    jmp     .pmf_copy_tail
-
-.pmf_copy_small_tail:
-    test    rcx, rcx
-    jz      .pmf_copy_done
-    ; Copy remaining bytes one at a time
-.pmf_copy_byte:
-    mov     al, [r10]
-    mov     [rdi], al
-    inc     r10
-    inc     rdi
-    dec     rcx
-    jnz     .pmf_copy_byte
-    jmp     .pmf_copy_done
-
-.pmf_copy_small:
-    ; For small copies (< 64 bytes), use 16-byte chunks then scalar
-    cmp     rcx, 16
-    jb      .pmf_copy_small_lt16
-    movdqu  xmm0, [r10]
-    movdqu  [rdi], xmm0
-    add     r10, 16
-    add     rdi, 16
-    sub     rcx, 16
-    jmp     .pmf_copy_small
-.pmf_copy_small_lt16:
-    ; Copy up to 15 remaining bytes
-    cmp     rcx, 8
-    jb      .pmf_copy_lt8
-    mov     r11, [r10]
-    mov     [rdi], r11
-    add     r10, 8
-    add     rdi, 8
-    sub     rcx, 8
-.pmf_copy_lt8:
-    cmp     rcx, 4
-    jb      .pmf_copy_lt4
-    mov     r11d, [r10]
-    mov     [rdi], r11d
-    add     r10, 4
-    add     rdi, 4
-    sub     rcx, 4
-.pmf_copy_lt4:
-    test    rcx, rcx
-    jz      .pmf_copy_done
-.pmf_copy_lt4_loop:
-    mov     al, [r10]
-    mov     [rdi], al
-    inc     r10
-    inc     rdi
-    dec     rcx
-    jnz     .pmf_copy_lt4_loop
-
-.pmf_copy_done:
-    ; Append newline
-    mov     byte [rdi], 10
-    inc     rdi
-
-    ; Update out_buf_used
-    mov     r12, rdi
-    sub     r12, r15                ; r12 = rdi - out_buf base
-
-    ; Increment line number
-    inc     r9
-
-    pop     rdx                     ; restore newline pointer
-    pop     rax                     ; restore newline bitmask
-
-    ; Advance line start past newline
-    lea     r14, [rdx + 1]          ; rdx points to newline char
-    jmp     .pmf_nl_loop
-
-.pmf_big_number:
-    ; Number > 999999: fall back to general itoa
-    ; Convert using div (rare case)
-    lea     r10, [rel itoa_buf + 31]
-    mov     byte [r10], 0
-    xor     ecx, ecx
-
-.pmf_big_itoa_loop:
-    xor     edx, edx
-    mov     rbx, 10
-    div     rbx
-    add     dl, '0'
-    dec     r10
-    mov     [r10], dl
-    inc     ecx
-    test    rax, rax
-    jnz     .pmf_big_itoa_loop
-
-    ; r10 = start of digits, ecx = digit count
-    ; Pad with spaces to width 6
-    mov     eax, 6
-    sub     eax, ecx
-    jle     .pmf_big_no_pad
-    ; Fill spaces
-    push    rcx
-    mov     rcx, rax
-    mov     al, ' '
-    rep     stosb
-    pop     rcx
-.pmf_big_no_pad:
-    ; Copy digits
-    push    rcx
-    mov     rsi, r10
-    ; Use rdi (already positioned)
-    cmp     ecx, 6
-    jle     .pmf_big_copy_digits
-    ; Number wider than 6, rdi needs to point right
-.pmf_big_copy_digits:
-    movzx   eax, byte [rsi]
-    mov     [rdi], al
-    inc     rsi
-    inc     rdi
-    dec     ecx
-    jnz     .pmf_big_copy_digits
-    pop     rcx
-
-    ; Tab + content + newline
-    mov     byte [rdi], 9
-    inc     rdi
-
-    ; Restore line content pointer/length
-    ; rbx was clobbered. Recalculate from r14 and rdx
-    ; Actually we need to save/restore these. Let me use the stack saves.
-    ; rdx = pointer to newline, r14 = line start
-    ; But rdx was clobbered by div! We need another approach.
-    ; Let's save rdx (newline ptr) before entering big_number path.
-
-    ; Actually, this is the big number fallback path. Let me restructure.
-    ; For now, just write content byte by byte (rare case)
-    mov     r10, [line_ptr]         ; we saved this earlier... no we didn't
-    ; This path is broken for big numbers. Let me fix by saving before.
-    ; Actually we need to restructure. Let me just fall back to generic path.
-    ; For numbers > 999999, we need to save rdx before the big itoa.
-
-    ; FIXME: For the big number path, let's use the generic process_line_direct
-    ; This only happens after 999999 lines which is very rare for the fast path.
-    ; Let's skip the rest and just emit a newline, then continue
-    ; Actually let's fix this properly by saving what we need.
-
-    ; Since this is the rare case (>999999), just emit newline and update
-    ; The line_ptr/line_len were never set in this path... Let me restructure.
-    ; For simplicity, I'll handle big numbers by saving rdx on stack before big_itoa.
-    ; But the code above already wrote spaces to [rdi] etc., so rdi is positioned.
-    ; We don't have the content pointer anymore since rbx and rdx were clobbered.
-
-    ; Let's just transition to generic path for this line.
-    ; pop rax to balance stack, then fall through to generic
-    pop     rax                     ; balance the push rax from earlier
-    ; Save state to globals and call generic
-    mov     [line_number], r9
-    ; We can't easily recover the line boundaries. Instead, let me fix this
-    ; by not clobbering rdx in the big_number path.
-    ; For now, just fall back to the slow mmap processor for remaining data.
-    ; This is acceptable since it only triggers after 999999 lines.
-
-    ; Actually, the simplest fix: save rdx (newline pointer) and rbx (line length)
-    ; before entering the big number path. But we already consumed them.
-    ; I'll restructure the fast path to save these on the stack.
-
-    ; Let me just break out to the slow path for the rest of the file
-    ; rsi was the scan position, but we've been modifying it. r14 is line start.
-    ; Let's save the current position and switch to slow path
-    mov     rsi, r14                ; restart from current line
-    jmp     .pmf_fallback_to_slow
-
-.pmf_empty_line:
-    ; Empty line with -b t (default): emit blank prefix + newline
-    ; Blank prefix = 7 spaces (width=6 + sep_len=1) + newline = 8 bytes
-    lea     rdi, [r12 + 8]
-    cmp     rdi, OUT_BUF_SIZE
-    jb      .pmf_empty_have_space
-    push    rax
-    push    rcx
-    push    rdx
-    push    rsi
-    push    r14
-    call    flush_output
-    pop     r14
-    pop     rsi
-    pop     rdx
-    pop     rcx
-    pop     rax
-.pmf_empty_have_space:
-    lea     rdi, [r15 + r12]
-    ; Write 8 bytes: 7 spaces + newline
-    ; "       \n" = 0x20 0x20 0x20 0x20 0x20 0x20 0x20 0x0A
-    mov     rax, 0x0A20202020202020  ; little-endian: 7 spaces + \n
-    mov     [rdi], rax
-    add     r12, 8
-
-    ; Advance past newline
-    lea     r14, [rdx + 1]
-    jmp     .pmf_nl_loop
-
-.pmf_nl_loop_done:
-    ; Processed all newlines in this 16-byte window
-    ; Advance rsi by 16
-    add     rsi, 16
-    ; r14 already points to start of next unprocessed line
-    jmp     .pmf_scan_loop
-
-.pmf_scalar_scan:
-    ; Less than 16 bytes remain, scan byte by byte
-    cmp     rsi, r8
-    jge     .pmf_done
-
-    cmp     byte [rsi], 10
-    je      .pmf_scalar_nl
-
-    inc     rsi
-    jmp     .pmf_scalar_scan
-
-.pmf_scalar_nl:
-    ; Found newline at rsi
-    mov     rbx, rsi
-    sub     rbx, r14                ; rbx = line length
-    mov     rdx, rsi                ; rdx = newline pointer
-
-    test    rbx, rbx
-    jz      .pmf_scalar_empty
-
-    ; Check for section delimiter (short lines only)
-    cmp     rbx, 6
-    ja      .pmf_scalar_nonempty
-    cmp     rbx, 2
-    jb      .pmf_scalar_nonempty
-    test    rbx, 1
-    jnz     .pmf_scalar_nonempty
-    push    rdx
-    push    rsi
-    mov     [line_ptr], r14
-    mov     [line_len], rbx
-    call    check_section_delimiter_direct_inline
-    cmp     eax, -1
-    pop     rsi
-    pop     rdx
-    je      .pmf_scalar_nonempty
-
-    ; Section delimiter
-    mov     [cur_section], al
-    mov     r9, [start_num]
-    mov     qword [blank_count], 0
-    lea     rdi, [r15 + r12]
-    mov     byte [rdi], 10
-    inc     r12
-    lea     r14, [rsi + 1]
-    inc     rsi
-    jmp     .pmf_scalar_scan
-
-.pmf_scalar_nonempty:
-    ; Non-empty line: format number + tab + content + newline
-    ; Ensure space
-    lea     rdi, [r12 + rbx]
-    add     rdi, 24
-    cmp     rdi, OUT_BUF_SIZE
-    jb      .pmf_sc_ne_space
-    push    rdx
-    push    rsi
-    push    rbx
-    push    r14
-    call    flush_output
-    pop     r14
-    pop     rbx
-    pop     rsi
-    pop     rdx
-.pmf_sc_ne_space:
-    lea     rdi, [r15 + r12]
-
-    ; Format number (same as above)
-    push    rdx
-    push    rsi
-    push    rbx
-    mov     rax, r9
-    cmp     rax, 999999
-    ja      .pmf_sc_big_num
-
-    mov     dword [rdi], 0x20202020
-    mov     word [rdi+4], 0x2020
-    lea     r10, [rdi + 5]
-
-.pmf_sc_digit_loop:
-    test    rax, rax
-    jz      .pmf_sc_digits_done
-    mov     rcx, rax
-    mov     rdx, 0xCCCCCCCCCCCCCCCD
-    mul     rdx
-    shr     rdx, 3
-    lea     r11, [rdx + rdx*4]
-    add     r11, r11
-    sub     rcx, r11
-    add     cl, '0'
-    mov     [r10], cl
-    dec     r10
-    mov     rax, rdx
-    jmp     .pmf_sc_digit_loop
-
-.pmf_sc_digits_done:
-    mov     byte [rdi + 6], 9       ; tab
-    add     rdi, 7
-    pop     rbx
-    pop     rsi
-    pop     rdx
-
-    ; Copy content
-    mov     rcx, rbx
-    mov     r10, r14
-.pmf_sc_copy:
-    test    rcx, rcx
-    jz      .pmf_sc_copy_done
-    mov     al, [r10]
-    mov     [rdi], al
-    inc     r10
-    inc     rdi
-    dec     rcx
-    jmp     .pmf_sc_copy
-
-.pmf_sc_copy_done:
-    mov     byte [rdi], 10
-    inc     rdi
-    mov     r12, rdi
-    sub     r12, r15
-
-    inc     r9
-    lea     r14, [rsi + 1]
-    inc     rsi
-    jmp     .pmf_scalar_scan
-
-.pmf_sc_big_num:
-    pop     rbx
-    pop     rsi
-    pop     rdx
-    ; Fall back to slow path for remaining
-    jmp     .pmf_fallback_to_slow
-
-.pmf_scalar_empty:
-    ; Empty line
-    lea     rdi, [r12 + 8]
-    cmp     rdi, OUT_BUF_SIZE
-    jb      .pmf_sc_empty_space
-    push    rdx
-    push    rsi
-    push    r14
-    call    flush_output
-    pop     r14
-    pop     rsi
-    pop     rdx
-.pmf_sc_empty_space:
-    lea     rdi, [r15 + r12]
-    mov     rax, 0x0A20202020202020
-    mov     [rdi], rax
-    add     r12, 8
-    lea     r14, [rsi + 1]
-    inc     rsi
-    jmp     .pmf_scalar_scan
-
-.pmf_fallback_to_slow:
-    ; Save line number back to global and fall through to slow mmap path
-    mov     [line_number], r9
-    ; We need to process remaining data from r14 to end of mmap
-    ; Set up mmap_base and mmap_size for the remaining portion
-    mov     [mmap_base], r14
-    mov     rax, r8
-    sub     rax, r14
-    mov     [mmap_size], rax
-    test    rax, rax
-    jle     .pmf_done
-    call    process_mmap
-    jmp     .pmf_done
-
-.pmf_done:
-    ; Save line number back to global
-    mov     [line_number], r9
-    pop     rbp
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     rbx
-    ret
-
-; ═══════════════════════════════════════════════════════════
-; check_section_delimiter_direct_inline — lightweight delimiter check
-; Uses [line_ptr]/[line_len] already set
-; Returns eax = SECTION_HEADER(0), SECTION_BODY(1), SECTION_FOOTER(2), or -1
-; ═══════════════════════════════════════════════════════════
-check_section_delimiter_direct_inline:
-    mov     rsi, [line_ptr]
-    mov     rcx, [line_len]
-
-    ; Default delimiter is \: (backslash + colon)
-    ; Header: \:\:\: (6 bytes), Body: \:\: (4 bytes), Footer: \: (2 bytes)
-    movzx   eax, byte [delim_char1]
-    movzx   edx, byte [delim_char2]
-
-    cmp     rcx, 6
-    je      .csdi_check_header
-    cmp     rcx, 4
-    je      .csdi_check_body
-    cmp     rcx, 2
-    je      .csdi_check_footer
-    mov     eax, -1
-    ret
-
-.csdi_check_header:
-    cmp     [rsi], al
-    jne     .csdi_no
-    cmp     [rsi+1], dl
-    jne     .csdi_no
-    cmp     [rsi+2], al
-    jne     .csdi_no
-    cmp     [rsi+3], dl
-    jne     .csdi_no
-    cmp     [rsi+4], al
-    jne     .csdi_no
-    cmp     [rsi+5], dl
-    jne     .csdi_no
-    mov     eax, SECTION_HEADER
-    ret
-
-.csdi_check_body:
-    cmp     [rsi], al
-    jne     .csdi_no
-    cmp     [rsi+1], dl
-    jne     .csdi_no
-    cmp     [rsi+2], al
-    jne     .csdi_no
-    cmp     [rsi+3], dl
-    jne     .csdi_no
-    mov     eax, SECTION_BODY
-    ret
-
-.csdi_check_footer:
-    cmp     [rsi], al
-    jne     .csdi_no
-    cmp     [rsi+1], dl
-    jne     .csdi_no
-    mov     eax, SECTION_FOOTER
-    ret
-
-.csdi_no:
-    mov     eax, -1
-    ret
-
-; ═══════════════════════════════════════════════════════════
-; process_mmap — Process entire mmap'd file (generic/slow path)
+; process_mmap — Process entire mmap'd file
 ; Uses [mmap_base] and [mmap_size] globals.
 ; Lines are referenced directly in the mmap'd region (true zero-copy).
 ; ═══════════════════════════════════════════════════════════
@@ -2014,7 +1412,7 @@ process_mmap:
     mov     [line_start], r8        ; start of current line
 
     ; Load newline pattern for SIMD
-    movdqa  xmm1, [rel newline_pattern]
+    movdqa  xmm1, [newline_pattern]
 
 .pm_scan_simd:
     mov     rax, r15
@@ -2033,24 +1431,180 @@ process_mmap:
     jmp     .pm_scan_simd
 
 .pm_simd_found_nl:
-    bsf     ecx, eax                ; position of \n in window
-    ; Line is [line_start .. r8+ecx)
-    lea     rax, [r14]
-    add     rax, [line_start]
-    mov     [line_ptr], rax
-    mov     rax, r8
-    add     rax, rcx
-    sub     rax, [line_start]
-    mov     [line_len], rax
+    ; Process all newlines in this 16-byte window
+    bsf     ecx, eax                ; position of first \n
 
-    ; Process this line
+    ; Set up line pointer
+    lea     rbx, [r14]
+    add     rbx, [line_start]       ; line start pointer
+    mov     rdx, r8
+    add     rdx, rcx
+    sub     rdx, [line_start]       ; line length
+
+    ; Inline fast path: process this line directly
+    ; Check section delimiter (fast rejection: most lines aren't delimiters)
+    cmp     byte [delim_len], 0
+    je      .pm_not_delim
+
+    ; Quick length check: delim lines are exactly 2, 4, or 6 bytes for default \: delimiter
+    movzx   eax, byte [delim_len]
+    cmp     rdx, rax                ; footer = 1x delim_len
+    je      .pm_maybe_delim
+    mov     r9, rax
+    shl     r9, 1                   ; 2x delim_len = body
+    cmp     rdx, r9
+    je      .pm_maybe_delim
+    lea     r9, [rax + rax*2]       ; 3x delim_len = header
+    cmp     rdx, r9
+    je      .pm_maybe_delim
+    jmp     .pm_not_delim
+
+.pm_maybe_delim:
+    ; Check first char
+    movzx   eax, byte [delim_char1]
+    cmp     al, [rbx]
+    jne     .pm_not_delim
+    ; Might be a delimiter — use full check
+    mov     [line_ptr], rbx
+    mov     [line_len], rdx
     push    r8
     push    rcx
     call    process_line_direct
     pop     rcx
     pop     r8
+    jmp     .pm_advance_nl
 
-    ; Advance past newline
+.pm_not_delim:
+    ; Determine if this line should be numbered
+    ; Get numbering style for current section
+    movzx   eax, byte [cur_section]
+    cmp     al, SECTION_HEADER
+    je      .pm_hdr_style
+    cmp     al, SECTION_FOOTER
+    je      .pm_ftr_style
+    movzx   eax, byte [body_style]
+    jmp     .pm_have_style
+.pm_hdr_style:
+    movzx   eax, byte [header_style]
+    jmp     .pm_have_style
+.pm_ftr_style:
+    movzx   eax, byte [footer_style]
+
+.pm_have_style:
+    cmp     al, STYLE_NONE
+    je      .pm_no_number
+    cmp     al, STYLE_NONEMPTY
+    je      .pm_check_nonempty
+    ; STYLE_ALL
+    test    rdx, rdx
+    jnz     .pm_do_number
+    ; Blank line — apply -l logic
+    inc     qword [blank_count]
+    mov     rax, [blank_count]
+    cmp     rax, [join_blank]
+    jl      .pm_no_number
+    mov     qword [blank_count], 0
+    jmp     .pm_do_number
+
+.pm_check_nonempty:
+    test    rdx, rdx
+    jz      .pm_no_number
+
+.pm_do_number:
+    ; Reset blank count for non-blank
+    test    rdx, rdx
+    jz      .pm_skip_blank_reset
+    mov     qword [blank_count], 0
+.pm_skip_blank_reset:
+    ; Save line data
+    push    r8
+    push    rcx
+    push    rbx                     ; line ptr
+    push    rdx                     ; line len
+    ; Emit number prefix
+    call    emit_number
+    ; Emit separator
+    call    emit_separator
+    ; Emit line content directly from mmap
+    pop     rdx                     ; line len
+    pop     rbx                     ; line ptr
+    ; Inline content copy
+    test    rdx, rdx
+    jz      .pm_num_content_done
+    ; Check output buffer space
+    lea     rax, [r12 + rdx + 1]    ; content + newline
+    cmp     rax, OUT_BUF_SIZE
+    jge     .pm_num_content_flush
+.pm_num_copy:
+    ; Bulk copy
+    lea     rdi, [out_buf]
+    add     rdi, r12
+    mov     rsi, rbx
+    mov     rcx, rdx
+    rep     movsb
+    add     r12, rdx
+.pm_num_content_done:
+    ; Emit newline
+    call    ensure_out_space_1
+    lea     rdi, [out_buf]
+    mov     byte [rdi + r12], 10
+    inc     r12
+    ; Advance line number
+    mov     rax, [line_number]
+    add     rax, [line_incr]
+    mov     [line_number], rax
+    pop     rcx
+    pop     r8
+    jmp     .pm_advance_nl
+
+.pm_num_content_flush:
+    push    rdx
+    push    rbx
+    call    flush_output
+    pop     rbx
+    pop     rdx
+    jmp     .pm_num_copy
+
+.pm_no_number:
+    ; Emit blank prefix + content + newline
+    push    r8
+    push    rcx
+    push    rbx
+    push    rdx
+    call    emit_blank_prefix
+    pop     rdx
+    pop     rbx
+    ; Inline content copy
+    test    rdx, rdx
+    jz      .pm_nonum_content_done
+    lea     rax, [r12 + rdx + 1]
+    cmp     rax, OUT_BUF_SIZE
+    jge     .pm_nonum_content_flush
+.pm_nonum_copy:
+    lea     rdi, [out_buf]
+    add     rdi, r12
+    mov     rsi, rbx
+    mov     rcx, rdx
+    rep     movsb
+    add     r12, rdx
+.pm_nonum_content_done:
+    call    ensure_out_space_1
+    lea     rdi, [out_buf]
+    mov     byte [rdi + r12], 10
+    inc     r12
+    pop     rcx
+    pop     r8
+    jmp     .pm_advance_nl
+
+.pm_nonum_content_flush:
+    push    rdx
+    push    rbx
+    call    flush_output
+    pop     rbx
+    pop     rdx
+    jmp     .pm_nonum_copy
+
+.pm_advance_nl:
     add     r8, rcx
     inc     r8
     mov     [line_start], r8
@@ -2067,14 +1621,14 @@ process_mmap:
     jmp     .pm_scan_scalar
 
 .pm_scalar_nl:
-    ; Line is [line_start .. r8)
-    lea     rax, [r14]
-    add     rax, [line_start]
-    mov     [line_ptr], rax
-    mov     rax, r8
-    sub     rax, [line_start]
-    mov     [line_len], rax
+    lea     rbx, [r14]
+    add     rbx, [line_start]
+    mov     rdx, r8
+    sub     rdx, [line_start]
 
+    ; Use same inline processing
+    mov     [line_ptr], rbx
+    mov     [line_len], rdx
     push    r8
     call    process_line_direct
     pop     r8
@@ -2089,7 +1643,6 @@ process_mmap:
     cmp     rax, r15
     jge     .pm_exit
 
-    ; There's a partial line at the end
     lea     rax, [r14]
     add     rax, [line_start]
     mov     [line_ptr], rax
@@ -2118,12 +1671,12 @@ process_fd:
     push    r15
 
     mov     ebx, edi                ; fd to read from
-    lea     r14, [rel line_buf]
+    lea     r14, [line_buf]
 
 .pf_read_loop:
     ; Read a chunk
     mov     edi, ebx
-    lea     rsi, [rel read_buf]
+    lea     rsi, [read_buf]
     mov     edx, READ_BUF_SIZE
     call    asm_read
 
@@ -2141,7 +1694,7 @@ process_fd:
     mov     [line_start], r8
 
     ; Load newline comparison pattern for SIMD
-    movdqa  xmm1, [rel newline_pattern]
+    movdqa  xmm1, [newline_pattern]
 
 .pf_scan_simd:
     mov     rax, r9
@@ -2149,7 +1702,7 @@ process_fd:
     cmp     rax, 16
     jl      .pf_scan_scalar
 
-    lea     rdi, [rel read_buf]
+    lea     rdi, [read_buf]
     add     rdi, r8
     movdqu  xmm0, [rdi]
     pcmpeqb xmm0, xmm1
@@ -2189,7 +1742,7 @@ process_fd:
 
     ; Direct mode: line is read_buf[line_start .. r8+ecx)
     ; Set up line_ptr and line_len for process_line_direct
-    lea     rax, [rel read_buf]
+    lea     rax, [read_buf]
     add     rax, [line_start]
     mov     [line_ptr], rax
     mov     rax, r8
@@ -2221,7 +1774,7 @@ process_fd:
     test    ecx, ecx
     jz      .pf_simd_span_emit
 
-    lea     rsi, [rel read_buf]
+    lea     rsi, [read_buf]
     add     rsi, r8
     lea     rdi, [r14 + rdx]
     push    rcx
@@ -2260,7 +1813,7 @@ process_fd:
     cmp     r8, r9
     jge     .pf_chunk_done
 
-    lea     rsi, [rel read_buf]
+    lea     rsi, [read_buf]
     movzx   eax, byte [rsi + r8]
     cmp     al, 10
     je      .pf_scalar_found_nl
@@ -2287,7 +1840,7 @@ process_fd:
     jne     .pf_scalar_spanning
 
     ; Direct mode line
-    lea     rax, [rel read_buf]
+    lea     rax, [read_buf]
     add     rax, [line_start]
     mov     [line_ptr], rax
     mov     rax, r8
@@ -2335,7 +1888,7 @@ process_fd:
     ; Copy read_buf[line_start..r9) to line_buf
     mov     rcx, r9
     sub     rcx, rax
-    lea     rsi, [rel read_buf]
+    lea     rsi, [read_buf]
     add     rsi, rax
     lea     rdi, [r14]
     push    rcx
@@ -2480,7 +2033,7 @@ process_line_direct:
 ; ═══════════════════════════════════════════════════════════
 process_last_line:
     ; Set up line_ptr/line_len from line_buf/line_buf_used
-    lea     rax, [rel line_buf]
+    lea     rax, [line_buf]
     mov     [line_ptr], rax
     mov     rax, [line_buf_used]
     mov     [line_len], rax
@@ -2514,7 +2067,7 @@ check_section_delimiter:
     jne     .csd_check_body
 
     ; Verify 3x delimiter
-    lea     rsi, [rel line_buf]
+    lea     rsi, [line_buf]
     mov     ecx, 3
     call    csd_verify_repeats
     test    eax, eax
@@ -2528,7 +2081,7 @@ check_section_delimiter:
     cmp     rax, rcx
     jne     .csd_check_footer
 
-    lea     rsi, [rel line_buf]
+    lea     rsi, [line_buf]
     mov     ecx, 2
     call    csd_verify_repeats
     test    eax, eax
@@ -2540,7 +2093,7 @@ check_section_delimiter:
     cmp     rax, rbx
     jne     .csd_no_match
 
-    lea     rsi, [rel line_buf]
+    lea     rsi, [line_buf]
     mov     ecx, 1
     call    csd_verify_repeats
     test    eax, eax
@@ -2710,7 +2263,7 @@ emit_number:
     ; Increment last digit with carry
     mov     rcx, [prefix_digit_end]
     dec     rcx                     ; point to last digit
-    lea     rdi, [rel prefix_buf]
+    lea     rdi, [prefix_buf]
 
 .en_carry_loop:
     cmp     rcx, [prefix_digit_start]
@@ -2735,7 +2288,7 @@ emit_number:
     jz      .en_rebuild              ; no padding, must rebuild
     dec     rcx
     mov     [prefix_digit_start], rcx
-    lea     rdi, [rel prefix_buf]
+    lea     rdi, [prefix_buf]
     mov     byte [rdi + rcx], '1'   ; the carry digit
     jmp     .en_emit_cached
 
@@ -2749,9 +2302,9 @@ emit_number:
     call    flush_output
     pop     rcx
 .en_ec_go:
-    lea     rdi, [rel out_buf]
+    lea     rdi, [out_buf]
     add     rdi, r12
-    lea     rsi, [rel prefix_buf]
+    lea     rsi, [prefix_buf]
     push    rcx
     rep     movsb
     pop     rcx
@@ -2764,7 +2317,7 @@ emit_number:
 
 .en_rebuild:
     ; Full rebuild of prefix_buf
-    ; Convert line number to decimal string using fast multiply
+    ; Convert line number to decimal string
     mov     rax, [line_number]
     xor     r15d, r15d              ; negative flag
     test    rax, rax
@@ -2772,26 +2325,18 @@ emit_number:
     mov     r15d, 1
     neg     rax
 .en_positive:
-    lea     rdi, [rel itoa_buf + 31]
+    lea     rdi, [itoa_buf + 31]
     mov     byte [rdi], 0
     xor     ecx, ecx
 
 .en_itoa_loop:
-    ; Fast divide by 10 using multiply by magic
-    mov     r14, rax
-    mov     rdx, 0xCCCCCCCCCCCCCCCD
-    mul     rdx
-    shr     rdx, 3                  ; rdx = rax / 10
-    ; remainder = r14 - rdx * 10
-    lea     r11, [rdx + rdx*4]
-    add     r11, r11                ; r11 = rdx * 10
-    mov     rax, r14
-    sub     rax, r11                ; rax = remainder
-    add     al, '0'
+    xor     edx, edx
+    mov     rbx, 10
+    div     rbx
+    add     dl, '0'
     dec     rdi
-    mov     [rdi], al
+    mov     [rdi], dl
     inc     ecx
-    mov     rax, rdx                ; continue with quotient
     test    rax, rax
     jnz     .en_itoa_loop
 
@@ -2818,7 +2363,7 @@ emit_number:
 
     ; FMT_RN — [spaces][digits]
 .en_build_rn:
-    lea     rdi, [rel prefix_buf]
+    lea     rdi, [prefix_buf]
     ; Fill with spaces
     mov     rcx, r15
     sub     rcx, rbx
@@ -2858,7 +2403,7 @@ emit_number:
 
 .en_build_ln:
     ; FMT_LN — [digits][spaces]
-    lea     rdi, [rel prefix_buf]
+    lea     rdi, [prefix_buf]
     mov     qword [prefix_digit_start], 0
     mov     rsi, r14
     movzx   ecx, bl
@@ -2890,7 +2435,7 @@ emit_number:
 
 .en_build_rz:
     ; FMT_RZ — [zeros][digits] or [-][zeros][digits]
-    lea     rdi, [rel prefix_buf]
+    lea     rdi, [prefix_buf]
     cmp     byte [r14], '-'
     je      .en_rz_neg
 
@@ -2976,9 +2521,9 @@ emit_number:
     call    flush_output
     pop     rcx
 .en_ep_go:
-    lea     rdi, [rel out_buf]
+    lea     rdi, [out_buf]
     add     rdi, r12
-    lea     rsi, [rel prefix_buf]
+    lea     rsi, [prefix_buf]
     push    rcx
     rep     movsb
     pop     rcx
@@ -3005,9 +2550,9 @@ emit_separator:
     call    flush_output
     pop     rbx
 .es_go:
-    lea     rdi, [rel out_buf]
+    lea     rdi, [out_buf]
     add     rdi, r12
-    lea     rsi, [rel separator]
+    lea     rsi, [separator]
     mov     rcx, rbx
     rep     movsb
     add     r12, rbx
@@ -3046,7 +2591,7 @@ emit_blank_prefix:
     jle     .ebp_fill
     mov     rcx, rax
 .ebp_fill:
-    lea     rdi, [rel out_buf]
+    lea     rdi, [out_buf]
     add     rdi, r12
     push    rcx
     mov     al, ' '
@@ -3071,7 +2616,7 @@ emit_line_content:
     mov     rbx, [line_buf_used]
     test    rbx, rbx
     jz      .elc_done
-    lea     r14, [rel line_buf]
+    lea     r14, [line_buf]
     xor     r15d, r15d              ; offset into line_buf
 
 .elc_chunk:
@@ -3097,7 +2642,7 @@ emit_line_content:
     jle     .elc_copy
     mov     rcx, rax
 .elc_copy:
-    lea     rdi, [rel out_buf]
+    lea     rdi, [out_buf]
     add     rdi, r12
     lea     rsi, [r14 + r15]
     push    rcx
@@ -3145,7 +2690,7 @@ emit_content_direct:
     jle     .ecd_copy
     mov     rcx, rax
 .ecd_copy:
-    lea     rdi, [rel out_buf]
+    lea     rdi, [out_buf]
     add     rdi, r12
     lea     rsi, [r14 + r15]
     push    rcx
@@ -3166,7 +2711,7 @@ emit_content_direct:
 ; ═══════════════════════════════════════════════════════════
 emit_newline:
     call    ensure_out_space_1
-    lea     rdi, [rel out_buf]
+    lea     rdi, [out_buf]
     mov     byte [rdi + r12], 10
     inc     r12
     ret
@@ -3199,7 +2744,7 @@ flush_output:
     test    r12, r12
     jz      .fo_ok
     mov     rdi, STDOUT
-    lea     rsi, [rel out_buf]
+    lea     rsi, [out_buf]
     mov     rdx, r12
     call    asm_write_all
     test    rax, rax
@@ -3267,11 +2812,11 @@ err_unrecognized_option:
     push    rbx
     mov     rbx, rsi
 
-    lea     rdi, [rel str_prefix]
+    lea     rdi, [str_prefix]
     mov     rsi, str_prefix_len
     call    write_stderr
 
-    lea     rdi, [rel str_unrecognized]
+    lea     rdi, [str_unrecognized]
     mov     rsi, str_unrecognized_len
     call    write_stderr
 
@@ -3281,11 +2826,11 @@ err_unrecognized_option:
     mov     rdi, rbx
     call    write_stderr
 
-    lea     rdi, [rel str_quote_nl]
+    lea     rdi, [str_quote_nl]
     mov     rsi, 2
     call    write_stderr
 
-    lea     rdi, [rel str_try_help]
+    lea     rdi, [str_try_help]
     mov     rsi, str_try_help_len
     call    write_stderr
 
@@ -3297,11 +2842,11 @@ err_invalid_option:
     push    rbx
     mov     rbx, rsi
 
-    lea     rdi, [rel str_prefix]
+    lea     rdi, [str_prefix]
     mov     rsi, str_prefix_len
     call    write_stderr
 
-    lea     rdi, [rel str_invalid_opt]
+    lea     rdi, [str_invalid_opt]
     mov     rsi, str_invalid_opt_len
     call    write_stderr
 
@@ -3310,11 +2855,11 @@ err_invalid_option:
     mov     rsi, 1
     call    write_stderr
 
-    lea     rdi, [rel str_quote_nl]
+    lea     rdi, [str_quote_nl]
     mov     rsi, 2
     call    write_stderr
 
-    lea     rdi, [rel str_try_help]
+    lea     rdi, [str_try_help]
     mov     rsi, str_try_help_len
     call    write_stderr
 
@@ -3328,7 +2873,7 @@ err_file:
     mov     rbx, rdi
     mov     r13d, esi
 
-    lea     rdi, [rel str_prefix]
+    lea     rdi, [str_prefix]
     mov     rsi, str_prefix_len
     call    write_stderr
 
@@ -3338,7 +2883,7 @@ err_file:
     mov     rdi, rbx
     call    write_stderr
 
-    lea     rdi, [rel str_colon_space]
+    lea     rdi, [str_colon_space]
     mov     rsi, 2
     call    write_stderr
 
@@ -3351,7 +2896,7 @@ err_file:
     mov     rdi, rbx
     call    write_stderr
 
-    lea     rdi, [rel str_newline_ch]
+    lea     rdi, [str_newline_ch]
     mov     rsi, 1
     call    write_stderr
 
@@ -3364,7 +2909,7 @@ print_error_simple:
     push    rbx
     mov     rbx, rdi
 
-    lea     rdi, [rel str_prefix]
+    lea     rdi, [str_prefix]
     mov     rsi, str_prefix_len
     call    write_stderr
 
@@ -3374,7 +2919,7 @@ print_error_simple:
     mov     rdi, rbx
     call    write_stderr
 
-    lea     rdi, [rel str_newline_ch]
+    lea     rdi, [str_newline_ch]
     mov     rsi, 1
     call    write_stderr
 
@@ -3405,44 +2950,45 @@ strerror:
     je      .se_emfile
     cmp     edi, 36
     je      .se_enametoolong
-    lea     rax, [rel str_eunknown]
+    lea     rax, [str_eunknown]
     ret
 .se_eperm:
-    lea     rax, [rel str_eperm]
+    lea     rax, [str_eperm]
     ret
 .se_enoent:
-    lea     rax, [rel str_enoent]
+    lea     rax, [str_enoent]
     ret
 .se_eio:
-    lea     rax, [rel str_eio]
+    lea     rax, [str_eio]
     ret
 .se_ebadf:
-    lea     rax, [rel str_ebadf]
+    lea     rax, [str_ebadf]
     ret
 .se_enomem:
-    lea     rax, [rel str_enomem]
+    lea     rax, [str_enomem]
     ret
 .se_eacces:
-    lea     rax, [rel str_eacces]
+    lea     rax, [str_eacces]
     ret
 .se_enotdir:
-    lea     rax, [rel str_enotdir]
+    lea     rax, [str_enotdir]
     ret
 .se_eisdir:
-    lea     rax, [rel str_eisdir]
+    lea     rax, [str_eisdir]
     ret
 .se_einval:
-    lea     rax, [rel str_einval]
+    lea     rax, [str_einval]
     ret
 .se_emfile:
-    lea     rax, [rel str_emfile]
+    lea     rax, [str_emfile]
     ret
 .se_enametoolong:
-    lea     rax, [rel str_enametoolong]
+    lea     rax, [str_enametoolong]
     ret
 
 ; ─── Data Section ────────────────────────────────────────
-section .data
+
+; ── Data Section ──
 
 align 16
 newline_pattern:
@@ -3560,55 +3106,85 @@ str_enametoolong:   db "File name too long", 0
 str_eunknown:       db "Unknown error", 0
 
 ; ─── BSS Section ─────────────────────────────────────────
-section .bss
 
-; I/O buffers
-read_buf:       resb READ_BUF_SIZE
-out_buf:        resb OUT_BUF_SIZE
-line_buf:       resb LINE_BUF_SIZE
-line_buf_used:  resq 1
+; ── io.asm routines (inlined) ──
+; io.asm — I/O library functions for fcoreutils assembly tools
 
-; Number formatting scratch
-itoa_buf:       resb 32
 
-; Prefix cache (pre-formatted number prefix for fast emit)
-prefix_buf:     resb 64
-prefix_valid:   resb 1
-               resb 7              ; padding
-prefix_total_len: resq 1
-prefix_digit_start: resq 1
-prefix_digit_end:   resq 1
 
-; Separator string
-separator:      resb MAX_SEP_LEN
+; asm_write(rdi=fd, rsi=buf, rdx=len) -> rax=bytes_written
+; Handles EINTR
+asm_write:
+.retry:
+    mov     rax, SYS_WRITE
+    syscall
+    cmp     rax, EINTR
+    je      .retry
+    ret
 
-; State variables
-body_style:     resb 1
-header_style:   resb 1
-footer_style:   resb 1
-num_format:     resb 1
-no_renumber:    resb 1
-cur_section:    resb 1
-delim_char1:    resb 1
-delim_char2:    resb 1
-delim_len:      resb 1
-is_default_opts: resb 1
-pad_bss:        resb 6
+; asm_write_all(rdi=fd, rsi=buf, rdx=len) -> rax=0 on success, -1 on error
+; Handles partial writes + EINTR
+asm_write_all:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rbx, rdi
+    mov     r12, rsi
+    mov     r13, rdx
+.loop:
+    test    r13, r13
+    jle     .success
+    mov     rdi, rbx
+    mov     rsi, r12
+    mov     rdx, r13
+    mov     rax, SYS_WRITE
+    syscall
+    cmp     rax, EINTR
+    je      .loop
+    test    rax, rax
+    js      .error
+    add     r12, rax
+    sub     r13, rax
+    jmp     .loop
+.success:
+    xor     eax, eax
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+.error:
+    mov     rax, -1
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
 
-line_number:    resq 1
-line_incr:      resq 1
-join_blank:     resq 1
-start_num:      resq 1
-num_width:      resq 1
-sep_len:        resq 1
-blank_count:    resq 1
-num_files:      resd 1
-argv_base:      resq 1
-argv_count:     resq 1
-arg_index:      resq 1
-line_start:     resq 1
-line_ptr:       resq 1
-line_len:       resq 1
-mmap_base:      resq 1
-mmap_size:      resq 1
-seen_dashdash:  resb 1
+; asm_read(rdi=fd, rsi=buf, rdx=len) -> rax=bytes_read
+asm_read:
+.retry:
+    mov     rax, SYS_READ
+    syscall
+    cmp     rax, EINTR
+    je      .retry
+    ret
+
+; asm_open(rdi=path, rsi=flags, rdx=mode) -> rax=fd
+asm_open:
+    mov     rax, SYS_OPEN
+    syscall
+    ret
+
+; asm_close(rdi=fd) -> rax=0 or error
+asm_close:
+    mov     rax, SYS_CLOSE
+    syscall
+    ret
+
+; asm_exit(rdi=code)
+asm_exit:
+    mov     rax, SYS_EXIT
+    syscall
+
+
+
+file_end:

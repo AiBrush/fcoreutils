@@ -1,5 +1,5 @@
 ; ============================================================================
-;  ffold.asm — GNU-compatible "fold" in x86_64 Linux assembly
+;  ffold.asm — GNU-compatible "fold" in x86_64 Linux assembly (SIMD optimized)
 ;
 ;  A drop-in replacement for GNU coreutils `fold`. Pure x86-64 assembly,
 ;  no libc, no dynamic linker. Handles all flags:
@@ -10,8 +10,11 @@
 ;    tab -> next multiple of 8, backspace -> col-1 (min 0),
 ;    \r -> col=0, \n -> output + col=0, all others -> col+1.
 ;
-;  Fold algorithm: when the NEXT byte would cause col > width, insert \n
-;  BEFORE that byte. With -s: backtrack to last blank instead.
+;  Optimization strategy:
+;    - mmap input files for zero-copy access
+;    - SSE2 SIMD to scan for special chars / newlines
+;    - Line-at-a-time processing: scan for next special char, bulk copy
+;    - Large output buffer (512KB) flushed only when near full
 ;
 ;  Register conventions (global state):
 ;    r12 = out_pos (bytes in output buffer)
@@ -34,11 +37,22 @@ extern asm_open
 extern asm_close
 
 ; ── Constants ──────────────────────────────────────────────
-%define READ_BUF_SIZE   131072          ; 128KB input buffer
+%define READ_BUF_SIZE   131072          ; 128KB input buffer (for stdin)
 %define OUT_BUF_SIZE    524288          ; 512KB output buffer
-%define FLUSH_THRESHOLD 262144          ; flush when output exceeds 256KB
+%define FLUSH_THRESHOLD 393216          ; flush when output exceeds 384KB
 %define MAX_FILES       256
 %define DEFAULT_WIDTH   80
+
+; mmap constants
+%define PROT_READ       1
+%define MAP_PRIVATE     2
+%define MAP_POPULATE    0x8000
+%define MADV_SEQUENTIAL 2
+%define SYS_MADVISE     28
+
+; struct stat offsets (x86-64)
+%define STAT_SIZE       144
+%define STAT_ST_SIZE    48
 
 global _start
 
@@ -50,21 +64,18 @@ section .text
 _start:
     BLOCK_SIGPIPE
 
-    ; Parse argc/argv from stack
-    mov     ecx, [rsp]                 ; argc
-    lea     r14, [rsp + 8]             ; &argv[0]
+    mov     ecx, [rsp]
+    lea     r14, [rsp + 8]
 
-    ; Initialize global state
-    xor     ebp, ebp                    ; had_error = 0
-    xor     r12d, r12d                  ; out_pos = 0
+    xor     ebp, ebp
+    xor     r12d, r12d
     mov     dword [width], DEFAULT_WIDTH
     mov     byte [flag_bytes], 0
     mov     byte [flag_spaces], 0
     mov     dword [num_files], 0
 
-    ; Skip argv[0] (program name)
     lea     rbx, [r14 + 8]
-    dec     ecx                         ; argc - 1
+    dec     ecx
     mov     [argc_rem], ecx
     mov     byte [past_dashdash], 0
 
@@ -83,12 +94,11 @@ _start:
     cmp     byte [rsi], '-'
     jne     .add_file
     cmp     byte [rsi + 1], 0
-    je      .add_file                   ; bare "-" is stdin
+    je      .add_file
 
     cmp     byte [rsi + 1], '-'
     je      .check_long
 
-    ; Short option(s)
     inc     rsi
     call    parse_short_options
     jmp     .next_arg
@@ -119,17 +129,19 @@ _start:
     jmp     .parse_loop
 
 .parse_done:
+    ; Initialize SSE2 constants
+    call    init_simd_constants
+
     mov     eax, [num_files]
     test    eax, eax
     jnz     .process_files
 
-    ; No files: process stdin
     mov     edi, STDIN
     call    process_fd
     jmp     .final_flush
 
 .process_files:
-    xor     r13d, r13d                  ; file index
+    xor     r13d, r13d
 .file_loop:
     cmp     r13d, [num_files]
     jge     .final_flush
@@ -171,6 +183,22 @@ _start:
     EXIT    rdi
 
 ; ============================================================================
+;  init_simd_constants
+; ============================================================================
+init_simd_constants:
+    ; xmm7 = all 0x0A (newline)
+    mov     eax, 0x0A0A0A0A
+    movd    xmm7, eax
+    pshufd  xmm7, xmm7, 0
+
+    ; xmm6 = all 0x0E (threshold: bytes < 0x0E are potentially special)
+    mov     eax, 0x0E0E0E0E
+    movd    xmm6, eax
+    pshufd  xmm6, xmm6, 0
+
+    ret
+
+; ============================================================================
 ;  parse_short_options(rsi = first option char after '-')
 ; ============================================================================
 parse_short_options:
@@ -208,17 +236,16 @@ parse_short_options:
     jl      .pso_width_next_arg
     cmp     al, '9'
     jg      .pso_width_next_arg
-    ; Digits follow: -w5 etc.
-    push    rsi                         ; save for error reporting
+    push    rsi
     call    parse_number
     test    eax, eax
     js      .pso_invalid_width_inline
     mov     [width], eax
-    add     rsp, 8                      ; discard saved rsi
+    add     rsp, 8
     jmp     .pso_loop
 
 .pso_invalid_width_inline:
-    pop     rsi                         ; restore value pointer
+    pop     rsi
     call    print_invalid_width
     mov     rdi, 1
     EXIT    rdi
@@ -230,14 +257,14 @@ parse_short_options:
     cmp     dword [argc_rem], 0
     jle     .pso_missing_width
     mov     rsi, [rbx]
-    push    rsi                         ; save for error reporting
+    push    rsi
     push    rbx
     call    parse_number
     pop     rbx
     test    eax, eax
     js      .pso_invalid_width_nextarg
     mov     [width], eax
-    add     rsp, 8                      ; discard saved rsi
+    add     rsp, 8
     push    rbx
     jmp     .pso_done
 
@@ -313,7 +340,6 @@ parse_long_option:
     test    eax, eax
     jz      .plo_spaces
 
-    ; --width=VALUE
     mov     rsi, [rbx]
     lea     rdi, [str_dashdash_width_eq]
     mov     ecx, 8
@@ -321,14 +347,12 @@ parse_long_option:
     test    eax, eax
     jz      .plo_width_eq
 
-    ; --width VALUE
     mov     rsi, [rbx]
     lea     rdi, [str_dashdash_width]
     call    strcmp
     test    eax, eax
     jz      .plo_width_sep
 
-    ; Unrecognized
     mov     rsi, [rbx]
     jmp     .plo_unrecognized
 
@@ -444,8 +468,7 @@ parse_long_option:
     EXIT    rdi
 
 ; ============================================================================
-;  parse_number(rsi = decimal string) -> eax = number, rsi advanced
-;  Returns -1 if invalid. Width of 0 is invalid.
+;  parse_number, print_invalid_width
 ; ============================================================================
 parse_number:
     xor     eax, eax
@@ -477,32 +500,23 @@ parse_number:
     mov     eax, -1
     ret
 
-; ============================================================================
-;  print_invalid_width(rsi = value string)
-;  "fold: invalid number of columns: 'VALUE': Numerical result out of range\n"
-; ============================================================================
 print_invalid_width:
     push    rbx
     mov     rbx, rsi
-
     lea     rdi, [str_prefix]
     mov     edx, str_prefix_len
     call    write_stderr
-
     lea     rdi, [str_invalid_width_pre]
     mov     edx, str_invalid_width_pre_len
     call    write_stderr
-
     mov     rdi, rbx
     call    strlen
     mov     edx, eax
     mov     rdi, rbx
     call    write_stderr
-
     lea     rdi, [str_invalid_width_suf]
     mov     edx, str_invalid_width_suf_len
     call    write_stderr
-
     pop     rbx
     ret
 
@@ -511,6 +525,8 @@ print_invalid_width:
 ; ============================================================================
 open_and_process:
     push    rbx
+    push    r14
+    push    r15
     mov     rbx, rsi
 
     mov     rdi, rsi
@@ -521,12 +537,70 @@ open_and_process:
     test    rax, rax
     js      .oap_error
 
-    push    rax
-    mov     edi, eax
-    call    process_fd
-    pop     rdi
+    mov     r14d, eax
+
+    sub     rsp, STAT_SIZE
+    mov     rdi, r14
+    mov     rsi, rsp
+    mov     rax, SYS_FSTAT
+    syscall
+    test    rax, rax
+    js      .oap_fstat_fail
+
+    mov     r15, [rsp + STAT_ST_SIZE]
+    add     rsp, STAT_SIZE
+
+    test    r15, r15
+    jz      .oap_try_read
+
+    xor     edi, edi
+    mov     rsi, r15
+    mov     edx, PROT_READ
+    mov     r10d, MAP_PRIVATE | MAP_POPULATE
+    mov     r8d, r14d
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
+    syscall
+    cmp     rax, -4096
+    ja      .oap_try_read
+
+    mov     [mmap_addr], rax
+    mov     [mmap_len], r15
+
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_SEQUENTIAL
+    mov     rax, SYS_MADVISE
+    syscall
+
+    mov     rdi, [mmap_addr]
+    mov     rsi, [mmap_len]
+    call    process_mmap
+
+    mov     rdi, [mmap_addr]
+    mov     rsi, [mmap_len]
+    mov     rax, SYS_MUNMAP
+    syscall
+
+    mov     rdi, r14
     mov     rax, SYS_CLOSE
     syscall
+
+    pop     r15
+    pop     r14
+    pop     rbx
+    ret
+
+.oap_fstat_fail:
+    add     rsp, STAT_SIZE
+.oap_try_read:
+    mov     edi, r14d
+    call    process_fd
+    mov     rdi, r14
+    mov     rax, SYS_CLOSE
+    syscall
+    pop     r15
+    pop     r14
     pop     rbx
     ret
 
@@ -536,25 +610,557 @@ open_and_process:
     mov     rsi, rbx
     call    err_open_file
     mov     ebp, 1
+    pop     r15
+    pop     r14
     pop     rbx
     ret
 
 ; ============================================================================
-;  process_fd(edi = fd)
+;  find_special_sse2(rbx=start, r13=end) -> rax = offset to first special char
+;  or (end-start) if none found.
+;  Special chars: bytes < 0x0E (covers \b=8, \t=9, \n=10, \r=13)
+;  Preserves: rbx, r13, r14, r15, r12, rbp
+;  Clobbers: rax, rcx, rdx, rsi, rdi, xmm0, xmm1, xmm2
+; ============================================================================
+find_special_sse2:
+    mov     rsi, rbx                    ; current scan position
+    mov     rcx, r13                    ; end
+
+    ; Process 16 bytes at a time
+.fs_simd_loop:
+    mov     rax, rcx
+    sub     rax, rsi
+    cmp     rax, 16
+    jl      .fs_tail
+
+    movdqu  xmm0, [rsi]
+    movdqa  xmm1, xmm0
+    psubusb xmm1, xmm6                 ; 0 where byte < 0x0E
+    pxor    xmm2, xmm2
+    pcmpeqb xmm1, xmm2                 ; 0xFF where special
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .fs_found
+
+    add     rsi, 16
+    jmp     .fs_simd_loop
+
+.fs_tail:
+    ; Check remaining bytes one at a time
+    cmp     rsi, rcx
+    jge     .fs_not_found
+    movzx   eax, byte [rsi]
+    cmp     al, 0x0E
+    jl      .fs_found_tail
+    inc     rsi
+    jmp     .fs_tail
+
+.fs_found:
+    bsf     eax, eax
+    add     rsi, rax
+.fs_found_tail:
+    mov     rax, rsi
+    sub     rax, rbx
+    ret
+
+.fs_not_found:
+    mov     rax, r13
+    sub     rax, rbx
+    ret
+
+; ============================================================================
+;  find_newline_sse2(rbx=start, r13=end) -> rax = offset to first newline
+;  or (end-start) if none found.
+;  Preserves: rbx, r13, r14, r15, r12, rbp
+; ============================================================================
+find_newline_sse2:
+    mov     rsi, rbx
+    mov     rcx, r13
+
+.fn_simd_loop:
+    mov     rax, rcx
+    sub     rax, rsi
+    cmp     rax, 16
+    jl      .fn_tail
+
+    movdqu  xmm0, [rsi]
+    movdqa  xmm1, xmm0
+    pcmpeqb xmm1, xmm7                 ; xmm7 = all 0x0A
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .fn_found
+
+    add     rsi, 16
+    jmp     .fn_simd_loop
+
+.fn_tail:
+    cmp     rsi, rcx
+    jge     .fn_not_found
+    cmp     byte [rsi], 10
+    je      .fn_found_tail
+    inc     rsi
+    jmp     .fn_tail
+
+.fn_found:
+    bsf     eax, eax
+    add     rsi, rax
+.fn_found_tail:
+    mov     rax, rsi
+    sub     rax, rbx
+    ret
+
+.fn_not_found:
+    mov     rax, r13
+    sub     rax, rbx
+    ret
+
+; ============================================================================
+;  bulk_copy_to_output(src=rsi_arg, count=rdx_arg)
+;  Copies count bytes from [rbx + offset] to out_buf using rep movsb.
+;  Uses: rsi (src), rdi (dst), rcx (count). Callee should set up.
+; ============================================================================
+
+; ============================================================================
+;  process_mmap(rdi = data_ptr, rsi = data_len)
 ;
-;  Core fold algorithm. For each byte of input:
-;    - In column mode: track column position with tab/bs/cr handling
-;    - In byte mode: just count bytes
-;    - When the NEXT character would exceed width, insert \n first
-;    - With -s: backtrack to last blank (space or tab) instead of hard break
-;
-;  Register usage inside process_fd:
-;    rbx = fd
+;  Register allocation (callee-saved to survive flush calls):
+;    rbx = current input pointer
+;    r13 = input end pointer (non -s modes) or stored in [input_end] for -s modes
 ;    r14 = column/byte count
 ;    r15 = last_blank_out_pos (-1 = none) for -s
-;    r13 = last_blank_col (col value AT the blank, used for col restore)
-;    [r12 = out_pos, global]
-;    [ebp = had_error, global]
+;    r12 = out_pos (global)
+;    ebp = had_error (global)
+; ============================================================================
+process_mmap:
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
+
+    mov     rbx, rdi
+    lea     r13, [rdi + rsi]
+
+    xor     r14d, r14d
+    mov     r15, -1
+
+    cmp     byte [flag_bytes], 0
+    jne     .pm_byte_dispatch
+    cmp     byte [flag_spaces], 0
+    jne     .pm_col_spaces_setup
+
+    ; ── Column mode, no -s: LINE-ORIENTED APPROACH ──
+    ; Strategy: scan for special chars with SIMD, bulk copy normal runs,
+    ; insert fold newlines every WIDTH bytes.
+    jmp     .pm_col_fast
+
+.pm_byte_dispatch:
+    cmp     byte [flag_spaces], 0
+    jne     .pm_byte_spaces_setup
+    jmp     .pm_byte_fast
+
+; ============================================================================
+;  Column mode fast path (no -s flag)
+;
+;  Algorithm: find distance to next special char with SIMD.
+;  Copy up to min(distance, width-col) normal bytes as a bulk operation.
+;  Then handle the special char (or insert fold newline if width reached).
+; ============================================================================
+.pm_col_fast:
+    mov     r8d, [width]
+
+.pm_cf_loop:
+    cmp     rbx, r13
+    jge     .pm_done
+
+    ; Flush output if needed
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .pm_cf_no_flush
+    push    r8
+    call    flush_output_safe
+    pop     r8
+.pm_cf_no_flush:
+
+    ; Find distance to next special char (< 0x0E)
+    call    find_special_sse2           ; rax = offset to first special (or remaining)
+
+    ; How many normal bytes can we emit before hitting width or special char?
+    ; Available columns = width - col
+    mov     ecx, r8d
+    sub     ecx, r14d                   ; available = width - col
+    test    ecx, ecx
+    jle     .pm_cf_need_fold            ; col >= width, need fold
+
+    ; clamp normal_count to available
+    cmp     rax, rcx
+    jle     .pm_cf_copy_rax
+    ; More normal bytes than available columns.
+    ; Copy 'available' bytes, then we need to fold.
+    mov     eax, ecx                    ; copy exactly 'available' bytes
+
+.pm_cf_copy_rax:
+    ; Copy rax normal bytes from [rbx] to out_buf
+    test    rax, rax
+    jz      .pm_cf_at_special           ; no normal bytes, handle special
+
+    ; Ensure output buffer has enough space (rax + 16 headroom)
+    lea     rdx, [r12 + rax + 16]
+    cmp     rdx, OUT_BUF_SIZE
+    jl      .pm_cf_copy_ok
+    ; Need flush first
+    push    rax
+    push    r8
+    call    flush_output_safe
+    pop     r8
+    pop     rax
+.pm_cf_copy_ok:
+    ; Bulk copy using rep movsb (ERMS optimized on modern CPUs)
+    push    r13                         ; save (rep movsb clobbers rcx/rsi/rdi)
+    lea     rdi, [out_buf + r12]
+    mov     rsi, rbx
+    mov     rcx, rax
+    rep movsb
+    pop     r13
+    add     r12, rax
+    add     rbx, rax
+    add     r14d, eax
+    jmp     .pm_cf_loop
+
+.pm_cf_need_fold:
+    ; col >= width: insert fold newline
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    jmp     .pm_cf_loop
+
+.pm_cf_at_special:
+    ; We're at a special char (< 0x0E)
+    cmp     rbx, r13
+    jge     .pm_done
+
+    movzx   eax, byte [rbx]
+
+    cmp     al, 10
+    je      .pm_cf_newline
+    cmp     al, 9
+    je      .pm_cf_tab
+    cmp     al, 8
+    je      .pm_cf_backspace
+    cmp     al, 13
+    je      .pm_cf_cr
+
+    ; Other control chars (0x00-0x07, 0x0B, 0x0C): treated as regular by GNU fold
+    ; Check if col+1 > width
+    lea     edx, [r14d + 1]
+    cmp     edx, r8d
+    jle     .pm_cf_ctrl_ok
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+.pm_cf_ctrl_ok:
+    inc     r14d
+    mov     [out_buf + r12], al
+    inc     r12
+    inc     rbx
+    jmp     .pm_cf_loop
+
+.pm_cf_newline:
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    inc     rbx
+    jmp     .pm_cf_loop
+
+.pm_cf_backspace:
+    test    r14d, r14d
+    jz      .pm_cf_bs_emit
+    dec     r14d
+.pm_cf_bs_emit:
+    mov     byte [out_buf + r12], 8
+    inc     r12
+    inc     rbx
+    jmp     .pm_cf_loop
+
+.pm_cf_cr:
+    xor     r14d, r14d
+    mov     byte [out_buf + r12], 13
+    inc     r12
+    inc     rbx
+    jmp     .pm_cf_loop
+
+.pm_cf_tab:
+    mov     eax, r14d
+    add     eax, 8
+    and     eax, ~7
+
+    cmp     eax, r8d
+    jle     .pm_cf_tab_no_prefold
+    test    r14d, r14d
+    jz      .pm_cf_tab_no_prefold
+
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    mov     eax, 8
+
+.pm_cf_tab_no_prefold:
+    mov     r14d, eax
+    mov     byte [out_buf + r12], 9
+    inc     r12
+
+    cmp     r14d, r8d
+    jle     .pm_cf_tab_done
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+
+.pm_cf_tab_done:
+    inc     rbx
+    jmp     .pm_cf_loop
+
+; ============================================================================
+;  Column mode with -s flag
+; ============================================================================
+.pm_col_spaces_setup:
+    mov     [input_end], r13
+    xor     r13d, r13d                  ; blank_col = 0
+
+.pm_cs_loop:
+    cmp     rbx, [input_end]
+    jge     .pm_done
+
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .pm_cs_no_flush
+    call    flush_output_safe
+.pm_cs_no_flush:
+
+    movzx   eax, byte [rbx]
+
+    cmp     al, 10
+    je      .pm_cs_newline
+    cmp     al, 8
+    je      .pm_cs_backspace
+    cmp     al, 13
+    je      .pm_cs_cr
+    cmp     al, 9
+    je      .pm_cs_tab
+
+    lea     edx, [r14d + 1]
+    cmp     edx, [width]
+    jle     .pm_cs_regular_ok
+    call    fold_line
+
+.pm_cs_regular_ok:
+    inc     r14d
+
+    cmp     al, ' '
+    jne     .pm_cs_regular_emit
+    lea     rax, [r12 + 1]
+    mov     r15, rax
+    mov     r13d, r14d
+
+.pm_cs_regular_emit:
+    mov     [out_buf + r12], al
+    inc     r12
+    inc     rbx
+    jmp     .pm_cs_loop
+
+.pm_cs_newline:
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    mov     r15, -1
+    inc     rbx
+    jmp     .pm_cs_loop
+
+.pm_cs_backspace:
+    test    r14d, r14d
+    jz      .pm_cs_bs_emit
+    dec     r14d
+.pm_cs_bs_emit:
+    mov     byte [out_buf + r12], 8
+    inc     r12
+    inc     rbx
+    jmp     .pm_cs_loop
+
+.pm_cs_cr:
+    xor     r14d, r14d
+    mov     byte [out_buf + r12], 13
+    inc     r12
+    inc     rbx
+    jmp     .pm_cs_loop
+
+.pm_cs_tab:
+    mov     eax, r14d
+    add     eax, 8
+    and     eax, ~7
+
+    cmp     eax, [width]
+    jle     .pm_cs_tab_no_prefold
+    test    r14d, r14d
+    jz      .pm_cs_tab_no_prefold
+
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    mov     r15, -1
+    mov     eax, 8
+
+.pm_cs_tab_no_prefold:
+    mov     r14d, eax
+    lea     rax, [r12 + 1]
+    mov     r15, rax
+    mov     r13d, r14d
+    mov     byte [out_buf + r12], 9
+    inc     r12
+
+    mov     ecx, [width]
+    cmp     r14d, ecx
+    jle     .pm_cs_tab_done
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    mov     r15, -1
+
+.pm_cs_tab_done:
+    inc     rbx
+    jmp     .pm_cs_loop
+
+; ============================================================================
+;  Byte mode fast path (no -s flag)
+;  Strategy: find next newline with SIMD, bulk copy chunks of WIDTH bytes
+;  inserting fold newlines as needed.
+; ============================================================================
+.pm_byte_fast:
+    mov     r8d, [width]
+
+.pm_bf_loop:
+    cmp     rbx, r13
+    jge     .pm_done
+
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .pm_bf_no_flush
+    push    r8
+    call    flush_output_safe
+    pop     r8
+.pm_bf_no_flush:
+
+    ; Find distance to next newline
+    call    find_newline_sse2           ; rax = offset to first newline (or remaining)
+
+    ; How many bytes can we emit before hitting width or newline?
+    mov     ecx, r8d
+    sub     ecx, r14d                   ; available = width - count
+    test    ecx, ecx
+    jle     .pm_bf_need_fold
+
+    cmp     rax, rcx
+    jle     .pm_bf_copy_rax
+    mov     eax, ecx
+
+.pm_bf_copy_rax:
+    test    rax, rax
+    jz      .pm_bf_at_newline
+
+    lea     rdx, [r12 + rax + 16]
+    cmp     rdx, OUT_BUF_SIZE
+    jl      .pm_bf_copy_ok
+    push    rax
+    push    r8
+    call    flush_output_safe
+    pop     r8
+    pop     rax
+.pm_bf_copy_ok:
+    push    r13
+    lea     rdi, [out_buf + r12]
+    mov     rsi, rbx
+    mov     rcx, rax
+    rep movsb
+    pop     r13
+    add     r12, rax
+    add     rbx, rax
+    add     r14d, eax
+    jmp     .pm_bf_loop
+
+.pm_bf_need_fold:
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    jmp     .pm_bf_loop
+
+.pm_bf_at_newline:
+    cmp     rbx, r13
+    jge     .pm_done
+    ; It should be a newline
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    inc     rbx
+    jmp     .pm_bf_loop
+
+; ============================================================================
+;  Byte mode with -s
+; ============================================================================
+.pm_byte_spaces_setup:
+    mov     [input_end], r13
+    xor     r13d, r13d
+
+.pm_bs_loop:
+    cmp     rbx, [input_end]
+    jge     .pm_done
+
+    cmp     r12, FLUSH_THRESHOLD
+    jl      .pm_bs_no_flush
+    call    flush_output_safe
+.pm_bs_no_flush:
+
+    movzx   eax, byte [rbx]
+
+    cmp     al, 10
+    je      .pm_bs_newline
+
+    lea     edx, [r14d + 1]
+    cmp     edx, [width]
+    jle     .pm_bs_ok
+    call    fold_line
+
+.pm_bs_ok:
+    inc     r14d
+
+    cmp     al, ' '
+    je      .pm_bs_mark_blank
+    cmp     al, 9
+    je      .pm_bs_mark_blank
+    jmp     .pm_bs_emit
+
+.pm_bs_mark_blank:
+    lea     rax, [r12 + 1]
+    mov     r15, rax
+    mov     r13d, r14d
+
+.pm_bs_emit:
+    mov     [out_buf + r12], al
+    inc     r12
+    inc     rbx
+    jmp     .pm_bs_loop
+
+.pm_bs_newline:
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    mov     r15, -1
+    inc     rbx
+    jmp     .pm_bs_loop
+
+; ── Common exit ──
+.pm_done:
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
+    ret
+
+; ============================================================================
+;  process_fd(edi = fd) — read-based fallback (for stdin/pipes)
 ; ============================================================================
 process_fd:
     push    rbx
@@ -563,9 +1169,9 @@ process_fd:
     push    r13
 
     mov     ebx, edi
-    xor     r14d, r14d                  ; col = 0
-    mov     r15, -1                     ; no blank tracked
-    xor     r13d, r13d                  ; last_blank_col = 0
+    xor     r14d, r14d
+    mov     r15, -1
+    xor     r13d, r13d
 
 .pf_read_loop:
     mov     edi, ebx
@@ -576,16 +1182,12 @@ process_fd:
     js      .pf_read_error
     jz      .pf_done
 
-    xor     r8d, r8d                    ; offset = 0
-    mov     r9, rax                     ; bytes read
+    xor     r8d, r8d
+    mov     r9, rax
 
     cmp     byte [flag_bytes], 0
     jne     .pf_byte_loop
 
-; ── Column mode loop ──────────────────────────────────────
-; Algorithm: for each byte, compute what the new column would be.
-; If new_col > width, fold first (insert \n), then emit the byte.
-; Special: \n always emitted, resets col. \b, \r never trigger fold.
 .pf_col_loop:
     cmp     r8, r9
     jge     .pf_read_loop
@@ -601,32 +1203,24 @@ process_fd:
     cmp     al, 9
     je      .pf_col_tab
 
-    ; Regular byte: new_col = col + 1
-    lea     edx, [r14d + 1]            ; proposed new column
+    lea     edx, [r14d + 1]
     mov     ecx, [width]
     cmp     edx, ecx
     jle     .pf_col_regular_ok
-
-    ; Would exceed width: fold first
-    ; fold_line sets r14d to base count (0 for hard, remaining for -s)
     call    fold_line
 
 .pf_col_regular_ok:
-    inc     r14d                        ; col += 1 (for this byte)
+    inc     r14d
 
-    ; Track blank for -s
     cmp     byte [flag_spaces], 0
     je      .pf_col_regular_emit
     cmp     byte [read_buf + r8], ' '
     jne     .pf_col_regular_emit
-    ; Record this space: break point is after writing it
-    ; out_pos+1 will be where \n goes; r14 is col after space
     lea     rax, [r12 + 1]
-    mov     r15, rax                    ; blank_out_pos
-    mov     r13d, r14d                  ; blank_col
+    mov     r15, rax
+    mov     r13d, r14d
 
 .pf_col_regular_emit:
-    ; Emit the byte
     mov     al, [read_buf + r8]
     mov     [out_buf + r12], al
     inc     r12
@@ -634,19 +1228,15 @@ process_fd:
     cmp     r12, FLUSH_THRESHOLD
     jl      .pf_col_next
     call    flush_output_safe
-    jmp     .pf_col_next
-
 .pf_col_next:
     inc     r8
     jmp     .pf_col_loop
 
 .pf_col_newline:
-    ; Output \n, reset everything
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
     mov     r15, -1
-
     cmp     r12, FLUSH_THRESHOLD
     jl      .pf_col_nl_next
     call    flush_output_safe
@@ -655,7 +1245,6 @@ process_fd:
     jmp     .pf_col_loop
 
 .pf_col_backspace:
-    ; col = max(0, col-1); emit byte
     test    r14d, r14d
     jz      .pf_col_bs_emit
     dec     r14d
@@ -670,7 +1259,6 @@ process_fd:
     jmp     .pf_col_loop
 
 .pf_col_cr:
-    ; col = 0; emit byte
     xor     r14d, r14d
     mov     byte [out_buf + r12], 13
     inc     r12
@@ -682,30 +1270,25 @@ process_fd:
     jmp     .pf_col_loop
 
 .pf_col_tab:
-    ; new_col = (col + 8) & ~7
     mov     eax, r14d
     add     eax, 8
-    and     eax, ~7                     ; proposed new column
+    and     eax, ~7
 
-    ; If tab would push past width AND col > 0: fold BEFORE the tab
     mov     ecx, [width]
     cmp     eax, ecx
     jle     .pf_col_tab_no_prefold
     test    r14d, r14d
     jz      .pf_col_tab_no_prefold
 
-    ; Fold before tab: insert \n, reset col, recompute tab col
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
     mov     r15, -1
-    ; Recompute: tab from col 0 goes to 8
-    mov     eax, 8                      ; (0 + 8) & ~7 = 8
+    mov     eax, 8
 
 .pf_col_tab_no_prefold:
-    mov     r14d, eax                   ; col = new_col
+    mov     r14d, eax
 
-    ; Track tab as blank for -s
     cmp     byte [flag_spaces], 0
     je      .pf_col_tab_emit
     lea     rax, [r12 + 1]
@@ -716,12 +1299,9 @@ process_fd:
     mov     byte [out_buf + r12], 9
     inc     r12
 
-    ; If col > width after tab (e.g., tab from col 0 goes to 8, width < 8),
-    ; fold after the tab
     mov     ecx, [width]
     cmp     r14d, ecx
     jle     .pf_col_tab_no_fold
-
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
@@ -735,8 +1315,6 @@ process_fd:
     inc     r8
     jmp     .pf_col_loop
 
-; ── Byte mode loop ────────────────────────────────────────
-; Count bytes. When count would exceed width, fold. \n resets.
 .pf_byte_loop:
     cmp     r8, r9
     jge     .pf_read_loop
@@ -746,20 +1324,15 @@ process_fd:
     cmp     al, 10
     je      .pf_byte_newline
 
-    ; Check if count+1 > width
     lea     edx, [r14d + 1]
     mov     ecx, [width]
     cmp     edx, ecx
     jle     .pf_byte_ok
-
-    ; Would exceed: fold first
-    ; fold_line sets r14d to base count (0 for hard, remaining for -s)
     call    fold_line
 
 .pf_byte_ok:
-    inc     r14d                        ; count += 1 (for this byte)
+    inc     r14d
 
-    ; Track blank for -s
     cmp     byte [flag_spaces], 0
     je      .pf_byte_emit
     movzx   eax, byte [read_buf + r8]
@@ -778,7 +1351,6 @@ process_fd:
     mov     al, [read_buf + r8]
     mov     [out_buf + r12], al
     inc     r12
-
     cmp     r12, FLUSH_THRESHOLD
     jl      .pf_byte_next
     call    flush_output_safe
@@ -791,7 +1363,6 @@ process_fd:
     inc     r12
     xor     r14d, r14d
     mov     r15, -1
-
     cmp     r12, FLUSH_THRESHOLD
     jl      .pf_byte_nl_next
     call    flush_output_safe
@@ -810,9 +1381,6 @@ process_fd:
 
 ; ============================================================================
 ;  fold_line()
-;  Insert fold point. If -s and blank tracked, break at blank. Else hard break.
-;  Resets r14 (col), r15 (blank tracking).
-;  Preserves r8, r9 (loop state).
 ; ============================================================================
 fold_line:
     cmp     byte [flag_spaces], 0
@@ -820,17 +1388,13 @@ fold_line:
     cmp     r15, -1
     je      .fl_hard
 
-    ; -s mode: insert \n at last_blank_out_pos
-    ; Shift bytes [blank_out_pos .. r12) right by 1, insert \n at blank_out_pos
     mov     rax, r12
-    sub     rax, r15                    ; bytes to shift
+    sub     rax, r15
 
-    ; Ensure buffer space
     lea     rdx, [r12 + 1]
     cmp     rdx, OUT_BUF_SIZE
-    jge     .fl_hard                    ; buffer full, fall back to hard break
+    jge     .fl_hard
 
-    ; Shift bytes right by 1 (backwards copy for overlap safety)
     test    rax, rax
     jz      .fl_space_insert
 
@@ -848,15 +1412,11 @@ fold_line:
 .fl_space_insert:
     mov     byte [out_buf + r15], 10
     inc     r12
-
-    ; Reset col: col = (current_col - blank_col)
-    ; The bytes after the blank had columns counted from blank_col
     sub     r14d, r13d
     mov     r15, -1
     ret
 
 .fl_hard:
-    ; Insert \n at current position
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
@@ -864,8 +1424,7 @@ fold_line:
     ret
 
 ; ============================================================================
-;  flush_output_safe()
-;  Flushes output buffer. Invalidates blank tracking (r15 = -1).
+;  flush_output_safe, flush_output
 ; ============================================================================
 flush_output_safe:
     call    flush_output
@@ -878,9 +1437,6 @@ flush_output_safe:
     mov     r15, -1
     ret
 
-; ============================================================================
-;  flush_output() -> rax = 0 success, -1 error. Resets r12.
-; ============================================================================
 flush_output:
     test    r12, r12
     jz      .fo_nothing
@@ -949,7 +1505,7 @@ strlen:
 write_stderr:
     mov     rsi, rdi
     mov     rdi, STDERR
-    mov     edx, edx                    ; zero-extend
+    mov     edx, edx
     call    asm_write_all
     ret
 
@@ -981,21 +1537,17 @@ err_open_file:
     push    r13
     mov     r13d, edi
     mov     rbx, rsi
-
     lea     rdi, [str_prefix]
     mov     edx, str_prefix_len
     call    write_stderr
-
     mov     rdi, rbx
     call    strlen
     mov     rdx, rax
     mov     rdi, rbx
     call    write_stderr_buf
-
     lea     rdi, [str_colon_space]
     mov     edx, 2
     call    write_stderr
-
     mov     edi, r13d
     call    strerror
     mov     rbx, rax
@@ -1004,11 +1556,9 @@ err_open_file:
     mov     rdx, rax
     mov     rdi, rbx
     call    write_stderr_buf
-
     lea     rdi, [str_newline]
     mov     edx, 1
     call    write_stderr
-
     pop     r13
     pop     rbx
     ret
@@ -1038,38 +1588,27 @@ strerror:
     je      .se_enametoolong
     lea     rax, [str_eunknown]
     ret
-.se_eperm:
-    lea     rax, [str_eperm]
+.se_eperm:  lea rax, [str_eperm]
     ret
-.se_enoent:
-    lea     rax, [str_enoent]
+.se_enoent: lea rax, [str_enoent]
     ret
-.se_eio:
-    lea     rax, [str_eio]
+.se_eio:    lea rax, [str_eio]
     ret
-.se_ebadf:
-    lea     rax, [str_ebadf]
+.se_ebadf:  lea rax, [str_ebadf]
     ret
-.se_enomem:
-    lea     rax, [str_enomem]
+.se_enomem: lea rax, [str_enomem]
     ret
-.se_eacces:
-    lea     rax, [str_eacces]
+.se_eacces: lea rax, [str_eacces]
     ret
-.se_enotdir:
-    lea     rax, [str_enotdir]
+.se_enotdir: lea rax, [str_enotdir]
     ret
-.se_eisdir:
-    lea     rax, [str_eisdir]
+.se_eisdir: lea rax, [str_eisdir]
     ret
-.se_einval:
-    lea     rax, [str_einval]
+.se_einval: lea rax, [str_einval]
     ret
-.se_emfile:
-    lea     rax, [str_emfile]
+.se_emfile: lea rax, [str_emfile]
     ret
-.se_enametoolong:
-    lea     rax, [str_enametoolong]
+.se_enametoolong: lea rax, [str_enametoolong]
     ret
 
 ; ============================================================================
@@ -1173,6 +1712,11 @@ opt_char_buf:       resb 2
 num_files:          resd 1
 files:              resq MAX_FILES
 
+mmap_addr:          resq 1
+mmap_len:           resq 1
+input_end:          resq 1
+
+alignb 16
 read_buf:           resb READ_BUF_SIZE
 out_buf:            resb OUT_BUF_SIZE
 
