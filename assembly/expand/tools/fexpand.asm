@@ -53,8 +53,8 @@ extern asm_close
 %define ST_SIZE_OFF      48       ; offset of st_size in struct stat
 
 ; Large output buffer
-%define OUT_BUF_SIZE_BIG   524288
-%define FLUSH_THRESHOLD_BIG 262144
+%define OUT_BUF_SIZE_BIG   1048576
+%define FLUSH_THRESHOLD_BIG 786432
 
 global _start
 
@@ -223,7 +223,7 @@ _start:
     push    rbx
     mov     r13d, 1
     mov     edi, STDIN
-    call    process_fd
+    call    try_mmap_or_read
     pop     rbx
     jmp     .parse_next
 
@@ -252,7 +252,7 @@ _start:
     test    r13, r13
     jnz     .final_flush
     mov     edi, STDIN
-    call    process_fd
+    call    try_mmap_or_read
 
 .final_flush:
     call    flush_output
@@ -619,6 +619,91 @@ skip_number:
 .sn_done:
     ret
 
+; ─── try_mmap_or_read(edi=fd) ──────────────────────────────
+; Try to mmap the fd (works for regular files, even stdin redirected from file).
+; Falls back to read() for pipes/sockets.
+try_mmap_or_read:
+    push    r14
+    push    r15
+    mov     r14d, edi               ; save fd
+
+    ; fstat to get file size
+    sub     rsp, STAT_SIZE
+    mov     edi, r14d
+    mov     rsi, rsp
+    mov     rax, SYS_FSTAT
+    syscall
+    test    rax, rax
+    js      .tmor_fstat_fail        ; fstat failed
+
+    mov     r15, [rsp + ST_SIZE_OFF]
+    add     rsp, STAT_SIZE
+
+    test    r15, r15
+    jle     .tmor_read              ; size 0 or negative, use read
+
+    ; Try mmap
+    xor     edi, edi
+    mov     rsi, r15
+    mov     edx, PROT_READ
+    mov     r10d, MAP_PRIVATE | MAP_POPULATE
+    mov     r8d, r14d
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
+    syscall
+    test    rax, rax
+    js      .tmor_read              ; mmap failed, use read
+
+    push    rax
+    push    r15
+
+    ; madvise SEQUENTIAL
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_SEQUENTIAL
+    mov     rax, SYS_MADVISE
+    syscall
+
+    ; madvise HUGEPAGE
+    pop     r15
+    pop     rax
+    push    rax
+    push    r15
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_HUGEPAGE
+    mov     rax, SYS_MADVISE
+    syscall
+
+    ; Process mmap'd data
+    pop     r15
+    pop     rax
+    push    rax
+    push    r15
+
+    mov     r8, rax
+    lea     r9, [rax + r15]
+    call    process_mmap_region
+
+    ; munmap
+    pop     rsi
+    pop     rdi
+    mov     rax, SYS_MUNMAP
+    syscall
+
+    pop     r15
+    pop     r14
+    ret
+
+.tmor_fstat_fail:
+    add     rsp, STAT_SIZE          ; clean up stat struct from stack
+.tmor_read:
+    mov     edi, r14d
+    call    process_fd
+    pop     r15
+    pop     r14
+    ret
+
 ; ─── open_and_process(rsi=filename) ──────────────────────
 ; Opens a file, tries mmap first, falls back to read() for empty/special files
 open_and_process:
@@ -673,6 +758,17 @@ open_and_process:
     mov     rdi, rax
     mov     rsi, r15
     mov     edx, MADV_SEQUENTIAL
+    mov     rax, SYS_MADVISE
+    syscall
+
+    ; madvise(addr, len, MADV_HUGEPAGE) — use transparent huge pages
+    pop     r15                     ; mmap size
+    pop     rax                     ; mmap address
+    push    rax
+    push    r15
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_HUGEPAGE
     mov     rax, SYS_MADVISE
     syscall
     ; ignore madvise errors
@@ -805,6 +901,9 @@ process_mmap_region:
     je      .pmr_list_mode
 
     ; ━━━ FAST PATH: uniform tabs, no -i ━━━━━━━━━━━━━━━━━━━
+    ; Pre-load SIMD constant into register to avoid memory loads in hot loop
+    movdqa  xmm6, [rel special_threshold]
+    pxor    xmm7, xmm7                 ; permanent zero for pcmpeqb
     jmp     .pf_fast_simd
 
     ; ━━━ LIST MODE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -816,6 +915,8 @@ process_mmap_region:
     jmp     .pf_initial_mode
 
 ; ─── FAST PATH: uniform tabs ────────────────────────────
+; Streamlined approach: SIMD scan → find first special → bulk copy before it
+; → handle special → repeat. No window loop — simpler and fewer branches.
 .pf_fast_simd:
     ; Ensure output buffer has room
     lea     rax, [rel out_buf + FLUSH_THRESHOLD_BIG]
@@ -833,81 +934,113 @@ process_mmap_region:
 .pf_fast_simd_scan:
     mov     rax, r9
     sub     rax, r8
-    cmp     rax, 16
-    jl      .pf_fast_scalar_loop
+    cmp     rax, 64
+    jl      .pf_fast_32_check
 
-    ; Load 16 bytes from input
+    ; 64-byte path: check 4x16 in parallel
     movdqu  xmm0, [r8]
-    ; Check for tab (0x09) | newline (0x0A) | backspace (0x08)
+    movdqu  xmm1, [r8 + 16]
+    movdqu  xmm2, [r8 + 32]
+    movdqu  xmm3, [r8 + 48]
     movdqa  xmm4, xmm0
-    pcmpeqb xmm4, [rel tab_pattern]
-    movdqa  xmm5, xmm0
-    pcmpeqb xmm5, [rel newline_pattern]
+    psubusb xmm4, xmm6
+    pcmpeqb xmm4, xmm7
+    movdqa  xmm5, xmm1
+    psubusb xmm5, xmm6
+    pcmpeqb xmm5, xmm7
     por     xmm4, xmm5
-    movdqa  xmm5, xmm0
-    pcmpeqb xmm5, [rel backspace_pattern]
+    movdqa  xmm5, xmm2
+    psubusb xmm5, xmm6
+    pcmpeqb xmm5, xmm7
+    por     xmm4, xmm5
+    movdqa  xmm5, xmm3
+    psubusb xmm5, xmm6
+    pcmpeqb xmm5, xmm7
     por     xmm4, xmm5
     pmovmskb eax, xmm4
     test    eax, eax
-    jnz     .pf_fast_simd_special
+    jnz     .pf_fast_64_special
 
-    ; No special chars in 16 bytes — bulk copy
+    ; No specials in 64 bytes — bulk copy all 4 chunks
+    movdqu  [r10], xmm0
+    movdqu  [r10 + 16], xmm1
+    movdqu  [r10 + 32], xmm2
+    movdqu  [r10 + 48], xmm3
+    add     r8, 64
+    add     r10, 64
+    add     r14, 64
+    jmp     .pf_fast_simd
+
+.pf_fast_64_special:
+    ; Fall through to 16-byte processing (data in cache)
+
+.pf_fast_32_check:
+    cmp     rax, 16
+    jl      .pf_fast_scalar_loop
+
+    ; 16-byte scan: find first special
+    movdqu  xmm0, [r8]
+    movdqa  xmm4, xmm0
+    psubusb xmm4, xmm6
+    pcmpeqb xmm4, xmm7
+    pmovmskb eax, xmm4
+    test    eax, eax
+    jnz     .pf_fast_has_special
+
+    ; No specials — bulk copy 16 bytes
     movdqu  [r10], xmm0
     add     r8, 16
     add     r10, 16
     add     r14, 16
     jmp     .pf_fast_simd
 
-.pf_fast_simd_special:
-    ; Find position of first special char
-    bsf     ecx, eax
+.pf_fast_has_special:
+    ; eax = bitmask, find position of first special
+    bsf     ecx, eax                    ; ecx = offset to first special
+
+    ; Copy normal bytes before the special (0 to 15 bytes)
     test    ecx, ecx
-    jz      .pf_fast_scalar         ; special at pos 0
+    jz      .pf_fast_at_special         ; first byte is special
 
-    ; Copy ecx regular bytes before the special char using small unrolled copies
-    movzx   edx, cl
-    add     r14, rdx                ; column += count
-
-    ; Small copy: edx is 1-15 bytes
-    cmp     edx, 8
+    ; Bulk copy ecx bytes using SIMD partial store
+    ; xmm0 already has the data; use overlapping write for < 16 bytes
+    add     r14, rcx
+    cmp     ecx, 8
     jl      .pf_fast_copy_small
-    ; 8-15 bytes: two overlapping 8-byte copies
-    mov     rcx, [r8]
-    mov     [r10], rcx
-    mov     rcx, [r8 + rdx - 8]
-    mov     [r10 + rdx - 8], rcx
+    ; 8-15 bytes: two overlapping 8-byte stores
+    movq    [r10], xmm0
+    lea     rsi, [r8 + rcx - 8]
+    mov     rax, [rsi]
+    mov     [r10 + rcx - 8], rax
     jmp     .pf_fast_copy_done
 .pf_fast_copy_small:
-    cmp     edx, 4
+    cmp     ecx, 4
     jl      .pf_fast_copy_tiny
-    ; 4-7 bytes: two overlapping 4-byte copies
-    mov     ecx, [r8]
-    mov     [r10], ecx
-    mov     ecx, [r8 + rdx - 4]
-    mov     [r10 + rdx - 4], ecx
+    mov     eax, [r8]
+    mov     [r10], eax
+    mov     eax, [r8 + rcx - 4]
+    mov     [r10 + rcx - 4], eax
     jmp     .pf_fast_copy_done
 .pf_fast_copy_tiny:
-    ; 1-3 bytes: byte-by-byte
-    mov     cl, [r8]
-    mov     [r10], cl
-    cmp     edx, 1
-    je      .pf_fast_copy_done
-    mov     cl, [r8+1]
-    mov     [r10+1], cl
-    cmp     edx, 2
-    je      .pf_fast_copy_done
-    mov     cl, [r8+2]
-    mov     [r10+2], cl
-.pf_fast_copy_done:
-    add     r8, rdx
-    add     r10, rdx
-    ; Fall through to scalar for the special byte
-
-.pf_fast_scalar:
-    cmp     r8, r9
-    jge     .pf_fast_done
-
+    ; 1-3 bytes
     movzx   eax, byte [r8]
+    mov     [r10], al
+    cmp     ecx, 1
+    je      .pf_fast_copy_done
+    movzx   eax, byte [r8 + 1]
+    mov     [r10 + 1], al
+    cmp     ecx, 2
+    je      .pf_fast_copy_done
+    movzx   eax, byte [r8 + 2]
+    mov     [r10 + 2], al
+.pf_fast_copy_done:
+    add     r10, rcx
+    add     r8, rcx
+
+.pf_fast_at_special:
+    ; r8 points to the special char, handle it
+    movzx   eax, byte [r8]
+    inc     r8
 
     cmp     al, 9
     je      .pf_fast_tab
@@ -915,72 +1048,41 @@ process_mmap_region:
     je      .pf_fast_newline
     cmp     al, 8
     je      .pf_fast_backspace
-
-    ; Regular char: copy and advance
+    ; Other control char: copy verbatim
     mov     [r10], al
     inc     r10
     inc     r14
-    inc     r8
     jmp     .pf_fast_simd
 
-.pf_fast_scalar_loop:
-    ; Tail: process remaining bytes one by one
-    cmp     r8, r9
-    jge     .pf_fast_done
-
-    movzx   eax, byte [r8]
-
-    cmp     al, 9
-    je      .pf_fast_tab
-    cmp     al, 10
-    je      .pf_fast_newline
-    cmp     al, 8
-    je      .pf_fast_backspace
-
-    ; Regular char
-    mov     [r10], al
-    inc     r10
-    inc     r14
-    inc     r8
-    jmp     .pf_fast_scalar_loop
-
 .pf_fast_tab:
-    ; Uniform tab expansion
-    ; Calculate spaces: tab_width - (column % tab_width)
     test    r15, r15
     jz      .pf_fast_tab_div
-
-    ; Power-of-2: column & mask
     mov     eax, r14d
-    and     eax, r15d               ; column % tab_width
-    mov     ecx, r13d
-    sub     ecx, eax                ; spaces = width - remainder
+    and     eax, r15d                   ; col & mask
+    mov     ecx, r13d                   ; tab_width
+    sub     ecx, eax                    ; spaces = tab_width - (col & mask)
     jmp     .pf_fast_fill_spaces
 
 .pf_fast_tab_div:
     mov     rax, r14
     xor     edx, edx
-    div     r13                     ; rdx = column % tab_width
+    div     r13
     mov     ecx, r13d
     sub     ecx, edx
 
 .pf_fast_fill_spaces:
-    ; ecx = number of spaces to write (1 to tab_width)
-    add     r14, rcx               ; column += spaces
-    inc     r8                     ; skip tab in input
+    add     r14, rcx
 
-    ; Inline space fill: for default tab=8, max 8 spaces
-    ; Use qword store of spaces for speed
     cmp     ecx, 8
     ja      .pf_fast_fill_large
-    ; 1-8 spaces: store 8 spaces, advance by ecx
-    mov     rax, 0x2020202020202020 ; 8 space chars
+    ; 1-8 spaces: single 8-byte store (always safe, output buffer has headroom)
+    mov     rax, 0x2020202020202020
     mov     [r10], rax
     add     r10, rcx
     jmp     .pf_fast_simd
 
 .pf_fast_fill_large:
-    ; More than 8 spaces (large tab width)
+    ; 9+ spaces (rare: tab_width > 8)
     mov     rax, 0x2020202020202020
 .pf_fast_fill_loop:
     cmp     ecx, 8
@@ -992,26 +1094,60 @@ process_mmap_region:
 .pf_fast_fill_tail:
     test    ecx, ecx
     jz      .pf_fast_simd
-    ; Write remaining 1-7 spaces
-    mov     [r10], rax              ; overwrite is OK, we only advance by ecx
+    mov     [r10], rax
     add     r10, rcx
     jmp     .pf_fast_simd
 
 .pf_fast_newline:
     mov     byte [r10], 10
     inc     r10
-    inc     r8
-    xor     r14d, r14d              ; column = 0
+    xor     r14d, r14d
     jmp     .pf_fast_simd
 
 .pf_fast_backspace:
     mov     byte [r10], 8
     inc     r10
-    inc     r8
     test    r14, r14
     jz      .pf_fast_simd
     dec     r14
     jmp     .pf_fast_simd
+
+.pf_fast_scalar_loop:
+    cmp     r8, r9
+    jge     .pf_fast_done
+
+    movzx   eax, byte [r8]
+
+    cmp     al, 9
+    je      .pf_fast_scalar_tab
+    cmp     al, 10
+    je      .pf_fast_scalar_nl
+    cmp     al, 8
+    je      .pf_fast_scalar_bs
+
+    mov     [r10], al
+    inc     r10
+    inc     r14
+    inc     r8
+    jmp     .pf_fast_scalar_loop
+
+.pf_fast_scalar_nl:
+    inc     r8
+    jmp     .pf_fast_newline
+
+.pf_fast_scalar_bs:
+    inc     r8
+    jmp     .pf_fast_backspace
+
+.pf_fast_scalar_tab:
+    inc     r8
+    test    r15, r15
+    jz      .pf_fast_tab_div
+    mov     eax, r14d
+    and     eax, r15d
+    mov     ecx, r13d
+    sub     ecx, eax
+    jmp     .pf_fast_fill_spaces
 
 .pf_fast_done:
     ; Update r12 from r10
@@ -2564,6 +2700,10 @@ newline_pattern:
 align 16
 backspace_pattern:
     times 16 db 8
+
+align 16
+special_threshold:
+    times 16 db 10              ; for psubusb: bytes <= 10 become 0
 
 align 16
 space_pattern:

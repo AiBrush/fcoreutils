@@ -639,176 +639,461 @@ seq_integer:
     jne     .int_slow_path
     test    r12, r12
     js      .int_slow_path
-    ; All conditions met → ultra-fast positive integer path
-    ; Register allocation for hot loop:
-    ;   r12 = current value
+
+    ; ── INCREMENTAL DIGIT UPDATE + BATCH-100 FAST PATH ──
+    ;
+    ; Three-level strategy:
+    ;   1. Batch-100: when last 2 digits are "00" and 100+ numbers remain,
+    ;      stamp prefix + digit_pairs[i] + newline for i=0..99. Only 1% of
+    ;      iterations need carry propagation (at the hundreds boundary).
+    ;   2. Batch-10: when last digit is '0' and 10+ numbers remain,
+    ;      stamp prefix + '0'..'9' + newline.
+    ;   3. Singles: for alignment and tail.
+    ;
+    ; Register allocation:
+    ;   r12 = current value (counts up)
     ;   r14 = last value
+    ;   r13 = digit_count
     ;   rbx = output buffer write pointer
-    ;   rbp = output buffer flush threshold (end - 32)
+    ;   rbp = output buffer flush threshold
+    ;   r15 = pointer to digit_buf
+
+    ; r12 = first_val, r14 = last_val (already set)
+    cmp     r12, r14
+    jg      .fast_done_inc
+
+    ; Convert start number (r12) to ASCII in digit_buf
+    lea     r15, [rel digit_buf]
+    mov     rax, r12
+
+    lea     rdi, [rel itoa_buf + ITOA_BUF_SIZE - 1]
+    mov     byte [rdi], 0
+    test    rax, rax
+    jnz     .fast_init_loop
+    dec     rdi
+    mov     byte [rdi], '0'
+    jmp     .fast_init_copy
+
+.fast_init_loop:
+    test    rax, rax
+    jz      .fast_init_copy
+    xor     edx, edx
+    mov     rcx, 10
+    div     rcx
+    add     dl, '0'
+    dec     rdi
+    mov     [rdi], dl
+    jmp     .fast_init_loop
+
+.fast_init_copy:
+    lea     rcx, [rel itoa_buf + ITOA_BUF_SIZE - 1]
+    sub     rcx, rdi
+    mov     r13, rcx
+    xor     eax, eax
+.fast_init_cp:
+    cmp     rax, r13
+    jge     .fast_init_done
+    mov     cl, [rdi + rax]
+    mov     [r15 + rax], cl
+    inc     rax
+    jmp     .fast_init_cp
+
+.fast_init_done:
+    mov     byte [r15 + r13], 10        ; newline sentinel
+
     lea     rbx, [rel outbuf]
     add     rbx, [rel outbuf_pos]
-    lea     rbp, [rel outbuf + OUTBUF_SIZE - 32]
+    lea     rbp, [rel outbuf + OUTBUF_SIZE - 2200]
+    ; Threshold: 2200 bytes headroom guarantees room for 100 entries
+    ; of up to 22 bytes each (20-digit number + newline + safety).
 
-.fast_loop:
+    jmp     .fast_main_enter
+
+    ; ── MAIN DISPATCH: try batch-100, then batch-10, then singles ──
+.fast_main_enter:
     cmp     r12, r14
-    jg      .fast_done
+    jg      .fast_done_inc
 
-    ; ── Fast inline itoa for non-negative integers ──
-    ; Uses multiply-by-reciprocal instead of div (3 cycles vs 35)
-    mov     rax, r12
-    ; For small numbers (0-9), single-digit fast path
-    cmp     rax, 10
-    jb      .fast_1digit
+    ; Try batch-100 first (requires digit_count >= 3 and last 2 digits == "00")
+    cmp     r13, 3
+    jb      .fast_try_b10
+    lea     rcx, [r13 - 2]
+    cmp     word [r15 + rcx], 0x3030    ; "00" in little-endian
+    jne     .fast_try_b10
 
-    cmp     rax, 100
-    jb      .fast_2digit
+    ; Check 100 numbers remain
+    lea     rax, [r12 + 99]
+    cmp     rax, r14
+    jg      .fast_try_b10
 
-    cmp     rax, 10000
-    jb      .fast_3_4digit
-
-    ; 5+ digits: use general path (backwards itoa with digit pairs)
-    jmp     .fast_general
-
-.fast_1digit:
-    add     al, '0'
-    mov     [rbx], al
-    mov     byte [rbx+1], 10            ; newline
-    add     rbx, 2
-    jmp     .fast_next
-
-.fast_2digit:
-    ; val = q*10 + r; use lookup table
-    lea     rsi, [rel digit_pairs]
-    movzx   ecx, word [rsi + rax*2]
-    mov     [rbx], cx
-    mov     byte [rbx+2], 10
-    add     rbx, 3
-    jmp     .fast_next
-
-.fast_3_4digit:
-    ; Divide by 100 using multiply-by-reciprocal (avoids slow div)
-    ; q = (n * 0x51EB851F) >> 37  for n < 10000
-    mov     ecx, eax                    ; save n
-    mov     edx, 0x51EB851F
-    imul    rdx, rax
-    shr     rdx, 37                     ; q = n/100
-    imul    r8d, edx, 100
-    sub     ecx, r8d                    ; r = n - q*100
-    lea     rsi, [rel digit_pairs]
-    cmp     edx, 10
-    jb      .fast_3d
-    ; 4 digits: pair(q) + pair(r) + '\n'
-    movzx   eax, word [rsi + rdx*2]
-    mov     [rbx], ax
-    movzx   eax, word [rsi + rcx*2]
-    mov     [rbx+2], ax
-    mov     byte [rbx+4], 10
-    add     rbx, 5
-    jmp     .fast_next
-.fast_3d:
-    ; 3 digits: single(q) + pair(r) + '\n'
-    lea     eax, [edx + '0']
-    mov     [rbx], al
-    movzx   eax, word [rsi + rcx*2]
-    mov     [rbx+1], ax
-    mov     byte [rbx+3], 10
-    add     rbx, 4
-    jmp     .fast_next
-
-.fast_general:
-    ; General itoa for 5+ digit numbers
-    ; Write digits backwards into itoa_buf, then 8/16-byte copy to outbuf
-    mov     rax, r12
-    lea     rdi, [rel itoa_buf + ITOA_BUF_SIZE - 1]
-    mov     byte [rdi], 10              ; newline
-    lea     rsi, [rel digit_pairs]
-
-    ; If >= 2^32, bring into range with 64-bit div
-    cmp     rax, 0x100000000
-    jb      .fast_gen_32bit
-    xor     edx, edx
-    mov     rcx, 100
-    div     rcx
-    sub     rdi, 2
-    movzx   ecx, word [rsi + rdx*2]
-    mov     [rdi], cx
-    cmp     rax, 0x100000000
-    jb      .fast_gen_32bit
-    xor     edx, edx
-    mov     rcx, 100
-    div     rcx
-    sub     rdi, 2
-    movzx   ecx, word [rsi + rdx*2]
-    mov     [rdi], cx
-
-.fast_gen_32bit:
-    ; eax < 2^32: multiply-by-reciprocal for /100
-.fast_gen_mul_loop:
-    cmp     eax, 100
-    jb      .fast_gen_last
-    mov     ecx, eax
-    mov     edx, 0x51EB851F
-    imul    rdx, rax
-    shr     rdx, 37
-    imul    r8d, edx, 100
-    sub     ecx, r8d
-    sub     rdi, 2
-    movzx   r8d, word [rsi + rcx*2]
-    mov     [rdi], r8w
-    mov     eax, edx
-    jmp     .fast_gen_mul_loop
-.fast_gen_last:
-    cmp     eax, 10
-    jb      .fast_gen_1
-    sub     rdi, 2
-    movzx   ecx, word [rsi + rax*2]
-    mov     [rdi], cx
-    jmp     .fast_gen_copy
-.fast_gen_1:
-    dec     rdi
-    add     al, '0'
-    mov     [rdi], al
-.fast_gen_copy:
-    ; Copy from rdi to rbx — always <= 21 bytes (max int64 + newline)
-    ; Use qword loads for speed
-    lea     rcx, [rel itoa_buf + ITOA_BUF_SIZE]
-    sub     rcx, rdi                    ; length
-    mov     rax, [rdi]
-    mov     [rbx], rax                  ; first 8 bytes
-    cmp     rcx, 8
-    jbe     .fast_gen_adv
-    mov     rax, [rdi+8]
-    mov     [rbx+8], rax                ; next 8 bytes
-    cmp     rcx, 16
-    jbe     .fast_gen_adv
-    mov     eax, [rdi+16]
-    mov     [rbx+16], eax              ; last 4 bytes (max 20 digits + newline = 21)
-.fast_gen_adv:
-    add     rbx, rcx
-    jmp     .fast_next
-
-.fast_next:
-    ; Check if buffer nearly full
+    ; Check buffer headroom
     cmp     rbx, rbp
-    jae     .fast_flush
-    inc     r12
-    jmp     .fast_loop
+    jae     .fast_main_flush
+    jmp     .fast_do_b100
 
-.fast_flush:
-    ; Calculate bytes written
+.fast_try_b10:
+    ; Try batch-10 (requires last digit == '0')
+    lea     rcx, [r13 - 1]
+    cmp     byte [r15 + rcx], '0'
+    jne     .fast_do_single
+
+    ; Check 10 numbers remain
+    lea     rax, [r12 + 9]
+    cmp     rax, r14
+    jg      .fast_do_single
+
+    ; Check buffer headroom (need ~220 bytes for 10 entries)
+    lea     rax, [rel outbuf + OUTBUF_SIZE - 256]
+    cmp     rbx, rax
+    jae     .fast_main_flush
+    jmp     .fast_do_b10
+
+    ; ── EMIT SINGLE NUMBER ──
+.fast_do_single:
+    cmp     r13, 7
+    ja      .fast_single_L
+    mov     rax, [r15]
+    mov     [rbx], rax
+    add     rbx, r13
+    inc     rbx
+    jmp     .fast_single_inc
+.fast_single_L:
+    mov     rax, [r15]
+    mov     [rbx], rax
+    mov     rax, [r15 + 8]
+    mov     [rbx + 8], rax
+    cmp     r13, 15
+    jbe     .fast_single_L2
+    mov     eax, [r15 + 16]
+    mov     [rbx + 16], eax
+.fast_single_L2:
+    add     rbx, r13
+    inc     rbx
+
+.fast_single_inc:
+    inc     r12
+    cmp     r12, r14
+    jg      .fast_done_inc
+
+    ; Increment digit string
+    lea     rcx, [r13 - 1]
+    inc     byte [r15 + rcx]
+    cmp     byte [r15 + rcx], '9'
+    jbe     .fast_single_ok
+
+    ; Carry
+    mov     byte [r15 + rcx], '0'
+    dec     rcx
+.fast_single_carry:
+    test    rcx, rcx
+    js      .fast_single_grow
+    inc     byte [r15 + rcx]
+    cmp     byte [r15 + rcx], '9'
+    jbe     .fast_single_ok
+    mov     byte [r15 + rcx], '0'
+    dec     rcx
+    jmp     .fast_single_carry
+
+.fast_single_grow:
+    mov     byte [r15], '1'
+    inc     r13
+    mov     rcx, 1
+.fast_single_gz:
+    cmp     rcx, r13
+    jge     .fast_single_gd
+    mov     byte [r15 + rcx], '0'
+    inc     rcx
+    jmp     .fast_single_gz
+.fast_single_gd:
+    mov     byte [r15 + r13], 10
+
+.fast_single_ok:
+    lea     rax, [rel outbuf + OUTBUF_SIZE - 256]
+    cmp     rbx, rax
+    jae     .fast_main_flush
+    jmp     .fast_main_enter
+
+    ; ── BATCH-10: write 10 numbers, last digit varies '0'..'9' ──
+.fast_do_b10:
+    ; For 1-digit numbers
+    cmp     r13, 1
+    je      .fast_b10_1d
+
+    mov     rax, [r15]                  ; prefix qword (up to 8 bytes)
+    ; Unrolled: stamp prefix, set last digit, set newline, advance
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '0'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '1'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '2'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '3'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '4'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '5'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '6'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '7'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '8'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    mov     [rbx], rax
+    mov     byte [rbx + r13 - 1], '9'
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+
+    jmp     .fast_b10_advance
+
+.fast_b10_1d:
+    mov     rax, 0x0A330A320A310A30     ; "0\n1\n2\n3\n"
+    mov     [rbx], rax
+    mov     rax, 0x0A370A360A350A34     ; "4\n5\n6\n7\n"
+    mov     [rbx + 8], rax
+    mov     eax, 0x0A390A38             ; "8\n9\n"
+    mov     [rbx + 16], eax
+    add     rbx, 20
+
+.fast_b10_advance:
+    add     r12, 10
+
+    ; Carry from tens digit
+    cmp     r13, 1
+    je      .fast_b10_1d_grow
+
+    lea     rcx, [r13 - 2]
+    inc     byte [r15 + rcx]
+    cmp     byte [r15 + rcx], '9'
+    jbe     .fast_b10_ok
+
+    mov     byte [r15 + rcx], '0'
+    dec     rcx
+.fast_b10_carry:
+    test    rcx, rcx
+    js      .fast_b10_grow
+    inc     byte [r15 + rcx]
+    cmp     byte [r15 + rcx], '9'
+    jbe     .fast_b10_ok
+    mov     byte [r15 + rcx], '0'
+    dec     rcx
+    jmp     .fast_b10_carry
+
+.fast_b10_grow:
+    mov     byte [r15], '1'
+    inc     r13
+    mov     rcx, 1
+.fast_b10_gz:
+    cmp     rcx, r13
+    jge     .fast_b10_gd
+    mov     byte [r15 + rcx], '0'
+    inc     rcx
+    jmp     .fast_b10_gz
+.fast_b10_gd:
+    mov     byte [r15 + r13], 10
+
+.fast_b10_ok:
+    jmp     .fast_main_enter
+
+.fast_b10_1d_grow:
+    mov     byte [r15], '1'
+    mov     byte [r15 + 1], '0'
+    mov     r13, 2
+    mov     byte [r15 + 2], 10
+    jmp     .fast_main_enter
+
+    ; ── BATCH-100: write 100 numbers, last 2 digits use digit_pairs ──
+.fast_do_b100:
+    ; digit_buf has digits [0..r13-1] with last 2 being "00".
+    ; We stamp prefix (r13-2 bytes) + digit_pairs[i] + newline for i=0..99.
+    ; prefix = digit_buf[0..r13-3]
+    ;
+    ; For 3-7 digit numbers: prefix fits in one qword load
+    ; For 8+ digit numbers: need two qword loads
+    lea     rsi, [rel digit_pairs]      ; pairs table
+
+    cmp     r13, 7
+    ja      .fast_b100_large
+
+    ; Check for 7-digit specialized path (entry = 8 bytes = 1 qword)
+    cmp     r13, 7
+    je      .fast_b100_7digit
+
+    ; ── BATCH-100 SHORT (3-6 digits) ──
+    ; prefix_len = r13 - 2, total entry = r13 + 1 bytes
+    mov     rax, [r15]                  ; load prefix (up to 8 bytes, includes last 2 digits)
+    xor     ecx, ecx                    ; pair index 0..99
+.fast_b100_short_loop:
+    mov     [rbx], rax                  ; stamp prefix (overwrites last 2 + extra, fine)
+    movzx   edx, word [rsi + rcx*2]    ; digit pair "XY"
+    mov     [rbx + r13 - 2], dx         ; overwrite last 2 digits
+    mov     byte [rbx + r13], 10        ; newline
+    lea     rbx, [rbx + r13 + 1]
+    inc     ecx
+    cmp     ecx, 100
+    jb      .fast_b100_short_loop
+    jmp     .fast_b100_advance
+
+    ; ── BATCH-100 7-DIGIT (entry = exactly 8 bytes = 1 qword per number) ──
+    ; Layout: [d0 d1 d2 d3 d4 XX YY 0A] where XX YY = digit pair
+    ; Single qword store per number — maximum throughput.
+.fast_b100_7digit:
+    mov     rax, [r15]                  ; digit_buf[0..7]
+    mov     rdx, 0x000000FFFFFFFFFF
+    and     rax, rdx                    ; keep only first 5 bytes (prefix)
+    mov     rdx, 0x0A00000000000000
+    or      rax, rdx                    ; byte 7 = newline
+    ; rax = template [d0 d1 d2 d3 d4 00 00 0A]
+
+    ; Unrolled by 10: 10 iterations of 10-at-a-time = 100 total
+    xor     ecx, ecx
+.fast_b100_7d_outer:
+    ; Load 10 pairs and write 10 qwords
+%assign _i 0
+%rep 10
+    movzx   edx, word [rsi + rcx*2 + _i*2]
+    shl     rdx, 40
+    or      rdx, rax
+    mov     [rbx + _i*8], rdx
+%assign _i _i+1
+%endrep
+    add     rbx, 80
+    add     ecx, 10
+    cmp     ecx, 100
+    jb      .fast_b100_7d_outer
+    jmp     .fast_b100_advance
+
+    ; ── BATCH-100 LARGE (8+ digits) ──
+.fast_b100_large:
+    ; For 8-digit case: entry = 9 bytes. Use qword template + byte store.
+    cmp     r13, 8
+    je      .fast_b100_8digit
+
+    ; Generic large path (9+ digits)
+    mov     rax, [r15]
+    mov     r8, [r15 + 8]
+    xor     ecx, ecx
+.fast_b100_large_loop:
+    mov     [rbx], rax
+    mov     [rbx + 8], r8
+    cmp     r13, 16
+    jbe     .fast_b100_large_pair
+    mov     r9d, [r15 + 16]
+    mov     [rbx + 16], r9d
+.fast_b100_large_pair:
+    movzx   edx, word [rsi + rcx*2]
+    mov     [rbx + r13 - 2], dx
+    mov     byte [rbx + r13], 10
+    lea     rbx, [rbx + r13 + 1]
+    inc     ecx
+    cmp     ecx, 100
+    jb      .fast_b100_large_loop
+    jmp     .fast_b100_advance
+
+    ; ── BATCH-100 8-DIGIT (entry = 9 bytes) ──
+    ; Layout: [d0 d1 d2 d3 d4 d5 XX YY] + [0A]
+    ; prefix = d0..d5 (6 bytes), pair at bytes 6-7
+.fast_b100_8digit:
+    mov     rax, [r15]                  ; load 8 bytes: [d0..d5 d6 d7]
+    mov     rdx, 0x0000FFFFFFFFFFFF
+    and     rax, rdx                    ; keep prefix 6 bytes, clear last 2
+    ; For each pair, OR in pair_word << 48
+    xor     ecx, ecx
+.fast_b100_8d_outer:
+%assign _i 0
+%rep 10
+    movzx   edx, word [rsi + rcx*2 + _i*2]
+    shl     rdx, 48
+    or      rdx, rax
+    mov     [rbx + _i*9], rdx          ; 8-byte store
+    mov     byte [rbx + _i*9 + 8], 10  ; newline byte
+%assign _i _i+1
+%endrep
+    add     rbx, 90                     ; 10 * 9 bytes
+    add     ecx, 10
+    cmp     ecx, 100
+    jb      .fast_b100_8d_outer
+
+.fast_b100_advance:
+    add     r12, 100
+
+    ; Carry from hundreds digit (digit at index r13-3)
+    lea     rcx, [r13 - 3]
+    inc     byte [r15 + rcx]
+    cmp     byte [r15 + rcx], '9'
+    jbe     .fast_b100_ok
+
+    mov     byte [r15 + rcx], '0'
+    dec     rcx
+.fast_b100_carry:
+    test    rcx, rcx
+    js      .fast_b100_grow
+    inc     byte [r15 + rcx]
+    cmp     byte [r15 + rcx], '9'
+    jbe     .fast_b100_ok
+    mov     byte [r15 + rcx], '0'
+    dec     rcx
+    jmp     .fast_b100_carry
+
+.fast_b100_grow:
+    mov     byte [r15], '1'
+    inc     r13
+    mov     rcx, 1
+.fast_b100_gz:
+    cmp     rcx, r13
+    jge     .fast_b100_gd
+    mov     byte [r15 + rcx], '0'
+    inc     rcx
+    jmp     .fast_b100_gz
+.fast_b100_gd:
+    mov     byte [r15 + r13], 10
+
+.fast_b100_ok:
+    jmp     .fast_main_enter
+
+    ; ── FLUSH ──
+.fast_main_flush:
     lea     rax, [rel outbuf]
     mov     rcx, rbx
-    sub     rcx, rax                    ; bytes in buffer
+    sub     rcx, rax
     mov     [rel outbuf_pos], rcx
     call    flush_outbuf
     test    rax, rax
-    js      .int_done                   ; EPIPE
-    lea     rbx, [rel outbuf]           ; reset write pointer
-    inc     r12
-    jmp     .fast_loop
+    js      .fast_epipe_inc
+    lea     rbx, [rel outbuf]
+    jmp     .fast_main_enter
 
-.fast_done:
-    ; Update outbuf_pos
+.fast_epipe_inc:
+    jmp     .int_done
+
+.fast_done_inc:
     lea     rax, [rel outbuf]
     sub     rbx, rax
     mov     [rel outbuf_pos], rbx
@@ -3222,6 +3507,7 @@ _eff_prec:      resd 1
 outbuf_pos:     resq 1
 itoa_buf:       resb ITOA_BUF_SIZE + 8
 fmt_scratch:    resb FMT_BUF_SIZE + 8
+digit_buf:      resb 24                 ; persistent digit buffer for incremental fast path
 
 alignb 16
 outbuf:         resb OUTBUF_SIZE

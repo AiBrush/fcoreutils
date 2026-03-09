@@ -32,9 +32,9 @@ extern asm_close
 
 ; ─── Constants ───────────────────────────────────────────
 %define READ_BUF_SIZE   262144
-%define OUT_BUF_SIZE    262144
+%define OUT_BUF_SIZE    524288
 %define LINE_BUF_SIZE   1048576
-%define FLUSH_THRESHOLD 131072
+%define FLUSH_THRESHOLD 393216
 %define MAX_SEP_LEN     256
 %define MAX_FILES       256
 
@@ -1219,6 +1219,13 @@ open_and_process:
     mov     rax, SYS_MADVISE
     syscall
 
+    ; madvise HUGEPAGE to use transparent huge pages
+    mov     rdi, [rsp + 8]         ; mmap address
+    mov     rsi, [rsp]             ; file size
+    mov     edx, MADV_HUGEPAGE
+    mov     rax, SYS_MADVISE
+    syscall
+
     ; Restore mmap address from stack (madvise clobbered rdi)
     mov     rax, [rsp + 8]          ; mmap address is at rsp+8 after push rax; push r15
 
@@ -1299,29 +1306,26 @@ open_and_process:
 ; process_mmap_fast — Ultra-fast path for default options on mmap'd files
 ;
 ; Default: -b t -n rn -w 6 -s '\t' -i 1 -v 1 -d '\:'
-; Means: number non-empty lines, right-justified 6-digit, tab separator
+; Number non-empty lines, right-justified 6-digit, tab separator.
+;   Non-empty: "     1\tLINE_CONTENT\n"
+;   Empty:     "       \n" (7 spaces + newline = 8 bytes)
 ;
-; For each line:
-;   - Non-empty: "     1\t<content>\n" (6-char number field + tab + content + newline)
-;   - Empty:     "       \t\n"         (7 spaces + tab + newline... wait no)
+; Key optimizations:
+;   - Incremental ASCII itoa: keep number as ASCII digits, just inc last byte
+;   - r13 = scan pointer (frees rsi for rep movsb, no push/pop needed)
+;   - 512KB output buffer with 384KB flush threshold
+;   - 64-byte SIMD scan (4x movdqu) for wider search
+;   - Threshold-based copy: SIMD 16-byte chunks for short lines, rep movsb for long
 ;
-; Actually for empty lines with -b t (default): just "       \n" = width+sep_len spaces + newline
-; Wait, GNU nl default for unnumbered lines: width + separator_len spaces.
-; Default width=6, sep=\t(1 char), so 7 spaces total for blank prefix.
-;
-; Register allocation:
-;   rsi = current read position in mmap'd data
+; Register allocation in hot loop:
+;   r13 = scan pointer in mmap'd data (instead of rsi, to free rsi for rep movsb)
 ;   r8  = end of mmap'd data
 ;   r12 = out_buf_used (global)
-;   r9  = line_number (local fast copy)
-;   rdi = out_buf write pointer (r12-relative)
-;
-; Strategy:
-;   1. SIMD scan for newlines (16 bytes at a time)
-;   2. For each newline found, emit number+tab+content+newline inline
-;   3. Use fast itoa (digit pairs) for number formatting
-;   4. Bulk memcpy line content with SIMD
-;   5. Flush output when buffer gets close to full
+;   r9  = line_number (local)
+;   r15 = out_buf base
+;   r14 = line start pointer
+;   rbp = pointer to num_ascii (7-byte: 6 digits + tab, on stack)
+;   rdi = output write pointer (transient)
 ; ═══════════════════════════════════════════════════════════
 process_mmap_fast:
     push    rbx
@@ -1330,8 +1334,8 @@ process_mmap_fast:
     push    r15
     push    rbp
 
-    mov     rsi, [mmap_base]        ; rsi = current read position
-    mov     r8, rsi
+    mov     r13, [mmap_base]        ; r13 = scan pointer
+    mov     r8, r13
     add     r8, [mmap_size]         ; r8 = end of data
     mov     r9, [line_number]       ; r9 = current line number (fast local)
     lea     r15, [rel out_buf]      ; r15 = base of output buffer
@@ -1339,506 +1343,22 @@ process_mmap_fast:
     ; Preload SIMD newline pattern
     movdqa  xmm15, [rel newline_pattern]
 
-    ; Quick check: is there section delimiter \: in the file?
-    ; For the fast path, we still need to handle section delimiters.
-    ; But in the common case (base64 data, etc.) there are no delimiters.
-    ; We'll check per-line only if the line length matches a delimiter pattern (2, 4, or 6 bytes).
+    ; --- Initialize incremental ASCII number buffer on stack ---
+    sub     rsp, 16
+    mov     rbp, rsp                ; rbp -> num_ascii[0..6]+tab
 
-    ; r14 = line start pointer
-    mov     r14, rsi                ; line starts at current position
+    mov     dword [rbp], 0x20202020
+    mov     word [rbp+4], 0x2020
+    mov     byte [rbp+6], 9         ; tab separator
 
-.pmf_scan_loop:
-    ; Check if we need to flush output buffer
-    cmp     r12, FLUSH_THRESHOLD
-    jb      .pmf_no_flush
-    ; Flush output
-    push    rsi
-    push    r8
-    push    r9
-    push    r14
-    call    flush_output
-    pop     r14
-    pop     r9
-    pop     r8
-    pop     rsi
-
-.pmf_no_flush:
-    ; SIMD scan for newline
-    mov     rax, r8
-    sub     rax, rsi
-    cmp     rax, 16
-    jl      .pmf_scalar_scan
-
-    movdqu  xmm0, [rsi]
-    pcmpeqb xmm0, xmm15
-    pmovmskb eax, xmm0
-    test    eax, eax
-    jnz     .pmf_found_newlines
-
-    ; No newline in 16 bytes, advance
-    add     rsi, 16
-    jmp     .pmf_scan_loop
-
-.pmf_found_newlines:
-    ; Process all newlines in this 16-byte window using bsf+btr
-.pmf_nl_loop:
-    test    eax, eax
-    jz      .pmf_nl_loop_done
-
-    bsf     ecx, eax                ; ecx = position of first newline
-    btr     eax, ecx                ; clear that bit
-
-    ; Line is [r14 .. rsi+ecx)
-    ; Line length = rsi + ecx - r14
-    lea     rdx, [rsi + rcx]        ; rdx = pointer to newline char
-    mov     rbx, rdx
-    sub     rbx, r14                ; rbx = line length (excluding newline)
-
-    ; Check if line is empty (blank)
-    test    rbx, rbx
-    jz      .pmf_empty_line
-
-    ; Check for section delimiter (only if line length matches: 2, 4, or 6)
-    cmp     rbx, 6
-    ja      .pmf_nonempty_line      ; too long to be a delimiter
-    cmp     rbx, 2
-    jb      .pmf_nonempty_line      ; too short (1 byte, not a delimiter pair)
-    test    rbx, 1
-    jnz     .pmf_nonempty_line      ; odd length, can't be delimiter pairs
-    ; Could be delimiter: check
-    push    rax
-    push    rcx
-    push    rdx
-    push    rsi
-    ; Save line info
-    mov     [line_ptr], r14
-    mov     [line_len], rbx
-    call    check_section_delimiter_direct_inline
-    cmp     eax, -1
-    pop     rsi
-    pop     rdx
-    pop     rcx
-    pop     rax                     ; restore rax (remaining newline bits)
-    je      .pmf_nonempty_line      ; not a delimiter, treat as normal line
-
-    ; It IS a section delimiter — emit blank line, reset line number
-    ; eax = section type
-    mov     [cur_section], al
-    mov     r9, [start_num]         ; reset line number
-    mov     qword [blank_count], 0
-
-    ; Emit just a newline
-    lea     rdi, [r15 + r12]
-    mov     byte [rdi], 10
-    inc     r12
-
-    ; Advance past this newline
-    lea     r14, [rdx + 1]          ; next line starts after newline
-    jmp     .pmf_nl_loop
-
-.pmf_nonempty_line:
-    ; Non-empty line: emit number prefix + tab + content + newline
-    ; Fast itoa for r9 (line number) into 6-char field, right-justified with spaces
-
-    ; Ensure enough output space: 6 (width) + 1 (tab) + rbx (content) + 1 (newline) + 16 (safety)
-    lea     rdi, [r12 + rbx]
-    add     rdi, 24                 ; 6+1+1+16
-    cmp     rdi, OUT_BUF_SIZE
-    jb      .pmf_ne_have_space
-    ; Need to flush
-    push    rax
-    push    rcx
-    push    rdx
-    push    rsi
-    push    rbx
-    push    r14
-    call    flush_output
-    pop     r14
-    pop     rbx
-    pop     rsi
-    pop     rdx
-    pop     rcx
-    pop     rax
-
-.pmf_ne_have_space:
-    lea     rdi, [r15 + r12]        ; rdi = write position in out_buf
-
-    ; Fast itoa: format r9 as right-justified 6-digit number
-    ; Use reciprocal multiply instead of div for speed
-    push    rax                     ; save remaining newline bitmask
-    push    rdx                     ; save newline pointer (mul clobbers rdx)
-    mov     rax, r9                 ; number to format
-
-    ; For numbers 1-999999 (fits in 6 digits), format directly
-    ; We'll use the digit-pair lookup table
-    cmp     rax, 999999
-    ja      .pmf_big_number
-
-    ; Format using digit pairs from right to left in itoa_scratch
-    ; Then copy with space padding to output
-
-    ; We need to extract digits. Use multiply-by-reciprocal for /100:
-    ; n/100 can be done as (n * 0x51EB851F) >> 37 for n < 2^32
-    ; But simpler: just use a small loop with imul/sub trick
-
-    ; Store digits right-to-left in a small buffer on stack
-    ; Actually, let's do it directly into the output buffer
-    ; First fill 6 bytes with spaces
-    mov     dword [rdi], 0x20202020   ; 4 spaces
-    mov     word [rdi+4], 0x2020      ; 2 more spaces
-
-    ; Now write digits from right to left
-    lea     r10, [rdi + 5]          ; r10 points to last digit position (index 5)
-
-    ; Digit extraction using multiply trick to avoid div
-    ; For each digit: d = n % 10, n = n / 10
-    ; n / 10 = (n * 0xCCCCCCCCCCCCCCCD) >> 67 ... actually let's use a simpler approach
-    ; Use the fact that for small numbers, imul + shift works
-
-    ; Extract digits using multiply by magic number
-    ; n / 10 = (n * 0xCCCCCCCD) >> 35 for n < 2^32
-.pmf_digit_loop:
-    ; rax = remaining number
-    test    rax, rax
-    jz      .pmf_digits_done
-
-    ; Compute rax / 10 and rax % 10
-    mov     rcx, rax
-    mov     rdx, 0xCCCCCCCCCCCCCCCD
-    mul     rdx                     ; rdx:rax = rax * magic
-    shr     rdx, 3                  ; rdx = rax / 10
-    ; remainder = rcx - rdx * 10
-    lea     r11, [rdx + rdx*4]      ; r11 = rdx * 5
-    add     r11, r11                ; r11 = rdx * 10
-    sub     rcx, r11                ; rcx = remainder (digit)
-    add     cl, '0'
-    mov     [r10], cl
-    dec     r10
-    mov     rax, rdx                ; continue with quotient
-    jmp     .pmf_digit_loop
-
-.pmf_digits_done:
-    ; Add tab separator after number
-    mov     byte [rdi + 6], 9       ; tab
-    add     rdi, 7                  ; advance past number+tab
-
-    ; Copy line content using SIMD
-    ; Source: r14, Length: rbx
-    mov     rcx, rbx
-    mov     r10, r14                ; source pointer
-    cmp     rcx, 64
-    jb      .pmf_copy_small
-
-    ; Large copy: 64 bytes at a time
-.pmf_copy_64:
-    cmp     rcx, 64
-    jb      .pmf_copy_tail
-    movdqu  xmm0, [r10]
-    movdqu  xmm1, [r10 + 16]
-    movdqu  xmm2, [r10 + 32]
-    movdqu  xmm3, [r10 + 48]
-    movdqu  [rdi], xmm0
-    movdqu  [rdi + 16], xmm1
-    movdqu  [rdi + 32], xmm2
-    movdqu  [rdi + 48], xmm3
-    add     r10, 64
-    add     rdi, 64
-    sub     rcx, 64
-    jmp     .pmf_copy_64
-
-.pmf_copy_tail:
-    cmp     rcx, 16
-    jb      .pmf_copy_small_tail
-    movdqu  xmm0, [r10]
-    movdqu  [rdi], xmm0
-    add     r10, 16
-    add     rdi, 16
-    sub     rcx, 16
-    jmp     .pmf_copy_tail
-
-.pmf_copy_small_tail:
-    test    rcx, rcx
-    jz      .pmf_copy_done
-    ; Copy remaining bytes one at a time
-.pmf_copy_byte:
-    mov     al, [r10]
-    mov     [rdi], al
-    inc     r10
-    inc     rdi
-    dec     rcx
-    jnz     .pmf_copy_byte
-    jmp     .pmf_copy_done
-
-.pmf_copy_small:
-    ; For small copies (< 64 bytes), use 16-byte chunks then scalar
-    cmp     rcx, 16
-    jb      .pmf_copy_small_lt16
-    movdqu  xmm0, [r10]
-    movdqu  [rdi], xmm0
-    add     r10, 16
-    add     rdi, 16
-    sub     rcx, 16
-    jmp     .pmf_copy_small
-.pmf_copy_small_lt16:
-    ; Copy up to 15 remaining bytes
-    cmp     rcx, 8
-    jb      .pmf_copy_lt8
-    mov     r11, [r10]
-    mov     [rdi], r11
-    add     r10, 8
-    add     rdi, 8
-    sub     rcx, 8
-.pmf_copy_lt8:
-    cmp     rcx, 4
-    jb      .pmf_copy_lt4
-    mov     r11d, [r10]
-    mov     [rdi], r11d
-    add     r10, 4
-    add     rdi, 4
-    sub     rcx, 4
-.pmf_copy_lt4:
-    test    rcx, rcx
-    jz      .pmf_copy_done
-.pmf_copy_lt4_loop:
-    mov     al, [r10]
-    mov     [rdi], al
-    inc     r10
-    inc     rdi
-    dec     rcx
-    jnz     .pmf_copy_lt4_loop
-
-.pmf_copy_done:
-    ; Append newline
-    mov     byte [rdi], 10
-    inc     rdi
-
-    ; Update out_buf_used
-    mov     r12, rdi
-    sub     r12, r15                ; r12 = rdi - out_buf base
-
-    ; Increment line number
-    inc     r9
-
-    pop     rdx                     ; restore newline pointer
-    pop     rax                     ; restore newline bitmask
-
-    ; Advance line start past newline
-    lea     r14, [rdx + 1]          ; rdx points to newline char
-    jmp     .pmf_nl_loop
-
-.pmf_big_number:
-    ; Number > 999999: fall back to general itoa
-    ; Convert using div (rare case)
-    lea     r10, [rel itoa_buf + 31]
-    mov     byte [r10], 0
-    xor     ecx, ecx
-
-.pmf_big_itoa_loop:
-    xor     edx, edx
-    mov     rbx, 10
-    div     rbx
-    add     dl, '0'
-    dec     r10
-    mov     [r10], dl
-    inc     ecx
-    test    rax, rax
-    jnz     .pmf_big_itoa_loop
-
-    ; r10 = start of digits, ecx = digit count
-    ; Pad with spaces to width 6
-    mov     eax, 6
-    sub     eax, ecx
-    jle     .pmf_big_no_pad
-    ; Fill spaces
-    push    rcx
-    mov     rcx, rax
-    mov     al, ' '
-    rep     stosb
-    pop     rcx
-.pmf_big_no_pad:
-    ; Copy digits
-    push    rcx
-    mov     rsi, r10
-    ; Use rdi (already positioned)
-    cmp     ecx, 6
-    jle     .pmf_big_copy_digits
-    ; Number wider than 6, rdi needs to point right
-.pmf_big_copy_digits:
-    movzx   eax, byte [rsi]
-    mov     [rdi], al
-    inc     rsi
-    inc     rdi
-    dec     ecx
-    jnz     .pmf_big_copy_digits
-    pop     rcx
-
-    ; Tab + content + newline
-    mov     byte [rdi], 9
-    inc     rdi
-
-    ; Restore line content pointer/length
-    ; rbx was clobbered. Recalculate from r14 and rdx
-    ; Actually we need to save/restore these. Let me use the stack saves.
-    ; rdx = pointer to newline, r14 = line start
-    ; But rdx was clobbered by div! We need another approach.
-    ; Let's save rdx (newline ptr) before entering big_number path.
-
-    ; Actually, this is the big number fallback path. Let me restructure.
-    ; For now, just write content byte by byte (rare case)
-    mov     r10, [line_ptr]         ; we saved this earlier... no we didn't
-    ; This path is broken for big numbers. Let me fix by saving before.
-    ; Actually we need to restructure. Let me just fall back to generic path.
-    ; For numbers > 999999, we need to save rdx before the big itoa.
-
-    ; FIXME: For the big number path, let's use the generic process_line_direct
-    ; This only happens after 999999 lines which is very rare for the fast path.
-    ; Let's skip the rest and just emit a newline, then continue
-    ; Actually let's fix this properly by saving what we need.
-
-    ; Since this is the rare case (>999999), just emit newline and update
-    ; The line_ptr/line_len were never set in this path... Let me restructure.
-    ; For simplicity, I'll handle big numbers by saving rdx on stack before big_itoa.
-    ; But the code above already wrote spaces to [rdi] etc., so rdi is positioned.
-    ; We don't have the content pointer anymore since rbx and rdx were clobbered.
-
-    ; Let's just transition to generic path for this line.
-    ; pop rax to balance stack, then fall through to generic
-    pop     rax                     ; balance the push rax from earlier
-    ; Save state to globals and call generic
-    mov     [line_number], r9
-    ; We can't easily recover the line boundaries. Instead, let me fix this
-    ; by not clobbering rdx in the big_number path.
-    ; For now, just fall back to the slow mmap processor for remaining data.
-    ; This is acceptable since it only triggers after 999999 lines.
-
-    ; Actually, the simplest fix: save rdx (newline pointer) and rbx (line length)
-    ; before entering the big number path. But we already consumed them.
-    ; I'll restructure the fast path to save these on the stack.
-
-    ; Let me just break out to the slow path for the rest of the file
-    ; rsi was the scan position, but we've been modifying it. r14 is line start.
-    ; Let's save the current position and switch to slow path
-    mov     rsi, r14                ; restart from current line
-    jmp     .pmf_fallback_to_slow
-
-.pmf_empty_line:
-    ; Empty line with -b t (default): emit blank prefix + newline
-    ; Blank prefix = 7 spaces (width=6 + sep_len=1) + newline = 8 bytes
-    lea     rdi, [r12 + 8]
-    cmp     rdi, OUT_BUF_SIZE
-    jb      .pmf_empty_have_space
-    push    rax
-    push    rcx
-    push    rdx
-    push    rsi
-    push    r14
-    call    flush_output
-    pop     r14
-    pop     rsi
-    pop     rdx
-    pop     rcx
-    pop     rax
-.pmf_empty_have_space:
-    lea     rdi, [r15 + r12]
-    ; Write 8 bytes: 7 spaces + newline
-    ; "       \n" = 0x20 0x20 0x20 0x20 0x20 0x20 0x20 0x0A
-    mov     rax, 0x0A20202020202020  ; little-endian: 7 spaces + \n
-    mov     [rdi], rax
-    add     r12, 8
-
-    ; Advance past newline
-    lea     r14, [rdx + 1]
-    jmp     .pmf_nl_loop
-
-.pmf_nl_loop_done:
-    ; Processed all newlines in this 16-byte window
-    ; Advance rsi by 16
-    add     rsi, 16
-    ; r14 already points to start of next unprocessed line
-    jmp     .pmf_scan_loop
-
-.pmf_scalar_scan:
-    ; Less than 16 bytes remain, scan byte by byte
-    cmp     rsi, r8
-    jge     .pmf_done
-
-    cmp     byte [rsi], 10
-    je      .pmf_scalar_nl
-
-    inc     rsi
-    jmp     .pmf_scalar_scan
-
-.pmf_scalar_nl:
-    ; Found newline at rsi
-    mov     rbx, rsi
-    sub     rbx, r14                ; rbx = line length
-    mov     rdx, rsi                ; rdx = newline pointer
-
-    test    rbx, rbx
-    jz      .pmf_scalar_empty
-
-    ; Check for section delimiter (short lines only)
-    cmp     rbx, 6
-    ja      .pmf_scalar_nonempty
-    cmp     rbx, 2
-    jb      .pmf_scalar_nonempty
-    test    rbx, 1
-    jnz     .pmf_scalar_nonempty
-    push    rdx
-    push    rsi
-    mov     [line_ptr], r14
-    mov     [line_len], rbx
-    call    check_section_delimiter_direct_inline
-    cmp     eax, -1
-    pop     rsi
-    pop     rdx
-    je      .pmf_scalar_nonempty
-
-    ; Section delimiter
-    mov     [cur_section], al
-    mov     r9, [start_num]
-    mov     qword [blank_count], 0
-    lea     rdi, [r15 + r12]
-    mov     byte [rdi], 10
-    inc     r12
-    lea     r14, [rsi + 1]
-    inc     rsi
-    jmp     .pmf_scalar_scan
-
-.pmf_scalar_nonempty:
-    ; Non-empty line: format number + tab + content + newline
-    ; Ensure space
-    lea     rdi, [r12 + rbx]
-    add     rdi, 24
-    cmp     rdi, OUT_BUF_SIZE
-    jb      .pmf_sc_ne_space
-    push    rdx
-    push    rsi
-    push    rbx
-    push    r14
-    call    flush_output
-    pop     r14
-    pop     rbx
-    pop     rsi
-    pop     rdx
-.pmf_sc_ne_space:
-    lea     rdi, [r15 + r12]
-
-    ; Format number (same as above)
-    push    rdx
-    push    rsi
-    push    rbx
     mov     rax, r9
     cmp     rax, 999999
-    ja      .pmf_sc_big_num
+    ja      .pmf_init_fallback
 
-    mov     dword [rdi], 0x20202020
-    mov     word [rdi+4], 0x2020
-    lea     r10, [rdi + 5]
-
-.pmf_sc_digit_loop:
+    lea     r10, [rbp + 5]
+.pmf_init_digit:
     test    rax, rax
-    jz      .pmf_sc_digits_done
+    jz      .pmf_init_done
     mov     rcx, rax
     mov     rdx, 0xCCCCCCCCCCCCCCCD
     mul     rdx
@@ -1850,72 +1370,173 @@ process_mmap_fast:
     mov     [r10], cl
     dec     r10
     mov     rax, rdx
-    jmp     .pmf_sc_digit_loop
+    jmp     .pmf_init_digit
 
-.pmf_sc_digits_done:
-    mov     byte [rdi + 6], 9       ; tab
-    add     rdi, 7
-    pop     rbx
-    pop     rsi
-    pop     rdx
+.pmf_init_done:
+    mov     r14, r13                ; line starts at current scan position
 
-    ; Copy content
-    mov     rcx, rbx
-    mov     r10, r14
-.pmf_sc_copy:
-    test    rcx, rcx
-    jz      .pmf_sc_copy_done
-    mov     al, [r10]
-    mov     [rdi], al
-    inc     r10
-    inc     rdi
-    dec     rcx
-    jmp     .pmf_sc_copy
-
-.pmf_sc_copy_done:
-    mov     byte [rdi], 10
-    inc     rdi
-    mov     r12, rdi
-    sub     r12, r15
-
-    inc     r9
-    lea     r14, [rsi + 1]
-    inc     rsi
-    jmp     .pmf_scalar_scan
-
-.pmf_sc_big_num:
-    pop     rbx
-    pop     rsi
-    pop     rdx
-    ; Fall back to slow path for remaining
-    jmp     .pmf_fallback_to_slow
-
-.pmf_scalar_empty:
-    ; Empty line
-    lea     rdi, [r12 + 8]
-    cmp     rdi, OUT_BUF_SIZE
-    jb      .pmf_sc_empty_space
-    push    rdx
-    push    rsi
+    ; ─── Main scan loop ──────────────────────────────────
+.pmf_scan_loop:
+    ; Proactive flush check (prevents expensive per-line overflow handling)
+    cmp     r12, FLUSH_THRESHOLD
+    jb      .pmf_no_flush
+    push    r8
+    push    r9
+    push    r13
     push    r14
     call    flush_output
     pop     r14
-    pop     rsi
-    pop     rdx
-.pmf_sc_empty_space:
-    lea     rdi, [r15 + r12]
-    mov     rax, 0x0A20202020202020
-    mov     [rdi], rax
-    add     r12, 8
-    lea     r14, [rsi + 1]
-    inc     rsi
-    jmp     .pmf_scalar_scan
+    pop     r13
+    pop     r9
+    pop     r8
 
-.pmf_fallback_to_slow:
-    ; Save line number back to global and fall through to slow mmap path
+.pmf_no_flush:
+    ; --- SIMD scan: 64 bytes at a time, then 16, then scalar ---
+    mov     rax, r8
+    sub     rax, r13
+    cmp     rax, 64
+    jl      .pmf_try_16
+
+    movdqu  xmm0, [r13]
+    pcmpeqb xmm0, xmm15
+    pmovmskb ecx, xmm0
+    test    ecx, ecx
+    jnz     .pmf_found_in_0
+
+    movdqu  xmm0, [r13 + 16]
+    pcmpeqb xmm0, xmm15
+    pmovmskb ecx, xmm0
+    test    ecx, ecx
+    jnz     .pmf_found_in_1
+
+    movdqu  xmm0, [r13 + 32]
+    pcmpeqb xmm0, xmm15
+    pmovmskb ecx, xmm0
+    test    ecx, ecx
+    jnz     .pmf_found_in_2
+
+    movdqu  xmm0, [r13 + 48]
+    pcmpeqb xmm0, xmm15
+    pmovmskb ecx, xmm0
+    test    ecx, ecx
+    jnz     .pmf_found_in_3
+
+    add     r13, 64
+    jmp     .pmf_scan_loop
+
+.pmf_found_in_3:
+    add     r13, 16
+.pmf_found_in_2:
+    add     r13, 16
+.pmf_found_in_1:
+    add     r13, 16
+.pmf_found_in_0:
+    mov     eax, ecx
+    jmp     .pmf_nl_loop
+
+.pmf_try_16:
+    cmp     rax, 16
+    jl      .pmf_scalar_scan
+
+    movdqu  xmm0, [r13]
+    pcmpeqb xmm0, xmm15
+    pmovmskb eax, xmm0
+    test    eax, eax
+    jnz     .pmf_nl_loop
+
+    add     r13, 16
+    jmp     .pmf_scan_loop
+
+    ; ─── Process newlines in current 16-byte window ──────
+.pmf_nl_loop:
+    test    eax, eax
+    jz      .pmf_nl_loop_done
+
+    tzcnt   ecx, eax               ; ecx = position of first newline (tzcnt faster than bsf)
+    btr     eax, ecx
+
+    lea     rdx, [r13 + rcx]       ; rdx = pointer to newline char
+    mov     rbx, rdx
+    sub     rbx, r14                ; rbx = line length
+
+    test    rbx, rbx
+    jz      .pmf_empty_line
+
+    ; --- Section delimiter quick check (lengths 2, 4, 6 only) ---
+    cmp     rbx, 6
+    ja      .pmf_nonempty_line
+    cmp     rbx, 2
+    jb      .pmf_nonempty_line
+    test    rbx, 1
+    jnz     .pmf_nonempty_line
+    cmp     byte [r14], '\'
+    jne     .pmf_nonempty_line
+    cmp     byte [r14+1], ':'
+    jne     .pmf_nonempty_line
+    cmp     rbx, 2
+    je      .pmf_delim_footer
+    cmp     byte [r14+2], '\'
+    jne     .pmf_nonempty_line
+    cmp     byte [r14+3], ':'
+    jne     .pmf_nonempty_line
+    cmp     rbx, 4
+    je      .pmf_delim_body
+    cmp     byte [r14+4], '\'
+    jne     .pmf_nonempty_line
+    cmp     byte [r14+5], ':'
+    jne     .pmf_nonempty_line
+    mov     byte [cur_section], SECTION_HEADER
+    jmp     .pmf_delim_fallback_slow
+.pmf_delim_body:
+    ; Body section: can stay in fast path (body uses STYLE_NONEMPTY = default)
+    mov     byte [cur_section], SECTION_BODY
+    push    rax
+    push    rdx
+    mov     r9, [start_num]
+    mov     qword [blank_count], 0
+    ; Re-init the ASCII number buffer
+    mov     dword [rbp], 0x20202020
+    mov     word [rbp+4], 0x2020
+    mov     byte [rbp+6], 9
+    mov     rax, r9
+    cmp     rax, 999999
+    ja      .pmf_delim_body_emit
+    lea     r10, [rbp + 5]
+.pmf_delim_body_reinit:
+    test    rax, rax
+    jz      .pmf_delim_body_emit
+    mov     rcx, rax
+    mov     rdx, 0xCCCCCCCCCCCCCCCD
+    mul     rdx
+    shr     rdx, 3
+    lea     r11, [rdx + rdx*4]
+    add     r11, r11
+    sub     rcx, r11
+    add     cl, '0'
+    mov     [r10], cl
+    dec     r10
+    mov     rax, rdx
+    jmp     .pmf_delim_body_reinit
+.pmf_delim_body_emit:
+    lea     rdi, [r15 + r12]
+    mov     byte [rdi], 10
+    inc     r12
+    pop     rdx
+    pop     rax
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+
+.pmf_delim_footer:
+    mov     byte [cur_section], SECTION_FOOTER
+.pmf_delim_fallback_slow:
+    ; Header/Footer use STYLE_NONE — fall back to slow path which handles
+    ; section-specific numbering styles correctly.
+    ; Emit delimiter newline, then hand off remaining data.
+    lea     rdi, [r15 + r12]
+    mov     byte [rdi], 10
+    inc     r12
     mov     [line_number], r9
-    ; We need to process remaining data from r14 to end of mmap
-    ; Set up mmap_base and mmap_size for the remaining portion
+    lea     r14, [rdx + 1]          ; data continues after newline
     mov     [mmap_base], r14
     mov     rax, r8
     sub     rax, r14
@@ -1923,11 +1544,584 @@ process_mmap_fast:
     test    rax, rax
     jle     .pmf_done
     call    process_mmap
+    mov     r9, [line_number]       ; reload (slow path may have changed it)
     jmp     .pmf_done
 
-.pmf_done:
-    ; Save line number back to global
+.pmf_nonempty_line:
+    ; Ensure enough output space: 7 + rbx + 1 + 16 (safety)
+    lea     rdi, [r12 + rbx]
+    add     rdi, 24
+    cmp     rdi, OUT_BUF_SIZE
+    jb      .pmf_ne_have_space
+    push    rax
+    push    rcx
+    push    rdx
+    push    rbx
+    push    r13
+    push    r14
+    call    flush_output
+    pop     r14
+    pop     r13
+    pop     rbx
+    pop     rdx
+    pop     rcx
+    pop     rax
+
+.pmf_ne_have_space:
+    lea     rdi, [r15 + r12]
+
+    cmp     r9, 999999
+    ja      .pmf_big_number
+
+    ; Copy 8 bytes of number+tab from stack (only 7 meaningful)
+    mov     r10, [rbp]
+    mov     [rdi], r10
+    add     rdi, 7
+
+    ; Copy line content from r14 (length rbx) to rdi
+    ; Overlapping SIMD technique: for N bytes, load first and last chunks
+    ; and write them (overlapping is fine for copies where src != dst)
+    ; This minimizes branches for the common case (lines 1-64 bytes)
+    mov     rsi, r14                ; source
+    mov     rcx, rbx                ; count
+
+    ; Optimized copy with common-case-first ordering
+    ; Most lines are 20-60 bytes, so check 17-32 and 33-64 first
+    cmp     rcx, 32
+    jbe     .pmf_copy_le32
+    cmp     rcx, 64
+    ja      .pmf_copy_big
+    ; 33-64 bytes (most common for avg ~38 byte lines)
+    movdqu  xmm0, [rsi]
+    movdqu  xmm1, [rsi + 16]
+    movdqu  xmm2, [rsi + rcx - 32]
+    movdqu  xmm3, [rsi + rcx - 16]
+    movdqu  [rdi], xmm0
+    movdqu  [rdi + 16], xmm1
+    movdqu  [rdi + rcx - 32], xmm2
+    movdqu  [rdi + rcx - 16], xmm3
+    add     rdi, rcx
+    jmp     .pmf_copy_done
+
+.pmf_copy_le32:
+    cmp     rcx, 16
+    jbe     .pmf_copy_le16
+    ; 17-32 bytes: load first 16 + last 16
+    movdqu  xmm0, [rsi]
+    movdqu  xmm1, [rsi + rcx - 16]
+    movdqu  [rdi], xmm0
+    movdqu  [rdi + rcx - 16], xmm1
+    add     rdi, rcx
+    jmp     .pmf_copy_done
+
+.pmf_copy_big:
+    ; > 64 bytes: rep movsb (ERMS)
+    rep     movsb
+    jmp     .pmf_copy_done
+
+.pmf_copy_le16:
+    cmp     rcx, 8
+    jbe     .pmf_copy_le8
+    ; 9-16 bytes
+    mov     r10, [rsi]
+    mov     r11, [rsi + rcx - 8]
+    mov     [rdi], r10
+    mov     [rdi + rcx - 8], r11
+    add     rdi, rcx
+    jmp     .pmf_copy_done
+
+.pmf_copy_le8:
+    cmp     rcx, 4
+    jbe     .pmf_copy_le4
+    ; 5-8 bytes
+    mov     r10d, [rsi]
+    mov     r11d, [rsi + rcx - 4]
+    mov     [rdi], r10d
+    mov     [rdi + rcx - 4], r11d
+    add     rdi, rcx
+    jmp     .pmf_copy_done
+
+.pmf_copy_le4:
+    ; 1-4 bytes: load first + overlapping last
+    cmp     rcx, 1
+    je      .pmf_copy_1
+    ; 2-4 bytes
+    movzx   r10d, word [rsi]
+    movzx   r11d, word [rsi + rcx - 2]
+    mov     [rdi], r10w
+    mov     [rdi + rcx - 2], r11w
+    add     rdi, rcx
+    jmp     .pmf_copy_done
+.pmf_copy_1:
+    mov     r10b, [rsi]
+    mov     [rdi], r10b
+    inc     rdi
+
+.pmf_copy_done:
+    mov     byte [rdi], 10
+    inc     rdi
+    mov     r12, rdi
+    sub     r12, r15
+
+    inc     r9
+
+    ; Incremental ASCII increment
+    cmp     byte [rbp + 5], '9'
+    jne     .pmf_inc_simple
+    jmp     .pmf_inc_carry
+
+.pmf_inc_simple:
+    inc     byte [rbp + 5]
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+
+.pmf_inc_carry:
+    mov     byte [rbp + 5], '0'
+    cmp     byte [rbp + 4], '9'
+    jne     .pmf_carry_pos4
+    mov     byte [rbp + 4], '0'
+    cmp     byte [rbp + 3], '9'
+    jne     .pmf_carry_pos3
+    mov     byte [rbp + 3], '0'
+    cmp     byte [rbp + 2], '9'
+    jne     .pmf_carry_pos2
+    mov     byte [rbp + 2], '0'
+    cmp     byte [rbp + 1], '9'
+    jne     .pmf_carry_pos1
+    mov     byte [rbp + 1], '0'
+    cmp     byte [rbp + 0], '9'
+    jne     .pmf_carry_pos0
+    mov     byte [rbp + 0], '0'
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos0:
+    cmp     byte [rbp + 0], ' '
+    jne     .pmf_carry_pos0_inc
+    mov     byte [rbp + 0], '1'
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos0_inc:
+    inc     byte [rbp + 0]
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos1:
+    cmp     byte [rbp + 1], ' '
+    jne     .pmf_carry_pos1_inc
+    mov     byte [rbp + 1], '1'
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos1_inc:
+    inc     byte [rbp + 1]
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos2:
+    cmp     byte [rbp + 2], ' '
+    jne     .pmf_carry_pos2_inc
+    mov     byte [rbp + 2], '1'
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos2_inc:
+    inc     byte [rbp + 2]
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos3:
+    cmp     byte [rbp + 3], ' '
+    jne     .pmf_carry_pos3_inc
+    mov     byte [rbp + 3], '1'
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos3_inc:
+    inc     byte [rbp + 3]
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos4:
+    cmp     byte [rbp + 4], ' '
+    jne     .pmf_carry_pos4_inc
+    mov     byte [rbp + 4], '1'
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+.pmf_carry_pos4_inc:
+    inc     byte [rbp + 4]
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+
+.pmf_big_number:
+    ; Number > 999999: multiply-by-magic itoa (rare path)
+    push    rax
+    push    rdx
+    push    rbx
+    mov     rax, r9
+    lea     r10, [rel itoa_buf + 31]
+    xor     ecx, ecx
+.pmf_big_itoa:
+    mov     r11, rax
+    mov     rdx, 0xCCCCCCCCCCCCCCCD
+    mul     rdx
+    shr     rdx, 3
+    lea     rbx, [rdx + rdx*4]
+    add     rbx, rbx
+    sub     r11, rbx
+    add     r11b, '0'
+    dec     r10
+    mov     [r10], r11b
+    inc     ecx
+    mov     rax, rdx
+    test    rax, rax
+    jnz     .pmf_big_itoa
+    mov     eax, 6
+    sub     eax, ecx
+    jle     .pmf_big_no_pad
+    push    rcx
+    mov     ecx, eax
+    mov     al, ' '
+    rep     stosb
+    pop     rcx
+.pmf_big_no_pad:
+    mov     rsi, r10
+    mov     eax, ecx
+    mov     ecx, eax
+    rep     movsb
+    mov     byte [rdi], 9
+    inc     rdi
+    pop     rbx
+    pop     rdx
+    pop     rax
+    mov     rsi, r14
+    mov     rcx, rbx
+    rep     movsb
+    mov     byte [rdi], 10
+    inc     rdi
+    mov     r12, rdi
+    sub     r12, r15
+    inc     r9
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+
+.pmf_empty_line:
+    lea     rdi, [r12 + 8]
+    cmp     rdi, OUT_BUF_SIZE
+    jb      .pmf_empty_have_space
+    push    rax
+    push    rcx
+    push    rdx
+    push    r13
+    push    r14
+    call    flush_output
+    pop     r14
+    pop     r13
+    pop     rdx
+    pop     rcx
+    pop     rax
+.pmf_empty_have_space:
+    lea     rdi, [r15 + r12]
+    mov     r10, 0x0A20202020202020
+    mov     [rdi], r10
+    add     r12, 8
+    lea     r14, [rdx + 1]
+    jmp     .pmf_nl_loop
+
+.pmf_nl_loop_done:
+    add     r13, 16
+    jmp     .pmf_scan_loop
+
+    ; ─── Scalar tail: < 16 bytes remain ──────────────────
+.pmf_scalar_scan:
+    cmp     r13, r8
+    jge     .pmf_done
+
+    cmp     byte [r13], 10
+    je      .pmf_scalar_nl
+
+    inc     r13
+    jmp     .pmf_scalar_scan
+
+.pmf_scalar_nl:
+    mov     rbx, r13
+    sub     rbx, r14                ; rbx = line length
+    mov     rdx, r13                ; rdx = newline pointer
+
+    test    rbx, rbx
+    jz      .pmf_scalar_empty
+
+    ; Section delimiter check
+    cmp     rbx, 6
+    ja      .pmf_scalar_nonempty
+    cmp     rbx, 2
+    jb      .pmf_scalar_nonempty
+    test    rbx, 1
+    jnz     .pmf_scalar_nonempty
+    cmp     byte [r14], '\'
+    jne     .pmf_scalar_nonempty
+    cmp     byte [r14+1], ':'
+    jne     .pmf_scalar_nonempty
+    cmp     rbx, 2
+    je      .pmf_sc_delim_footer
+    cmp     byte [r14+2], '\'
+    jne     .pmf_scalar_nonempty
+    cmp     byte [r14+3], ':'
+    jne     .pmf_scalar_nonempty
+    cmp     rbx, 4
+    je      .pmf_sc_delim_body
+    cmp     byte [r14+4], '\'
+    jne     .pmf_scalar_nonempty
+    cmp     byte [r14+5], ':'
+    jne     .pmf_scalar_nonempty
+    mov     byte [cur_section], SECTION_HEADER
+    jmp     .pmf_sc_delim_fallback_slow
+.pmf_sc_delim_body:
+    ; Body section: stay in fast path
+    mov     byte [cur_section], SECTION_BODY
+    mov     r9, [start_num]
+    mov     qword [blank_count], 0
+    mov     dword [rbp], 0x20202020
+    mov     word [rbp+4], 0x2020
+    mov     byte [rbp+6], 9
+    push    rdx
+    mov     rax, r9
+    lea     r10, [rbp + 5]
+.pmf_sc_delim_reinit:
+    test    rax, rax
+    jz      .pmf_sc_delim_reinit_done
+    mov     rcx, rax
+    mov     rdx, 0xCCCCCCCCCCCCCCCD
+    mul     rdx
+    shr     rdx, 3
+    lea     r11, [rdx + rdx*4]
+    add     r11, r11
+    sub     rcx, r11
+    add     cl, '0'
+    mov     [r10], cl
+    dec     r10
+    mov     rax, rdx
+    jmp     .pmf_sc_delim_reinit
+.pmf_sc_delim_reinit_done:
+    pop     rdx
+    lea     rdi, [r15 + r12]
+    mov     byte [rdi], 10
+    inc     r12
+    lea     r14, [rdx + 1]
+    lea     r13, [rdx + 1]
+    jmp     .pmf_scalar_scan
+
+.pmf_sc_delim_footer:
+    mov     byte [cur_section], SECTION_FOOTER
+.pmf_sc_delim_fallback_slow:
+    ; Header/Footer: fall back to slow path
+    lea     rdi, [r15 + r12]
+    mov     byte [rdi], 10
+    inc     r12
     mov     [line_number], r9
+    lea     r14, [rdx + 1]
+    mov     [mmap_base], r14
+    mov     rax, r8
+    sub     rax, r14
+    mov     [mmap_size], rax
+    test    rax, rax
+    jle     .pmf_done
+    call    process_mmap
+    mov     r9, [line_number]
+    jmp     .pmf_done
+
+.pmf_scalar_nonempty:
+    lea     rdi, [r12 + rbx]
+    add     rdi, 24
+    cmp     rdi, OUT_BUF_SIZE
+    jb      .pmf_sc_ne_space
+    push    rdx
+    push    rbx
+    push    r13
+    push    r14
+    call    flush_output
+    pop     r14
+    pop     r13
+    pop     rbx
+    pop     rdx
+.pmf_sc_ne_space:
+    lea     rdi, [r15 + r12]
+
+    cmp     r9, 999999
+    ja      .pmf_sc_big_num
+
+    mov     r10, [rbp]
+    mov     [rdi], r10
+    add     rdi, 7
+
+    mov     rsi, r14
+    mov     rcx, rbx
+    rep     movsb
+
+    mov     byte [rdi], 10
+    inc     rdi
+    mov     r12, rdi
+    sub     r12, r15
+
+    inc     r9
+    cmp     byte [rbp + 5], '9'
+    jne     .pmf_sc_inc_simple
+    mov     byte [rbp + 5], '0'
+    cmp     byte [rbp + 4], '9'
+    jne     .pmf_sc_c4
+    mov     byte [rbp + 4], '0'
+    cmp     byte [rbp + 3], '9'
+    jne     .pmf_sc_c3
+    mov     byte [rbp + 3], '0'
+    cmp     byte [rbp + 2], '9'
+    jne     .pmf_sc_c2
+    mov     byte [rbp + 2], '0'
+    cmp     byte [rbp + 1], '9'
+    jne     .pmf_sc_c1
+    mov     byte [rbp + 1], '0'
+    cmp     byte [rbp + 0], '9'
+    jne     .pmf_sc_c0
+    mov     byte [rbp + 0], '0'
+    jmp     .pmf_sc_advance
+.pmf_sc_c0:
+    cmp     byte [rbp + 0], ' '
+    jne     .pmf_sc_c0i
+    mov     byte [rbp + 0], '1'
+    jmp     .pmf_sc_advance
+.pmf_sc_c0i:
+    inc     byte [rbp + 0]
+    jmp     .pmf_sc_advance
+.pmf_sc_c1:
+    cmp     byte [rbp + 1], ' '
+    jne     .pmf_sc_c1i
+    mov     byte [rbp + 1], '1'
+    jmp     .pmf_sc_advance
+.pmf_sc_c1i:
+    inc     byte [rbp + 1]
+    jmp     .pmf_sc_advance
+.pmf_sc_c2:
+    cmp     byte [rbp + 2], ' '
+    jne     .pmf_sc_c2i
+    mov     byte [rbp + 2], '1'
+    jmp     .pmf_sc_advance
+.pmf_sc_c2i:
+    inc     byte [rbp + 2]
+    jmp     .pmf_sc_advance
+.pmf_sc_c3:
+    cmp     byte [rbp + 3], ' '
+    jne     .pmf_sc_c3i
+    mov     byte [rbp + 3], '1'
+    jmp     .pmf_sc_advance
+.pmf_sc_c3i:
+    inc     byte [rbp + 3]
+    jmp     .pmf_sc_advance
+.pmf_sc_c4:
+    cmp     byte [rbp + 4], ' '
+    jne     .pmf_sc_c4i
+    mov     byte [rbp + 4], '1'
+    jmp     .pmf_sc_advance
+.pmf_sc_c4i:
+    inc     byte [rbp + 4]
+    jmp     .pmf_sc_advance
+
+.pmf_sc_inc_simple:
+    inc     byte [rbp + 5]
+
+.pmf_sc_advance:
+    lea     r14, [rdx + 1]
+    lea     r13, [rdx + 1]
+    jmp     .pmf_scalar_scan
+
+.pmf_sc_big_num:
+    push    rax
+    push    rdx
+    push    rbx
+    mov     rax, r9
+    lea     r10, [rel itoa_buf + 31]
+    xor     ecx, ecx
+.pmf_sc_big_itoa:
+    mov     r11, rax
+    mov     rdx, 0xCCCCCCCCCCCCCCCD
+    mul     rdx
+    shr     rdx, 3
+    lea     rbx, [rdx + rdx*4]
+    add     rbx, rbx
+    sub     r11, rbx
+    add     r11b, '0'
+    dec     r10
+    mov     [r10], r11b
+    inc     ecx
+    mov     rax, rdx
+    test    rax, rax
+    jnz     .pmf_sc_big_itoa
+    mov     eax, 6
+    sub     eax, ecx
+    jle     .pmf_sc_big_no_pad
+    push    rcx
+    mov     ecx, eax
+    mov     al, ' '
+    rep     stosb
+    pop     rcx
+.pmf_sc_big_no_pad:
+    mov     rsi, r10
+    mov     eax, ecx
+    mov     ecx, eax
+    rep     movsb
+    mov     byte [rdi], 9
+    inc     rdi
+    pop     rbx
+    pop     rdx
+    pop     rax
+    mov     rsi, r14
+    mov     rcx, rbx
+    rep     movsb
+    mov     byte [rdi], 10
+    inc     rdi
+    mov     r12, rdi
+    sub     r12, r15
+    inc     r9
+    lea     r14, [rdx + 1]
+    lea     r13, [rdx + 1]
+    jmp     .pmf_scalar_scan
+
+.pmf_scalar_empty:
+    lea     rdi, [r12 + 8]
+    cmp     rdi, OUT_BUF_SIZE
+    jb      .pmf_sc_empty_space
+    push    rdx
+    push    r13
+    push    r14
+    call    flush_output
+    pop     r14
+    pop     r13
+    pop     rdx
+.pmf_sc_empty_space:
+    lea     rdi, [r15 + r12]
+    mov     r10, 0x0A20202020202020
+    mov     [rdi], r10
+    add     r12, 8
+    lea     r14, [r13 + 1]
+    inc     r13
+    jmp     .pmf_scalar_scan
+
+.pmf_init_fallback:
+    add     rsp, 16
+    mov     [line_number], r9
+    call    process_mmap
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
+    ret
+
+.pmf_done:
+    ; Handle remaining data without trailing newline (e.g., "hello" with no \n)
+    mov     [line_number], r9
+    cmp     r14, r8
+    jge     .pmf_exit
+    ; There's trailing data at [r14..r8) without a newline
+    mov     [line_ptr], r14
+    mov     rax, r8
+    sub     rax, r14
+    mov     [line_len], rax
+    call    process_line_direct
+    ; Advance line number (process_line_direct updates [line_number])
+
+.pmf_exit:
+    add     rsp, 16
     pop     rbp
     pop     r15
     pop     r14

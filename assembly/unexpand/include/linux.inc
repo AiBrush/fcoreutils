@@ -64,4 +64,9 @@
 %define MAP_PRIVATE         2
 %define MAP_POPULATE    0x8000
 
+; ── madvise constants ──
+%define SYS_MADVISE        28
+%define MADV_SEQUENTIAL     2
+%define MADV_HUGEPAGE      14
+
 %endif

@@ -329,7 +329,7 @@ _start:
     cmp     dword [num_files], 0
     jne     .process_files
     mov     edi, STDIN
-    call    process_fd
+    call    try_mmap_or_read
     jmp     .final_flush
 .process_files:
     xor     ebx, ebx
@@ -347,7 +347,7 @@ _start:
 .file_stdin:
     push    rbx
     mov     edi, STDIN
-    call    process_fd
+    call    try_mmap_or_read
     pop     rbx
 .file_next:
     inc     ebx
@@ -384,6 +384,87 @@ _start:
 
 ; ═══════════════════════════════════════════════════════════
 ;  open_and_process(rsi=filename)
+; ═══════════════════════════════════════════════════════════
+;  try_mmap_or_read(edi=fd)
+;  Try mmap on fd (works for regular files and stdin redirects).
+;  Falls back to read() for pipes/sockets.
+; ═══════════════════════════════════════════════════════════
+try_mmap_or_read:
+    push    r14
+    push    r15
+    mov     r14d, edi
+
+    sub     rsp, STAT_STRUCT_SIZE
+    mov     edi, r14d
+    mov     rsi, rsp
+    mov     rax, SYS_FSTAT
+    syscall
+    test    rax, rax
+    js      .tmor_fstat_fail
+
+    mov     r15, [rsp + STAT_SIZE]
+    add     rsp, STAT_STRUCT_SIZE
+
+    test    r15, r15
+    jle     .tmor_read
+
+    ; mmap
+    xor     edi, edi
+    mov     rsi, r15
+    mov     edx, PROT_READ
+    mov     r10d, MAP_PRIVATE | MAP_POPULATE
+    mov     r8d, r14d
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
+    syscall
+    cmp     rax, -4096
+    ja      .tmor_read
+
+    push    rax
+    push    r15
+
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_SEQUENTIAL
+    mov     rax, SYS_MADVISE
+    syscall
+
+    pop     r15
+    pop     rax
+    push    rax
+    push    r15
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_HUGEPAGE
+    mov     rax, SYS_MADVISE
+    syscall
+
+    pop     r15
+    pop     rax
+    push    rax
+
+    mov     rdi, rax
+    mov     rsi, r15
+    call    process_buffer
+    pop     rdi
+
+    mov     rsi, r15
+    mov     rax, SYS_MUNMAP
+    syscall
+
+    pop     r15
+    pop     r14
+    ret
+
+.tmor_fstat_fail:
+    add     rsp, STAT_STRUCT_SIZE
+.tmor_read:
+    mov     edi, r14d
+    call    process_fd
+    pop     r15
+    pop     r14
+    ret
+
 ; ═══════════════════════════════════════════════════════════
 open_and_process:
     push    rbx
@@ -425,6 +506,30 @@ open_and_process:
     ja      .oap_read_fallback
 
     push    rax
+    push    r15
+
+    ; madvise(addr, len, MADV_SEQUENTIAL)
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_SEQUENTIAL
+    mov     rax, SYS_MADVISE
+    syscall
+
+    ; madvise(addr, len, MADV_HUGEPAGE)
+    pop     r15
+    pop     rax
+    push    rax
+    push    r15
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_HUGEPAGE
+    mov     rax, SYS_MADVISE
+    syscall
+
+    pop     r15
+    pop     rax
+    push    rax
+
     mov     rdi, rax
     mov     rsi, r15
     call    process_buffer
@@ -543,11 +648,16 @@ unexpand_core:
     mov     rbx, rdi                ; data ptr
     mov     r13, rsi                ; remaining
     lea     r15, [out_buf]          ; cache base
+    mov     r14d, [st_column]       ; cache column in register
 
     ; Load SIMD constants into registers (avoid memory loads in hot loop)
     movdqa  xmm6, [simd_space]     ; 0x20 x16 for range check
     movdqa  xmm7, [simd_nl]        ; 0x0a x16 for verbatim path
+    pxor    xmm5, xmm5             ; permanent zero register
 
+; Re-entry from scalar paths — reload cached column from memory first
+.uc_loop_scalar:
+    mov     r14d, [st_column]
 .uc_loop:
     test    r13, r13
     jle     .uc_done
@@ -557,51 +667,34 @@ unexpand_core:
 
     ; ── Convert mode: SIMD scan for specials (any byte <= 0x20) ──
     cmp     r13, 16
-    jl      .uc_scalar
+    jl      .uc_scalar_sync
 
-    lea     rax, [r12 + 16]
-    cmp     rax, FLUSH_THRESHOLD
+    cmp     r12, FLUSH_THRESHOLD
     jl      .uc_simd_go
+    mov     [st_column], r14d       ; sync column before flush
     call    flush_output_save
     lea     r15, [out_buf]
 
 .uc_simd_go:
+    mov     r14d, [st_column]       ; reload column (may have changed in scalar path)
     movdqu  xmm0, [rbx]
-    ; Check: any byte <= 0x20?
-    ; pminub(x, 0x20) == 0x20 means the byte was >= 0x20.
-    ; If byte < 0x20, pminub gives the byte itself which != 0x20.
-    ; If byte == 0x20 (space), pminub gives 0x20 which == 0x20 -> match!
-    ; Wait, we want to detect <= 0x20. pminub(byte, 0x20) == 0x20 only when byte >= 0x20.
-    ; For byte < 0x20, min is byte < 0x20 != 0x20. For byte > 0x20, min is 0x20 == 0x20.
-    ; For byte == 0x20, min is 0x20 == 0x20.
-    ; So pcmpeqb(pminub(x, 0x20), 0x20) gives 0xFF for bytes >= 0x20, 0x00 for bytes < 0x20.
-    ; That's the OPPOSITE of what we want.
-    ;
-    ; Alternative approach: Use unsigned comparison via saturating subtract.
-    ; psubusb(0x20, x): if x <= 0x20, result is 0x20-x >= 0; if x > 0x20, result is 0.
-    ; Wait, psubusb saturates to 0: psubusb(a,b) = max(a-b, 0).
-    ; psubusb(0x20, x): for x <= 0x20, gives 0x20-x (which is >= 0, could be 0 if x==0x20).
-    ; for x > 0x20, gives 0.
-    ; Hmm, we want "x <= 0x20". With psubusb(x, 0x20): for x <= 0x20, gives 0.
-    ; For x > 0x20, gives x - 0x20 > 0. Then pcmpeqb against zero gives 0xFF for <= 0x20.
-    ; That works!
+    ; Check for bytes <= 0x20 using saturating subtract
     movdqa  xmm1, xmm0
-    psubusb xmm1, xmm6              ; saturated sub: x - 0x20, clamped to 0
-    pxor    xmm2, xmm2
-    pcmpeqb xmm1, xmm2             ; == 0 means original byte was <= 0x20
+    psubusb xmm1, xmm6              ; x - 0x20, clamped to 0
+    pcmpeqb xmm1, xmm5             ; == 0 means byte was <= 0x20
     pmovmskb eax, xmm1
     test    eax, eax
     jnz     .uc_simd_has_special
 
-    ; No specials in 16 bytes
+    ; No specials in 16 bytes — fast copy
     cmp     dword [st_pending], 0
     jne     .uc_simd_flush_pending
 
 .uc_simd_copy16:
-    movdqu  xmm4, [rbx]
-    movdqu  [r15 + r12], xmm4
+    ; Use xmm0 directly (already loaded)
+    movdqu  [r15 + r12], xmm0
     add     r12, 16
-    add     dword [st_column], 16
+    add     r14d, 16
     mov     byte [st_prev_blank], 0
     cmp     byte [convert_entire_line], 0
     jne     .uc_simd_advance
@@ -610,26 +703,63 @@ unexpand_core:
     add     rbx, 16
     sub     r13, 16
 
-    ; Tight inner loop for consecutive non-special chunks
+    ; Specialized tight inner loop for -a flag (convert_entire_line=1)
+    ; Skips all state updates except column — only does load/check/copy
+    cmp     byte [convert_entire_line], 0
+    je      .uc_simd_advance_check_convert
+
+    ; Ultra-fast inner loop: uses direct output pointer for speed
+    ; r9 = direct output pointer = r15 + r12
+    lea     r9, [r15 + r12]
+.uc_fast_inner:
+    cmp     r13, 16
+    jl      .uc_fast_inner_exit
+    lea     rax, [out_buf + FLUSH_THRESHOLD]
+    cmp     r9, rax
+    jge     .uc_fast_inner_exit
+
+    movdqu  xmm0, [rbx]
+    movdqa  xmm1, xmm0
+    psubusb xmm1, xmm6
+    pcmpeqb xmm1, xmm5
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .uc_fast_inner_exit         ; has special, sync and re-enter main
+
+    movdqu  [r9], xmm0
+    add     r9, 16
+    add     r14d, 16
+    add     rbx, 16
+    sub     r13, 16
+    jmp     .uc_fast_inner
+
+.uc_fast_inner_exit:
+    ; Sync r9 back to r12
+    lea     rax, [out_buf]
+    sub     r9, rax
+    mov     r12, r9
+    lea     r15, [out_buf]
+    jmp     .uc_loop
+
+.uc_simd_advance_check_convert:
     cmp     byte [st_convert], 0
     je      .uc_loop
     cmp     r13, 16
     jl      .uc_loop
-    lea     rax, [r12 + 16]
-    cmp     rax, FLUSH_THRESHOLD
+    cmp     r12, FLUSH_THRESHOLD
     jge     .uc_loop
 
     movdqu  xmm0, [rbx]
     movdqa  xmm1, xmm0
     psubusb xmm1, xmm6
-    pxor    xmm2, xmm2
-    pcmpeqb xmm1, xmm2
+    pcmpeqb xmm1, xmm5
     pmovmskb eax, xmm1
     test    eax, eax
     jnz     .uc_loop
     jmp     .uc_simd_copy16
 
 .uc_simd_flush_pending:
+    mov     [st_column], r14d       ; sync column before function call
     push    rbx
     push    r13
     call    flush_pending_blanks
@@ -644,13 +774,29 @@ unexpand_core:
     jmp     .uc_simd_copy16
 
 .uc_simd_has_special:
+    ; Sync cached column to memory before potential scalar/flush operations
+    mov     [st_column], r14d
     bsf     ecx, eax
     test    ecx, ecx
-    jz      .uc_scalar
+    jz      .uc_scalar_sync
 
-    ; Copy ecx non-special bytes
+    ; Copy ecx non-special bytes (ecx = 1..15)
+    ; Fast path: skip pending check when no pending blanks (common case)
     cmp     dword [st_pending], 0
-    je      .uc_simd_partial_nopend
+    jne     .uc_simd_partial_pending
+
+.uc_simd_partial_nopend:
+    ; Ensure output space
+    lea     rax, [r12 + 16]             ; max 15 bytes + headroom
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .uc_simd_partial_copy
+    push    rcx
+    call    flush_output_save
+    pop     rcx
+    lea     r15, [out_buf]
+    jmp     .uc_simd_partial_copy
+
+.uc_simd_partial_pending:
     push    rcx
     push    rbx
     push    r13
@@ -659,19 +805,43 @@ unexpand_core:
     pop     rbx
     pop     rcx
     lea     r15, [out_buf]
-.uc_simd_partial_nopend:
-    lea     rax, [r12 + rcx]
-    cmp     rax, FLUSH_THRESHOLD
-    jl      .uc_simd_partial_copy
-    push    rcx
-    call    flush_output_save
-    pop     rcx
-    lea     r15, [out_buf]
+    jmp     .uc_simd_partial_nopend
+
 .uc_simd_partial_copy:
+    ; Fast copy ecx bytes (1-15) without rep movsb overhead
     lea     rdi, [r15 + r12]
-    mov     rsi, rbx
     mov     edx, ecx
-    rep     movsb
+    cmp     ecx, 8
+    jl      .uc_spc_small
+    mov     rax, [rbx]
+    mov     [rdi], rax
+    cmp     ecx, 8
+    je      .uc_spc_done
+    mov     rax, [rbx + rcx - 8]
+    mov     [rdi + rcx - 8], rax
+    jmp     .uc_spc_done
+.uc_spc_small:
+    cmp     ecx, 4
+    jl      .uc_spc_tiny
+    mov     eax, [rbx]
+    mov     [rdi], eax
+    cmp     ecx, 4
+    je      .uc_spc_done
+    mov     eax, [rbx + rcx - 4]
+    mov     [rdi + rcx - 4], eax
+    jmp     .uc_spc_done
+.uc_spc_tiny:
+    movzx   eax, byte [rbx]
+    mov     [rdi], al
+    cmp     ecx, 1
+    je      .uc_spc_done
+    movzx   eax, byte [rbx + 1]
+    mov     [rdi + 1], al
+    cmp     ecx, 2
+    je      .uc_spc_done
+    movzx   eax, byte [rbx + 2]
+    mov     [rdi + 2], al
+.uc_spc_done:
     add     r12, rdx
     add     dword [st_column], edx
     mov     byte [st_prev_blank], 0
@@ -681,9 +851,21 @@ unexpand_core:
 .uc_simd_partial_adv:
     add     rbx, rdx
     sub     r13, rdx
-    jmp     .uc_loop
+    ; Next byte at [rbx] is the known special char — handle directly
+    ; in scalar path, skipping SIMD re-scan (saves ~500k loads)
+    test    r13, r13
+    jle     .uc_done_from_partial
+    jmp     .uc_scalar
 
-; ── Scalar path ──
+.uc_done_from_partial:
+    ; [st_column] is already up-to-date from the partial copy path
+    ; Reload r14d so .uc_done writes the correct value
+    mov     r14d, [st_column]
+    jmp     .uc_done
+
+; ── Scalar path (sync SIMD register to memory for scalar use) ──
+.uc_scalar_sync:
+    mov     [st_column], r14d
 .uc_scalar:
     movzx   eax, byte [rbx]
 
@@ -715,7 +897,7 @@ unexpand_core:
 .uc_nb_next:
     inc     rbx
     dec     r13
-    jmp     .uc_loop
+    jmp     .uc_loop_scalar
 
 ; ─── Space ────────────────────────────────────────────────
 .uc_space:
@@ -749,7 +931,7 @@ unexpand_core:
     mov     byte [st_prev_blank], 1
     inc     rbx
     dec     r13
-    jmp     .uc_loop
+    jmp     .uc_loop_scalar
 
 .uc_space_convert:
     mov     eax, [st_column]
@@ -788,7 +970,7 @@ unexpand_core:
     mov     byte [st_prev_blank], 1
     inc     rbx
     dec     r13
-    jmp     .uc_loop
+    jmp     .uc_loop_scalar
 
 .uc_space_no_convert:
     mov     eax, [st_column]
@@ -806,7 +988,7 @@ unexpand_core:
     mov     byte [st_prev_blank], 1
     inc     rbx
     dec     r13
-    jmp     .uc_loop
+    jmp     .uc_loop_scalar
 
 .uc_space_pending_overflow:
     call    flush_pending_blanks
@@ -817,7 +999,7 @@ unexpand_core:
     mov     byte [st_prev_blank], 1
     inc     rbx
     dec     r13
-    jmp     .uc_loop
+    jmp     .uc_loop_scalar
 
 ; ─── Tab character ────────────────────────────────────────
 .uc_tab_char:
@@ -852,7 +1034,7 @@ unexpand_core:
     mov     byte [st_prev_blank], 1
     inc     rbx
     dec     r13
-    jmp     .uc_loop
+    jmp     .uc_loop_scalar
 
 .uc_tab_convert:
     mov     eax, [st_next_tab_col]
@@ -886,11 +1068,14 @@ unexpand_core:
     mov     byte [st_prev_blank], 1
     inc     rbx
     dec     r13
-    jmp     .uc_loop
+    jmp     .uc_loop_scalar
 
 ; ─── Newline ──────────────────────────────────────────────
 .uc_newline:
-    call    flush_pending_blanks
+    ; Inline pending check to avoid function call overhead (500k lines!)
+    cmp     dword [st_pending], 0
+    jne     .uc_nl_flush_pending
+.uc_nl_after_flush:
     lea     r15, [out_buf]
     mov     byte [r15 + r12], 10
     inc     r12
@@ -900,15 +1085,21 @@ unexpand_core:
     lea     r15, [out_buf]
 .uc_nl_nf:
     mov     byte [st_convert], 1
-    mov     dword [st_column], 0
-    mov     dword [st_next_tab_col], 0
-    mov     dword [st_tab_index], 0
+    xor     eax, eax
+    mov     [st_column], eax
+    mov     [st_next_tab_col], eax
+    mov     [st_tab_index], eax
+    mov     [st_pending], eax
     mov     byte [st_one_blank_before], 0
     mov     byte [st_prev_blank], 1
-    mov     dword [st_pending], 0
+    xor     r14d, r14d              ; column = 0, skip reload in uc_loop_scalar
     inc     rbx
     dec     r13
     jmp     .uc_loop
+
+.uc_nl_flush_pending:
+    call    flush_pending_blanks
+    jmp     .uc_nl_after_flush
 
 ; ─── Backspace ────────────────────────────────────────────
 .uc_backspace:
@@ -937,7 +1128,7 @@ unexpand_core:
     mov     byte [st_prev_blank], 0
     inc     rbx
     dec     r13
-    jmp     .uc_loop
+    jmp     .uc_loop_scalar
 
 ; ─── Verbatim copy (not converting) ──────────────────────
 .uc_verbatim:
@@ -1000,11 +1191,72 @@ unexpand_core:
     test    edx, edx
     jz      .uc_verb_64_emit_nl
 
-    ; Copy bytes before newline
+    ; Copy edx bytes before newline (overlapping load/store, no rep movsb)
     lea     rdi, [r15 + r12]
-    mov     rsi, rbx
-    mov     ecx, edx
-    rep     movsb
+    cmp     edx, 32
+    jl      .uc_verb_nl_lt32
+    ; 32-63 bytes: copy using pre-loaded xmm registers
+    ; xmm0-3 already loaded from the 64-byte scan
+    movdqu  [rdi], xmm0
+    movdqu  [rdi + 16], xmm1
+    cmp     edx, 32
+    je      .uc_verb_nl_copied
+    ; 33-63: overlap last 32 bytes
+    lea     ecx, [edx - 32]
+    ; Use two fresh loads from rbx for the overlapping tail
+    movdqu  xmm4, [rbx + rdx - 32]
+    movdqu  xmm3, [rbx + rdx - 16]
+    mov     eax, edx
+    sub     eax, 32
+    movdqu  [rdi + rax], xmm4
+    movdqu  [rdi + rax + 16], xmm3
+    jmp     .uc_verb_nl_copied
+.uc_verb_nl_lt32:
+    cmp     edx, 16
+    jl      .uc_verb_nl_lt16
+    ; 16-31: use xmm0 + overlap
+    movdqu  [rdi], xmm0
+    cmp     edx, 16
+    je      .uc_verb_nl_copied
+    movdqu  xmm4, [rbx + rdx - 16]
+    mov     eax, edx
+    sub     eax, 16
+    movdqu  [rdi + rax], xmm4
+    jmp     .uc_verb_nl_copied
+.uc_verb_nl_lt16:
+    cmp     edx, 8
+    jl      .uc_verb_nl_lt8
+    mov     rax, [rbx]
+    mov     [rdi], rax
+    cmp     edx, 8
+    je      .uc_verb_nl_copied
+    mov     rax, [rbx + rdx - 8]
+    lea     ecx, [edx - 8]
+    mov     [rdi + rcx], rax
+    jmp     .uc_verb_nl_copied
+.uc_verb_nl_lt8:
+    cmp     edx, 4
+    jl      .uc_verb_nl_lt4
+    mov     eax, [rbx]
+    mov     [rdi], eax
+    cmp     edx, 4
+    je      .uc_verb_nl_copied
+    mov     eax, [rbx + rdx - 4]
+    lea     ecx, [edx - 4]
+    mov     [rdi + rcx], eax
+    jmp     .uc_verb_nl_copied
+.uc_verb_nl_lt4:
+    movzx   eax, byte [rbx]
+    mov     [rdi], al
+    cmp     edx, 1
+    je      .uc_verb_nl_copied
+    movzx   eax, byte [rbx + 1]
+    mov     [rdi + 1], al
+    cmp     edx, 2
+    je      .uc_verb_nl_copied
+    movzx   eax, byte [rbx + 2]
+    mov     [rdi + 2], al
+.uc_verb_nl_copied:
     add     r12, rdx
     add     rbx, rdx
     sub     r13, rdx
@@ -1018,12 +1270,14 @@ unexpand_core:
     lea     r15, [out_buf]
 .uc_verb_64_nl_nf:
     mov     byte [st_convert], 1
-    mov     dword [st_column], 0
-    mov     dword [st_next_tab_col], 0
-    mov     dword [st_tab_index], 0
+    xor     eax, eax
+    mov     [st_column], eax
+    mov     [st_next_tab_col], eax
+    mov     [st_tab_index], eax
+    mov     [st_pending], eax
     mov     byte [st_one_blank_before], 0
     mov     byte [st_prev_blank], 1
-    mov     dword [st_pending], 0
+    xor     r14d, r14d
     inc     rbx
     dec     r13
     jmp     .uc_loop
@@ -1055,11 +1309,39 @@ unexpand_core:
     bsf     ecx, eax
     test    ecx, ecx
     jz      .uc_verb_emit_nl
+    ; Copy ecx bytes (1-15) without rep movsb overhead
     lea     rdi, [r15 + r12]
-    mov     rsi, rbx
-    push    rcx
-    rep     movsb
-    pop     rcx
+    cmp     ecx, 8
+    jl      .uc_vfn_small
+    mov     rax, [rbx]
+    mov     [rdi], rax
+    cmp     ecx, 8
+    je      .uc_vfn_done
+    mov     rax, [rbx + rcx - 8]
+    mov     [rdi + rcx - 8], rax
+    jmp     .uc_vfn_done
+.uc_vfn_small:
+    cmp     ecx, 4
+    jl      .uc_vfn_tiny
+    mov     eax, [rbx]
+    mov     [rdi], eax
+    cmp     ecx, 4
+    je      .uc_vfn_done
+    mov     eax, [rbx + rcx - 4]
+    mov     [rdi + rcx - 4], eax
+    jmp     .uc_vfn_done
+.uc_vfn_tiny:
+    movzx   eax, byte [rbx]
+    mov     [rdi], al
+    cmp     ecx, 1
+    je      .uc_vfn_done
+    movzx   eax, byte [rbx + 1]
+    mov     [rdi + 1], al
+    cmp     ecx, 2
+    je      .uc_vfn_done
+    movzx   eax, byte [rbx + 2]
+    mov     [rdi + 2], al
+.uc_vfn_done:
     add     r12, rcx
     add     rbx, rcx
     sub     r13, rcx
@@ -1072,12 +1354,14 @@ unexpand_core:
     lea     r15, [out_buf]
 .uc_verb_nl_nf:
     mov     byte [st_convert], 1
-    mov     dword [st_column], 0
-    mov     dword [st_next_tab_col], 0
-    mov     dword [st_tab_index], 0
+    xor     eax, eax
+    mov     [st_column], eax
+    mov     [st_next_tab_col], eax
+    mov     [st_tab_index], eax
+    mov     [st_pending], eax
     mov     byte [st_one_blank_before], 0
     mov     byte [st_prev_blank], 1
-    mov     dword [st_pending], 0
+    xor     r14d, r14d
     inc     rbx
     dec     r13
     jmp     .uc_loop
@@ -1100,6 +1384,7 @@ unexpand_core:
     jmp     .uc_verb_scalar
 
 .uc_done:
+    mov     [st_column], r14d       ; sync cached column back to memory
     pop     r13
     pop     r15
     pop     r14

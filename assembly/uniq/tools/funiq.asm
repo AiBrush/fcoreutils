@@ -37,9 +37,9 @@ extern asm_close
 
 ; ─── Constants ───────────────────────────────────────────
 %define READ_BUF_SIZE   131072          ; 128KB input buffer (stdin fallback)
-%define OUT_BUF_SIZE    262144          ; 256KB output buffer
+%define OUT_BUF_SIZE    1048576         ; 1MB output buffer
 %define LINE_BUF_SIZE   1048576         ; 1MB max line length (stdin fallback)
-%define FLUSH_THRESHOLD 131072          ; Flush at 128KB
+%define FLUSH_THRESHOLD 786432          ; Flush at 768KB
 
 ; mmap constants
 %define PROT_READ       1
@@ -802,25 +802,6 @@ _start:
     mov     byte [rel delimiter], 0             ; NUL
 .run_uniq_delim_done:
 
-    ; DEBUG: write delimiter value to stderr
-    movzx   eax, byte [rel delimiter]
-    add     al, '0'
-    mov     [rel count_buf], al
-    mov     byte [rel count_buf+1], 10
-    push    rdi
-    push    rsi
-    push    rdx
-    push    rax
-    mov     rax, SYS_WRITE
-    mov     rdi, STDERR
-    lea     rsi, [rel count_buf]
-    mov     rdx, 2
-    syscall
-    pop     rax
-    pop     rdx
-    pop     rsi
-    pop     rdi
-
     ; Check if we can use the fast mmap path
     cmp     byte [rel use_mmap], 1
     jne     .run_uniq_slow
@@ -837,6 +818,27 @@ _start:
     jmp     .run_uniq_slow
 
 .run_uniq_mmap_ok:
+    ; Check if we can use the ultra-fast path:
+    ; MODE_NORMAL, no skip_fields, no skip_chars, no check_chars limit,
+    ; no case_insensitive, newline delimiter
+    cmp     byte [rel opt_mode], MODE_NORMAL
+    jne     .run_uniq_mmap_generic
+    cmp     qword [rel opt_skip_fields], 0
+    jne     .run_uniq_mmap_generic
+    cmp     qword [rel opt_skip_chars], 0
+    jne     .run_uniq_mmap_generic
+    cmp     qword [rel opt_check_chars], -1
+    jne     .run_uniq_mmap_generic
+    cmp     byte [rel opt_case_insensitive], 0
+    jne     .run_uniq_mmap_generic
+    cmp     byte [rel opt_zero_terminated], 0
+    jne     .run_uniq_mmap_generic
+
+    call    process_uniq_mmap_fast
+    call    cleanup_mmap
+    jmp     .run_uniq_done
+
+.run_uniq_mmap_generic:
     call    process_uniq_mmap
     call    cleanup_mmap
     jmp     .run_uniq_done
@@ -997,7 +999,532 @@ cleanup_mmap:
     ret
 
 ; ═══════════════════════════════════════════════════════════
-;  process_uniq_mmap — Fast mmap-based processing
+;  process_uniq_mmap_fast — Ultra-fast zero-copy path for MODE_NORMAL
+;
+;  Conditions: MODE_NORMAL, no skip_fields, no skip_chars,
+;  no check_chars limit, no case_insensitive, newline delimiter.
+;
+;  Strategy: Direct write from mmap buffer. Track contiguous
+;  regions of unique lines and write them in bulk. When a
+;  duplicate is found, flush the region before it, skip the
+;  duplicate, and start a new region.
+;
+;  Uses a mask lookup table to avoid runtime shift computation
+;  for the common short-line path.
+;
+;  Register usage:
+;    r13 = current scan position in mmap buffer
+;    r14 = safe end for 16-byte SIMD reads (end - 16)
+;    r15 = previous line start pointer (-1 = no prev)
+;    rbx = previous line masked qword (for short lines)
+;    rbp = output_fd
+;    r8  = write_start
+;    r9  = absolute end of mmap buffer
+;    r10 = previous line length
+;    xmm15 = newline broadcast pattern
+; ═══════════════════════════════════════════════════════════
+process_uniq_mmap_fast:
+    push    rbx
+    push    r13
+    push    r14
+    push    r15
+    push    rbp
+    sub     rsp, 32                     ; local storage
+
+    ; Load output fd into rbp for fast access
+    mov     ebp, [rel output_fd]
+
+    ; Initialize scan pointers
+    mov     r13, [rel mmap_addr]        ; current pos
+    mov     r9, r13
+    add     r9, [rel mmap_len]          ; absolute end
+    lea     r14, [r9 - 16]             ; safe end for SIMD
+
+    ; No previous line yet
+    mov     r15, -1
+
+    ; write_start = beginning of mmap
+    mov     r8, r13
+
+    ; Set up SSE2 newline pattern
+    mov     eax, 10
+    movd    xmm15, eax
+    punpcklbw xmm15, xmm15
+    punpcklwd xmm15, xmm15
+    pshufd  xmm15, xmm15, 0
+
+    ; ─── Main loop ───
+    ; Combined scan + compare approach:
+    ; 1. SIMD scan to find newline, get line length
+    ; 2. Compare with previous line using fastest method for given length
+    ; Fast path (len 1-7): single qword compare with mask table
+    ; The mask table lookup is faster than shift-based masking.
+
+.pf_main_loop:
+    cmp     r13, r9
+    jge     .pf_handle_last
+
+    mov     rdi, r13                    ; line start
+
+    ; ─── Find newline ───
+    cmp     r13, r14
+    ja      .pf_scan_scalar
+
+    movdqu  xmm0, [r13]
+    pcmpeqb xmm0, xmm15
+    pmovmskb eax, xmm0
+    test    eax, eax
+    jnz     .pf_found_nl
+    add     r13, 16
+
+.pf_scan16:
+    cmp     r13, r14
+    ja      .pf_scan_scalar
+    movdqu  xmm0, [r13]
+    pcmpeqb xmm0, xmm15
+    pmovmskb eax, xmm0
+    test    eax, eax
+    jnz     .pf_found_nl
+    add     r13, 16
+    jmp     .pf_scan16
+
+.pf_found_nl:
+    bsf     ecx, eax
+    add     r13, rcx                    ; r13 -> newline char
+    mov     rcx, r13
+    sub     rcx, rdi                    ; rcx = line length
+    inc     r13                         ; advance past newline
+
+    ; ─── Compare with prev ───
+    cmp     r15, -1
+    je      .pf_first_line
+
+    ; Length differ => different lines (common case for sorted data)
+    cmp     rcx, r10
+    jne     .pf_update_prev
+
+    ; Same length — compare content
+    test    r10, r10
+    jz      .pf_equal                   ; both empty
+
+    ; Use qword compare for lines up to 7 bytes (covers ~95% of lines)
+    cmp     r10, 8
+    jge     .pf_cmp_long
+
+    ; Short line (1-7): one qword load + mask + compare
+    mov     rax, [rdi]
+    and     rax, [rel mask_table + rcx*8]
+    cmp     rax, rbx
+    je      .pf_equal
+    ; fall through to update_prev
+
+.pf_update_prev:
+    ; Lines differ — update prev, keep growing the output region
+    mov     r15, rdi
+    mov     r10, rcx
+    cmp     rcx, 8
+    jge     .pf_main_loop
+    mov     rbx, [rdi]
+    and     rbx, [rel mask_table + rcx*8]
+    jmp     .pf_main_loop
+
+.pf_cmp_long:
+    ; Length >= 8: compare first 8 bytes (usually sufficient to distinguish)
+    mov     rax, [r15]
+    cmp     rax, [rdi]
+    jne     .pf_update_prev
+
+    ; First 8 bytes match — compare rest
+    cmp     r10, 16
+    jle     .pf_cmp_last8
+
+    mov     rdx, 8
+.pf_cmp16_loop:
+    mov     rax, r10
+    sub     rax, rdx
+    cmp     rax, 16
+    jl      .pf_cmp_tail8
+
+    movdqu  xmm0, [r15 + rdx]
+    movdqu  xmm1, [rdi + rdx]
+    pcmpeqb xmm0, xmm1
+    pmovmskb eax, xmm0
+    cmp     eax, 0xFFFF
+    jne     .pf_update_prev
+    add     rdx, 16
+    jmp     .pf_cmp16_loop
+
+.pf_cmp_tail8:
+    mov     rax, [r15 + r10 - 8]
+    cmp     rax, [rdi + r10 - 8]
+    jne     .pf_update_prev
+    jmp     .pf_equal
+
+.pf_cmp_last8:
+    mov     rax, [r15 + r10 - 8]
+    cmp     rax, [rdi + r10 - 8]
+    jne     .pf_update_prev
+    ; fall through to equal
+
+.pf_equal:
+    ; Duplicate found. Buffer [write_start .. this line start) to output buf,
+    ; then skip this duplicate line.
+    mov     rdx, rdi
+    sub     rdx, r8                     ; rdx = bytes to buffer
+    jz      .pf_skip_dup
+
+    ; Check if it fits in output buffer
+    lea     rax, [r12 + rdx]
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .pf_equal_copy_to_buf
+
+    ; Flush output buffer first if non-empty
+    test    r12, r12
+    jz      .pf_equal_direct_write
+
+    mov     [rsp], r8
+    mov     [rsp+8], r13
+    mov     [rsp+16], rcx
+    mov     [rsp+24], rdi
+    mov     edi, ebp
+    lea     rsi, [rel out_buf]
+    mov     rdx, r12
+    call    asm_write_all
+    xor     r12d, r12d
+    mov     r8, [rsp]
+    mov     r13, [rsp+8]
+    mov     rcx, [rsp+16]
+    mov     rdi, [rsp+24]
+    ; Recompute region size
+    mov     rdx, rdi
+    sub     rdx, r8
+
+    ; If region fits in buffer now, copy it
+    lea     rax, [r12 + rdx]
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .pf_equal_copy_to_buf
+
+.pf_equal_direct_write:
+    ; Region too large for buffer — write directly from mmap
+    mov     [rsp], r8
+    mov     [rsp+8], r13
+    mov     [rsp+16], rcx
+    mov     [rsp+24], rdi
+    mov     edi, ebp
+    mov     rsi, r8
+    ; rdx = region size (already set)
+    call    asm_write_all
+    mov     r8, [rsp]
+    mov     r13, [rsp+8]
+    mov     rcx, [rsp+16]
+    mov     rdi, [rsp+24]
+    jmp     .pf_skip_dup
+
+.pf_equal_copy_to_buf:
+    ; Copy region [r8, r8+rdx) to output buffer using SIMD
+    push    rdi
+    push    rcx
+    push    rdx
+    lea     rdi, [rel out_buf]
+    add     rdi, r12
+    mov     rsi, r8                     ; src = write_start in mmap
+    mov     rcx, rdx                    ; count remaining
+
+.pf_ecopy32:
+    cmp     rcx, 32
+    jl      .pf_ecopy16
+    movdqu  xmm0, [rsi]
+    movdqu  xmm1, [rsi + 16]
+    movdqu  [rdi], xmm0
+    movdqu  [rdi + 16], xmm1
+    add     rsi, 32
+    add     rdi, 32
+    sub     rcx, 32
+    jmp     .pf_ecopy32
+
+.pf_ecopy16:
+    cmp     rcx, 16
+    jl      .pf_ecopy8
+    movdqu  xmm0, [rsi]
+    movdqu  [rdi], xmm0
+    add     rsi, 16
+    add     rdi, 16
+    sub     rcx, 16
+
+.pf_ecopy8:
+    cmp     rcx, 8
+    jl      .pf_ecopy_tail
+    mov     rax, [rsi]
+    mov     [rdi], rax
+    add     rsi, 8
+    add     rdi, 8
+    sub     rcx, 8
+
+.pf_ecopy_tail:
+    test    rcx, rcx
+    jz      .pf_ecopy_done
+.pf_ecopy_byte:
+    movzx   eax, byte [rsi]
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    dec     rcx
+    jnz     .pf_ecopy_byte
+
+.pf_ecopy_done:
+    pop     rdx
+    pop     rcx
+    pop     rdi
+    add     r12, rdx                    ; update out_buf_used
+
+.pf_skip_dup:
+    ; Skip this duplicate: write_start = byte after this line's newline
+    mov     r8, r13
+    jmp     .pf_main_loop
+
+.pf_first_line:
+    mov     r15, rdi
+    mov     r10, rcx
+    cmp     rcx, 8
+    jge     .pf_main_loop
+    mov     rbx, [rdi]
+    and     rbx, [rel mask_table + rcx*8]
+    jmp     .pf_main_loop
+
+    ; ─── Scalar newline scan (last <16 bytes of file) ───
+.pf_scan_scalar:
+    cmp     r13, r9
+    jge     .pf_no_trailing_nl
+    cmp     byte [r13], 10
+    je      .pf_got_line_scalar
+    inc     r13
+    jmp     .pf_scan_scalar
+
+.pf_got_line_scalar:
+    ; r13 -> newline
+    mov     rcx, r13
+    sub     rcx, rdi
+    inc     r13
+
+    ; Same compare logic as above
+    cmp     r15, -1
+    je      .pf_first_line
+
+    cmp     rcx, r10
+    jne     .pf_update_prev
+
+    test    r10, r10
+    jz      .pf_equal
+
+    cmp     r10, 8
+    jge     .pf_cmp_long
+
+    mov     rax, [rdi]
+    and     rax, [rel mask_table + rcx*8]
+    cmp     rax, rbx
+    je      .pf_equal
+    jmp     .pf_update_prev
+
+.pf_no_trailing_nl:
+    ; Partial line at end without newline
+    mov     rcx, r13
+    sub     rcx, rdi
+    test    rcx, rcx
+    jz      .pf_handle_last
+
+    ; Compare this partial line with prev
+    cmp     r15, -1
+    je      .pf_partial_first
+
+    cmp     rcx, r10
+    jne     .pf_partial_diff
+
+    test    r10, r10
+    jz      .pf_partial_equal
+
+    cmp     r10, 8
+    jge     .pf_partial_cmp_long
+
+    mov     rax, [rdi]
+    and     rax, [rel mask_table + rcx*8]
+    cmp     rax, rbx
+    je      .pf_partial_equal
+    jmp     .pf_partial_diff
+
+.pf_partial_cmp_long:
+    mov     rax, [r15]
+    cmp     rax, [rdi]
+    jne     .pf_partial_diff
+    cmp     r10, 16
+    jle     .pf_partial_cmp_last8
+    mov     rdx, 8
+.pf_partial_cmp16:
+    mov     rax, r10
+    sub     rax, rdx
+    cmp     rax, 16
+    jl      .pf_partial_cmp_t8
+    movdqu  xmm0, [r15 + rdx]
+    movdqu  xmm1, [rdi + rdx]
+    pcmpeqb xmm0, xmm1
+    pmovmskb eax, xmm0
+    cmp     eax, 0xFFFF
+    jne     .pf_partial_diff
+    add     rdx, 16
+    jmp     .pf_partial_cmp16
+.pf_partial_cmp_t8:
+    mov     rax, [r15 + r10 - 8]
+    cmp     rax, [rdi + r10 - 8]
+    jne     .pf_partial_diff
+    jmp     .pf_partial_equal
+.pf_partial_cmp_last8:
+    mov     rax, [r15 + r10 - 8]
+    cmp     rax, [rdi + r10 - 8]
+    jne     .pf_partial_diff
+    ; fall through
+
+.pf_partial_equal:
+    ; Duplicate partial line: buffer region before it, skip it
+    mov     rdx, rdi
+    sub     rdx, r8
+    jz      .pf_partial_skip
+
+    ; Copy region to output buffer
+    lea     rax, [r12 + rdx]
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .pf_partial_copy
+
+    ; Flush buffer first
+    test    r12, r12
+    jz      .pf_partial_direct
+    mov     [rsp], r8
+    mov     [rsp+8], rdi
+    mov     [rsp+16], rdx
+    mov     edi, ebp
+    lea     rsi, [rel out_buf]
+    mov     rdx, r12
+    call    asm_write_all
+    xor     r12d, r12d
+    mov     r8, [rsp]
+    mov     rdi, [rsp+8]
+    mov     rdx, [rsp+16]
+
+    lea     rax, [r12 + rdx]
+    cmp     rax, FLUSH_THRESHOLD
+    jl      .pf_partial_copy
+
+.pf_partial_direct:
+    mov     [rsp], r8
+    mov     edi, ebp
+    mov     rsi, r8
+    call    asm_write_all
+    mov     r8, [rsp]
+    jmp     .pf_partial_skip
+
+.pf_partial_copy:
+    push    rdi
+    push    rcx
+    push    rdx
+    lea     rdi, [rel out_buf]
+    add     rdi, r12
+    mov     rsi, r8
+    mov     rcx, rdx
+.pf_pcopy8:
+    cmp     rcx, 8
+    jl      .pf_pcopy_tail
+    mov     rax, [rsi]
+    mov     [rdi], rax
+    add     rsi, 8
+    add     rdi, 8
+    sub     rcx, 8
+    jmp     .pf_pcopy8
+.pf_pcopy_tail:
+    test    rcx, rcx
+    jz      .pf_pcopy_done
+    movzx   eax, byte [rsi]
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    dec     rcx
+    jnz     .pf_pcopy_tail
+.pf_pcopy_done:
+    pop     rdx
+    pop     rcx
+    pop     rdi
+    add     r12, rdx
+
+.pf_partial_skip:
+    mov     r8, r9
+    jmp     .pf_handle_last
+
+.pf_partial_diff:
+    mov     r15, rdi
+    mov     r10, rcx
+    jmp     .pf_handle_last
+
+.pf_partial_first:
+    mov     r15, rdi
+    mov     r10, rcx
+    jmp     .pf_handle_last
+
+    ; ─── Handle end of file ───
+.pf_handle_last:
+    cmp     r15, -1
+    je      .pf_done
+
+    ; First flush output buffer if non-empty
+    test    r12, r12
+    jz      .pf_last_no_buf
+
+    mov     [rsp], r8
+    mov     edi, ebp
+    lea     rsi, [rel out_buf]
+    mov     rdx, r12
+    call    asm_write_all
+    xor     r12d, r12d
+    mov     r8, [rsp]
+
+.pf_last_no_buf:
+    ; Write remaining region [write_start .. end)
+    mov     rdx, r9
+    sub     rdx, r8
+    jz      .pf_done_empty
+
+    cmp     byte [r9 - 1], 10
+    je      .pf_handle_last_write
+
+    ; File doesn't end with newline: write region + newline
+    mov     edi, ebp
+    mov     rsi, r8
+    call    asm_write_all
+    mov     byte [rel out_buf], 10
+    mov     edi, ebp
+    lea     rsi, [rel out_buf]
+    mov     edx, 1
+    call    asm_write_all
+    xor     r12d, r12d
+    jmp     .pf_done
+
+.pf_handle_last_write:
+    mov     edi, ebp
+    mov     rsi, r8
+    call    asm_write_all
+    xor     r12d, r12d
+    jmp     .pf_done
+
+.pf_done_empty:
+    xor     r12d, r12d
+
+.pf_done:
+    add     rsp, 32
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     rbx
+    ret
+
+; ═══════════════════════════════════════════════════════════
+;  process_uniq_mmap — Generic mmap-based processing
 ;
 ;  Processes the mmap'd buffer directly. Lines are identified
 ;  by scanning for delimiters with SIMD. Lines are compared
@@ -2931,6 +3458,19 @@ strerror:
 
 ; ─── Data Section ────────────────────────────────────────
 section .data
+
+; Mask lookup table for short-line qword comparison (indexed by line length 0-7)
+; mask_table[n] = (1 << (n*8)) - 1 = low n bytes set
+align 64
+mask_table:
+    dq 0x0000000000000000              ; len=0: no bytes
+    dq 0x00000000000000FF              ; len=1: low 1 byte
+    dq 0x000000000000FFFF              ; len=2: low 2 bytes
+    dq 0x0000000000FFFFFF              ; len=3: low 3 bytes
+    dq 0x00000000FFFFFFFF              ; len=4: low 4 bytes
+    dq 0x000000FFFFFFFFFF              ; len=5: low 5 bytes
+    dq 0x0000FFFFFFFFFFFF              ; len=6: low 6 bytes
+    dq 0x00FFFFFFFFFFFFFF              ; len=7: low 7 bytes
 
 align 16
 ; sigaction for SIGPIPE: sa_handler=SIG_DFL, sa_flags=SA_RESTORER, sa_restorer=0

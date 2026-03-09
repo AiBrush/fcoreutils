@@ -31,10 +31,15 @@ extern asm_exit
 
 ; ── Constants ──────────────────────────────────────────
 %define MAX_FILES       256
-%define OUTBUF_SIZE     65536
+%define OUTBUF_SIZE     262144      ; 256KB output buffer
 %define INBUF_SIZE      131072
 %define MAX_TYPES       16
 %define MAX_LINE_FMT    1024
+
+; mmap constants
+%define PROT_READ       1
+%define MAP_PRIVATE     2
+%define MAP_POPULATE    0x08000     ; pre-fault pages for readahead
 
 ; Address radix constants
 %define ADDR_OCTAL      0
@@ -119,6 +124,9 @@ _start:
     mov     [rdi], rax
     mov     qword [rel num_files], 1
 .have_files:
+
+    ; Compute address width based on total input size
+    call    compute_addr_width
 
     ; Initialize output buffer
     mov     qword [rel outbuf_pos], 0
@@ -719,6 +727,21 @@ compute_col_widths:
     push    r12
     push    r13
 
+    ; Fast path: single type — use base width directly (avoids rounding error)
+    cmp     qword [rel num_types], 1
+    jne     .ccw_multi
+    lea     rax, [rel type_specs]
+    movzx   edi, byte [rax]            ; type code
+    movzx   esi, byte [rax + 1]        ; size
+    call    get_base_field_width
+    lea     rdx, [rel type_col_widths]
+    mov     [rdx], eax
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+.ccw_multi:
+
     ; First pass: find max per-byte width
     ; per_byte_width = ceil(base_width / size)
     ; We use *2 to avoid fractions: per_byte_x2 = (base_width * 2 + size - 1) / size * ...
@@ -828,6 +851,25 @@ compute_col_widths:
     pop     r13
     pop     r12
     pop     rbx
+    ret
+
+; ============================================================================
+;  compute_addr_width — Initialize default address width
+;  The variable-width formatters will update addr_width dynamically,
+;  but we set a sane default for format_addr_spaces.
+; ============================================================================
+compute_addr_width:
+    cmp     byte [rel addr_radix], ADDR_HEX
+    je      .def_hex
+    cmp     byte [rel addr_radix], ADDR_NONE
+    je      .def_none
+    mov     qword [rel addr_width], 7   ; octal/decimal default
+    ret
+.def_hex:
+    mov     qword [rel addr_width], 6
+    ret
+.def_none:
+    mov     qword [rel addr_width], 0
     ret
 
 ; get_base_field_width — Return the "natural" field width for a type/size
@@ -1361,6 +1403,94 @@ process_all_files:
 
 .process_fd:
     mov     [rel cur_fd], rdi
+    mov     qword [rel mmap_base_save], 0
+    mov     qword [rel mmap_len_save], 0
+
+    ; Try mmap if fd > 0 (not stdin)
+    cmp     rdi, 0
+    je      .read_fallback
+
+    ; fstat to get file size
+    sub     rsp, 144            ; struct stat is 144 bytes
+    mov     rsi, rsp
+    mov     rax, SYS_FSTAT
+    syscall
+    test    rax, rax
+    js      .fstat_fail
+
+    ; st_size is at offset 48
+    mov     rax, [rsp + 48]
+    add     rsp, 144
+    test    rax, rax
+    jz      .close_file         ; empty file
+    mov     [rel mmap_len_save], rax
+
+    ; mmap(NULL, size, PROT_READ, MAP_PRIVATE|MAP_POPULATE, fd, 0)
+    push    rax                 ; save file size
+    xor     edi, edi            ; addr = NULL
+    mov     rsi, rax            ; length = file size
+    mov     edx, PROT_READ
+    mov     r10d, MAP_PRIVATE | MAP_POPULATE
+    mov     r8, [rel cur_fd]
+    xor     r9d, r9d            ; offset = 0
+    mov     eax, SYS_MMAP
+    syscall
+    pop     rcx                 ; rcx = file size
+
+    ; Check for mmap failure (returns -errno in rax if < 0)
+    cmp     rax, -4096
+    ja      .mmap_fail          ; error: fall back to read
+
+    ; mmap succeeded: rax = mapped address, rcx = file size
+    mov     [rel mmap_base_save], rax
+    mov     rsi, rax            ; rsi = buffer start
+    ; rcx already has file size
+
+    ; Handle skip_bytes
+    test    rbp, rbp
+    jz      .mmap_no_skip
+    cmp     rbp, rcx
+    jge     .mmap_skip_all
+    add     rsi, rbp
+    sub     rcx, rbp
+    xor     ebp, ebp
+    jmp     .mmap_no_skip
+.mmap_skip_all:
+    sub     rbp, rcx
+    jmp     .mmap_unmap
+.mmap_no_skip:
+
+    ; Apply limit
+    cmp     byte [rel have_limit], 0
+    je      .mmap_no_limit
+    cmp     r15, rcx
+    jge     .mmap_limit_ok
+    mov     rcx, r15
+.mmap_limit_ok:
+    sub     r15, rcx
+.mmap_no_limit:
+
+    ; Process entire mmap region as one chunk
+    test    rcx, rcx
+    jz      .mmap_unmap
+    mov     rdi, rsi
+    mov     rsi, rcx
+    call    process_chunk
+
+.mmap_unmap:
+    ; munmap
+    mov     rdi, [rel mmap_base_save]
+    mov     rsi, [rel mmap_len_save]
+    mov     eax, SYS_MUNMAP
+    syscall
+    mov     qword [rel mmap_base_save], 0
+    jmp     .close_file_fd
+
+.fstat_fail:
+    add     rsp, 144
+.mmap_fail:
+    ; Fall through to read-based path
+.read_fallback:
 
     ; Read and process data from this fd
 .read_loop:
@@ -1419,6 +1549,8 @@ process_all_files:
     mov     rdi, [rel cur_fd]
     test    rdi, rdi
     jz      .next_file          ; don't close stdin
+.close_file_fd:
+    mov     rdi, [rel cur_fd]
     call    asm_close
     jmp     .next_file
 
@@ -1499,13 +1631,8 @@ process_chunk:
     mov     r15, r13            ; partial last line
 .line_ok:
 
-    ; Format this line into line_buf
-    ; First, format the line content (without address) for duplicate checking
-    mov     rdi, r12
-    mov     rsi, r15
-    call    format_line_content
-
-    ; Check for duplicate suppression
+    ; Check for duplicate suppression using raw input bytes
+    ; (if raw bytes match, formatted output matches regardless of type)
     cmp     byte [rel show_dupes], 1
     je      .print_line
 
@@ -1513,22 +1640,22 @@ process_chunk:
     cmp     r15, r14
     jne     .print_line
 
-    ; Compare with previous line
+    ; Compare with previous raw line
     cmp     byte [rel prev_line_valid], 0
     je      .print_line
 
-    ; Compare line content buffers
-    lea     rdi, [rel line_content_buf]
-    lea     rsi, [rel prev_line_buf]
-    mov     rcx, [rel line_content_len]
-    mov     rdx, [rel prev_line_len]
-    cmp     rcx, rdx
+    ; Compare raw input bytes (r12 = current data, prev_raw_line = previous)
+    mov     rcx, r15
+    cmp     rcx, [rel prev_line_len]
     jne     .print_line
-    ; memcmp
-    call    memcmp_inline
-    test    eax, eax
-    jnz     .print_line
+    lea     rdi, [r12]
+    lea     rsi, [rel prev_raw_line]
+    repe    cmpsb
+    je      .is_duplicate
 
+    jmp     .print_line
+
+.is_duplicate:
     ; Duplicate — print * if not already printed
     cmp     byte [rel dup_star_printed], 0
     jne     .skip_line
@@ -1544,14 +1671,46 @@ process_chunk:
 .print_line:
     mov     byte [rel dup_star_printed], 0
 
-    ; Save current line as previous
-    lea     rdi, [rel prev_line_buf]
-    lea     rsi, [rel line_content_buf]
-    mov     rcx, [rel line_content_len]
+    ; Save current raw line for next comparison
+    lea     rdi, [rel prev_raw_line]
+    mov     rsi, r12
+    mov     rcx, r15
     mov     [rel prev_line_len], rcx
-    call    memcpy_inline
+    rep     movsb
     mov     byte [rel prev_line_valid], 1
 
+    ; Fast path: single type — combine values + newline into one write_outbuf call
+    cmp     qword [rel num_types], 1
+    jne     .multi_type_path
+
+    ; Write address
+    mov     rdi, [rel total_offset]
+    call    format_address
+    lea     rsi, [rel addr_buf]
+    mov     rdx, rax
+    test    rdx, rdx
+    jz      .st_skip_addr
+    call    write_outbuf
+.st_skip_addr:
+
+    ; Format values + newline as single write
+    lea     rax, [rel type_specs]
+    movzx   ecx, byte [rax]
+    movzx   edx, byte [rax + 1]
+    xor     r8d, r8d
+    mov     rdi, r12
+    mov     rsi, r15
+    call    format_type_to_buf
+    ; rax = bytes in fmt_buf
+    lea     rsi, [rel fmt_buf]
+    mov     byte [rsi + rax], 10
+    inc     rax
+    mov     rdx, rax
+    call    write_outbuf
+
+    jmp     .type_done
+
+.multi_type_path:
     ; Output address (for first type row)
     mov     rdi, [rel total_offset]
     call    format_address
@@ -2073,6 +2232,106 @@ format_type_to_buf:
     je      .fmt_x8_loop
     jmp     .fmt_done
 
+; ── SIMD fast path for x1 when column width = 3 (space + 2 hex chars) ──
+    cmp     ebp, 3
+    jne     .fmt_x1_scalar
+
+    ; SIMD path: process 16 bytes at a time producing 48 output bytes (" HH" * 16)
+    ; Load hex lookup table into xmm5
+    movdqa  xmm5, [rel simd_hex_lut]
+    movdqa  xmm6, [rel simd_mask_0f]
+
+.fmt_x1_simd_loop:
+    mov     rax, r13
+    sub     rax, rsi
+    cmp     rax, 16
+    jb      .fmt_x1_simd_tail
+
+    ; Load 16 input bytes
+    movdqu  xmm0, [r12 + rsi]
+
+    ; Split into high and low nibbles
+    movdqa  xmm1, xmm0
+    psrlw   xmm1, 4
+    pand    xmm1, xmm6         ; high nibbles (0-15 values)
+    pand    xmm0, xmm6         ; low nibbles (0-15 values)
+
+    ; Look up hex characters via pshufb
+    ; pshufb: dest is data (LUT), src is indices (nibbles)
+    movdqa  xmm2, xmm5         ; copy hex LUT
+    pshufb  xmm2, xmm1         ; xmm2 = hex char for high nibble
+    movdqa  xmm3, xmm5         ; copy hex LUT
+    pshufb  xmm3, xmm0         ; xmm3 = hex char for low nibble
+
+    ; xmm2 has H0 H1 H2 ... H15 (high nibble hex chars)
+    ; xmm3 has L0 L1 L2 ... L15 (low nibble hex chars)
+
+    ; Interleave low 8: H0 L0 H1 L1 H2 L2 H3 L3 H4 L4 H5 L5 H6 L6 H7 L7
+    movdqa  xmm0, xmm2
+    punpcklbw xmm0, xmm3       ; bytes 0-7: H0 L0 H1 L1 ...
+    ; Interleave high 8: H8 L8 H9 L9 ...
+    movdqa  xmm1, xmm2
+    punpckhbw xmm1, xmm3       ; bytes 8-15: H8 L8 H9 L9 ...
+
+    ; Now we need to insert spaces before each hex pair: " H0L0 H1L1 ..."
+    ; xmm2 has 16 bytes: H0 L0 H1 L1 H2 L2 H3 L3 H4 L4 H5 L5 H6 L6 H7 L7
+    ; We need: 0x20 H0 L0 0x20 H1 L1 0x20 H2 L2 ... (3 bytes per pair, 8 pairs = 24 bytes)
+
+    ; Unpack bytes 0-7 (from xmm2) into output with space prefix
+    ; We'll do this with scalar unrolling for correct format
+    ; Extract xmm0 and xmm1 to memory, then interleave with spaces
+    movdqu  [rel simd_tmp], xmm0
+    movdqu  [rel simd_tmp + 16], xmm1
+
+    ; Unrolled: write " HH" for each of 16 bytes
+    ; Bytes 0-7 from simd_tmp, bytes 8-15 from simd_tmp+16
+    lea     rdi, [rbx + rcx]
+
+%assign _si 0
+%rep 8
+    mov     byte [rdi + _si*3], ' '
+    mov     al, [rel simd_tmp + _si*2]
+    mov     [rdi + _si*3 + 1], al
+    mov     al, [rel simd_tmp + _si*2 + 1]
+    mov     [rdi + _si*3 + 2], al
+%assign _si _si+1
+%endrep
+%assign _si 0
+%rep 8
+    mov     byte [rdi + 24 + _si*3], ' '
+    mov     al, [rel simd_tmp + 16 + _si*2]
+    mov     [rdi + 24 + _si*3 + 1], al
+    mov     al, [rel simd_tmp + 16 + _si*2 + 1]
+    mov     [rdi + 24 + _si*3 + 2], al
+%assign _si _si+1
+%endrep
+
+    add     rcx, 48             ; 16 bytes * 3 chars each
+    add     rsi, 16
+    jmp     .fmt_x1_simd_loop
+
+.fmt_x1_simd_tail:
+    ; Handle remaining < 16 bytes with scalar code
+.fmt_x1_scalar_loop:
+    cmp     rsi, r13
+    jge     .fmt_done
+    movzx   eax, byte [r12 + rsi]
+    mov     byte [rbx + rcx], ' '
+    mov     edx, eax
+    shr     edx, 4
+    lea     rdi, [rel hex_digits]
+    movzx   edx, byte [rdi + rdx]
+    mov     [rbx + rcx + 1], dl
+    mov     edx, eax
+    and     edx, 0xF
+    movzx   edx, byte [rdi + rdx]
+    mov     [rbx + rcx + 2], dl
+    add     rcx, 3
+    inc     rsi
+    jmp     .fmt_x1_scalar_loop
+
+; ── Scalar fallback for non-standard column widths ──
+.fmt_x1_scalar:
 .fmt_x1_loop:
     cmp     rsi, r13
     jge     .fmt_done
@@ -2606,29 +2865,22 @@ format_address:
     jmp     .addr_none
 
 .addr_octal:
-    ; 7-digit octal
     mov     rsi, rbx
-    mov     edx, 7
-    call    format_octal64_padded
-    mov     rax, 7
+    call    format_addr_oct_var
     pop     rbx
     ret
 
 .addr_decimal:
-    ; 7-digit zero-padded decimal
     mov     rsi, rbx
-    mov     edx, 7
-    call    format_decimal_zeropad64
-    mov     rax, 7
+    call    format_addr_dec_var
     pop     rbx
     ret
 
 .addr_hex:
-    ; 6-digit hex
+    ; Format hex address with minimum 6 digits, expanding for larger values
     mov     rsi, rbx
-    mov     edx, 6
-    call    format_hex64_padded
-    mov     rax, 6
+    call    format_addr_hex_var
+    ; rax = number of chars written
     pop     rbx
     ret
 
@@ -2648,14 +2900,8 @@ format_addr_spaces:
 
     cmp     byte [rel addr_radix], ADDR_NONE
     je      .as_none
-    cmp     byte [rel addr_radix], ADDR_HEX
-    je      .as_hex
 
-    ; Octal or decimal: 7 spaces
-    mov     rcx, 7
-    jmp     .as_fill
-.as_hex:
-    mov     rcx, 6
+    mov     rcx, [rel addr_width]   ; width of last formatted address
     jmp     .as_fill
 .as_none:
     xor     eax, eax
@@ -3118,6 +3364,142 @@ format_float_field:
     jmp     .ff_sign
 
 ; ============================================================================
+;  Variable-width address formatters
+;  rdi = value, rsi = output buffer
+;  Returns: rax = number of chars written
+;  Also stores width in [addr_width] for format_addr_spaces
+; ============================================================================
+
+; format_addr_hex_var — Hex address, minimum 6 digits
+format_addr_hex_var:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rax, rdi            ; value
+    mov     r12, rsi            ; output buffer
+    lea     r13, [rel hex_digits]
+
+    ; First, determine how many hex digits we need
+    mov     rcx, rax
+    xor     edx, edx            ; digit count
+.hv_count:
+    inc     edx
+    shr     rcx, 4
+    jnz     .hv_count
+
+    ; Minimum 6
+    cmp     edx, 6
+    jge     .hv_width_ok
+    mov     edx, 6
+.hv_width_ok:
+    mov     ebx, edx            ; save width
+    mov     [rel addr_width], rdx
+
+    ; Format right-to-left
+    lea     rcx, [r12 + rdx - 1]
+    mov     edx, ebx
+.hv_loop:
+    mov     esi, eax
+    and     esi, 0xF
+    movzx   esi, byte [r13 + rsi]
+    mov     [rcx], sil
+    shr     rax, 4
+    dec     rcx
+    dec     edx
+    jnz     .hv_loop
+
+    movzx   eax, bl             ; return width
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; format_addr_oct_var — Octal address, minimum 7 digits
+format_addr_oct_var:
+    push    rbx
+    push    r12
+    mov     rax, rdi
+    mov     r12, rsi
+
+    ; Count octal digits needed
+    mov     rcx, rax
+    xor     edx, edx
+.ov_count:
+    inc     edx
+    shr     rcx, 3
+    jnz     .ov_count
+    cmp     edx, 7
+    jge     .ov_ok
+    mov     edx, 7
+.ov_ok:
+    mov     ebx, edx
+    mov     [rel addr_width], rdx
+
+    lea     rcx, [r12 + rdx - 1]
+    mov     edx, ebx
+.ov_loop:
+    mov     esi, eax
+    and     esi, 7
+    add     sil, '0'
+    mov     [rcx], sil
+    shr     rax, 3
+    dec     rcx
+    dec     edx
+    jnz     .ov_loop
+
+    movzx   eax, bl
+    pop     r12
+    pop     rbx
+    ret
+
+; format_addr_dec_var — Decimal address, minimum 7 digits
+format_addr_dec_var:
+    push    rbx
+    push    r12
+    push    r13
+    mov     r12, rsi            ; output buffer
+
+    ; Count decimal digits needed for rdi
+    mov     rax, rdi
+    xor     ebx, ebx            ; digit count
+    mov     rcx, 10
+.dv_count_loop:
+    inc     ebx
+    xor     edx, edx
+    div     rcx
+    test    rax, rax
+    jnz     .dv_count_loop
+
+    cmp     ebx, 7
+    jge     .dv_ok
+    mov     ebx, 7
+.dv_ok:
+    movzx   r13, bl
+    mov     [rel addr_width], r13
+
+    ; Format: zero-padded decimal, right-to-left
+    mov     rax, rdi
+    lea     rcx, [r12 + r13 - 1]
+    mov     edx, ebx
+    mov     r13, 10
+.dv_loop:
+    push    rdx
+    xor     edx, edx
+    div     r13
+    add     dl, '0'
+    mov     [rcx], dl
+    pop     rdx
+    dec     rcx
+    dec     edx
+    jnz     .dv_loop
+
+    movzx   eax, bl
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ============================================================================
 ;  Output buffer management
 ; ============================================================================
 
@@ -3141,7 +3523,8 @@ write_outbuf:
     test    rcx, rcx
     jnz     .wo_copy
 
-    ; Buffer full, flush
+    ; Buffer full, flush — update outbuf_pos first so flush writes all data
+    mov     [rel outbuf_pos], r13
     call    flush_outbuf
     xor     r13d, r13d
 
@@ -3159,19 +3542,7 @@ write_outbuf:
     lea     rdi, [rel outbuf]
     add     rdi, r13
     mov     rsi, rbx
-    ; inline memcpy
-    push    rcx
-.cpy_loop:
-    test    rcx, rcx
-    jz      .cpy_done
-    mov     al, [rsi]
-    mov     [rdi], al
-    inc     rsi
-    inc     rdi
-    dec     rcx
-    jmp     .cpy_loop
-.cpy_done:
-    pop     rcx
+    rep     movsb
     pop     rcx
     add     r13, rcx
     add     rbx, rcx
@@ -3273,39 +3644,20 @@ str_len:
 ; rdi = buf1, rsi = buf2, rcx = length
 ; Returns: eax = 0 if equal, non-zero if different
 memcmp_inline:
-    push    rbx
-    xor     ebx, ebx
-.loop:
-    cmp     rbx, rcx
-    jge     .equal
-    mov     al, [rdi + rbx]
-    cmp     al, [rsi + rbx]
-    jne     .neq
-    inc     rbx
-    jmp     .loop
+    test    rcx, rcx
+    jz      .equal
+    repe    cmpsb
+    je      .equal
+    mov     eax, 1
+    ret
 .equal:
     xor     eax, eax
-    pop     rbx
-    ret
-.neq:
-    mov     eax, 1
-    pop     rbx
     ret
 
 ; memcpy_inline — Copy memory
 ; rdi = dst, rsi = src, rcx = length
 memcpy_inline:
-    push    rbx
-    xor     ebx, ebx
-.loop:
-    cmp     rbx, rcx
-    jge     .done
-    mov     al, [rsi + rbx]
-    mov     [rdi + rbx], al
-    inc     rbx
-    jmp     .loop
-.done:
-    pop     rbx
+    rep     movsb
     ret
 
 ; ============================================================================
@@ -3314,6 +3666,12 @@ memcpy_inline:
 section .data
 
 hex_digits: db "0123456789abcdef"
+
+; SIMD constants (16-byte aligned)
+align 16
+simd_hex_lut: db "0123456789abcdef"
+align 16
+simd_mask_0f: times 16 db 0x0F
 
 ; Named character table (4 bytes each, space-padded to 3 chars)
 ; Index 0-127: NUL, SOH, STX, ...
@@ -3617,6 +3975,7 @@ outbuf_pos:     resq 1
 line_content_len: resq 1
 prev_line_len:  resq 1
 type_count_save: resq 1
+addr_width:     resq 1          ; computed hex/oct/dec address width
 
 ; Type specs: pairs of (type_code, size), up to MAX_TYPES
 type_specs:     resb MAX_TYPES * 2
@@ -3647,6 +4006,10 @@ prev_line_buf:  resb 4096
 
 ; Previous raw line (for fast-path duplicate detection)
 prev_raw_line:  resb 256
+
+; SIMD scratch space (aligned)
+alignb 16
+simd_tmp:       resb 64
 
 ; mmap tracking
 mmap_base_save: resq 1

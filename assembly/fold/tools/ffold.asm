@@ -38,8 +38,8 @@ extern asm_close
 
 ; ── Constants ──────────────────────────────────────────────
 %define READ_BUF_SIZE   131072          ; 128KB input buffer (for stdin)
-%define OUT_BUF_SIZE    524288          ; 512KB output buffer
-%define FLUSH_THRESHOLD 393216          ; flush when output exceeds 384KB
+%define OUT_BUF_SIZE    1048576         ; 1MB output buffer
+%define FLUSH_THRESHOLD 786432          ; flush when output exceeds ~768KB
 %define MAX_FILES       256
 %define DEFAULT_WIDTH   80
 
@@ -48,11 +48,13 @@ extern asm_close
 %define MAP_PRIVATE     2
 %define MAP_POPULATE    0x8000
 %define MADV_SEQUENTIAL 2
+%define MADV_HUGEPAGE   14
 %define SYS_MADVISE     28
 
 ; struct stat offsets (x86-64)
 %define STAT_SIZE       144
 %define STAT_ST_SIZE    48
+%define ST_SIZE_OFF     48
 
 global _start
 
@@ -137,7 +139,7 @@ _start:
     jnz     .process_files
 
     mov     edi, STDIN
-    call    process_fd
+    call    try_mmap_or_read
     jmp     .final_flush
 
 .process_files:
@@ -155,7 +157,7 @@ _start:
     jne     .open_file
     push    r13
     mov     edi, STDIN
-    call    process_fd
+    call    try_mmap_or_read
     pop     r13
     jmp     .next_file
 
@@ -523,6 +525,76 @@ print_invalid_width:
 ; ============================================================================
 ;  open_and_process(rsi = filename)
 ; ============================================================================
+; ─── try_mmap_or_read(edi=fd) ──────────────────────────────
+; Try mmap on fd (works for stdin redirected from file).
+; Falls back to read() for pipes/sockets.
+try_mmap_or_read:
+    push    r14
+    push    r15
+    mov     r14d, edi
+
+    sub     rsp, STAT_SIZE
+    mov     edi, r14d
+    mov     rsi, rsp
+    mov     rax, SYS_FSTAT
+    syscall
+    test    rax, rax
+    js      .tmor_fstat_fail
+
+    mov     r15, [rsp + ST_SIZE_OFF]
+    add     rsp, STAT_SIZE
+
+    test    r15, r15
+    jle     .tmor_read
+
+    xor     edi, edi
+    mov     rsi, r15
+    mov     edx, PROT_READ
+    mov     r10d, MAP_PRIVATE | MAP_POPULATE
+    mov     r8d, r14d
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
+    syscall
+    cmp     rax, -4096
+    ja      .tmor_read
+
+    mov     [mmap_addr], rax
+    mov     [mmap_len], r15
+
+    mov     rdi, rax
+    mov     rsi, r15
+    mov     edx, MADV_SEQUENTIAL
+    mov     rax, SYS_MADVISE
+    syscall
+
+    mov     rdi, [mmap_addr]
+    mov     rsi, [mmap_len]
+    mov     edx, MADV_HUGEPAGE
+    mov     rax, SYS_MADVISE
+    syscall
+
+    mov     rdi, [mmap_addr]
+    mov     rsi, [mmap_len]
+    call    process_mmap
+
+    mov     rdi, [mmap_addr]
+    mov     rsi, [mmap_len]
+    mov     rax, SYS_MUNMAP
+    syscall
+
+    pop     r15
+    pop     r14
+    ret
+
+.tmor_fstat_fail:
+    add     rsp, STAT_SIZE
+.tmor_read:
+    mov     edi, r14d
+    call    process_fd
+    pop     r15
+    pop     r14
+    ret
+
 open_and_process:
     push    rbx
     push    r14
@@ -570,6 +642,12 @@ open_and_process:
     mov     rdi, rax
     mov     rsi, r15
     mov     edx, MADV_SEQUENTIAL
+    mov     rax, SYS_MADVISE
+    syscall
+
+    mov     rdi, [mmap_addr]
+    mov     rsi, [mmap_len]
+    mov     edx, MADV_HUGEPAGE
     mov     rax, SYS_MADVISE
     syscall
 
@@ -761,12 +839,15 @@ process_mmap:
 ; ============================================================================
 ;  Column mode fast path (no -s flag)
 ;
-;  Algorithm: find distance to next special char with SIMD.
-;  Copy up to min(distance, width-col) normal bytes as a bulk operation.
-;  Then handle the special char (or insert fold newline if width reached).
+;  Two-level approach:
+;  1. SIMD scan for specials (< 0x0E) in 16-byte chunks
+;  2. When no specials found and col+16 <= width: bulk copy
+;  3. When special found: copy bytes before it, handle special, continue
+;  Uses xmm5 as permanent zero register.
 ; ============================================================================
 .pm_col_fast:
     mov     r8d, [width]
+    pxor    xmm5, xmm5                 ; permanent zero register
 
 .pm_cf_loop:
     cmp     rbx, r13
@@ -780,142 +861,301 @@ process_mmap:
     pop     r8
 .pm_cf_no_flush:
 
-    ; Find distance to next special char (< 0x0E)
-    call    find_special_sse2           ; rax = offset to first special (or remaining)
+    ; Check if we have 16 bytes remaining
+    mov     rax, r13
+    sub     rax, rbx
+    cmp     rax, 16
+    jl      .pm_cf_scalar_tail
 
-    ; How many normal bytes can we emit before hitting width or special char?
-    ; Available columns = width - col
+    ; SIMD: load 16 bytes, check for specials (bytes < 0x0E)
+    movdqu  xmm0, [rbx]
+    movdqa  xmm1, xmm0
+    psubusb xmm1, xmm6                 ; 0 where byte < 0x0E
+    pcmpeqb xmm1, xmm5                 ; 0xFF where special
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .pm_cf_has_special
+
+    ; No specials in 16 bytes. Check if col+16 <= width
+    lea     ecx, [r14d + 16]
+    cmp     ecx, r8d
+    jg      .pm_cf_partial_width
+
+    ; Fast path: bulk copy 16 bytes, advance col by 16
+    movdqu  [out_buf + r12], xmm0
+    add     r12, 16
+    add     rbx, 16
+    mov     r14d, ecx
+
+    ; Tight inner loop: process 16 bytes/iteration
+    ; No flush check needed: at most ~width bytes before a newline/special
+    ; triggers exit. width << FLUSH_THRESHOLD headroom.
+.pm_cf_inner:
+    mov     rax, r13
+    sub     rax, rbx
+    cmp     rax, 16
+    jl      .pm_cf_loop
+    lea     ecx, [r14d + 16]
+    cmp     ecx, r8d
+    jg      .pm_cf_loop
+
+    movdqu  xmm0, [rbx]
+    movdqa  xmm1, xmm0
+    psubusb xmm1, xmm6
+    pcmpeqb xmm1, xmm5
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .pm_cf_loop
+    movdqu  [out_buf + r12], xmm0
+    add     r12, 16
+    add     rbx, 16
+    mov     r14d, ecx
+    jmp     .pm_cf_inner
+
+.pm_cf_partial_width:
+    ; col + 16 > width, but no specials. Copy min(width-col, 16) then fold.
     mov     ecx, r8d
     sub     ecx, r14d                   ; available = width - col
     test    ecx, ecx
-    jle     .pm_cf_need_fold            ; col >= width, need fold
+    jle     .pm_cf_need_fold
 
-    ; clamp normal_count to available
-    cmp     rax, rcx
-    jle     .pm_cf_copy_rax
-    ; More normal bytes than available columns.
-    ; Copy 'available' bytes, then we need to fold.
-    mov     eax, ecx                    ; copy exactly 'available' bytes
-
-.pm_cf_copy_rax:
-    ; Copy rax normal bytes from [rbx] to out_buf
-    test    rax, rax
-    jz      .pm_cf_at_special           ; no normal bytes, handle special
-
-    ; Ensure output buffer has enough space (rax + 16 headroom)
-    lea     rdx, [r12 + rax + 16]
-    cmp     rdx, OUT_BUF_SIZE
-    jl      .pm_cf_copy_ok
-    ; Need flush first
-    push    rax
-    push    r8
-    call    flush_output_safe
-    pop     r8
-    pop     rax
-.pm_cf_copy_ok:
-    ; Bulk copy using rep movsb (ERMS optimized on modern CPUs)
-    push    r13                         ; save (rep movsb clobbers rcx/rsi/rdi)
-    lea     rdi, [out_buf + r12]
-    mov     rsi, rbx
-    mov     rcx, rax
-    rep movsb
-    pop     r13
-    add     r12, rax
-    add     rbx, rax
-    add     r14d, eax
-    jmp     .pm_cf_loop
-
-.pm_cf_need_fold:
-    ; col >= width: insert fold newline
+    ; Copy ecx bytes (< 16)
+    ; Use overlapping 8-byte copies for speed
+    cmp     ecx, 8
+    jl      .pm_cf_pw_small
+    mov     rax, [rbx]
+    mov     [out_buf + r12], rax
+    mov     rax, [rbx + rcx - 8]
+    lea     rdx, [out_buf + r12]
+    mov     [rdx + rcx - 8], rax
+    jmp     .pm_cf_pw_done
+.pm_cf_pw_small:
+    cmp     ecx, 4
+    jl      .pm_cf_pw_tiny
+    mov     eax, [rbx]
+    mov     [out_buf + r12], eax
+    mov     eax, [rbx + rcx - 4]
+    lea     rdx, [out_buf + r12]
+    mov     [rdx + rcx - 4], eax
+    jmp     .pm_cf_pw_done
+.pm_cf_pw_tiny:
+    ; 1-3 bytes
+    movzx   eax, byte [rbx]
+    mov     [out_buf + r12], al
+    cmp     ecx, 1
+    je      .pm_cf_pw_done
+    movzx   eax, byte [rbx + 1]
+    mov     [out_buf + r12 + 1], al
+    cmp     ecx, 2
+    je      .pm_cf_pw_done
+    movzx   eax, byte [rbx + 2]
+    mov     [out_buf + r12 + 2], al
+.pm_cf_pw_done:
+    add     r12, rcx
+    add     rbx, rcx
+    mov     r14d, r8d                   ; col = width
+    ; Peek at next byte — if newline, let the newline handler deal with it
+    ; (avoids double-newline when line length is exact multiple of width)
+    cmp     rbx, r13
+    jge     .pm_cf_pw_fold              ; at EOF, still need fold
+    cmp     byte [rbx], 10
+    je      .pm_cf_loop                 ; next is newline — skip fold
+.pm_cf_pw_fold:
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
     jmp     .pm_cf_loop
 
-.pm_cf_at_special:
-    ; We're at a special char (< 0x0E)
+.pm_cf_has_special:
+    ; eax = bitmask of specials in 16-byte chunk
+    ; Find first special, copy normal bytes before it, then go scalar
+    bsf     ecx, eax                    ; ecx = position of first special
+
+    test    ecx, ecx
+    jz      .pm_cf_scalar_at_special    ; first byte is special
+
+    ; Copy ecx normal bytes (ecx < 16), clamped by width
+    mov     edi, r8d
+    sub     edi, r14d                   ; available = width - col
+    cmp     ecx, edi
+    jle     .pm_cf_hs_copy
+    ; Would exceed width, copy what fits then fold
+    test    edi, edi
+    jle     .pm_cf_need_fold
+    mov     ecx, edi
+
+.pm_cf_hs_copy:
+    ; Copy ecx bytes (1-15)
+    add     r14d, ecx
+    cmp     ecx, 8
+    jl      .pm_cf_hsc_small
+    mov     rax, [rbx]
+    mov     [out_buf + r12], rax
+    cmp     ecx, 8
+    je      .pm_cf_hsc_done
+    mov     rax, [rbx + rcx - 8]
+    lea     rdx, [out_buf + r12]
+    mov     [rdx + rcx - 8], rax
+    jmp     .pm_cf_hsc_done
+.pm_cf_hsc_small:
+    cmp     ecx, 4
+    jl      .pm_cf_hsc_tiny
+    mov     eax, [rbx]
+    mov     [out_buf + r12], eax
+    cmp     ecx, 4
+    je      .pm_cf_hsc_done
+    mov     eax, [rbx + rcx - 4]
+    lea     rdx, [out_buf + r12]
+    mov     [rdx + rcx - 4], eax
+    jmp     .pm_cf_hsc_done
+.pm_cf_hsc_tiny:
+    movzx   eax, byte [rbx]
+    mov     [out_buf + r12], al
+    cmp     ecx, 1
+    je      .pm_cf_hsc_done
+    movzx   eax, byte [rbx + 1]
+    mov     [out_buf + r12 + 1], al
+    cmp     ecx, 2
+    je      .pm_cf_hsc_done
+    movzx   eax, byte [rbx + 2]
+    mov     [out_buf + r12 + 2], al
+.pm_cf_hsc_done:
+    add     r12, rcx
+    add     rbx, rcx
+    ; Check if we hit width
+    cmp     r14d, r8d
+    jl      .pm_cf_scalar_at_special
+    ; At width boundary — but next byte is the special char at [rbx].
+    ; If it's a newline, skip the fold (the newline handler emits it).
+    cmp     rbx, r13
+    jge     .pm_cf_hsc_fold             ; at EOF, still need fold
+    cmp     byte [rbx], 10
+    je      .pm_cf_scalar_at_special    ; next is newline — skip fold
+.pm_cf_hsc_fold:
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    jmp     .pm_cf_loop
+
+.pm_cf_scalar_at_special:
+    ; Process special char at [rbx] scalarly
     cmp     rbx, r13
     jge     .pm_done
-
     movzx   eax, byte [rbx]
 
     cmp     al, 10
-    je      .pm_cf_newline
+    je      .pm_cf_s_nl
     cmp     al, 9
-    je      .pm_cf_tab
+    je      .pm_cf_s_tab
     cmp     al, 8
-    je      .pm_cf_backspace
+    je      .pm_cf_s_bs
     cmp     al, 13
-    je      .pm_cf_cr
+    je      .pm_cf_s_cr
 
-    ; Other control chars (0x00-0x07, 0x0B, 0x0C): treated as regular by GNU fold
-    ; Check if col+1 > width
+    ; Other control char
     lea     edx, [r14d + 1]
     cmp     edx, r8d
-    jle     .pm_cf_ctrl_ok
+    jle     .pm_cf_s_ctrl_ok
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
-.pm_cf_ctrl_ok:
+.pm_cf_s_ctrl_ok:
     inc     r14d
     mov     [out_buf + r12], al
     inc     r12
     inc     rbx
     jmp     .pm_cf_loop
 
-.pm_cf_newline:
+.pm_cf_s_nl:
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
     inc     rbx
     jmp     .pm_cf_loop
 
-.pm_cf_backspace:
+.pm_cf_s_bs:
     test    r14d, r14d
-    jz      .pm_cf_bs_emit
+    jz      .pm_cf_s_bs_emit
     dec     r14d
-.pm_cf_bs_emit:
+.pm_cf_s_bs_emit:
     mov     byte [out_buf + r12], 8
     inc     r12
     inc     rbx
     jmp     .pm_cf_loop
 
-.pm_cf_cr:
+.pm_cf_s_cr:
     xor     r14d, r14d
     mov     byte [out_buf + r12], 13
     inc     r12
     inc     rbx
     jmp     .pm_cf_loop
 
-.pm_cf_tab:
+.pm_cf_s_tab:
     mov     eax, r14d
     add     eax, 8
     and     eax, ~7
-
     cmp     eax, r8d
-    jle     .pm_cf_tab_no_prefold
+    jle     .pm_cf_s_tab_nopf
     test    r14d, r14d
-    jz      .pm_cf_tab_no_prefold
-
+    jz      .pm_cf_s_tab_nopf
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
     mov     eax, 8
-
-.pm_cf_tab_no_prefold:
+.pm_cf_s_tab_nopf:
     mov     r14d, eax
     mov     byte [out_buf + r12], 9
     inc     r12
-
     cmp     r14d, r8d
-    jle     .pm_cf_tab_done
+    jle     .pm_cf_s_tab_done
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
-
-.pm_cf_tab_done:
+.pm_cf_s_tab_done:
     inc     rbx
     jmp     .pm_cf_loop
+
+.pm_cf_need_fold:
+    ; col >= width: insert fold newline (but skip if next byte is newline)
+    cmp     rbx, r13
+    jge     .pm_cf_nf_fold              ; at EOF, still need fold
+    cmp     byte [rbx], 10
+    je      .pm_cf_loop                 ; next is newline — skip fold
+.pm_cf_nf_fold:
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    jmp     .pm_cf_loop
+
+.pm_cf_scalar_tail:
+    ; Less than 16 bytes remaining, process one at a time
+    cmp     rbx, r13
+    jge     .pm_done
+
+    movzx   eax, byte [rbx]
+
+    cmp     al, 10
+    je      .pm_cf_s_nl
+    cmp     al, 9
+    je      .pm_cf_s_tab
+    cmp     al, 8
+    je      .pm_cf_s_bs
+    cmp     al, 13
+    je      .pm_cf_s_cr
+
+    ; Regular char
+    lea     edx, [r14d + 1]
+    cmp     edx, r8d
+    jle     .pm_cf_st_ok
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+.pm_cf_st_ok:
+    inc     r14d
+    mov     [out_buf + r12], al
+    inc     r12
+    inc     rbx
+    jmp     .pm_cf_scalar_tail
 
 ; ============================================================================
 ;  Column mode with -s flag
@@ -1027,8 +1267,7 @@ process_mmap:
 
 ; ============================================================================
 ;  Byte mode fast path (no -s flag)
-;  Strategy: find next newline with SIMD, bulk copy chunks of WIDTH bytes
-;  inserting fold newlines as needed.
+;  Single-pass SIMD: scan for newlines + copy + track byte count in one loop.
 ; ============================================================================
 .pm_byte_fast:
     mov     r8d, [width]
@@ -1037,65 +1276,252 @@ process_mmap:
     cmp     rbx, r13
     jge     .pm_done
 
-    cmp     r12, FLUSH_THRESHOLD
+    ; Flush output if needed
+    lea     rax, [r12 + 256]
+    cmp     rax, OUT_BUF_SIZE
     jl      .pm_bf_no_flush
     push    r8
     call    flush_output_safe
     pop     r8
 .pm_bf_no_flush:
 
-    ; Find distance to next newline
-    call    find_newline_sse2           ; rax = offset to first newline (or remaining)
+    ; Check remaining bytes
+    mov     rax, r13
+    sub     rax, rbx
+    cmp     rax, 16
+    jl      .pm_bf_scalar_tail
 
-    ; How many bytes can we emit before hitting width or newline?
-    mov     ecx, r8d
-    sub     ecx, r14d                   ; available = width - count
-    test    ecx, ecx
-    jle     .pm_bf_need_fold
+    ; SIMD: scan for newlines
+    movdqu  xmm0, [rbx]
+    movdqa  xmm1, xmm0
+    pcmpeqb xmm1, xmm7                 ; xmm7 = all 0x0A
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .pm_bf_has_newline
 
-    cmp     rax, rcx
-    jle     .pm_bf_copy_rax
-    mov     eax, ecx
+    ; No newlines in 16 bytes. Check byte count.
+    lea     ecx, [r14d + 16]
+    cmp     ecx, r8d
+    jg      .pm_bf_partial
 
-.pm_bf_copy_rax:
-    test    rax, rax
-    jz      .pm_bf_at_newline
+    ; Bulk copy 16 bytes
+    movdqu  [out_buf + r12], xmm0
+    add     r12, 16
+    add     rbx, 16
+    mov     r14d, ecx
 
-    lea     rdx, [r12 + rax + 16]
-    cmp     rdx, OUT_BUF_SIZE
-    jl      .pm_bf_copy_ok
-    push    rax
-    push    r8
-    call    flush_output_safe
-    pop     r8
-    pop     rax
-.pm_bf_copy_ok:
-    push    r13
-    lea     rdi, [out_buf + r12]
-    mov     rsi, rbx
-    mov     rcx, rax
-    rep movsb
-    pop     r13
-    add     r12, rax
-    add     rbx, rax
-    add     r14d, eax
+    ; Tight inner loop
+    mov     rax, r13
+    sub     rax, rbx
+    cmp     rax, 16
+    jl      .pm_bf_loop
+    lea     rax, [r12 + 256]
+    cmp     rax, OUT_BUF_SIZE
+    jge     .pm_bf_loop
+    lea     ecx, [r14d + 16]
+    cmp     ecx, r8d
+    jg      .pm_bf_loop
+
+    movdqu  xmm0, [rbx]
+    movdqa  xmm1, xmm0
+    pcmpeqb xmm1, xmm7
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .pm_bf_loop
+    movdqu  [out_buf + r12], xmm0
+    add     r12, 16
+    add     rbx, 16
+    mov     r14d, ecx
     jmp     .pm_bf_loop
 
-.pm_bf_need_fold:
+.pm_bf_partial:
+    ; Would exceed width. Copy what fits.
+    mov     ecx, r8d
+    sub     ecx, r14d
+    test    ecx, ecx
+    jle     .pm_bf_need_fold
+    ; Copy ecx bytes
+    cmp     ecx, 8
+    jl      .pm_bf_p_small
+    mov     rax, [rbx]
+    mov     [out_buf + r12], rax
+    cmp     ecx, 8
+    je      .pm_bf_p_done
+    mov     rax, [rbx + rcx - 8]
+    lea     rdx, [out_buf + r12]
+    mov     [rdx + rcx - 8], rax
+    jmp     .pm_bf_p_done
+.pm_bf_p_small:
+    cmp     ecx, 4
+    jl      .pm_bf_p_tiny
+    mov     eax, [rbx]
+    mov     [out_buf + r12], eax
+    cmp     ecx, 4
+    je      .pm_bf_p_done
+    mov     eax, [rbx + rcx - 4]
+    lea     rdx, [out_buf + r12]
+    mov     [rdx + rcx - 4], eax
+    jmp     .pm_bf_p_done
+.pm_bf_p_tiny:
+    movzx   eax, byte [rbx]
+    mov     [out_buf + r12], al
+    cmp     ecx, 1
+    je      .pm_bf_p_done
+    movzx   eax, byte [rbx + 1]
+    mov     [out_buf + r12 + 1], al
+    cmp     ecx, 2
+    je      .pm_bf_p_done
+    movzx   eax, byte [rbx + 2]
+    mov     [out_buf + r12 + 2], al
+.pm_bf_p_done:
+    add     r12, rcx
+    add     rbx, rcx
+    mov     r14d, r8d
+    ; Peek at next byte — skip fold if it's a newline
+    cmp     rbx, r13
+    jge     .pm_bf_p_fold
+    cmp     byte [rbx], 10
+    je      .pm_bf_loop                 ; next is newline — skip fold
+.pm_bf_p_fold:
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
     jmp     .pm_bf_loop
 
+.pm_bf_has_newline:
+    ; Copy bytes before newline
+    bsf     ecx, eax
+    test    ecx, ecx
+    jz      .pm_bf_at_newline
+
+    ; Check byte count
+    lea     edx, [r14d + ecx]
+    cmp     edx, r8d
+    jle     .pm_bf_copy_before_nl
+
+    ; Would exceed width before newline
+    mov     ecx, r8d
+    sub     ecx, r14d
+    test    ecx, ecx
+    jle     .pm_bf_need_fold
+    cmp     ecx, 8
+    jl      .pm_bf_hn_small
+    mov     rax, [rbx]
+    mov     [out_buf + r12], rax
+    jmp     .pm_bf_hn_done
+.pm_bf_hn_small:
+    cmp     ecx, 4
+    jl      .pm_bf_hn_tiny
+    mov     eax, [rbx]
+    mov     [out_buf + r12], eax
+    jmp     .pm_bf_hn_done
+.pm_bf_hn_tiny:
+    movzx   eax, byte [rbx]
+    mov     [out_buf + r12], al
+    cmp     ecx, 1
+    je      .pm_bf_hn_done
+    movzx   eax, byte [rbx + 1]
+    mov     [out_buf + r12 + 1], al
+    cmp     ecx, 2
+    je      .pm_bf_hn_done
+    movzx   eax, byte [rbx + 2]
+    mov     [out_buf + r12 + 2], al
+.pm_bf_hn_done:
+    add     r12, rcx
+    add     rbx, rcx
+    mov     r14d, r8d
+    ; Peek at next byte — skip fold if it's a newline
+    cmp     rbx, r13
+    jge     .pm_bf_hn_fold
+    cmp     byte [rbx], 10
+    je      .pm_bf_loop                 ; next is newline — skip fold
+.pm_bf_hn_fold:
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    jmp     .pm_bf_loop
+
+.pm_bf_copy_before_nl:
+    ; Copy ecx bytes before newline
+    cmp     ecx, 8
+    jl      .pm_bf_cbn_small
+    mov     rax, [rbx]
+    mov     [out_buf + r12], rax
+    cmp     ecx, 8
+    je      .pm_bf_cbn_done
+    mov     rax, [rbx + rcx - 8]
+    lea     rdx, [out_buf + r12]
+    mov     [rdx + rcx - 8], rax
+    jmp     .pm_bf_cbn_done
+.pm_bf_cbn_small:
+    cmp     ecx, 4
+    jl      .pm_bf_cbn_tiny
+    mov     eax, [rbx]
+    mov     [out_buf + r12], eax
+    cmp     ecx, 4
+    je      .pm_bf_cbn_done
+    mov     eax, [rbx + rcx - 4]
+    lea     rdx, [out_buf + r12]
+    mov     [rdx + rcx - 4], eax
+    jmp     .pm_bf_cbn_done
+.pm_bf_cbn_tiny:
+    movzx   eax, byte [rbx]
+    mov     [out_buf + r12], al
+    cmp     ecx, 1
+    je      .pm_bf_cbn_done
+    movzx   eax, byte [rbx + 1]
+    mov     [out_buf + r12 + 1], al
+    cmp     ecx, 2
+    je      .pm_bf_cbn_done
+    movzx   eax, byte [rbx + 2]
+    mov     [out_buf + r12 + 2], al
+.pm_bf_cbn_done:
+    add     r12, rcx
+    add     rbx, rcx
+    add     r14d, ecx
+    ; Fall through to newline
+
 .pm_bf_at_newline:
     cmp     rbx, r13
     jge     .pm_done
-    ; It should be a newline
     mov     byte [out_buf + r12], 10
     inc     r12
     xor     r14d, r14d
     inc     rbx
     jmp     .pm_bf_loop
+
+.pm_bf_need_fold:
+    ; Skip fold if next byte is a newline
+    cmp     rbx, r13
+    jge     .pm_bf_nf_fold
+    cmp     byte [rbx], 10
+    je      .pm_bf_loop                 ; next is newline — skip fold
+.pm_bf_nf_fold:
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+    jmp     .pm_bf_loop
+
+.pm_bf_scalar_tail:
+    cmp     rbx, r13
+    jge     .pm_done
+
+    movzx   eax, byte [rbx]
+    cmp     al, 10
+    je      .pm_bf_at_newline
+
+    lea     edx, [r14d + 1]
+    cmp     edx, r8d
+    jle     .pm_bf_st_ok
+    mov     byte [out_buf + r12], 10
+    inc     r12
+    xor     r14d, r14d
+.pm_bf_st_ok:
+    inc     r14d
+    mov     [out_buf + r12], al
+    inc     r12
+    inc     rbx
+    jmp     .pm_bf_scalar_tail
 
 ; ============================================================================
 ;  Byte mode with -s
