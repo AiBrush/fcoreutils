@@ -3806,3 +3806,6 @@ line_len:       resq 1
 mmap_base:      resq 1
 mmap_size:      resq 1
 seen_dashdash:  resb 1
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits
