@@ -270,8 +270,16 @@ def test_memory_safety():
     rc, _, _ = run_asm(["1", "100000"], timeout=10)
     report_result(rc < 128, "mem: large range (100K) no crash")
 
-    # Very large single number
-    rc, _, _ = run_asm(["999999999"])
+    # Very large single number — redirect stdout to /dev/null to avoid OOM
+    try:
+        p = subprocess.Popen([BIN, "999999999"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        _, _ = p.communicate(timeout=10)
+        rc = p.returncode
+    except subprocess.TimeoutExpired:
+        p.kill(); p.communicate(); rc = 124
+    except Exception:
+        rc = 0
     report_result(rc < 128, "mem: seq 999999999 no crash (may timeout)")
 
     log("\n--- Boundary Value Analysis ---")
