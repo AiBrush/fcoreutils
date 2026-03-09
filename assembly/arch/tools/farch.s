@@ -63,7 +63,8 @@ str_invalid_opt_end:
 .equ str_invalid_opt_len, str_invalid_opt_end - str_invalid_opt
 
 str_extra_operand:
-    .ascii "extra operand '"
+    .ascii "extra operand "
+    .byte 0xe2, 0x80, 0x98
 str_extra_operand_end:
 .equ str_extra_operand_len, str_extra_operand_end - str_extra_operand
 
@@ -71,6 +72,12 @@ str_err_suffix:
     .ascii "'\n"
 str_err_suffix_end:
 .equ str_err_suffix_len, str_err_suffix_end - str_err_suffix
+
+str_err_suffix_unicode:
+    .byte 0xe2, 0x80, 0x99
+    .ascii "\n"
+str_err_suffix_unicode_end:
+.equ str_err_suffix_unicode_len, str_err_suffix_unicode_end - str_err_suffix_unicode
 
 str_try_help:
     .ascii "Try 'arch --help' for more information.\n"
@@ -240,8 +247,8 @@ _start:
     mov     rsi, r12
     call    asm_write_err
 
-    lea     rsi, [rip + str_err_suffix]
-    mov     rdx, str_err_suffix_len
+    lea     rsi, [rip + str_err_suffix_unicode]
+    mov     rdx, str_err_suffix_unicode_len
     call    asm_write_err
 
     lea     rsi, [rip + str_try_help]

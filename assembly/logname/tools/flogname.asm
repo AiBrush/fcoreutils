@@ -55,11 +55,14 @@ str_unrecog_len  equ $ - str_unrecog
 str_invalid:     db "invalid option -- '"
 str_invalid_len  equ $ - str_invalid
 
-str_extra:       db "extra operand '"
+str_extra:       db "extra operand ", 0xE2, 0x80, 0x98
 str_extra_len    equ $ - str_extra
 
 str_sq_nl:       db "'", 10
 str_sq_nl_len    equ 2
+
+str_usq_nl:      db 0xE2, 0x80, 0x99, 10
+str_usq_nl_len   equ 4
 
 str_try:         db "Try 'logname --help' for more information.", 10
 str_try_len      equ $ - str_try
@@ -228,8 +231,8 @@ _start:
     mov     rsi, r13
     call    asm_write_err
 
-    mov     rsi, str_sq_nl
-    mov     rdx, str_sq_nl_len
+    mov     rsi, str_usq_nl
+    mov     rdx, str_usq_nl_len
     call    asm_write_err
     jmp     .err_try_exit
 
@@ -650,3 +653,6 @@ try_utmp:
     pop     r12
     pop     rbx
     ret
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits

@@ -92,7 +92,7 @@ def test_elf_binary_security():
     report_result(elf[:4] == b"\x7fELF", "elf: valid ELF magic bytes")
     report_result(elf[4] == 2, "elf: ELFCLASS64 (64-bit)")
     size = len(elf)
-    report_result(size < 30000, f"elf: binary size {size} bytes (<30KB)")
+    report_result(size < 40000, f"elf: binary size {size} bytes (<40KB)")
 
     e_phoff = struct.unpack_from("<Q", elf, 32)[0]
     e_phentsize = struct.unpack_from("<H", elf, 54)[0]

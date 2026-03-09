@@ -42,3 +42,6 @@ asm_memcpy:
     mov     rax, rdi
     rep     movsb
     ret
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits

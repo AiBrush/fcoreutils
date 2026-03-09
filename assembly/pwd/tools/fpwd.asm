@@ -491,3 +491,6 @@ _start:
     ; For now, just exit 1
     mov     edi, 1
     call    asm_exit
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits

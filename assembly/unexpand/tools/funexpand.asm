@@ -1132,6 +1132,16 @@ unexpand_core:
 
 ; ─── Verbatim copy (not converting) ──────────────────────
 .uc_verbatim:
+    ; Flush any pending blanks that accumulated during convert phase
+    cmp     dword [st_pending], 0
+    je      .uc_verbatim_no_pending
+    push    rbx
+    push    r13
+    call    flush_pending_blanks
+    pop     r13
+    pop     rbx
+    lea     r15, [out_buf]
+.uc_verbatim_no_pending:
     cmp     r13, 64
     jl      .uc_verb_small
 

@@ -48,10 +48,12 @@ section .data
     str_err_unrec_len   equ 21
     str_err_invalid:    db "invalid option -- '"
     str_err_invalid_len equ 19
-    str_err_extra:      db "extra operand '"
-    str_err_extra_len   equ 15
+    str_err_extra:      db "extra operand ", 0xE2, 0x80, 0x98
+    str_err_extra_len   equ 17
     str_err_apost_nl:   db "'", 10
     str_err_apost_nl_len equ 2
+    str_err_uapost_nl:  db 0xE2, 0x80, 0x99, 10
+    str_err_uapost_nl_len equ 4
     str_try:            db "Try 'hostid --help' for more information.", 10
     str_try_len         equ 42
 
@@ -171,7 +173,7 @@ _start:
     jmp     .error_try_help
 
 .error_extra_operand:
-    ; "hostid: extra operand 'ARG'\n"
+    ; "hostid: extra operand \u2018ARG\u2019\n"
     mov     r12, rdi
     mov     rdi, STDERR
     lea     rsi, [rel str_err_prefix]
@@ -188,8 +190,8 @@ _start:
     mov     rdi, STDERR
     call    asm_write
     mov     rdi, STDERR
-    lea     rsi, [rel str_err_apost_nl]
-    mov     rdx, str_err_apost_nl_len
+    lea     rsi, [rel str_err_uapost_nl]
+    mov     rdx, str_err_uapost_nl_len
     call    asm_write
     jmp     .error_try_help
 

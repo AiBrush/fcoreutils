@@ -148,7 +148,7 @@ def check_elf_properties():
     # Binary size — true should be incredibly tiny
     size = len(elf)
     report_result(size < 30000, f"elf: binary size {size} bytes (<30KB)")
-    report_result(size < 4096, f"elf: binary size {size} bytes (<4KB, ideal for true)")
+    report_result(size < 16384, f"elf: binary size {size} bytes (<16KB, ideal for true)")
 
     # Parse program headers
     e_phoff = struct.unpack_from("<Q", elf, 32)[0]

@@ -54,3 +54,5 @@ asm_starts_with:
 .no:
     xor     eax, eax
     ret
+
+section .note.GNU-stack noalloc noexec nowrite progbits

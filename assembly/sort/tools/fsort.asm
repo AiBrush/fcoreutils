@@ -75,17 +75,17 @@ extern asm_memcpy
 %define FLAG_HUMAN      0x4000      ; -h human numeric
 %define FLAG_VERSION    0x8000      ; -V version sort
 
-; Key option flags (per-key)
-%define KEY_NUMERIC     0x01
-%define KEY_BLANKS      0x02
-%define KEY_FOLD_CASE   0x04
-%define KEY_DICT        0x08
-%define KEY_IGNORE_NP   0x10
-%define KEY_REVERSE     0x20
-%define KEY_GEN_NUM     0x40
-%define KEY_MONTH       0x80
-%define KEY_HUMAN       0x0100
-%define KEY_VERSION     0x0200
+; Key option flags (per-key) — shifted to bits 16+ to avoid collision with FLAG_* bits
+%define KEY_NUMERIC     0x010000
+%define KEY_BLANKS      0x020000
+%define KEY_FOLD_CASE   0x040000
+%define KEY_DICT        0x080000
+%define KEY_IGNORE_NP   0x100000
+%define KEY_REVERSE     0x200000
+%define KEY_GEN_NUM     0x400000
+%define KEY_MONTH       0x800000
+%define KEY_HUMAN       0x1000000
+%define KEY_VERSION     0x2000000
 
 ; Key definition structure (40 bytes each)
 ; [0]  qword  start_field  (1-based)
@@ -147,7 +147,7 @@ str_help:
     db "  -s, --stable                 stabilize sort by disabling last-resort comparison", 10
     db "  -S, --buffer-size=SIZE       use SIZE for main memory buffer", 10
     db "  -t, --field-separator=SEP    use SEP instead of non-blank to blank transition", 10
-    db "  -T, --temporary-directory=DIR  use DIR for temporaries, not $TMPDIR or /tmp;", 10
+    db "  -T, --temporary-directory=DIR  use DIR for temporaries, not $TMPDIR or default;", 10
     db "                              multiple options specify multiple directories", 10
     db "      --parallel=N             change the number of sorts run concurrently to N", 10
     db "  -u, --unique                 with -c, check for strict ordering;", 10
@@ -1713,7 +1713,7 @@ sort_lines:
 
     mov     rcx, [rel line_count]
     cmp     rcx, 2
-    jl      .sort_done
+    jl      .srt_done
 
     mov     r12, [rel line_array]
     mov     r13, rcx
@@ -1729,7 +1729,7 @@ sort_lines:
     mov     eax, SYS_MMAP
     syscall
     test    rax, rax
-    js      .sort_fail
+    js      .srt_fail
     mov     [rel merge_temp], rax
     mov     r14, rax
 
@@ -1823,7 +1823,7 @@ sort_lines:
 
 .merge_width_loop:
     cmp     rbp, r13
-    jge     .sort_cleanup
+    jge     .srt_cleanup
 
     xor     ebx, ebx
 
@@ -1871,14 +1871,14 @@ sort_lines:
     shl     rbp, 1
     jmp     .merge_width_loop
 
-.sort_cleanup:
+.srt_cleanup:
     mov     rdi, [rel merge_temp]
     mov     rsi, r13
     imul    rsi, LINE_ENTRY_SIZE
     mov     eax, SYS_MUNMAP
     syscall
 
-.sort_done:
+.srt_done:
     pop     rbp
     pop     r15
     pop     r14
@@ -1887,7 +1887,7 @@ sort_lines:
     pop     rbx
     ret
 
-.sort_fail:
+.srt_fail:
     mov     edi, 2
     call    asm_exit
 
@@ -2200,7 +2200,7 @@ compare_lines:
     jnz     .cl_check_key_rev
     mov     r8, [rel flag_bits]
 .cl_check_key_rev:
-    test    r8, KEY_REVERSE
+    test    r8, KEY_REVERSE | FLAG_REVERSE
     jz      .cl_done
     neg     eax
     jmp     .cl_done
@@ -2487,11 +2487,12 @@ compare_fields:
     mov     rdi, r12
     mov     rsi, r13
     call    parse_month
-    mov     r8d, eax
+    push    rax             ; save month1 (parse_month clobbers r8)
     mov     rdi, r14
     mov     rsi, r15
     call    parse_month
-    cmp     r8d, eax
+    pop     rcx             ; rcx = month1
+    cmp     ecx, eax
     jl      .cf_num_less
     jg      .cf_num_greater
     xor     eax, eax
@@ -2587,15 +2588,26 @@ compare_fields:
 .cf_ver_digits_equal:
     pop     r9
     pop     r8
+    ; Advance r8 past all digits in string 1
 .cf_ver_adv1:
     cmp     r8, r13
-    jge     .cf_ver_loop
+    jge     .cf_ver_adv2
     movzx   eax, byte [r12 + r8]
     sub     eax, '0'
     cmp     eax, 9
-    ja      .cf_ver_loop
+    ja      .cf_ver_adv2
     inc     r8
     jmp     .cf_ver_adv1
+    ; Advance r9 past all digits in string 2
+.cf_ver_adv2:
+    cmp     r9, r15
+    jge     .cf_ver_loop
+    movzx   eax, byte [r14 + r9]
+    sub     eax, '0'
+    cmp     eax, 9
+    ja      .cf_ver_loop
+    inc     r9
+    jmp     .cf_ver_adv2
 
 .cf_ver_pop_greater:
     pop     r9

@@ -94,6 +94,7 @@ _start:
     mov     byte [rel opt_mode], MODE_NORMAL
     mov     byte [rel opt_flag_d], 0
     mov     byte [rel opt_flag_u], 0
+    mov     byte [rel opt_count], 0
     mov     byte [rel opt_case_insensitive], 0
     mov     byte [rel opt_zero_terminated], 0
     mov     qword [rel opt_skip_fields], 0
@@ -169,7 +170,7 @@ _start:
     syscall
 
 .short_c:
-    mov     byte [rel opt_mode], MODE_COUNT
+    mov     byte [rel opt_count], 1
     inc     rdi
     jmp     .parse_short_opts
 
@@ -382,7 +383,7 @@ _start:
 .long_count:
     pop     rbx
     pop     rcx
-    mov     byte [rel opt_mode], MODE_COUNT
+    mov     byte [rel opt_count], 1
     jmp     .parse_next
 
 .long_repeated:
@@ -819,9 +820,11 @@ _start:
 
 .run_uniq_mmap_ok:
     ; Check if we can use the ultra-fast path:
-    ; MODE_NORMAL, no skip_fields, no skip_chars, no check_chars limit,
+    ; MODE_NORMAL, no count, no skip_fields, no skip_chars, no check_chars limit,
     ; no case_insensitive, newline delimiter
     cmp     byte [rel opt_mode], MODE_NORMAL
+    jne     .run_uniq_mmap_generic
+    cmp     byte [rel opt_count], 0
     jne     .run_uniq_mmap_generic
     cmp     qword [rel opt_skip_fields], 0
     jne     .run_uniq_mmap_generic
@@ -1977,8 +1980,6 @@ output_group_mmap:
     movzx   eax, byte [rel opt_mode]
     cmp     al, MODE_NORMAL
     je      .ogm_normal
-    cmp     al, MODE_COUNT
-    je      .ogm_count
     cmp     al, MODE_REPEATED
     je      .ogm_repeated
     cmp     al, MODE_ALL_REPEAT
@@ -1989,14 +1990,11 @@ output_group_mmap:
     je      .ogm_group
 
 .ogm_normal:
-    mov     rdi, [rel prev_mmap_ptr]
-    mov     rsi, [rel prev_mmap_len]
-    call    emit_line_direct
-    jmp     .ogm_done
-
-.ogm_count:
+    cmp     byte [rel opt_count], 1
+    jne     .ogm_normal_noc
     mov     rdi, [rel count]
     call    emit_count_prefix
+.ogm_normal_noc:
     mov     rdi, [rel prev_mmap_ptr]
     mov     rsi, [rel prev_mmap_len]
     call    emit_line_direct
@@ -2007,6 +2005,11 @@ output_group_mmap:
     je      .ogm_done
     cmp     qword [rel count], 1
     jle     .ogm_done
+    cmp     byte [rel opt_count], 1
+    jne     .ogm_repeated_noc
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+.ogm_repeated_noc:
     mov     rdi, [rel prev_mmap_ptr]
     mov     rsi, [rel prev_mmap_len]
     call    emit_line_direct
@@ -2020,6 +2023,11 @@ output_group_mmap:
     je      .ogm_done
     cmp     qword [rel count], 1
     jne     .ogm_done
+    cmp     byte [rel opt_count], 1
+    jne     .ogm_unique_noc
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+.ogm_unique_noc:
     mov     rdi, [rel prev_mmap_ptr]
     mov     rsi, [rel prev_mmap_len]
     call    emit_line_direct
@@ -2054,8 +2062,6 @@ output_group_final_mmap:
     movzx   eax, byte [rel opt_mode]
     cmp     al, MODE_NORMAL
     je      .ogfm_normal
-    cmp     al, MODE_COUNT
-    je      .ogfm_count
     cmp     al, MODE_REPEATED
     je      .ogfm_repeated
     cmp     al, MODE_ALL_REPEAT
@@ -2066,14 +2072,11 @@ output_group_final_mmap:
     je      .ogfm_group
 
 .ogfm_normal:
-    mov     rdi, [rel prev_mmap_ptr]
-    mov     rsi, [rel prev_mmap_len]
-    call    emit_line_direct
-    jmp     .ogfm_done
-
-.ogfm_count:
+    cmp     byte [rel opt_count], 1
+    jne     .ogfm_normal_noc
     mov     rdi, [rel count]
     call    emit_count_prefix
+.ogfm_normal_noc:
     mov     rdi, [rel prev_mmap_ptr]
     mov     rsi, [rel prev_mmap_len]
     call    emit_line_direct
@@ -2084,6 +2087,11 @@ output_group_final_mmap:
     je      .ogfm_done
     cmp     qword [rel count], 1
     jle     .ogfm_done
+    cmp     byte [rel opt_count], 1
+    jne     .ogfm_repeated_noc
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+.ogfm_repeated_noc:
     mov     rdi, [rel prev_mmap_ptr]
     mov     rsi, [rel prev_mmap_len]
     call    emit_line_direct
@@ -2097,6 +2105,11 @@ output_group_final_mmap:
     je      .ogfm_done
     cmp     qword [rel count], 1
     jne     .ogfm_done
+    cmp     byte [rel opt_count], 1
+    jne     .ogfm_unique_noc
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+.ogfm_unique_noc:
     mov     rdi, [rel prev_mmap_ptr]
     mov     rsi, [rel prev_mmap_len]
     call    emit_line_direct
@@ -2456,8 +2469,6 @@ output_group_slow:
     movzx   eax, byte [rel opt_mode]
     cmp     al, MODE_NORMAL
     je      .ogs_normal
-    cmp     al, MODE_COUNT
-    je      .ogs_count
     cmp     al, MODE_REPEATED
     je      .ogs_repeated
     cmp     al, MODE_ALL_REPEAT
@@ -2468,14 +2479,11 @@ output_group_slow:
     je      .ogs_group
 
 .ogs_normal:
-    lea     rdi, [rel prev_line_buf]
-    mov     rsi, [rel prev_line_len]
-    call    emit_line_direct
-    jmp     .ogs_done
-
-.ogs_count:
+    cmp     byte [rel opt_count], 1
+    jne     .ogs_normal_noc
     mov     rdi, [rel count]
     call    emit_count_prefix
+.ogs_normal_noc:
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
     call    emit_line_direct
@@ -2486,6 +2494,11 @@ output_group_slow:
     je      .ogs_done
     cmp     qword [rel count], 1
     jle     .ogs_done
+    cmp     byte [rel opt_count], 1
+    jne     .ogs_repeated_noc
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+.ogs_repeated_noc:
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
     call    emit_line_direct
@@ -2499,6 +2512,11 @@ output_group_slow:
     je      .ogs_done
     cmp     qword [rel count], 1
     jne     .ogs_done
+    cmp     byte [rel opt_count], 1
+    jne     .ogs_unique_noc
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+.ogs_unique_noc:
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
     call    emit_line_direct
@@ -2524,8 +2542,6 @@ output_group_final_slow:
     movzx   eax, byte [rel opt_mode]
     cmp     al, MODE_NORMAL
     je      .ogfs_normal
-    cmp     al, MODE_COUNT
-    je      .ogfs_count
     cmp     al, MODE_REPEATED
     je      .ogfs_repeated
     cmp     al, MODE_ALL_REPEAT
@@ -2536,14 +2552,11 @@ output_group_final_slow:
     je      .ogfs_group
 
 .ogfs_normal:
-    lea     rdi, [rel prev_line_buf]
-    mov     rsi, [rel prev_line_len]
-    call    emit_line_direct
-    jmp     .ogfs_done
-
-.ogfs_count:
+    cmp     byte [rel opt_count], 1
+    jne     .ogfs_normal_noc
     mov     rdi, [rel count]
     call    emit_count_prefix
+.ogfs_normal_noc:
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
     call    emit_line_direct
@@ -2554,6 +2567,11 @@ output_group_final_slow:
     je      .ogfs_done
     cmp     qword [rel count], 1
     jle     .ogfs_done
+    cmp     byte [rel opt_count], 1
+    jne     .ogfs_repeated_noc
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+.ogfs_repeated_noc:
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
     call    emit_line_direct
@@ -2567,6 +2585,11 @@ output_group_final_slow:
     je      .ogfs_done
     cmp     qword [rel count], 1
     jne     .ogfs_done
+    cmp     byte [rel opt_count], 1
+    jne     .ogfs_unique_noc
+    mov     rdi, [rel count]
+    call    emit_count_prefix
+.ogfs_unique_noc:
     lea     rdi, [rel prev_line_buf]
     mov     rsi, [rel prev_line_len]
     call    emit_line_direct
@@ -3588,6 +3611,7 @@ section .bss
 opt_mode:               resb 1
 opt_flag_d:             resb 1
 opt_flag_u:             resb 1
+opt_count:              resb 1
 opt_case_insensitive:   resb 1
 opt_zero_terminated:    resb 1
 opt_allrep_method:      resb 1

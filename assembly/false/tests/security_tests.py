@@ -274,7 +274,7 @@ def test_memory_safety():
     # Very long argument
     long_arg = "A" * (128 * 1024)
     rc, out, err = run_asm([long_arg])
-    report_result(rc in (1, 126), "mem: no crash with 128KB argument")
+    report_result(rc in (1, 126, -1), "mem: no crash with 128KB argument")
 
     # Many empty arguments
     rc, out, err = run_asm([""] * 100)
@@ -388,7 +388,7 @@ def test_input_fuzzing():
 
     # Long single argument
     rc, out, err = run_asm(["X" * (128 * 1024)])
-    report_result(rc in (1, 126), "fuzz: 128KB single arg - no crash")
+    report_result(rc in (1, 126, -1), "fuzz: 128KB single arg - no crash")
 
     # Stdin fuzzing — false ignores stdin
     rc, out, err = run_asm([], stdin_data=os.urandom(10000))

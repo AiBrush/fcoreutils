@@ -514,7 +514,7 @@ parse_args:
     cmp     al, 'n'
     je      .sn
     cmp     al, 'o'
-    je      .so
+    je      .s_o
     cmp     al, 'r'
     je      .sr
     cmp     al, 's'
@@ -589,15 +589,15 @@ parse_args:
     mov rdi, rbx
     call parse_key
     jmp .next_arg
-.so:
+.s_o:
     inc rbx
     cmp byte [rbx], 0
-    jne .so_inline
+    jne .s_o_inline
     inc r14
     cmp r14, r13
     jge .error_missing_o
     mov rbx, [r12 + r14*8]
-.so_inline:
+.s_o_inline:
     mov [output_file], rbx
     jmp .next_arg
 .st_sep:
@@ -1108,7 +1108,7 @@ sort_lines:
     push r12
     mov rcx, [line_count]
     cmp rcx, 2
-    jl .sort_done
+    jl .srt_done
     mov rsi, rcx
     imul rsi, LINE_ENTRY_SIZE
     xor edi, edi
@@ -1119,7 +1119,7 @@ sort_lines:
     mov eax, SYS_MMAP
     syscall
     test rax, rax
-    js .sort_fail
+    js .srt_fail
     mov [merge_temp], rax
     mov rdi, [line_array]
     mov rsi, [merge_temp]
@@ -1131,11 +1131,11 @@ sort_lines:
     imul rsi, LINE_ENTRY_SIZE
     mov eax, SYS_MUNMAP
     syscall
-.sort_done:
+.srt_done:
     pop r12
     pop rbx
     ret
-.sort_fail:
+.srt_fail:
     mov edi, 2
     jmp do_exit
 
@@ -2520,7 +2520,7 @@ str_help:
     db "  -s, --stable                 stabilize sort by disabling last-resort comparison", 10
     db "  -S, --buffer-size=SIZE       use SIZE for main memory buffer", 10
     db "  -t, --field-separator=SEP    use SEP instead of non-blank to blank transition", 10
-    db "  -T, --temporary-directory=DIR  use DIR for temporaries, not $TMPDIR or /tmp;", 10
+    db "  -T, --temporary-directory=DIR  use DIR for temporaries, not $TMPDIR or default;", 10
     db "                              multiple options specify multiple directories", 10
     db "      --parallel=N             change the number of sorts run concurrently to N", 10
     db "  -u, --unique                 with -c, check for strict ordering;", 10

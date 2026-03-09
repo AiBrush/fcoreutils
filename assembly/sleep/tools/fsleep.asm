@@ -50,12 +50,16 @@ str_try:
 str_try_len equ $ - str_try
 
 str_invalid_pre:
-    db "sleep: invalid time interval '", 0
+    db "sleep: invalid time interval ", 0xE2, 0x80, 0x98, 0
 str_invalid_pre_len equ $ - str_invalid_pre - 1  ; minus null
 
 str_invalid_post:
-    db "'", 10, 0
+    db 0xE2, 0x80, 0x99, 10, 0
 str_invalid_post_len equ $ - str_invalid_post - 1
+
+str_opt_err_post:
+    db "'", 10, 0
+str_opt_err_post_len equ $ - str_opt_err_post - 1
 
 str_unrec_opt_pre:
     db "sleep: unrecognized option '", 0
@@ -351,8 +355,8 @@ _start:
     mov     rdx, rax
     call    asm_write_err
 
-    mov     rsi, str_invalid_post
-    mov     rdx, str_invalid_post_len
+    mov     rsi, str_opt_err_post
+    mov     rdx, str_opt_err_post_len
     call    asm_write_err
 
     mov     rsi, str_try
@@ -377,8 +381,8 @@ _start:
     mov     rdx, 1
     call    asm_write_err
 
-    mov     rsi, str_invalid_post
-    mov     rdx, str_invalid_post_len
+    mov     rsi, str_opt_err_post
+    mov     rdx, str_opt_err_post_len
     call    asm_write_err
 
     mov     rsi, str_try
@@ -644,3 +648,6 @@ parse_time_arg:
     pop     rbp
     pop     rbx
     ret
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits

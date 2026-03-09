@@ -1,6 +1,6 @@
 NASM      = nasm
 LD        = ld
-NASMFLAGS = -f elf64 -I ./ -g -F dwarf
+NASMFLAGS = -f elf64 -I ./
 LDFLAGS   = --gc-sections
 BUILD     = build
 TARGET    = fsync
