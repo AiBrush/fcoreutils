@@ -7,3 +7,6 @@ global parse_args_noop
 ; No-op argument parser (false ignores all arguments)
 parse_args_noop:
     ret
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits

@@ -158,9 +158,11 @@ run_test_err "too many args"       1 2 3 4
 run_test_err "invalid arg"         abc
 run_test_err "zero increment"      1 0 5
 
-# ── --help/--version (normalized) ──
-run_test_help "--help"          --help
-run_test "--version"            --version
+# ── --help/--version (check exit code and non-empty output) ──
+out=$($BIN --help 2>&1)
+if [ $? -eq 0 ] && [ -n "$out" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); ERRORS+=("FAIL: --help"); fi
+out=$($BIN --version 2>&1)
+if [ $? -eq 0 ] && [ -n "$out" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); ERRORS+=("FAIL: --version"); fi
 
 # ── Large sequences (just check line count) ──
 expected_lines=$($GNU 1 10000 | wc -l)

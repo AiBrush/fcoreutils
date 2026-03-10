@@ -665,3 +665,6 @@ print_errno:
 .pe_print:
     call    asm_write
     ret
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits

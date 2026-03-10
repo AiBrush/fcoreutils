@@ -48,8 +48,8 @@ section .data
 
     str_err_prefix:     db "whoami: ", 0
     str_err_no_name:    db "cannot find name for user ID ", 0
-    str_err_operand1:   db "whoami: extra operand '", 0
-    str_err_operand2:   db "'", 10, "Try 'whoami --help' for more information.", 10, 0
+    str_err_operand1:   db "whoami: extra operand ", 0xE2, 0x80, 0x98, 0
+    str_err_operand2:   db 0xE2, 0x80, 0x99, 10, "Try 'whoami --help' for more information.", 10, 0
     str_err_unrec1:     db "whoami: unrecognized option '", 0
     str_err_unrec2:     db "'", 10, "Try 'whoami --help' for more information.", 10, 0
     str_err_invalid1:   db "whoami: invalid option -- '", 0

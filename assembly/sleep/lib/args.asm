@@ -8,3 +8,6 @@ section .text
 ; Sleep uses custom parsing in the main tool file
 parse_args:
     ret
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits

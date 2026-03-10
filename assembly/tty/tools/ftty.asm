@@ -63,12 +63,16 @@ str_err_unrecognized:
 str_err_unrecognized_len equ $ - str_err_unrecognized
 
 str_err_extra_operand:
-    db "extra operand '"
+    db "extra operand ", 0xE2, 0x80, 0x98
 str_err_extra_operand_len equ $ - str_err_extra_operand
 
 str_err_quote_nl:
     db "'", 10
 str_err_quote_nl_len equ $ - str_err_quote_nl
+
+str_err_uquote_nl:
+    db 0xE2, 0x80, 0x99, 10
+str_err_uquote_nl_len equ $ - str_err_uquote_nl
 
 str_try_help:
     db "Try 'tty --help' for more information.", 10
@@ -364,7 +368,7 @@ _start:
     mov     rdx, str_err_prefix_len
     call    asm_write_err
 
-    ; "extra operand '"
+    ; "extra operand " + Unicode open quote
     mov     rsi, str_err_extra_operand
     mov     rdx, str_err_extra_operand_len
     call    asm_write_err
@@ -376,9 +380,9 @@ _start:
     mov     rsi, rbx
     call    asm_write_err
 
-    ; "'\n"
-    mov     rsi, str_err_quote_nl
-    mov     rdx, str_err_quote_nl_len
+    ; Unicode closing quote + newline
+    mov     rsi, str_err_uquote_nl
+    mov     rdx, str_err_uquote_nl_len
     call    asm_write_err
 
     ; "Try 'tty --help' for more information.\n"

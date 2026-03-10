@@ -25,3 +25,6 @@ asm_write_err:
 asm_exit:
     mov     rax, SYS_EXIT
     syscall
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits

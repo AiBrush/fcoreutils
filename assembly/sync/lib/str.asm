@@ -55,3 +55,5 @@ asm_starts_with:
 .no_match:
     xor     rax, rax
     ret
+
+section .note.GNU-stack noalloc noexec nowrite progbits

@@ -80,3 +80,6 @@ version_text:
     db "There is NO WARRANTY, to the extent permitted by law.", 10, 10
     db "Written by Jim Meyering.", 10
 version_text_len equ $ - version_text
+
+; Non-executable stack
+section .note.GNU-stack noalloc noexec nowrite progbits

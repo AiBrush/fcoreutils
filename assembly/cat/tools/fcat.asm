@@ -211,10 +211,61 @@ parse_args:
     cmp     byte [rsi+2], 0
     je      .pa_dashdash                ; exactly "--"
 
-    ; Unknown --option: error and exit
+    ; Check --help
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
     mov     rdi, rsi
+    lea     rsi, [rel str_help_opt]
+    call    str_eq_cat
+    test    eax, eax
+    jnz     .pa_do_help
+
+    ; Check --version
+    mov     rsi, [r13 + rbx*8]
+    mov     rdi, rsi
+    lea     rsi, [rel str_version_opt]
+    call    str_eq_cat
+    test    eax, eax
+    jnz     .pa_do_version
+
+    ; Unknown --option: error and exit
+    mov     rdi, [r13 + rbx*8]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     call    err_unrecognized_option
     mov     edi, 1
+    mov     eax, SYS_EXIT
+    syscall
+
+.pa_do_help:
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ; Print help to stdout and exit 0
+    mov     rdi, STDOUT
+    lea     rsi, [rel help_text]
+    mov     rdx, help_text_len
+    call    asm_write_all
+    xor     edi, edi
+    mov     eax, SYS_EXIT
+    syscall
+
+.pa_do_version:
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ; Print version to stdout and exit 0
+    mov     rdi, STDOUT
+    lea     rsi, [rel version_text]
+    mov     rdx, version_text_len
+    call    asm_write_all
+    xor     edi, edi
     mov     eax, SYS_EXIT
     syscall
 
@@ -1197,6 +1248,25 @@ strerror:
     lea     rax, [rel str_enametoolong]
     ret
 
+; str_eq_cat(rdi=s1, rsi=s2) -> eax=1 if equal, 0 if not
+str_eq_cat:
+.sec_loop:
+    mov     al, [rdi]
+    mov     cl, [rsi]
+    cmp     al, cl
+    jne     .sec_ne
+    test    al, al
+    jz      .sec_equal
+    inc     rdi
+    inc     rsi
+    jmp     .sec_loop
+.sec_equal:
+    mov     eax, 1
+    ret
+.sec_ne:
+    xor     eax, eax
+    ret
+
 ; ─── Data Section ────────────────────────────────────────
 section .data
 
@@ -1218,6 +1288,47 @@ str_invalid_opt: db "cat: invalid option -- '"
 str_invalid_opt_len equ $ - str_invalid_opt
 
 str_write_error: db "write error", 0
+
+str_help_opt:   db "--help", 0
+str_version_opt: db "--version", 0
+
+help_text:
+    db "Usage: cat [OPTION]... [FILE]...", 10
+    db "Concatenate FILE(s) to standard output.", 10
+    db 10
+    db "With no FILE, or when FILE is -, read standard input.", 10
+    db 10
+    db "  -A, --show-all           equivalent to -vET", 10
+    db "  -b, --number-nonblank    number nonempty output lines, overrides -n", 10
+    db "  -e                       equivalent to -vE", 10
+    db "  -E, --show-ends          display $ at end of each line", 10
+    db "  -n, --number             number all output lines", 10
+    db "  -s, --squeeze-blank      suppress repeated empty output lines", 10
+    db "  -t                       equivalent to -vT", 10
+    db "  -T, --show-tabs          display TAB characters as ^I", 10
+    db "  -u                       (ignored)", 10
+    db "  -v, --show-nonprinting   use ^ and M- notation, except for LFD and TAB", 10
+    db "      --help        display this help and exit", 10
+    db "      --version     output version information and exit", 10
+    db 10
+    db "Examples:", 10
+    db "  cat f - g  Output f's contents, then standard input, then g's contents.", 10
+    db "  cat        Copy standard input to standard output.", 10
+    db 10
+    db "GNU coreutils online help: <https://www.gnu.org/software/coreutils/>", 10
+    db "Full documentation <https://www.gnu.org/software/coreutils/cat>", 10
+    db "or available locally via: info '(coreutils) cat invocation'", 10
+help_text_len equ $ - help_text
+
+version_text:
+    db "cat (GNU coreutils) 9.7", 10
+    db "Packaged by Debian (9.7-3)", 10
+    db "Copyright (C) 2025 Free Software Foundation, Inc.", 10
+    db "License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.", 10
+    db "This is free software: you are free to change and redistribute it.", 10
+    db "There is NO WARRANTY, to the extent permitted by law.", 10, 10
+    db "Written by Torbjorn Granlund and Richard M. Stallman.", 10
+version_text_len equ $ - version_text
 
 dash_str:       db "-", 0
 

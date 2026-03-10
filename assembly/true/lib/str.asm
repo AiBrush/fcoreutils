@@ -14,3 +14,5 @@ asm_strlen:
     jmp     .loop
 .done:
     ret
+
+section .note.GNU-stack noalloc noexec nowrite progbits

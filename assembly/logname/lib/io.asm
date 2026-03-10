@@ -36,3 +36,5 @@ asm_read:
 asm_exit:
     mov     rax, SYS_EXIT
     syscall
+
+section .note.GNU-stack noalloc noexec nowrite progbits

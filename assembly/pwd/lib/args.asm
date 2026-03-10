@@ -46,3 +46,5 @@ asm_find_env:
     pop     r12
     pop     rbx
     ret
+
+section .note.GNU-stack noalloc noexec nowrite progbits

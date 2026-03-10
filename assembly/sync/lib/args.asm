@@ -12,3 +12,5 @@ section .text
 ; For sync, all parsing is done inline in the tool
 asm_parse_long_opt:
     ret
+
+section .note.GNU-stack noalloc noexec nowrite progbits
