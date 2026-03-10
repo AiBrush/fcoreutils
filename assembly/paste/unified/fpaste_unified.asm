@@ -5,6 +5,7 @@
 
 BITS 64
 org 0x400000
+default abs
 
 ; ── Linux syscall numbers and constants ──
 %define SYS_READ            0
@@ -260,7 +261,7 @@ _start:
 
     cmp     qword [nfiles], 0
     jne     .have_files
-    lea     rax, [dash_str]
+mov     rax, dash_str
     mov     [file_ptrs], rax
     mov     qword [nfiles], 1
 
@@ -342,35 +343,35 @@ parse_args:
     push    r14
 
     mov     rdi, rsi
-    lea     rsi, [str_help_opt]
+mov     rsi, str_help_opt
     call    str_eq
     test    eax, eax
     jnz     .pa_do_help
 
     mov     rsi, [r13 + rbx*8]
     mov     rdi, rsi
-    lea     rsi, [str_version_opt]
+mov     rsi, str_version_opt
     call    str_eq
     test    eax, eax
     jnz     .pa_do_version
 
     mov     rsi, [r13 + rbx*8]
     mov     rdi, rsi
-    lea     rsi, [str_serial_opt]
+mov     rsi, str_serial_opt
     call    str_eq
     test    eax, eax
     jnz     .pa_do_serial
 
     mov     rsi, [r13 + rbx*8]
     mov     rdi, rsi
-    lea     rsi, [str_zero_opt]
+mov     rsi, str_zero_opt
     call    str_eq
     test    eax, eax
     jnz     .pa_do_zero
 
     mov     rsi, [r13 + rbx*8]
     mov     rdi, rsi
-    lea     rsi, [str_delimiters_eq]
+mov     rsi, str_delimiters_eq
     mov     ecx, 13
     call    str_has_prefix
     test    eax, eax
@@ -378,7 +379,7 @@ parse_args:
 
     mov     rsi, [r13 + rbx*8]
     mov     rdi, rsi
-    lea     rsi, [str_delimiters_opt]
+mov     rsi, str_delimiters_opt
     call    str_eq
     test    eax, eax
     jnz     .pa_do_delim_next
@@ -399,7 +400,7 @@ parse_args:
     pop     r12
     pop     rbx
     mov     rdi, STDOUT
-    lea     rsi, [help_text]
+mov     rsi, help_text
     mov     rdx, help_text_len
     call    asm_write_all
     xor     edi, edi
@@ -412,7 +413,7 @@ parse_args:
     pop     r12
     pop     rbx
     mov     rdi, STDOUT
-    lea     rsi, [version_text]
+mov     rsi, version_text
     mov     rdx, version_text_len
     call    asm_write_all
     xor     edi, edi
@@ -459,7 +460,7 @@ parse_args:
 
 .pa_delim_missing:
     mov     rdi, STDERR
-    lea     rsi, [str_delim_missing]
+mov     rsi, str_delim_missing
     mov     rdx, str_delim_missing_len
     call    asm_write_all
     mov     edi, 1
@@ -517,7 +518,7 @@ parse_args:
     jmp     .pa_next
 .pa_d_missing:
     mov     rdi, STDERR
-    lea     rsi, [str_d_missing]
+mov     rsi, str_d_missing
     mov     rdx, str_d_missing_len
     call    asm_write_all
     mov     edi, 1
@@ -528,7 +529,7 @@ parse_args:
     mov     rax, [nfiles]
     cmp     rax, MAX_FILES
     jge     .pa_next
-    lea     rcx, [file_ptrs]
+mov     rcx, file_ptrs
     mov     [rcx + rax*8], rsi
     inc     qword [nfiles]
 .pa_next:
@@ -548,7 +549,7 @@ parse_args:
 parse_delimiters:
     push    rbx
     push    r12
-    lea     r12, [delim_buf]
+mov     r12, delim_buf
     xor     ebx, ebx
 .pd_loop:
     movzx   eax, byte [rdi]
@@ -627,7 +628,7 @@ check_and_read_stdin:
 .cas_loop:
     cmp     rbx, r12
     jge     .cas_no_stdin
-    lea     rax, [file_ptrs]
+mov     rax, file_ptrs
     mov     rdi, [rax + rbx*8]
     cmp     byte [rdi], '-'
     jne     .cas_next
@@ -709,7 +710,7 @@ open_all_files:
 .oaf_count_stdin:
     cmp     rcx, r12
     jge     .oaf_count_done
-    lea     rax, [file_ptrs]
+mov     rax, file_ptrs
     mov     rdi, [rax + rcx*8]
     cmp     byte [rdi], '-'
     jne     .oaf_count_next
@@ -727,32 +728,32 @@ open_all_files:
 .oaf_loop:
     cmp     rbx, r12
     jge     .oaf_done
-    lea     rax, [file_ptrs]
+mov     rax, file_ptrs
     mov     rdi, [rax + rbx*8]
     cmp     byte [rdi], '-'
     jne     .oaf_open_file
     cmp     byte [rdi+1], 0
     jne     .oaf_open_file
     mov     rax, [stdin_data]
-    lea     rcx, [file_datas]
+mov     rcx, file_datas
     mov     [rcx + rbx*8], rax
     mov     rax, [stdin_size]
-    lea     rcx, [file_sizes]
+mov     rcx, file_sizes
     mov     [rcx + rbx*8], rax
-    lea     rcx, [file_fds]
+mov     rcx, file_fds
     mov     qword [rcx + rbx*8], -1
-    lea     rcx, [file_mmapped]
+mov     rcx, file_mmapped
     mov     byte [rcx + rbx], 0
-    lea     rcx, [file_is_stdin]
+mov     rcx, file_is_stdin
     mov     byte [rcx + rbx], 1
     jmp     .oaf_next
 
 .oaf_open_file:
-    lea     rcx, [file_is_stdin]
+mov     rcx, file_is_stdin
     mov     byte [rcx + rbx], 0
     push    rbx
     push    r12
-    lea     rax, [file_ptrs]
+mov     rax, file_ptrs
     mov     rdi, [rax + rbx*8]
     xor     esi, esi
     xor     edx, edx
@@ -764,7 +765,7 @@ open_all_files:
     mov     r13, rax
     push    rbx
     push    r12
-    lea     rsi, [stat_buf]
+mov     rsi, stat_buf
     mov     edi, r13d
     call    asm_fstat
     pop     r12
@@ -776,7 +777,7 @@ open_all_files:
     cmp     eax, S_IFREG
     jne     .oaf_is_dir_check
     mov     r14, [stat_buf + STAT_SIZE]
-    lea     rcx, [file_fds]
+mov     rcx, file_fds
     mov     [rcx + rbx*8], r13
     test    r14, r14
     jz      .oaf_empty_file
@@ -793,20 +794,20 @@ open_all_files:
     pop     rbx
     test    rax, rax
     js      .oaf_mmap_error
-    lea     rcx, [file_datas]
+mov     rcx, file_datas
     mov     [rcx + rbx*8], rax
-    lea     rcx, [file_sizes]
+mov     rcx, file_sizes
     mov     [rcx + rbx*8], r14
-    lea     rcx, [file_mmapped]
+mov     rcx, file_mmapped
     mov     byte [rcx + rbx], 1
     jmp     .oaf_next
 
 .oaf_empty_file:
-    lea     rcx, [file_datas]
+mov     rcx, file_datas
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_sizes]
+mov     rcx, file_sizes
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_mmapped]
+mov     rcx, file_mmapped
     mov     byte [rcx + rbx], 0
     jmp     .oaf_next
 
@@ -817,7 +818,7 @@ open_all_files:
     jne     .oaf_read_fallback
     push    rbx
     push    r12
-    lea     rax, [file_ptrs]
+mov     rax, file_ptrs
     mov     rdi, [rax + rbx*8]
     mov     esi, 21
     call    err_file
@@ -828,13 +829,13 @@ open_all_files:
     mov     rdi, r13
     call    asm_close
     pop     rbx
-    lea     rcx, [file_datas]
+mov     rcx, file_datas
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_sizes]
+mov     rcx, file_sizes
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_fds]
+mov     rcx, file_fds
     mov     qword [rcx + rbx*8], -1
-    lea     rcx, [file_mmapped]
+mov     rcx, file_mmapped
     mov     byte [rcx + rbx], 0
     jmp     .oaf_next
 
@@ -845,13 +846,13 @@ open_all_files:
     call    asm_close
     pop     r12
     pop     rbx
-    lea     rcx, [file_datas]
+mov     rcx, file_datas
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_sizes]
+mov     rcx, file_sizes
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_fds]
+mov     rcx, file_fds
     mov     qword [rcx + rbx*8], -1
-    lea     rcx, [file_mmapped]
+mov     rcx, file_mmapped
     mov     byte [rcx + rbx], 0
     jmp     .oaf_next
 
@@ -860,22 +861,22 @@ open_all_files:
     mov     r15d, eax
     push    rbx
     push    r12
-    lea     rax, [file_ptrs]
+mov     rax, file_ptrs
     mov     rdi, [rax + rbx*8]
     mov     esi, r15d
     call    err_file
     pop     r12
     pop     rbx
     mov     byte [had_error], 1
-    lea     rcx, [file_datas]
+mov     rcx, file_datas
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_sizes]
+mov     rcx, file_sizes
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_fds]
+mov     rcx, file_fds
     mov     qword [rcx + rbx*8], -1
-    lea     rcx, [file_mmapped]
+mov     rcx, file_mmapped
     mov     byte [rcx + rbx], 0
-    lea     rcx, [file_is_stdin]
+mov     rcx, file_is_stdin
     mov     byte [rcx + rbx], 0
     jmp     .oaf_done
 
@@ -884,7 +885,7 @@ open_all_files:
     mov     r15d, eax
     push    rbx
     push    r12
-    lea     rax, [file_ptrs]
+mov     rax, file_ptrs
     mov     rdi, [rax + rbx*8]
     mov     esi, r15d
     call    err_file
@@ -895,22 +896,22 @@ open_all_files:
     mov     rdi, r13
     call    asm_close
     pop     rbx
-    lea     rcx, [file_datas]
+mov     rcx, file_datas
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_sizes]
+mov     rcx, file_sizes
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_fds]
+mov     rcx, file_fds
     mov     qword [rcx + rbx*8], -1
-    lea     rcx, [file_mmapped]
+mov     rcx, file_mmapped
     mov     byte [rcx + rbx], 0
     jmp     .oaf_done
 
 .oaf_mmap_error:
-    lea     rcx, [file_datas]
+mov     rcx, file_datas
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_sizes]
+mov     rcx, file_sizes
     mov     qword [rcx + rbx*8], 0
-    lea     rcx, [file_mmapped]
+mov     rcx, file_mmapped
     mov     byte [rcx + rbx], 0
     jmp     .oaf_next
 
@@ -936,20 +937,20 @@ close_all_files:
 .caf_loop:
     cmp     rbx, r12
     jge     .caf_done
-    lea     rcx, [file_mmapped]
+mov     rcx, file_mmapped
     cmp     byte [rcx + rbx], 0
     je      .caf_close_fd
     push    rbx
     push    r12
-    lea     rax, [file_datas]
+mov     rax, file_datas
     mov     rdi, [rax + rbx*8]
-    lea     rax, [file_sizes]
+mov     rax, file_sizes
     mov     rsi, [rax + rbx*8]
     call    asm_munmap
     pop     r12
     pop     rbx
 .caf_close_fd:
-    lea     rcx, [file_fds]
+mov     rcx, file_fds
     mov     rdi, [rcx + rbx*8]
     cmp     rdi, -1
     je      .caf_next
@@ -979,13 +980,13 @@ paste_parallel:
     sub     rsp, 8
 
     mov     r12, [nfiles]
-    lea     r13, [out_buf]
+mov     r13, out_buf
 
     xor     ecx, ecx
 .pp_init:
     cmp     rcx, r12
     jge     .pp_init_done
-    lea     rax, [file_cursors]
+mov     rax, file_cursors
     mov     qword [rax + rcx*8], 0
     inc     rcx
     jmp     .pp_init
@@ -998,9 +999,9 @@ paste_parallel:
 .pp_chk:
     cmp     rcx, r12
     jge     .pp_chk_done
-    lea     rax, [file_cursors]
+mov     rax, file_cursors
     mov     rdi, [rax + rcx*8]
-    lea     rax, [file_sizes]
+mov     rax, file_sizes
     cmp     rdi, [rax + rcx*8]
     jge     .pp_chk_nxt
     mov     edx, 1
@@ -1009,7 +1010,7 @@ paste_parallel:
     jmp     .pp_chk
 .pp_chk_done:
     ; Also check stdin refs
-    lea     rax, [file_is_stdin]
+mov     rax, file_is_stdin
     xor     ecx, ecx
 .pp_chk_stdin:
     cmp     rcx, r12
@@ -1059,7 +1060,7 @@ paste_parallel:
     mov     rcx, [delim_len]
     div     rcx
     pop     rcx
-    lea     rax, [delim_buf]
+mov     rax, delim_buf
     movzx   eax, byte [rax + rdx]
     pop     rdx
     test    al, al
@@ -1067,15 +1068,15 @@ paste_parallel:
     call    emit_byte_al
 
 .pp_nodel:
-    lea     rax, [file_is_stdin]
+mov     rax, file_is_stdin
     cmp     byte [rax + rbx], 0
     jne     .pp_stdin
 
-    lea     rax, [file_datas]
+mov     rax, file_datas
     mov     rsi, [rax + rbx*8]
-    lea     rax, [file_sizes]
+mov     rax, file_sizes
     mov     rcx, [rax + rbx*8]
-    lea     rax, [file_cursors]
+mov     rax, file_cursors
     mov     rdi, [rax + rbx*8]
     cmp     rdi, rcx
     jge     .pp_nxtf
@@ -1109,7 +1110,7 @@ paste_parallel:
     call    flush_output_inner
     mov     rdi, [out_buf_pos]
 .pp_cp1:
-    lea     rdx, [out_buf]
+mov     rdx, out_buf
     add     rdx, rdi
     lea     rax, [rsi + r15]
     push    rsi
@@ -1129,7 +1130,7 @@ paste_parallel:
     pop     r13
     pop     r12
     pop     rbx
-    lea     rcx, [file_cursors]
+mov     rcx, file_cursors
     mov     [rcx + rbx*8], rax
     jmp     .pp_nxtf
 
@@ -1145,7 +1146,7 @@ paste_parallel:
     call    flush_output_inner
     mov     rdi, [out_buf_pos]
 .pp_cp2:
-    lea     rdx, [out_buf]
+mov     rdx, out_buf
     add     rdx, rdi
     lea     rax, [rsi + r15]
     push    rsi
@@ -1165,9 +1166,9 @@ paste_parallel:
     pop     r13
     pop     r12
     pop     rbx
-    lea     rax, [file_sizes]
+mov     rax, file_sizes
     mov     rax, [rax + rbx*8]
-    lea     rcx, [file_cursors]
+mov     rcx, file_cursors
     mov     [rcx + rbx*8], rax
     jmp     .pp_nxtf
 
@@ -1205,7 +1206,7 @@ paste_parallel:
     call    flush_output_inner
     mov     rdi, [out_buf_pos]
 .pp_scp1:
-    lea     rdx, [out_buf]
+mov     rdx, out_buf
     add     rdx, rdi
     lea     rax, [rsi + r15]
     push    rsi
@@ -1239,7 +1240,7 @@ paste_parallel:
     call    flush_output_inner
     mov     rdi, [out_buf_pos]
 .pp_scp2:
-    lea     rdx, [out_buf]
+mov     rdx, out_buf
     add     rdx, rdi
     lea     rax, [rsi + r15]
     push    rsi
@@ -1301,18 +1302,18 @@ paste_serial:
     push    r13
     push    r14
     push    r15
-    lea     r13, [out_buf]
+mov     r13, out_buf
     mov     qword [stdin_rr_cursor], 0
     xor     ebx, ebx
 .ps_fl:
     cmp     rbx, [nfiles]
     jge     .ps_done
-    lea     rax, [file_is_stdin]
+mov     rax, file_is_stdin
     cmp     byte [rax + rbx], 0
     jne     .ps_stdin
-    lea     rax, [file_datas]
+mov     rax, file_datas
     mov     r14, [rax + rbx*8]
-    lea     rax, [file_sizes]
+mov     rax, file_sizes
     mov     r15, [rax + rbx*8]
     jmp     .ps_proc
 .ps_stdin:
@@ -1342,7 +1343,7 @@ paste_serial:
     mov     rcx, [delim_len]
     div     rcx
     pop     rcx
-    lea     rax, [delim_buf]
+mov     rax, delim_buf
     movzx   eax, byte [rax + rdx]
     pop     rdx
     test    al, al
@@ -1374,7 +1375,7 @@ paste_serial:
 .ps_cl:
     pop     rcx
     mov     rdi, [out_buf_pos]
-    lea     rax, [out_buf]
+mov     rax, out_buf
     add     rax, rdi
     push    rsi
     push    rcx
@@ -1410,7 +1411,7 @@ paste_serial:
     pop     rdi
     mov     rcx, rdi
     mov     rdi, [out_buf_pos]
-    lea     rax, [out_buf]
+mov     rax, out_buf
     add     rax, rdi
     push    rcx
     mov     rdi, rax
@@ -1450,7 +1451,7 @@ paste_serial:
 emit_byte_al:
     push    rbx
     mov     rbx, [out_buf_pos]
-    lea     rcx, [out_buf]
+mov     rcx, out_buf
     mov     [rcx + rbx], al
     inc     rbx
     mov     [out_buf_pos], rbx
@@ -1468,7 +1469,7 @@ flush_output_inner:
     test    r12, r12
     jz      .fo_nothing
     mov     rdi, STDOUT
-    lea     rsi, [out_buf]
+mov     rsi, out_buf
     mov     rdx, r12
     call    asm_write_all
     mov     qword [out_buf_pos], 0
@@ -1539,7 +1540,7 @@ err_file:
     mov     rbx, rdi
     mov     r13d, esi
     mov     rdi, STDERR
-    lea     rsi, [err_prefix]
+mov     rsi, err_prefix
     mov     rdx, err_prefix_len
     call    asm_write_all
     mov     rdi, rbx
@@ -1549,7 +1550,7 @@ err_file:
     mov     rsi, rbx
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [str_colon_space]
+mov     rsi, str_colon_space
     mov     rdx, 2
     call    asm_write_all
     mov     edi, r13d
@@ -1562,7 +1563,7 @@ err_file:
     mov     rsi, rbx
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [str_newline]
+mov     rsi, str_newline
     mov     rdx, 1
     call    asm_write_all
     pop     r13
@@ -1573,7 +1574,7 @@ err_unrecognized_option:
     push    rbx
     mov     rbx, rdi
     mov     rdi, STDERR
-    lea     rsi, [str_unrecognized]
+mov     rsi, str_unrecognized
     mov     rdx, str_unrecognized_len
     call    asm_write_all
     mov     rdi, rbx
@@ -1583,11 +1584,11 @@ err_unrecognized_option:
     mov     rsi, rbx
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [str_quote_nl]
+mov     rsi, str_quote_nl
     mov     rdx, 4
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [str_try_help]
+mov     rsi, str_try_help
     mov     rdx, str_try_help_len
     call    asm_write_all
     pop     rbx
@@ -1597,20 +1598,20 @@ err_invalid_option:
     push    rbx
     mov     ebx, esi
     mov     rdi, STDERR
-    lea     rsi, [str_invalid_opt]
+mov     rsi, str_invalid_opt
     mov     rdx, str_invalid_opt_len
     call    asm_write_all
     mov     [char_buf], bl
     mov     rdi, STDERR
-    lea     rsi, [char_buf]
+mov     rsi, char_buf
     mov     rdx, 1
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [str_quote_nl]
+mov     rsi, str_quote_nl
     mov     rdx, 4
     call    asm_write_all
     mov     rdi, STDERR
-    lea     rsi, [str_try_help]
+mov     rsi, str_try_help
     mov     rdx, str_try_help_len
     call    asm_write_all
     pop     rbx
@@ -1639,19 +1640,41 @@ strerror:
     je      .se_emfile
     cmp     edi, 36
     je      .se_enametoolong
-    lea     rax, [str_eunknown]
+    mov     rax, str_eunknown
     ret
-.se_eperm:    lea rax, [str_eperm]; ret
-.se_enoent:   lea rax, [str_enoent]; ret
-.se_eio:      lea rax, [str_eio]; ret
-.se_ebadf:    lea rax, [str_ebadf]; ret
-.se_enomem:   lea rax, [str_enomem]; ret
-.se_eacces:   lea rax, [str_eacces]; ret
-.se_enotdir:  lea rax, [str_enotdir]; ret
-.se_eisdir:   lea rax, [str_eisdir]; ret
-.se_einval:   lea rax, [str_einval]; ret
-.se_emfile:   lea rax, [str_emfile]; ret
-.se_enametoolong: lea rax, [str_enametoolong]; ret
+.se_eperm:
+    mov rax, str_eperm
+    ret
+.se_enoent:
+    mov rax, str_enoent
+    ret
+.se_eio:
+    mov rax, str_eio
+    ret
+.se_ebadf:
+    mov rax, str_ebadf
+    ret
+.se_enomem:
+    mov rax, str_enomem
+    ret
+.se_eacces:
+    mov rax, str_eacces
+    ret
+.se_enotdir:
+    mov rax, str_enotdir
+    ret
+.se_eisdir:
+    mov rax, str_eisdir
+    ret
+.se_einval:
+    mov rax, str_einval
+    ret
+.se_emfile:
+    mov rax, str_emfile
+    ret
+.se_enametoolong:
+    mov rax, str_enametoolong
+    ret
 
 ; ── Data Section ──
 err_prefix:     db "paste: "
