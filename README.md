@@ -8,11 +8,11 @@
 
 High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelerated, drop-in compatible, cross-platform.
 
-## Independent Test Results (v0.19.0)
+## Independent Test Results (v0.19.4)
 
 *Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, hyperfine*
 
-**Summary:** 107 tools tracked · 101 benchmarked · **fastest: unexpand at 39.0x** vs GNU · compat: **3805/3911 (97.3%)** across 107 tools
+**Summary:** 107 tools tracked · 101 benchmarked · **fastest: unexpand at 35.1x** vs GNU · compat: **3807/3911 (97.3%)** across 107 tools
 
 > Compat is GNU test pass rate on Linux x86_64 (skipped tests counted as not passed). Speedup is peak across all benchmark scenarios. `-` = no benchmark data collected. `N/A` = not applicable (requires root/SELinux/tty).
 
@@ -31,10 +31,10 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | chown | ⚠️ 85% (17/20) | **1.0x** | 3 skips: require root |
 | chroot | ⚠️ 47% (18/38) | N/A | 20 skips: require root; can't benchmark in CI |
 | cksum | ✅ 48/48 | **1.4x** | |
-| comm | ✅ 30/30 | **4.3x** | |
+| comm | ✅ 30/30 | **4.6x** | |
 | cp | ✅ 69/69 | **1.1x** | I/O-bound — kernel copy_file_range |
 | csplit | ✅ 2/2 | - | No data throughput to benchmark (creates files) |
-| cut | ⚠️ 97% (96/99) | **6.6x** | 3 skips: bounded-memory/overflow tests |
+| cut | ⚠️ 97% (96/99) | **6.7x** | 3 skips: bounded-memory/overflow tests |
 | date | ✅ 46/46 | **1.0x** | |
 | dd | ✅ 29/29 | **1.1x** | I/O-bound — kernel copy_file_range |
 | df | ✅ 25/25 | **1.6x** | |
@@ -44,14 +44,14 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | du | ✅ 51/51 | 0.9x | |
 | echo | ✅ 53/53 | 0.9x | |
 | env | ⚠️ 96% (49/51) | **1.0x** | 2 skips: environment-dependent tests |
-| expand | ✅ 35/35 | **10.7x** | |
+| expand | ✅ 35/35 | **10.9x** | |
 | expr | ✅ 43/43 | **1.0x** | |
-| factor | ⚠️ 93% (55/59) | **1.3x** | 2 skips + 2 GNU timeouts (128-bit) |
+| factor | ⚠️ 93% (55/59) | **2.0x** | 2 skips + 2 GNU timeouts (128-bit) |
 | false | ✅ 6/6 | 0.8x | Startup-only tool — no data to process |
 | fmt | ✅ 22/22 | **1.3x** | |
 | fold | ⚠️ 98% (57/58) | **8.0x** | 1 skip: bounded-memory test (ulimit) |
 | groups | ✅ 28/28 | 0.9x | |
-| head | ⚠️ 95% (60/63) | **1.9x** | 3 skips: large-file/overflow edge cases; I/O-bound via sendfile |
+| head | ⚠️ 95% (60/63) | **2.0x** | 3 skips: large-file/overflow edge cases; I/O-bound via sendfile |
 | hostid | ✅ 6/6 | 0.9x | |
 | id | ✅ 27/27 | **1.1x** | |
 | install | ⚠️ 84% (27/32) | **1.1x** | 5 skips: require root |
@@ -68,64 +68,64 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | mktemp | ⚠️ 88% (15/17) | 0.9x | 2 skips: tmpdir edge cases |
 | mv | ✅ 3/3 | **1.1x** | |
 | nice | ⚠️ 94% (32/34) | **1.0x** | 2 skips: require root |
-| nl | ⚠️ 98% (61/62) | **9.4x** | 1 skip: overflow test (getlimits) |
+| nl | ⚠️ 98% (61/62) | **11.9x** | 1 skip: overflow test (getlimits) |
 | nohup | ✅ 11/11 | **1.0x** | |
 | nproc | ⚠️ 94% (29/31) | 0.9x | 2 skips: cgroup/environment tests |
-| numfmt | ⚠️ 97% (32/33) | **1.1x** | 1 skip: GB18030 locale test |
-| od | ✅ 50/50 | **13.2x** | |
+| numfmt | ⚠️ 97% (32/33) | **1.1x** | 1 fail: GB18030 locale test |
+| od | ✅ 50/50 | **11.0x** | |
 | paste | ✅ 32/32 | **3.9x** | |
 | pathchk | ✅ 22/22 | 0.9x | |
 | pinky | ✅ 32/32 | 0.9x | |
-| pr | ⚠️ 95% (18/19) | **6.3x** | 1 skip: bounded-memory test (ulimit) |
+| pr | ⚠️ 95% (18/19) | **7.7x** | 1 skip: bounded-memory test (ulimit) |
 | printenv | ✅ 9/9 | 0.9x | |
 | printf | ✅ 74/74 | 0.9x | |
 | ptx | ✅ 15/15 | **1.9x** | |
 | pwd | ⚠️ 94% (16/17) | 0.9x | 1 skip: symlink/mount edge case |
 | readlink | ✅ 60/60 | 0.9x | |
 | realpath | ✅ 43/43 | 0.8x | |
-| rev | ✅ 32/32 | **23.1x** | |
+| rev | ✅ 32/32 | **23.0x** | |
 | rm | ✅ 23/23 | 0.9x | |
 | rmdir | ✅ 21/21 | 0.9x | |
 | runcon | ⚠️ 40% (2/5) | N/A | 3 skips: require SELinux; can't benchmark without it |
-| seq | ✅ 62/62 | **15.6x** | |
+| seq | ✅ 62/62 | **15.8x** | |
 | sha1sum | ✅ 43/43 | **1.2x** | |
 | sha224sum | ✅ 39/39 | **1.1x** | |
 | sha256sum | ✅ 34/34 | **1.2x** | |
 | sha384sum | ✅ 39/39 | 0.9x | |
 | sha512sum | ✅ 39/39 | **1.0x** | |
 | shred | ✅ 27/27 | **2.6x** | |
-| shuf | ⚠️ 98% (52/53) | **4.9x** | 1 skip: requires valgrind |
+| shuf | ⚠️ 98% (52/53) | **5.2x** | 1 skip: requires valgrind |
 | sleep | ✅ 15/15 | **1.0x** | |
-| sort | ✅ 111/111 | **12.4x** | |
-| split | ✅ 72/72 | **1.4x** | I/O-bound — kernel copy_file_range |
+| sort | ✅ 111/111 | **13.2x** | |
+| split | ✅ 72/72 | **1.3x** | I/O-bound — kernel copy_file_range |
 | stat | ✅ 38/38 | **1.2x** | |
 | stdbuf | ✅ 13/13 | 0.8x | |
 | stty | ⚠️ 60% (25/42) | N/A | 17 skips: require a real terminal; can't benchmark in CI |
 | sum | ✅ 23/23 | **1.2x** | |
 | sync | ⚠️ 90% (9/10) | 0.9x | 1 skip: device sync test |
 | tac | ✅ 59/59 | **2.7x** | |
-| tail | ✅ 80/80 | **2.0x** | I/O-bound — near kernel sendfile limit |
+| tail | ✅ 80/80 | **1.9x** | I/O-bound — near kernel sendfile limit |
 | tee | ✅ 27/27 | **1.1x** | |
 | test | ✅ 116/116 | 0.9x | |
 | timeout | ✅ 36/36 | 0.9x | |
-| touch | ⚠️ 92% (44/48) | **1.0x** | 3 skips: require root/specific fs; 1 flaky: race in timestamp test |
-| tr | ✅ 59/59 | **6.6x** | |
+| touch | ⚠️ 94% (45/48) | **1.0x** | 2 skips: require root/specific fs; 1 flaky: race in timestamp test |
+| tr | ✅ 59/59 | **7.0x** | |
 | true | ✅ 7/7 | 0.8x | Startup-only tool — no data to process |
 | truncate | ⚠️ 94% (46/49) | **1.0x** | 3 skips: require root or specific fs |
-| tsort | ✅ 19/19 | **8.3x** | |
+| tsort | ✅ 19/19 | **10.3x** | |
 | tty | ✅ 10/10 | 0.8x | |
 | uname | ✅ 14/14 | 0.9x | |
-| unexpand | ⚠️ 96% (26/27) | **39.0x** | 1 skip: bounded-memory test (ulimit) |
-| uniq | ⚠️ 99% (85/86) | **11.2x** | 1 skip: locale-dependent collation |
+| unexpand | ⚠️ 96% (26/27) | **35.1x** | 1 skip: bounded-memory test (ulimit) |
+| uniq | ⚠️ 99% (85/86) | **11.5x** | 1 skip: locale-dependent collation |
 | unlink | ✅ 30/30 | 0.9x | |
 | uptime | ✅ 16/16 | **1.5x** | |
 | users | ✅ 6/6 | 0.9x | |
 | vdir | ✅ 41/41 | 0.9x | |
-| wc | ✅ 77/77 | **17.5x** | |
+| wc | ✅ 77/77 | **18.9x** | |
 | who | ✅ 38/38 | 0.9x | |
 | whoami | ✅ 16/16 | 0.9x | |
-| yes | ⚠️ 86% (25/29) | **1.5x** | 4 fails: stderr/stdout interleaving with long strings via `2>&1` |
-| **Average** | **97.3%** (3805/3911) | **3.1x** | 101 skips (root/SELinux/tty/ulimit), 5 flaky fails |
+| yes | ⚠️ 90% (26/29) | **1.5x** | 3 fails: stderr/stdout interleaving with long strings via `2>&1` |
+| **Average** | **97.3%** (3807/3911) | **3.2x** | 100 skips (root/SELinux/tty/ulimit), 5 fails |
 
 ## Installation
 
@@ -224,38 +224,47 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 ## Assembly Optimization Path
 
-We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **20 tools** are implemented in assembly — static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
+We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **30 tools** are implemented in assembly — static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
 
-Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. The **better** value in each pair is **bold**.
+Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. Speedups **>1.0x** vs GNU are **bold**.
 
-| Tool | Compat | Asm Size | C Size | Asm Memory | C Memory | Asm Startup | C Startup | Asm Throughput | C Throughput |
-|------|-------:|--------:|---------:|-----------:|---------:|------------:|----------:|---------------:|-------------:|
-| arch | ✅ 17/17 | **11.5 KB** | 42.4 KB | **716 KB** | 1,744 KB | **0.09 ms** | 0.79 ms | - | - |
-| base64 | ✅ 33/33 | **5.7 KB** | 46.4 KB | **716 KB** | 1,956 KB | **0.10 ms** | 0.59 ms | 490 MB/s | **521 MB/s** |
-| cut | ⚠️ 97% (96/99) | **9.3 KB** | 54.4 KB | **812 KB** | 1,784 KB | **0.01 ms** | 1.20 ms | **694 MB/s** | 303 MB/s |
-| echo | ✅ 53/53 | **2.9 KB** | 42.4 KB | **716 KB** | 1,800 KB | **0.03 ms** | 0.84 ms | - | - |
-| head | ⚠️ 95% (60/63) | **7.2 KB** | 50.4 KB | **684 KB** | 1,960 KB | **0.19 ms** | 0.58 ms | - | - |
-| hostid | ✅ 6/6 | **2.5 KB** | 42.4 KB | **816 KB** | 2,112 KB | **0.21 ms** | 1.10 ms | - | - |
-| logname | ✅ 13/13 | **2.6 KB** | 42.4 KB | **684 KB** | 2,052 KB | **0.27 ms** | 1.20 ms | - | - |
-| md5sum | ✅ 30/30 | **9.6 KB** | 54.4 KB | **716 KB** | 3,996 KB | **0.02 ms** | 1.80 ms | 317 MB/s | **435 MB/s** |
-| pwd | ⚠️ 94% (16/17) | **2.7 KB** | 42.4 KB | **716 KB** | 1,812 KB | **0.11 ms** | 0.61 ms | - | - |
-| rev | ✅ 32/32 | **2.8 KB** | 14.4 KB | **684 KB** | 2,048 KB | **0.06 ms** | 0.86 ms | **429 MB/s** | 42 MB/s |
-| sleep | ✅ 15/15 | **2.6 KB** | 42.4 KB | **716 KB** | 1,880 KB | **0.15 ms** | 0.91 ms | - | - |
-| sync | ⚠️ 90% (9/10) | **3.1 KB** | 42.4 KB | **684 KB** | 1,864 KB | **0.21 ms** | 0.98 ms | - | - |
-| tac | ✅ 59/59 | **4.6 KB** | 46.4 KB | 10,116 KB | **1,932 KB** | **0.04 ms** | 0.94 ms | **840 MB/s** | 758 MB/s |
-| tail | ✅ 80/80 | **7.5 KB** | 78.5 KB | **716 KB** | 2,036 KB | **0.13 ms** | 0.59 ms | - | - |
-| tr | ✅ 59/59 | **9.8 KB** | 58.4 KB | **1,584 KB** | 1,920 KB | **0.41 ms** | 0.96 ms | 820 MB/s | **980 MB/s** |
-| true | ✅ 7/7 | **1.2 KB** | 42.4 KB | **716 KB** | 1,108 KB | **0.18 ms** | 0.57 ms | - | - |
-| tty | ✅ 10/10 | **2.0 KB** | 42.4 KB | **564 KB** | 1,780 KB | **0.42 ms** | 1.34 ms | - | - |
-| wc | ✅ 77/77 | **11.7 KB** | 66.5 KB | **716 KB** | 2,188 KB | **0.16 ms** | 0.79 ms | 224 MB/s | **322 MB/s** |
-| whoami | ✅ 16/16 | **2.2 KB** | 42.4 KB | **812 KB** | 2,140 KB | **0.19 ms** | 1.00 ms | - | - |
-| yes | ⚠️ 90% (26/29) | **1.8 KB** | 42.4 KB | **1,912 KB** | 1,948 KB | **0.93 ms** | 4.30 ms | 2.3 GB/s | **2.4 GB/s** |
-| **Average** | **98.5%** (714/725) | **5.2 KB** | 46.8 KB | **1,290 KB** | 2,003 KB | **0.20 ms** | 1.10 ms | **764 MB/s** | 720 MB/s |
+| Tool | Compat | Security | Asm Size | Speedup vs GNU |
+|------|-------:|---------:|---------:|---------------:|
+| arch | ✅ 12/12 | ✅ 100% | 13.5 KB | - |
+| base64 | ✅ 17/17 | ✅ 100% | 5.7 KB | 1.0x |
+| cat | ✅ 65/65 | ✅ 100% | 18.0 KB | **3.6x** |
+| cut | ✅ 24/24 | ✅ 100% | 9.3 KB | **4.1x** |
+| echo | ✅ 57/57 | ✅ 100% | 8.2 KB | 0.3x |
+| expand | ✅ 60/60 | ✅ 100% | 29.5 KB | **4.3x** |
+| false | ✅ 20/20 | ✅ 100% | 4.8 KB | - |
+| fold | ✅ 58/58 | ✅ 100% | 9.8 KB | **7.7x** |
+| head | ✅ 19/19 | ✅ 100% | 7.2 KB | **2.9x** |
+| hostid | ✅ 6/6 | ✅ 100% | 13.1 KB | - |
+| logname | ✅ 9/9 | ✅ 100% | 13.4 KB | - |
+| md5sum | ✅ 16/16 | ✅ 100% | 9.6 KB | 0.7x |
+| nl | ✅ 69/69 | ✅ 100% | 38.2 KB | **10.4x** |
+| od | ✅ 58/58 | ✅ 100% | 37.7 KB | **11.0x** |
+| pwd | ✅ 14/14 | ✅ 100% | 12.8 KB | - |
+| rev | ✅ 15/15 | ✅ 100% | 2.6 KB | **9.5x** |
+| seq | ✅ 50/50 | ✅ 100% | 36.2 KB | **10.2x** |
+| sleep | ✅ 17/17 | ✅ 100% | 13.4 KB | - |
+| sort | ✅ 46/46 | ✅ 100% | 39.7 KB | **1.5x** |
+| sync | ✅ 16/16 | ✅ 100% | 14.6 KB | - |
+| tac | ✅ 13/13 | ✅ 100% | 4.6 KB | **2.3x** |
+| tail | ✅ 18/18 | ✅ 100% | 7.6 KB | **3.1x** |
+| tr | ✅ 20/20 | ✅ 100% | 9.8 KB | **2.0x** |
+| true | ✅ 9/9 | ✅ 100% | 9.9 KB | - |
+| tty | ✅ 16/16 | ✅ 100% | 12.0 KB | - |
+| unexpand | ✅ 57/57 | ✅ 100% | 22.1 KB | **3.3x** |
+| uniq | ✅ 72/72 | ✅ 100% | 39.3 KB | **6.2x** |
+| wc | ✅ 23/23 | ✅ 100% | 30.4 KB | **1.1x** |
+| whoami | ✅ 4/4 | ✅ 100% | 12.4 KB | - |
+| yes | ⚠️ 90% (26/29) | ✅ 100% | 1.8 KB | 0.6x |
+| **Average** | **99.7%** (906/909) | **100%** | **16.2 KB** | **4.3x** |
 
-- **Size** — Stripped binary on disk. Assembly averages **5.2 KB** vs 45.5 KB for GNU C (8.7x smaller)
-- **Memory** — Peak resident set size (RSS) during execution, measured with `/usr/bin/time -v`
-- **Startup** — Wall-clock time to run with trivial or no input (hyperfine, 200+ runs). Assembly is faster because there is no dynamic linker, no libc init, and no relocation overhead
-- **Throughput** — Sustained data processing rate on a 10 MB file (10 MB / wall time). `-` means the tool only prints a short string and exits, so throughput is not applicable. Tools like rev (10.2x) and cut (2.3x) show large gains; I/O-bound tools (yes, base64) converge to kernel limits
+- **Size** — Stripped static ELF binary on disk. Assembly averages **16.2 KB** across 30 tools
+- **Speedup** — Wall-clock throughput on a 10 MB file (hyperfine, warmup). `-` means the tool only prints a short string and exits, so throughput is not applicable. Tools like od (11.0x), nl (10.4x), and seq (10.2x) show large gains; I/O-bound tools (yes, base64) converge to kernel limits
+- **Security** — All 30 tools pass 100% of security tests (buffer overflow, path traversal, signal handling, symlink attacks)
 
 On **Linux x86_64** and **Linux ARM64**, releases ship assembly binaries. All other platforms (macOS, Windows) use the Rust implementation.
 
