@@ -91,7 +91,7 @@ phdr_size equ $ - phdr
     ; LOAD: BSS (R+W)
     dd      1                   ; PT_LOAD
     dd      6                   ; PF_R | PF_W
-    dq      0                   ; file offset (not backed by file)
+    dq      bss_file_offset     ; file offset
     dq      bss_start           ; virtual address
     dq      bss_start           ; physical address
     dq      0                   ; file size = 0
@@ -923,27 +923,1459 @@ parse_args:
     mov     edi, 1
     call    asm_exit
 
-; The rest of the functions are the same as in tools/fshuf.asm
-; (grow_echo_array, str_match_long, str_starts_with, find_eq_value,
-;  parse_range_str, parse_count_str, parse_uint64, seed_prng,
-;  xoshiro256_next, rand_bounded, outbuf_write, outbuf_byte,
-;  outbuf_u64_delim, flush_outbuf, get_delimiter,
-;  run_echo_mode, run_range_mode, run_file_mode,
-;  read_input_data, split_lines, store_line,
-;  err_* functions)
-; For brevity in this unified build, they are included via the modular build.
-; The unified file is provided as a template; use `make dev` for the working binary.
+; ─── grow_echo_array ───
+grow_echo_array:
+    push    rbx
+    mov     rax, [echo_cap]
+    test    rax, rax
+    jz      .alloc_new
+    shl     rax, 1
+    jmp     .do_grow
+.alloc_new:
+    mov     rax, 64
+.do_grow:
+    mov     [echo_cap], rax
+    shl     rax, 3
+    mov     rsi, rax
 
-; Placeholder: this unified file needs the full code inlined.
-; For production, use the modular build (make dev).
+    cmp     qword [echo_ptrs], 0
+    je      .mmap_new
 
-code_end:
+    ; mremap existing
+    mov     rdi, [echo_ptrs]
+    mov     rdx, rsi
+    mov     rax, [echo_cap]
+    shr     rax, 1
+    shl     rax, 3
+    push    rsi
+    mov     rsi, rax
+    pop     rdx
+    mov     r10, MREMAP_MAYMOVE
+    mov     rax, SYS_MREMAP
+    syscall
+    test    rax, rax
+    js      .oom
+    mov     [echo_ptrs], rax
+    pop     rbx
+    ret
+
+.mmap_new:
+    mov     rdi, 0
+    mov     rdx, PROT_READ | PROT_WRITE
+    mov     r10, MAP_PRIVATE | MAP_ANONYMOUS
+    mov     r8, -1
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
+    syscall
+    test    rax, rax
+    js      .oom
+    mov     [echo_ptrs], rax
+    pop     rbx
+    ret
+
+.oom:
+    mov     edi, 1
+    call    asm_exit
+
+; ─── str_match_long ───
+str_match_long:
+    push    rbx
+.sml_cmp_loop:
+    movzx   eax, byte [rdi]
+    movzx   ecx, byte [rsi]
+    test    cl, cl
+    jz      .sml_check_end
+    cmp     al, cl
+    jne     .sml_no_match
+    inc     rdi
+    inc     rsi
+    jmp     .sml_cmp_loop
+.sml_check_end:
+    test    al, al
+    jnz     .sml_no_match
+    mov     eax, 1
+    pop     rbx
+    ret
+.sml_no_match:
+    xor     eax, eax
+    pop     rbx
+    ret
+
+; ─── str_starts_with ───
+str_starts_with:
+.ssw_cmp_loop:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .ssw_match
+    movzx   ecx, byte [rdi]
+    cmp     al, cl
+    jne     .ssw_no_match
+    inc     rdi
+    inc     rsi
+    jmp     .ssw_cmp_loop
+.ssw_match:
+    mov     eax, 1
+    ret
+.ssw_no_match:
+    xor     eax, eax
+    ret
+
+; ─── find_eq_value ───
+find_eq_value:
+.fev_loop:
+    movzx   eax, byte [rdi]
+    test    al, al
+    jz      .fev_not_found
+    cmp     al, '='
+    je      .fev_found
+    inc     rdi
+    jmp     .fev_loop
+.fev_found:
+    lea     rax, [rdi + 1]
+    ret
+.fev_not_found:
+    mov     rax, rdi
+    ret
+
+; ─── parse_range_str ───
+parse_range_str:
+    push    rbx
+    push    r12
+    mov     r12, rdi
+
+    call    parse_uint64
+    test    edx, edx
+    jnz     .prs_invalid
+    mov     [opt_range_lo], rax
+    mov     rbx, rdi
+
+    cmp     byte [rbx], '-'
+    jne     .prs_invalid
+    inc     rbx
+
+    mov     rdi, rbx
+    call    parse_uint64
+    test    edx, edx
+    jnz     .prs_invalid
+    mov     [opt_range_hi], rax
+
+    cmp     byte [rdi], 0
+    jne     .prs_invalid
+
+    mov     rax, [opt_range_lo]
+    cmp     rax, [opt_range_hi]
+    ja      .prs_invalid
+
+    pop     r12
+    pop     rbx
+    ret
+
+.prs_invalid:
+    mov     rdi, r12
+    call    err_invalid_range
+
+; ─── parse_count_str ───
+parse_count_str:
+    push    rbx
+    mov     rbx, rdi
+    call    parse_uint64
+    test    edx, edx
+    jnz     .pcs_invalid
+    cmp     byte [rdi], 0
+    jne     .pcs_invalid
+    pop     rbx
+    ret
+.pcs_invalid:
+    mov     rdi, rbx
+    call    err_invalid_count
+
+; ─── parse_uint64 ───
+parse_uint64:
+    xor     eax, eax
+    xor     edx, edx
+    movzx   ecx, byte [rdi]
+    sub     cl, '0'
+    cmp     cl, 9
+    ja      .pu64_error
+.pu64_digit_loop:
+    movzx   ecx, byte [rdi]
+    sub     cl, '0'
+    cmp     cl, 9
+    ja      .pu64_done
+    imul    rax, 10
+    movzx   ecx, byte [rdi]
+    sub     cl, '0'
+    add     rax, rcx
+    inc     rdi
+    jmp     .pu64_digit_loop
+.pu64_done:
+    ret
+.pu64_error:
+    mov     edx, 1
+    ret
+
+; ─── seed_prng ───
+seed_prng:
+    push    rbx
+
+    test    qword [opt_flags], FLAG_HAS_RSRC
+    jnz     .sp_open_rsrc
+
+    mov     rdi, str_devurandom
+    mov     rsi, O_RDONLY
+    xor     edx, edx
+    call    asm_open
+    test    rax, rax
+    js      .sp_fallback_seed
+    mov     rbx, rax
+
+    mov     rdi, rbx
+    mov     rsi, prng_s0
+    mov     rdx, 32
+    call    asm_read
+
+    mov     rdi, rbx
+    call    asm_close
+
+    mov     rax, [prng_s0]
+    or      rax, [prng_s1]
+    or      rax, [prng_s2]
+    or      rax, [prng_s3]
+    test    rax, rax
+    jnz     .sp_seed_done
+    jmp     .sp_fallback_seed
+
+.sp_open_rsrc:
+    mov     rdi, [rsrc_file]
+    mov     rsi, O_RDONLY
+    xor     edx, edx
+    call    asm_open
+    test    rax, rax
+    js      .sp_err_rsrc_open
+    mov     [opt_rsrc_fd], rax
+
+    mov     rdi, rax
+    mov     rsi, prng_s0
+    mov     rdx, 32
+    call    asm_read
+    cmp     rax, 32
+    jl      .sp_fallback_seed
+
+    mov     rax, [prng_s0]
+    or      rax, [prng_s1]
+    or      rax, [prng_s2]
+    or      rax, [prng_s3]
+    test    rax, rax
+    jnz     .sp_seed_done
+    jmp     .sp_fallback_seed
+
+.sp_fallback_seed:
+    mov     rax, 0x123456789abcdef0
+    mov     [prng_s0], rax
+    mov     rax, 0xfedcba9876543210
+    mov     [prng_s1], rax
+    mov     rax, 0x0123456789abcdef
+    mov     [prng_s2], rax
+    mov     rax, 0xdeadbeefcafebabe
+    mov     [prng_s3], rax
+
+.sp_seed_done:
+    pop     rbx
+    ret
+
+.sp_err_rsrc_open:
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, [rsrc_file]
+    call    asm_strlen
+    mov     rdx, rax
+    mov     rdi, STDERR
+    mov     rsi, [rsrc_file]
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_colon_space
+    mov     rdx, 2
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_no_such
+    mov     rdx, str_no_such_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+; ─── xoshiro256_next ───
+xoshiro256_next:
+    mov     rax, [prng_s1]
+    lea     rax, [rax + rax*4]
+    rol     rax, 7
+    lea     rax, [rax + rax*8]
+    push    rax
+
+    mov     r8, [prng_s1]
+    shl     r8, 17
+
+    mov     rax, [prng_s0]
+    xor     [prng_s2], rax
+
+    mov     rax, [prng_s1]
+    xor     [prng_s3], rax
+
+    mov     rax, [prng_s2]
+    xor     [prng_s1], rax
+
+    mov     rax, [prng_s3]
+    xor     [prng_s0], rax
+
+    xor     [prng_s2], r8
+
+    mov     rax, [prng_s3]
+    rol     rax, 45
+    mov     [prng_s3], rax
+
+    pop     rax
+    ret
+
+; ─── rand_bounded ───
+rand_bounded:
+    push    rbx
+    push    r12
+    mov     r12, rdi
+
+    cmp     r12, 1
+    jbe     .rb_return_zero
+
+.rb_retry:
+    call    xoshiro256_next
+    mul     r12
+    mov     rbx, rax
+    mov     rax, rdx
+    push    rax
+
+    cmp     rbx, r12
+    jae     .rb_accept
+
+    mov     rax, r12
+    neg     rax
+    xor     edx, edx
+    div     r12
+    cmp     rbx, rdx
+    jb      .rb_reject
+
+.rb_accept:
+    pop     rax
+    pop     r12
+    pop     rbx
+    ret
+
+.rb_reject:
+    pop     rax
+    jmp     .rb_retry
+
+.rb_return_zero:
+    xor     eax, eax
+    pop     r12
+    pop     rbx
+    ret
+
+; ─── outbuf_write ───
+outbuf_write:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rbx, rdi
+    mov     r12, rsi
+    mov     r13, [outbuf_pos]
+
+.obw_write_loop:
+    test    r12, r12
+    jz      .obw_write_done
+
+    mov     rax, OUTBUF_SIZE
+    sub     rax, r13
+    jz      .obw_flush_first
+
+    cmp     r12, rax
+    jbe     .obw_copy_all
+    mov     rdi, [outbuf]
+    add     rdi, r13
+    mov     rsi, rbx
+    mov     rdx, rax
+    push    rax
+    call    asm_memcpy
+    pop     rax
+    add     rbx, rax
+    sub     r12, rax
+    mov     r13, OUTBUF_SIZE
+
+.obw_flush_first:
+    mov     rdi, [opt_output_fd]
+    mov     rsi, [outbuf]
+    mov     rdx, r13
+    call    asm_write_all
+    cmp     rax, -EPIPE
+    je      .obw_broken_pipe
+    test    rax, rax
+    jnz     .obw_write_error
+    xor     r13d, r13d
+    jmp     .obw_write_loop
+
+.obw_copy_all:
+    mov     rdi, [outbuf]
+    add     rdi, r13
+    mov     rsi, rbx
+    mov     rdx, r12
+    call    asm_memcpy
+    add     r13, r12
+    xor     r12d, r12d
+
+.obw_write_done:
+    mov     [outbuf_pos], r13
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+.obw_broken_pipe:
+    xor     edi, edi
+    call    asm_exit
+
+.obw_write_error:
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_write_err
+    mov     rdx, str_write_err_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+; ─── outbuf_byte ───
+outbuf_byte:
+    mov     rax, [outbuf_pos]
+    cmp     rax, OUTBUF_SIZE
+    jge     .obb_flush_first
+    mov     rcx, [outbuf]
+    mov     [rcx + rax], dil
+    inc     rax
+    mov     [outbuf_pos], rax
+    ret
+.obb_flush_first:
+    push    rdi
+    call    flush_outbuf
+    pop     rdi
+    mov     rax, [outbuf_pos]
+    mov     rcx, [outbuf]
+    mov     [rcx + rax], dil
+    inc     rax
+    mov     [outbuf_pos], rax
+    ret
+
+; ─── flush_outbuf ───
+flush_outbuf:
+    mov     rdx, [outbuf_pos]
+    test    rdx, rdx
+    jz      .fo_nothing
+    mov     rdi, [opt_output_fd]
+    mov     rsi, [outbuf]
+    call    asm_write_all
+    cmp     rax, -EPIPE
+    je      .fo_epipe
+    test    rax, rax
+    jnz     .fo_werr
+    mov     qword [outbuf_pos], 0
+.fo_nothing:
+    ret
+.fo_epipe:
+    xor     edi, edi
+    call    asm_exit
+.fo_werr:
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_write_err
+    mov     rdx, str_write_err_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+; ─── outbuf_u64_delim ───
+outbuf_u64_delim:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rbx, rdi
+    movzx   r12d, sil
+
+    mov     r13, [outbuf_pos]
+    lea     rax, [r13 + 24]
+    cmp     rax, OUTBUF_SIZE
+    jb      .u64d_have_space
+    call    flush_outbuf
+    mov     r13, [outbuf_pos]
+.u64d_have_space:
+    sub     rsp, 24
+    mov     rax, rbx
+    lea     rdi, [rsp + 20]
+    xor     ecx, ecx
+
+    test    rax, rax
+    jnz     .u64d_nonzero
+    mov     byte [rdi], '0'
+    dec     rdi
+    inc     ecx
+    jmp     .u64d_copy
+
+.u64d_nonzero:
+    lea     r8, [rel digit_pairs]
+.u64d_pair_loop:
+    cmp     rax, 99
+    jbe     .u64d_last_digits
+
+    xor     edx, edx
+    mov     r9, 100
+    div     r9
+
+    movzx   r9d, word [r8 + rdx*2]
+    mov     [rdi-1], r9w
+    sub     rdi, 2
+    add     ecx, 2
+    jmp     .u64d_pair_loop
+
+.u64d_last_digits:
+    cmp     rax, 9
+    jbe     .u64d_single
+    movzx   r9d, word [r8 + rax*2]
+    mov     [rdi-1], r9w
+    sub     rdi, 2
+    add     ecx, 2
+    jmp     .u64d_copy
+.u64d_single:
+    add     al, '0'
+    mov     [rdi], al
+    dec     rdi
+    inc     ecx
+
+.u64d_copy:
+    inc     rdi
+    mov     rsi, [outbuf]
+    add     rsi, r13
+
+    push    rdi
+    push    rcx
+    mov     rax, rsi
+    mov     rsi, rdi
+    mov     rdi, rax
+    rep     movsb
+    pop     rcx
+    pop     rdi
+
+    mov     rax, [outbuf]
+    add     r13, rcx
+    mov     byte [rax + r13], r12b
+    inc     r13
+    mov     [outbuf_pos], r13
+
+    add     rsp, 24
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ─── get_delimiter ───
+get_delimiter:
+    test    qword [opt_flags], FLAG_ZERO_TERM
+    jnz     .gd_zero
+    mov     al, 10
+    ret
+.gd_zero:
+    xor     al, al
+    ret
+
+; ═══════════════════════════════════════════════════════════════════
+; MODE: Echo (-e)
+; ═══════════════════════════════════════════════════════════════════
+run_echo_mode:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+
+    call    get_delimiter
+    movzx   r14d, al
+
+    mov     r15, [echo_count]
+
+    test    r15, r15
+    jz      .rem_echo_empty_check
+
+    test    qword [opt_flags], FLAG_REPEAT
+    jnz     .rem_echo_repeat
+
+    ; Non-repeat: Fisher-Yates shuffle
+    mov     rbx, [echo_ptrs]
+    xor     r12d, r12d
+
+.rem_echo_shuffle:
+    cmp     r12, r15
+    jge     .rem_echo_output
+
+    mov     rdi, r15
+    sub     rdi, r12
+    call    rand_bounded
+    add     rax, r12
+
+    mov     rcx, [rbx + r12*8]
+    mov     rdx, [rbx + rax*8]
+    mov     [rbx + r12*8], rdx
+    mov     [rbx + rax*8], rcx
+
+    inc     r12
+    jmp     .rem_echo_shuffle
+
+.rem_echo_output:
+    mov     r13, r15
+    mov     rax, [opt_head_count]
+    cmp     rax, -1
+    je      .rem_echo_out_loop
+    cmp     rax, r13
+    jae     .rem_echo_out_loop
+    mov     r13, rax
+
+.rem_echo_out_loop:
+    xor     r12d, r12d
+.rem_echo_out_iter:
+    cmp     r12, r13
+    jge     .rem_echo_done
+
+    mov     rdi, [rbx + r12*8]
+    call    asm_strlen
+    mov     rsi, rax
+    mov     rdi, [rbx + r12*8]
+    call    outbuf_write
+
+    mov     dil, r14b
+    call    outbuf_byte
+
+    inc     r12
+    jmp     .rem_echo_out_iter
+
+.rem_echo_done:
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+.rem_echo_empty_check:
+    test    qword [opt_flags], FLAG_REPEAT
+    jz      .rem_echo_done
+    mov     rax, [opt_head_count]
+    test    rax, rax
+    jz      .rem_echo_done
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_no_lines
+    mov     rdx, str_no_lines_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+.rem_echo_repeat:
+    mov     r13, [opt_head_count]
+    cmp     r13, -1
+    jne     .rem_echo_rep_check
+    mov     r13, -1
+.rem_echo_rep_check:
+    test    r13, r13
+    jz      .rem_echo_done
+
+    test    r15, r15
+    jz      .rem_echo_empty_check
+
+    mov     rbx, [echo_ptrs]
+    xor     r12d, r12d
+
+.rem_echo_rep_loop:
+    cmp     r12, r13
+    jge     .rem_echo_done
+
+    mov     rdi, r15
+    call    rand_bounded
+
+    mov     rdi, [rbx + rax*8]
+    push    rax
+    call    asm_strlen
+    mov     rsi, rax
+    pop     rax
+    mov     rdi, [rbx + rax*8]
+    call    outbuf_write
+
+    mov     dil, r14b
+    call    outbuf_byte
+
+    inc     r12
+    jmp     .rem_echo_rep_loop
+
+; ═══════════════════════════════════════════════════════════════════
+; MODE: Input range (-i LO-HI)
+; ═══════════════════════════════════════════════════════════════════
+run_range_mode:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    rbp
+
+    call    get_delimiter
+    movzx   r14d, al
+
+    mov     rax, [opt_range_hi]
+    sub     rax, [opt_range_lo]
+    inc     rax
+    mov     r15, rax
+
+    test    qword [opt_flags], FLAG_REPEAT
+    jnz     .rrm_range_repeat
+
+    mov     r13, r15
+    mov     rax, [opt_head_count]
+    cmp     rax, -1
+    je      .rrm_range_no_hc
+    cmp     rax, r13
+    jae     .rrm_range_no_hc
+    mov     r13, rax
+.rrm_range_no_hc:
+    test    r13, r13
+    jz      .rrm_range_done
+
+    ; Allocate array
+    mov     rdi, 0
+    mov     rsi, r15
+    shl     rsi, 3
+    mov     rdx, PROT_READ | PROT_WRITE
+    mov     r10, MAP_PRIVATE | MAP_ANONYMOUS
+    mov     r8, -1
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
+    syscall
+    test    rax, rax
+    js      .rrm_range_oom
+    mov     rbx, rax
+
+    ; Fill array
+    mov     rcx, [opt_range_lo]
+    xor     edx, edx
+.rrm_range_fill:
+    cmp     rdx, r15
+    jge     .rrm_range_shuffle
+    mov     [rbx + rdx*8], rcx
+    inc     rcx
+    inc     rdx
+    jmp     .rrm_range_fill
+
+.rrm_range_shuffle:
+    xor     r12d, r12d
+.rrm_range_fy:
+    cmp     r12, r13
+    jge     .rrm_range_output
+
+    mov     rdi, r15
+    sub     rdi, r12
+    call    rand_bounded
+    add     rax, r12
+
+    mov     rcx, [rbx + r12*8]
+    mov     rdx, [rbx + rax*8]
+    mov     [rbx + r12*8], rdx
+    mov     [rbx + rax*8], rcx
+
+    inc     r12
+    jmp     .rrm_range_fy
+
+.rrm_range_output:
+    xor     r12d, r12d
+.rrm_range_out_loop:
+    cmp     r12, r13
+    jge     .rrm_range_unmap
+
+    mov     rdi, [rbx + r12*8]
+    mov     sil, r14b
+    call    outbuf_u64_delim
+
+    inc     r12
+    jmp     .rrm_range_out_loop
+
+.rrm_range_unmap:
+    mov     rdi, rbx
+    mov     rsi, r15
+    shl     rsi, 3
+    mov     rax, SYS_MUNMAP
+    syscall
+
+.rrm_range_done:
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+.rrm_range_repeat:
+    mov     r13, [opt_head_count]
+    cmp     r13, -1
+    jne     .rrm_range_rep_check
+    mov     r13, -1
+.rrm_range_rep_check:
+    test    r13, r13
+    jz      .rrm_range_done
+
+    xor     r12d, r12d
+.rrm_range_rep_loop:
+    cmp     r12, r13
+    jge     .rrm_range_done
+
+    mov     rdi, r15
+    call    rand_bounded
+    add     rax, [opt_range_lo]
+
+    mov     rdi, rax
+    mov     sil, r14b
+    call    outbuf_u64_delim
+
+    inc     r12
+    jmp     .rrm_range_rep_loop
+
+.rrm_range_oom:
+    mov     edi, 1
+    call    asm_exit
+
+; ═══════════════════════════════════════════════════════════════════
+; MODE: File/stdin
+; ═══════════════════════════════════════════════════════════════════
+run_file_mode:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    rbp
+
+    call    get_delimiter
+    movzx   r14d, al
+    mov     rbp, r14
+
+    call    read_input_data
+
+    mov     rax, [input_size]
+    test    rax, rax
+    jz      .rfm_file_empty
+
+    call    split_lines
+
+    mov     r15, [line_count]
+    test    r15, r15
+    jz      .rfm_file_empty
+
+    test    qword [opt_flags], FLAG_REPEAT
+    jnz     .rfm_file_repeat
+
+    mov     r13, r15
+    mov     rax, [opt_head_count]
+    cmp     rax, -1
+    je      .rfm_file_no_hc
+    cmp     rax, r13
+    jae     .rfm_file_no_hc
+    mov     r13, rax
+.rfm_file_no_hc:
+    test    r13, r13
+    jz      .rfm_file_done
+
+    ; Fisher-Yates shuffle
+    mov     rbx, [line_ptrs]
+    xor     r12d, r12d
+.rfm_file_fy:
+    cmp     r12, r13
+    jge     .rfm_file_output
+
+    mov     rdi, r15
+    sub     rdi, r12
+    call    rand_bounded
+    add     rax, r12
+
+    ; Swap line_ptrs[i] and line_ptrs[j] (each entry is 16 bytes)
+    mov     rdx, r12
+    shl     rdx, 4
+    add     rdx, rbx
+    mov     rcx, rax
+    shl     rcx, 4
+    add     rcx, rbx
+
+    mov     r8, [rdx]
+    mov     r9, [rdx+8]
+    mov     r10, [rcx]
+    mov     r11, [rcx+8]
+    mov     [rdx], r10
+    mov     [rdx+8], r11
+    mov     [rcx], r8
+    mov     [rcx+8], r9
+
+    inc     r12
+    jmp     .rfm_file_fy
+
+.rfm_file_output:
+    xor     r12d, r12d
+.rfm_file_out_loop:
+    cmp     r12, r13
+    jge     .rfm_file_done
+
+    mov     rax, r12
+    shl     rax, 4
+    add     rax, rbx
+    mov     rdi, [rax]
+    mov     rsi, [rax+8]
+    call    outbuf_write
+
+    mov     dil, r14b
+    call    outbuf_byte
+
+    inc     r12
+    jmp     .rfm_file_out_loop
+
+.rfm_file_done:
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+.rfm_file_empty:
+    test    qword [opt_flags], FLAG_REPEAT
+    jz      .rfm_file_done
+    mov     rax, [opt_head_count]
+    test    rax, rax
+    jz      .rfm_file_done
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_no_lines
+    mov     rdx, str_no_lines_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+.rfm_file_repeat:
+    mov     r13, [opt_head_count]
+    cmp     r13, -1
+    jne     .rfm_file_rep_check
+    mov     r13, -1
+.rfm_file_rep_check:
+    test    r13, r13
+    jz      .rfm_file_done
+
+    mov     rbx, [line_ptrs]
+    xor     r12d, r12d
+.rfm_file_rep_loop:
+    cmp     r12, r13
+    jge     .rfm_file_done
+
+    mov     rdi, r15
+    call    rand_bounded
+
+    shl     rax, 4
+    add     rax, rbx
+    mov     rdi, [rax]
+    mov     rsi, [rax+8]
+    call    outbuf_write
+
+    mov     dil, r14b
+    call    outbuf_byte
+
+    inc     r12
+    jmp     .rfm_file_rep_loop
+
+; ─── read_input_data ───
+read_input_data:
+    push    rbx
+    push    r12
+
+    mov     rax, [input_file]
+    test    rax, rax
+    jz      .rid_read_stdin
+    cmp     byte [rax], '-'
+    jne     .rid_read_file
+    cmp     byte [rax+1], 0
+    je      .rid_read_stdin
+
+.rid_read_file:
+    mov     rdi, [input_file]
+    mov     rsi, O_RDONLY
+    xor     edx, edx
+    call    asm_open
+    test    rax, rax
+    js      .rid_err_open_file
+    mov     rbx, rax
+
+    sub     rsp, STAT_STRUCT_SIZE
+    mov     rdi, rbx
+    mov     rsi, rsp
+    mov     rax, SYS_FSTAT
+    syscall
+    test    rax, rax
+    js      .rid_err_stat
+    mov     r12, [rsp + STAT_SIZE]
+    add     rsp, STAT_STRUCT_SIZE
+
+    test    r12, r12
+    jz      .rid_empty_file
+
+    mov     rdi, 0
+    mov     rsi, r12
+    mov     rdx, PROT_READ
+    mov     r10, MAP_PRIVATE
+    mov     r8, rbx
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
+    syscall
+    test    rax, rax
+    js      .rid_err_mmap
+
+    mov     [input_data], rax
+    mov     [input_size], r12
+
+    mov     rdi, rbx
+    call    asm_close
+
+    pop     r12
+    pop     rbx
+    ret
+
+.rid_empty_file:
+    mov     qword [input_data], 0
+    mov     qword [input_size], 0
+    mov     rdi, rbx
+    call    asm_close
+    pop     r12
+    pop     rbx
+    ret
+
+.rid_read_stdin:
+    mov     rdi, 0
+    mov     rsi, INITIAL_BUF
+    mov     rdx, PROT_READ | PROT_WRITE
+    mov     r10, MAP_PRIVATE | MAP_ANONYMOUS
+    mov     r8, -1
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
+    syscall
+    test    rax, rax
+    js      .rid_err_mmap_stdin
+    mov     rbx, rax
+    xor     r12d, r12d
+    mov     r13, INITIAL_BUF
+
+.rid_stdin_read_loop:
+    mov     rdi, STDIN
+    lea     rsi, [rbx + r12]
+    mov     rdx, r13
+    sub     rdx, r12
+    cmp     rdx, BUF_SIZE
+    jbe     .rid_stdin_read_do
+    mov     rdx, BUF_SIZE
+.rid_stdin_read_do:
+    call    asm_read
+    test    rax, rax
+    jz      .rid_stdin_eof
+    js      .rid_stdin_eof
+    add     r12, rax
+
+    cmp     r12, r13
+    jl      .rid_stdin_read_loop
+
+    ; Grow buffer
+    mov     rdi, rbx
+    mov     rsi, r13
+    lea     rdx, [r13 * 2]
+    mov     r10, MREMAP_MAYMOVE
+    mov     rax, SYS_MREMAP
+    syscall
+    test    rax, rax
+    js      .rid_err_mmap_stdin
+    mov     rbx, rax
+    shl     r13, 1
+    jmp     .rid_stdin_read_loop
+
+.rid_stdin_eof:
+    mov     [input_data], rbx
+    mov     [input_size], r12
+    pop     r12
+    pop     rbx
+    ret
+
+.rid_err_open_file:
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, [input_file]
+    call    asm_strlen
+    mov     rdx, rax
+    mov     rdi, STDERR
+    mov     rsi, [input_file]
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_colon_space
+    mov     rdx, 2
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_no_such
+    mov     rdx, str_no_such_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+.rid_err_stat:
+    add     rsp, STAT_STRUCT_SIZE
+    mov     edi, 1
+    call    asm_exit
+
+.rid_err_mmap:
+    mov     edi, 1
+    call    asm_exit
+
+.rid_err_mmap_stdin:
+    mov     edi, 1
+    call    asm_exit
+
+; ─── split_lines ───
+split_lines:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+
+    mov     rdi, 0
+    mov     rsi, INITIAL_LINES
+    shl     rsi, 4
+    mov     rdx, PROT_READ | PROT_WRITE
+    mov     r10, MAP_PRIVATE | MAP_ANONYMOUS
+    mov     r8, -1
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
+    syscall
+    test    rax, rax
+    js      .sl_split_oom
+    mov     [line_ptrs], rax
+    mov     qword [line_cap], INITIAL_LINES
+
+    mov     rbx, [input_data]
+    mov     r12, [input_size]
+    xor     r13d, r13d
+    mov     r14, rbx
+
+.sl_split_loop:
+    test    r12, r12
+    jz      .sl_split_last
+
+    movzx   eax, byte [rbx]
+    cmp     al, bpl
+    je      .sl_found_sep
+
+    inc     rbx
+    dec     r12
+    jmp     .sl_split_loop
+
+.sl_found_sep:
+    mov     rdi, r14
+    mov     rsi, rbx
+    sub     rsi, r14
+
+    call    store_line
+
+    inc     rbx
+    dec     r12
+    mov     r14, rbx
+    jmp     .sl_split_loop
+
+.sl_split_last:
+    cmp     r14, rbx
+    je      .sl_split_done
+
+    mov     rdi, r14
+    mov     rsi, rbx
+    sub     rsi, r14
+    call    store_line
+
+.sl_split_done:
+    mov     [line_count], r13
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+.sl_split_oom:
+    mov     edi, 1
+    call    asm_exit
+
+; ─── store_line ───
+store_line:
+    cmp     r13, [line_cap]
+    jb      .stl_store_ok
+
+    push    rdi
+    push    rsi
+    mov     rdi, [line_ptrs]
+    mov     rsi, [line_cap]
+    shl     rsi, 4
+    mov     rdx, [line_cap]
+    shl     rdx, 1
+    mov     [line_cap], rdx
+    shl     rdx, 4
+    mov     r10, MREMAP_MAYMOVE
+    mov     rax, SYS_MREMAP
+    syscall
+    test    rax, rax
+    js      .stl_store_oom
+    mov     [line_ptrs], rax
+    pop     rsi
+    pop     rdi
+
+.stl_store_ok:
+    mov     rax, [line_ptrs]
+    mov     rcx, r13
+    shl     rcx, 4
+    add     rax, rcx
+    mov     [rax], rdi
+    mov     [rax+8], rsi
+    inc     r13
+    ret
+
+.stl_store_oom:
+    mov     edi, 1
+    call    asm_exit
+
+; ═══════════════════════════════════════════════════════════════════
+; Error reporting functions
+; ═══════════════════════════════════════════════════════════════════
+
+err_invalid_option:
+    push    rdi
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_inv_opt
+    mov     rdx, str_inv_opt_len
+    call    asm_write_all
+    pop     rax
+    sub     rsp, 8
+    mov     [rsp], al
+    mov     rdi, STDERR
+    mov     rsi, rsp
+    mov     rdx, 1
+    call    asm_write_all
+    add     rsp, 8
+    mov     rdi, STDERR
+    mov     rsi, str_inv_opt2
+    mov     rdx, 2
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_try_help
+    mov     rdx, str_try_help_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+err_opt_requires_arg:
+    push    rdi
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_opt_req
+    mov     rdx, str_opt_req_len
+    call    asm_write_all
+    pop     rax
+    sub     rsp, 8
+    mov     [rsp], al
+    mov     rdi, STDERR
+    mov     rsi, rsp
+    mov     rdx, 1
+    call    asm_write_all
+    add     rsp, 8
+    mov     rdi, STDERR
+    mov     rsi, str_inv_opt2
+    mov     rdx, 2
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_try_help
+    mov     rdx, str_try_help_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+err_unrecog_option:
+    push    rdi
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_unrecog
+    mov     rdx, str_unrecog_len
+    call    asm_write_all
+    pop     rdi
+    push    rdi
+    call    asm_strlen
+    mov     rdx, rax
+    mov     rdi, STDERR
+    pop     rsi
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_unrecog2
+    mov     rdx, 2
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_try_help
+    mov     rdx, str_try_help_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+err_extra_operand:
+    push    rdi
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_extra_op
+    mov     rdx, str_extra_op_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_lquote
+    mov     rdx, str_lquote_len
+    call    asm_write_all
+    pop     rdi
+    push    rdi
+    call    asm_strlen
+    mov     rdx, rax
+    mov     rdi, STDERR
+    pop     rsi
+    call    asm_write_all
+    sub     rsp, 8
+    mov     byte [rsp], 0xe2
+    mov     byte [rsp+1], 0x80
+    mov     byte [rsp+2], 0x99
+    mov     byte [rsp+3], 10
+    mov     rdi, STDERR
+    mov     rsi, rsp
+    mov     rdx, 4
+    call    asm_write_all
+    add     rsp, 8
+    mov     rdi, STDERR
+    mov     rsi, str_try_help
+    mov     rdx, str_try_help_len
+    call    asm_write_all
+    mov     edi, 1
+    call    asm_exit
+
+err_invalid_range:
+    push    rdi
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_inv_range
+    mov     rdx, str_inv_range_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_lquote
+    mov     rdx, str_lquote_len
+    call    asm_write_all
+    pop     rdi
+    push    rdi
+    call    asm_strlen
+    mov     rdx, rax
+    mov     rdi, STDERR
+    pop     rsi
+    call    asm_write_all
+    sub     rsp, 8
+    mov     byte [rsp], 0xe2
+    mov     byte [rsp+1], 0x80
+    mov     byte [rsp+2], 0x99
+    mov     byte [rsp+3], 10
+    mov     rdi, STDERR
+    mov     rsi, rsp
+    mov     rdx, 4
+    call    asm_write_all
+    add     rsp, 8
+    mov     edi, 1
+    call    asm_exit
+
+err_invalid_count:
+    push    rdi
+    mov     rdi, STDERR
+    mov     rsi, str_shuf_prefix
+    mov     rdx, str_shuf_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_inv_count
+    mov     rdx, str_inv_count_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    mov     rsi, str_lquote
+    mov     rdx, str_lquote_len
+    call    asm_write_all
+    pop     rdi
+    push    rdi
+    call    asm_strlen
+    mov     rdx, rax
+    mov     rdi, STDERR
+    pop     rsi
+    call    asm_write_all
+    sub     rsp, 8
+    mov     byte [rsp], 0xe2
+    mov     byte [rsp+1], 0x80
+    mov     byte [rsp+2], 0x99
+    mov     byte [rsp+3], 10
+    mov     rdi, STDERR
+    mov     rsi, rsp
+    mov     rdx, 4
+    call    asm_write_all
+    add     rsp, 8
+    mov     edi, 1
+    call    asm_exit
+
+code_end equ $
+bss_file_offset equ code_end - ehdr
 
 ; ════════════════════════════════════════════════════════════════
 ; BSS — Uninitialized data (zero-filled by kernel)
 ; ════════════════════════════════════════════════════════════════
-absolute code_end
-alignb 16
+align 4096
 bss_start:
 
 opt_flags:      resq 1
@@ -964,7 +2396,7 @@ echo_ptrs:      resq 1
 echo_count:     resq 1
 echo_cap:       resq 1
 
-alignb 32
+align 32
 prng_s0:        resq 1
 prng_s1:        resq 1
 prng_s2:        resq 1
