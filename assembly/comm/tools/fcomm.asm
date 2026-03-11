@@ -20,7 +20,7 @@
 ;   - mmap() both input files (zero-copy, no read syscalls)
 ;   - SSE2 SIMD line comparison (pcmpeqb + pmovmskb)
 ;   - Large 1MB output buffer with threshold flushing
-;   - For stdin (-), read into 16MB buffer
+;   - For stdin (-), dynamically growing buffer via mmap/mremap
 ;
 ; Build (modular):
 ;   nasm -f elf64 -I include/ tools/fcomm.asm -o build/fcomm.o
@@ -844,6 +844,7 @@ open_and_mmap_file:
     push    rbx
     push    r12
     push    r13
+    push    r14
 
     mov     rbx, rdi                ; save path
 
@@ -853,43 +854,70 @@ open_and_mmap_file:
     cmp     byte [rdi+1], 0
     jne     .omf_not_stdin
 
-    ; Read stdin into buffer
-    ; Use brk to allocate STDIN_BUF_SIZE
-    mov     rax, SYS_BRK
+    ; Allocate initial buffer via mmap (anonymous, read+write)
+    mov     r12, STDIN_BUF_SIZE     ; current capacity
     xor     edi, edi
+    mov     rsi, r12
+    mov     edx, PROT_READ | PROT_WRITE
+    mov     r10d, MAP_PRIVATE | MAP_ANONYMOUS
+    mov     r8d, -1
+    xor     r9d, r9d
+    mov     rax, SYS_MMAP
     syscall
-    mov     r12, rax                ; current brk
-    lea     rdi, [rax + STDIN_BUF_SIZE]
-    mov     rax, SYS_BRK
-    syscall
-    cmp     rax, r12
-    je      .omf_brk_fail           ; brk failed
-
-    ; Read from stdin into buffer at r12
+    cmp     rax, -4096
+    ja      .omf_mmap_stdin_fail
+    mov     r14, rax                ; buffer ptr
     xor     r13d, r13d              ; total bytes read
+
 .omf_stdin_loop:
     mov     rdi, STDIN
-    lea     rsi, [r12 + r13]
-    mov     rdx, STDIN_BUF_SIZE
+    lea     rsi, [r14 + r13]
+    mov     rdx, r12
     sub     rdx, r13
-    jle     .omf_stdin_done         ; buffer full
+    cmp     rdx, STDIN_BUF_SIZE
+    jbe     .omf_stdin_read_ok
+    mov     rdx, STDIN_BUF_SIZE     ; cap read size
+.omf_stdin_read_ok:
+    test    rdx, rdx
+    jz      .omf_stdin_grow         ; no space left, grow first
     call    asm_read
     test    rax, rax
     jle     .omf_stdin_done         ; EOF or error
     add     r13, rax
+
+    ; Check if buffer needs growing (less than 4KB remaining)
+    mov     rax, r12
+    sub     rax, r13
+    cmp     rax, 4096
+    jge     .omf_stdin_loop
+
+.omf_stdin_grow:
+    ; Grow buffer via mremap (double the size)
+    mov     rdi, r14
+    mov     rsi, r12
+    lea     rdx, [r12 * 2]
+    mov     r10d, MREMAP_MAYMOVE
+    mov     rax, SYS_MREMAP
+    syscall
+    cmp     rax, -4096
+    ja      .omf_mmap_stdin_fail
+    mov     r14, rax                ; update buffer ptr (may have moved)
+    shl     r12, 1                  ; double capacity
     jmp     .omf_stdin_loop
 
 .omf_stdin_done:
-    mov     rax, r12                ; address
+    mov     rax, r14                ; address
     mov     rdx, r13                ; length
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx
     ret
 
-.omf_brk_fail:
+.omf_mmap_stdin_fail:
     mov     rax, -1
     xor     edx, edx
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx
@@ -948,6 +976,7 @@ open_and_mmap_file:
 
     pop     rax                     ; mmap address
     mov     rdx, r13                ; length
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx
@@ -960,6 +989,7 @@ open_and_mmap_file:
     ; Use the stat_buf address as a dummy
     lea     rax, [rel stat_buf]
     xor     edx, edx
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx
@@ -970,6 +1000,7 @@ open_and_mmap_file:
 .omf_mmap_fail:
     mov     rax, -1
     xor     edx, edx
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx

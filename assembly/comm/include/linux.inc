@@ -10,6 +10,7 @@
 %define SYS_MMAP         9
 %define SYS_MUNMAP      11
 %define SYS_BRK         12
+%define SYS_MREMAP      25
 %define SYS_RT_SIGACTION 13
 %define SYS_RT_SIGPROCMASK 14
 %define SYS_IOCTL       16
@@ -42,5 +43,9 @@
 %define EPIPE           32
 
 %define SIGPIPE         13
+
+%define PROT_WRITE       2
+%define MAP_ANONYMOUS   0x20
+%define MREMAP_MAYMOVE   1
 
 %define BUF_SIZE     65536
