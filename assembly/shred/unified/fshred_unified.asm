@@ -12,7 +12,7 @@
 ;   -f / --force               (chmod +w if needed)
 ;   -x / --exact               (don't round up to block)
 ;   -s NUM / --size=NUM        (override file size, K/M/G suffixes)
-;   --random-source=FILE       (accepted, ignored — uses xoshiro256**)
+;   --random-source=FILE       (read random data from FILE instead of xoshiro256**)
 ;   --help / --version / --
 ;
 ; Performance: xoshiro256** PRNG, 128KB write buffers, fdatasync between passes
@@ -137,6 +137,7 @@ _start:
     mov     qword [override_size], 0
     mov     qword [nfiles], 0
     mov     byte [had_error], 0
+    mov     dword [random_source_fd], -1
 
     ; Parse arguments
     call    parse_args
@@ -171,6 +172,14 @@ _start:
     jmp     .file_loop
 
 .all_done:
+    ; Close random source fd if open
+    mov     eax, [random_source_fd]
+    cmp     eax, -1
+    je      .no_close_rs
+    mov     edi, eax
+    mov     eax, SYS_CLOSE
+    syscall
+.no_close_rs:
     movzx   edi, byte [had_error]
     jmp     do_exit
 
@@ -281,14 +290,22 @@ parse_args:
     test    eax, eax
     jnz     .parse_remove_eq
 
-    ; --random-source=FILE (accept but ignore)
+    ; --random-source=FILE
     mov     rax, [argv]
     mov     rdi, [rax + rbx*8]
     lea     rsi, [str_opt_random_source]
     mov     ecx, 16                    ; len("--random-source=")
     call    str_starts_with
     test    eax, eax
-    jnz     .next_arg                  ; just skip it
+    jnz     .parse_random_source_eq
+
+    ; --random-source FILE (space-separated)
+    mov     rax, [argv]
+    mov     rdi, [rax + rbx*8]
+    lea     rsi, [str_opt_random_source_bare]
+    call    str_eq
+    test    eax, eax
+    jnz     .parse_random_source_next
 
     ; Unknown long option
     mov     rax, [argv]
@@ -470,6 +487,60 @@ parse_args:
     mov     rdi, str_invalid_size
     mov     rsi, str_invalid_size_len
     call    write_stderr
+    mov     edi, 1
+    jmp     do_exit
+
+.parse_random_source_eq:
+    ; rdi still has the arg; extract FILE after "--random-source="
+    mov     rax, [argv]
+    mov     rdi, [rax + rbx*8]
+    add     rdi, 16                    ; skip "--random-source="
+    jmp     .open_random_source
+
+.parse_random_source_next:
+    ; Next arg is the FILE
+    inc     rbx
+    cmp     rbx, [argc]
+    jge     .missing_random_source_arg
+    mov     rax, [argv]
+    mov     rdi, [rax + rbx*8]
+
+.open_random_source:
+    ; rdi = path to random source file
+    ; Open it for reading
+    push    rdi
+    mov     eax, SYS_OPEN
+    ; rdi already set to path
+    xor     esi, esi                   ; O_RDONLY
+    xor     edx, edx
+    syscall
+    pop     rdi
+    test    rax, rax
+    js      .random_source_open_error
+    mov     [random_source_fd], eax
+    jmp     .next_arg
+
+.missing_random_source_arg:
+    mov     rdi, str_shred_prefix
+    mov     rsi, str_shred_prefix_len
+    call    write_stderr
+    mov     rdi, str_opt_rs_missing
+    mov     rsi, str_opt_rs_missing_len
+    call    write_stderr
+    mov     edi, 1
+    jmp     do_exit
+
+.random_source_open_error:
+    neg     rax
+    mov     ebx, eax
+    mov     rdi, str_shred_prefix
+    mov     rsi, str_shred_prefix_len
+    call    write_stderr
+    mov     rdi, str_rs_open_failed
+    mov     rsi, str_rs_open_failed_len
+    call    write_stderr
+    mov     edi, ebx
+    call    print_errno
     mov     edi, 1
     jmp     do_exit
 
@@ -969,9 +1040,10 @@ write_pass:
     ret
 
 ; ============================================================================
-; fill_random_buf — fill buffer with xoshiro256** random bytes
+; fill_random_buf — fill buffer with random bytes
 ; rdi = buffer pointer
 ; rsi = length
+; Uses --random-source file if specified, otherwise xoshiro256** PRNG
 ; ============================================================================
 fill_random_buf:
     push    rbx
@@ -983,6 +1055,11 @@ fill_random_buf:
 
     mov     r12, rdi                   ; buffer
     mov     r13, rsi                   ; length
+
+    ; Check if --random-source was specified
+    mov     eax, [random_source_fd]
+    cmp     eax, -1
+    jne     .fill_from_file
 
     ; Load PRNG state
     mov     rax, [prng_s0]
@@ -1123,6 +1200,67 @@ fill_random_buf:
     mov     [prng_s2], rcx
     mov     [prng_s3], rdx
 
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; --- Fill from --random-source file ---
+.fill_from_file:
+    ; r12 = buffer, r13 = remaining length
+    mov     ebx, eax                   ; ebx = random_source_fd
+    xor     r14d, r14d                 ; r14 = offset into buffer (bytes filled)
+
+.fill_file_loop:
+    cmp     r14, r13
+    jge     .fill_file_done
+
+    mov     eax, SYS_READ
+    mov     edi, ebx
+    lea     rsi, [r12 + r14]
+    mov     rdx, r13
+    sub     rdx, r14                   ; remaining bytes
+    syscall
+
+    test    rax, rax
+    js      .fill_file_read_error
+    jz      .fill_file_eof             ; EOF: not enough random data
+
+    add     r14, rax
+    jmp     .fill_file_loop
+
+.fill_file_eof:
+    ; Not enough data in random source — print error and exit
+    mov     rdi, str_shred_prefix
+    mov     rsi, str_shred_prefix_len
+    call    write_stderr
+    mov     rdi, str_rs_eof
+    mov     rsi, str_rs_eof_len
+    call    write_stderr
+    mov     edi, 1
+    jmp     do_exit
+
+.fill_file_read_error:
+    cmp     rax, -EINTR
+    je      .fill_file_loop            ; Retry on EINTR
+    ; Fatal read error
+    neg     rax
+    mov     ebx, eax
+    mov     rdi, str_shred_prefix
+    mov     rsi, str_shred_prefix_len
+    call    write_stderr
+    mov     rdi, str_rs_read_failed
+    mov     rsi, str_rs_read_failed_len
+    call    write_stderr
+    mov     edi, ebx
+    call    print_errno
+    mov     edi, 1
+    jmp     do_exit
+
+.fill_file_done:
     pop     rbp
     pop     r15
     pop     r14
@@ -2006,6 +2144,19 @@ str_opt_iterations_eq: db "--iterations="
 str_opt_size_eq:    db "--size="
 str_opt_remove_eq:  db "--remove="
 str_opt_random_source: db "--random-source="
+str_opt_random_source_bare: db "--random-source", 0
+
+str_opt_rs_missing: db "option '--random-source' requires an argument", 10
+str_opt_rs_missing_len equ $ - str_opt_rs_missing
+
+str_rs_open_failed: db "failed to open random source: "
+str_rs_open_failed_len equ $ - str_rs_open_failed
+
+str_rs_read_failed: db "error reading random source: "
+str_rs_read_failed_len equ $ - str_rs_read_failed
+
+str_rs_eof:         db "end of file reading random source", 10
+str_rs_eof_len      equ $ - str_rs_eof
 
 str_unlink:         db "unlink", 0
 str_wipe:           db "wipe", 0
@@ -2098,6 +2249,9 @@ prng_s0:        resq 1
 prng_s1:        resq 1
 prng_s2:        resq 1
 prng_s3:        resq 1
+
+random_source_fd: resd 1              ; fd for --random-source (-1 = use PRNG)
+                resb 4                 ; alignment
 
 ; Buffers
 char_buf:       resb 8

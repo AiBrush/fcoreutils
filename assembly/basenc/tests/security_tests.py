@@ -7,9 +7,6 @@ import subprocess
 import struct
 import signal
 import time
-import random
-import string
-import tempfile
 import resource
 from pathlib import Path
 from shutil import which

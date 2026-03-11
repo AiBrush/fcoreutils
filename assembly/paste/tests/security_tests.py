@@ -511,7 +511,7 @@ def test_concurrency():
     all_ok = True
     for p, data in procs:
         try:
-            out, err = p.communicate(input=data, timeout=TIMEOUT)
+            p.communicate(input=data, timeout=TIMEOUT)
             if p.returncode >= 128: all_ok = False
         except subprocess.TimeoutExpired:
             p.kill(); p.communicate(); all_ok = False

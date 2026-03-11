@@ -1055,31 +1055,56 @@ pollard_rho:
 
 ; ============================================================================
 ; gcd64(rdi=a, rsi=b) -> rax = gcd(a, b)
-; Euclidean algorithm.
+; Binary GCD (Stein's algorithm) — avoids expensive div, uses bsf/shr.
+; Clobbers: rcx, rdx, r8
 ; ============================================================================
 gcd64:
-    mov     rax, rdi
-    mov     rcx, rsi
+    mov     rax, rdi                    ; a
+    mov     rdx, rsi                    ; b
 
     test    rax, rax
     jz      .g_ret_b
-    test    rcx, rcx
+    test    rdx, rdx
     jz      .g_ret_a
 
+    ; Extract common factor of 2: shift = min(ctz(a), ctz(b))
+    bsf     rcx, rax                    ; rcx = ctz(a)
+    bsf     r8, rdx                     ; r8  = ctz(b)
+    cmp     ecx, r8d
+    cmova   ecx, r8d                    ; ecx = min shift (common 2s)
+    push    rcx                          ; save common shift count
+
+    ; Remove all factors of 2 from a
+    bsf     rcx, rax
+    shr     rax, cl
+
+    ; Remove all factors of 2 from b
+    bsf     rcx, rdx
+    shr     rdx, cl
+
+    ; Now both a (rax) and b (rdx) are odd
 .g_loop:
-    xor     edx, edx
-    div     rcx                         ; rax = a/b, rdx = a%b
-    test    rdx, rdx
-    jz      .g_ret_rcx
-    mov     rax, rcx
-    mov     rcx, rdx
+    ; Ensure a >= b; if not, swap
+    cmp     rax, rdx
+    jae     .g_no_swap
+    xchg    rax, rdx
+.g_no_swap:
+    sub     rax, rdx                     ; a = a - b (even since both odd)
+    jz      .g_done                      ; if a == 0, gcd = b << shift
+
+    ; Remove factors of 2 from a (a is now even)
+    bsf     rcx, rax
+    shr     rax, cl
     jmp     .g_loop
 
-.g_ret_rcx:
-    mov     rax, rcx
+.g_done:
+    mov     rax, rdx
+    pop     rcx                          ; restore common shift count
+    shl     rax, cl                      ; restore common factor of 2
     ret
+
 .g_ret_b:
-    mov     rax, rcx
+    mov     rax, rdx
     ret
 .g_ret_a:
     ret

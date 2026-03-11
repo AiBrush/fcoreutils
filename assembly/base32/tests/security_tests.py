@@ -9,9 +9,7 @@ import signal
 import time
 import random
 import string
-import tempfile
 import resource
-import base64 as b64lib
 from pathlib import Path
 from shutil import which
 
