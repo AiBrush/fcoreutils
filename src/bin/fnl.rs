@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{read_file, read_stdin};
+use coreutils_rs::common::io::{FileData, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::nl::{self, NlConfig};
 
@@ -404,6 +404,72 @@ fn print_help() {
     );
 }
 
+/// Read file with lazy page faults: mmap + HUGEPAGE + SEQUENTIAL only.
+/// Skips POPULATE_READ: pages fault lazily during memchr scan, which overlaps
+/// with SIMD processing and avoids the upfront ~2ms populate cost for 10MB files.
+#[cfg(target_os = "linux")]
+fn read_file_nl(path: &std::path::Path) -> std::io::Result<FileData> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOATIME)
+        .open(path)
+        .or_else(|_| std::fs::File::open(path))?;
+    let metadata = file.metadata()?;
+    let len = metadata.len();
+
+    if len > 0 && metadata.file_type().is_file() {
+        if len < 1024 * 1024 {
+            use std::io::Read;
+            let mut buf = vec![0u8; len as usize];
+            let mut reader = &file;
+            let mut filled = 0;
+            while filled < buf.len() {
+                match reader.read(&mut buf[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            buf.truncate(filled);
+            return Ok(FileData::Owned(buf));
+        }
+
+        match unsafe { memmap2::MmapOptions::new().map(&file) } {
+            Ok(mmap) => {
+                if len >= 2 * 1024 * 1024 {
+                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                }
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                // Deliberately skip PopulateRead: let pages fault lazily
+                // during the memchr SIMD scan, avoiding the upfront populate cost.
+                Ok(FileData::Mmap(mmap))
+            }
+            Err(_) => {
+                use std::io::Read;
+                let mut buf = Vec::with_capacity(len as usize);
+                let mut reader = file;
+                reader.read_to_end(&mut buf)?;
+                Ok(FileData::Owned(buf))
+            }
+        }
+    } else if !metadata.file_type().is_file() {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut reader = file;
+        reader.read_to_end(&mut buf)?;
+        Ok(FileData::Owned(buf))
+    } else {
+        Ok(FileData::Owned(Vec::new()))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_file_nl(path: &std::path::Path) -> std::io::Result<FileData> {
+    coreutils_rs::common::io::read_file(path)
+}
+
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -431,7 +497,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file(Path::new(filename)) {
+            match read_file_nl(Path::new(filename)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("nl: {}: {}", filename, io_error_msg(&e));
