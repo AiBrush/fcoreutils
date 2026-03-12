@@ -381,6 +381,10 @@ fn multi_select_chunk(
         // For small max_field, use single-pass memchr2 bitmask approach:
         // scans for both delimiter and newline simultaneously, avoiding
         // per-line iterator creation overhead on short lines.
+        // Trade-off: bitmask processes all delimiters per line (no early exit),
+        // while twolevel exits after max_field delimiters. For narrow CSVs
+        // (<=8 fields), the memchr2 SIMD advantage outweighs the extra hits.
+        // For wide CSVs, twolevel's early exit wins.
         if max_field <= 8 {
             multi_select_chunk_bitmask(data, delim, line_delim, mask, max_field, suppress, buf);
         } else {
@@ -535,6 +539,7 @@ fn multi_select_chunk_bitmask(
         }
     }
 
+    debug_assert!(wp <= data.len() + 1);
     unsafe {
         buf.set_len(initial_len + wp);
     }
@@ -2553,6 +2558,9 @@ fn process_bytes_from_start(
     // per-line truncation + buffer assembly even with parallelism.
     // 64MB limit is independent of PARALLEL_THRESHOLD to preserve this fast path
     // even when parallel threshold is lowered.
+    //
+    // When all_fit=false, the scan breaks early at the first long line, so the
+    // overhead is bounded by the position of that line (not the full file size).
     if data.len() < 64 * 1024 * 1024 && max_bytes > 0 && max_bytes < usize::MAX {
         let mut start = 0;
         let mut all_fit = true;

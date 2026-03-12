@@ -309,7 +309,7 @@ fn main() {
         .map(|v| v.get().max(1))
         .unwrap_or(1);
     let _ = rayon::ThreadPoolBuilder::new()
-        .num_threads(cpus.saturating_sub(1).max(1))
+        .num_threads(cpus.saturating_sub(1).max(1)) // n-1 pool threads; main thread joins as nth worker in rayon::scope
         .build_global();
 
     let cli = parse_args();
