@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{read_file, read_stdin};
+use coreutils_rs::common::io::{FileData, MmapHints, read_file_with_hints, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::nl::{self, NlConfig};
 
@@ -423,7 +423,7 @@ fn main() {
     for filename in &files {
         let data = if filename == "-" {
             match read_stdin() {
-                Ok(d) => coreutils_rs::common::io::FileData::Owned(d),
+                Ok(d) => FileData::Owned(d),
                 Err(e) => {
                     eprintln!("nl: standard input: {}", io_error_msg(&e));
                     had_error = true;
@@ -431,7 +431,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file(Path::new(filename)) {
+            match read_file_with_hints(Path::new(filename), MmapHints::Lazy) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("nl: {}: {}", filename, io_error_msg(&e));
