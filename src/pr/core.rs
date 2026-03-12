@@ -630,9 +630,9 @@ fn count_newlines_u64(word: u64) -> u32 {
 }
 
 /// Ultra-fast contiguous-write paginator for single-column, no-transform mode.
-/// Two-pass approach: find page boundaries via SWAR+memchr, then build IoSlice
-/// references interleaving metadata (headers/footers) with zero-copy body slices
-/// from the original mmap data. Batched writev calls for output.
+/// Two-pass approach: find page boundaries via SWAR+memchr, then build a single
+/// output buffer interleaving metadata (headers/footers) with body data copied
+/// from the original mmap via extend_from_slice. Flushed at a 4MB threshold.
 fn pr_data_contiguous<W: Write>(
     data: &[u8],
     output: &mut W,
@@ -743,7 +743,6 @@ fn pr_data_contiguous<W: Write>(
     // Headers/footers are generated inline; body data is copied from the mmap.
     // A single large write_all uses fewer syscalls than batched writev, which
     // is critical for file output (where writev overhead dominates).
-    let visible_count = last_visible - first_visible;
     let footer_bytes: &[u8] = if config.form_feed {
         b"\x0c"
     } else {
@@ -755,8 +754,6 @@ fn pr_data_contiguous<W: Write>(
     let left_len = date_bytes.len();
     let center_len = header_bytes.len();
     let page_prefix = b"Page ";
-    let base_right_len = page_prefix.len() + 1;
-    let overflow = left_len + center_len + base_right_len + 2 >= line_width;
     let flush_threshold = 4 * 1024 * 1024;
     let mut out_buf: Vec<u8> = Vec::with_capacity(flush_threshold + 256 * 1024);
     let mut num_tmp = [0u8; 20];
@@ -766,6 +763,24 @@ fn pr_data_contiguous<W: Write>(
         let body_start = page_bounds[pi];
         let body_end = page_bounds[pi + 1];
 
+        // Format page number into num_tmp (right-aligned, digits end at index 19).
+        let mut n = page_num;
+        let mut pos = 19usize;
+        loop {
+            num_tmp[pos] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+            pos -= 1;
+        }
+        let num_digits = 20 - pos;
+        let right_len = page_prefix.len() + num_digits;
+
+        // Check overflow with the actual page number width each iteration,
+        // since the digit count can grow as page numbers increase.
+        let overflow = left_len + center_len + right_len + 2 >= line_width;
+
         if overflow {
             out_buf.extend_from_slice(b"\n\n");
             out_buf.extend_from_slice(date_bytes);
@@ -773,31 +788,12 @@ fn pr_data_contiguous<W: Write>(
             out_buf.extend_from_slice(header_bytes);
             out_buf.push(b' ');
             out_buf.extend_from_slice(page_prefix);
-            let mut n = page_num;
-            let mut pos = 19usize;
-            loop {
-                num_tmp[pos] = b'0' + (n % 10) as u8;
-                n /= 10;
-                if n == 0 {
-                    break;
-                }
-                pos -= 1;
-            }
             out_buf.extend_from_slice(&num_tmp[pos..20]);
             out_buf.extend_from_slice(b"\n\n\n");
         } else {
-            let mut n = page_num;
-            let mut pos = 19usize;
-            loop {
-                num_tmp[pos] = b'0' + (n % 10) as u8;
-                n /= 10;
-                if n == 0 {
-                    break;
-                }
-                pos -= 1;
-            }
-            let num_digits = 20 - pos;
-            let right_len = page_prefix.len() + num_digits;
+            // Safety: overflow check above guarantees
+            // line_width > left_len + center_len + right_len, so this
+            // subtraction cannot underflow.
             let total_spaces = line_width - left_len - center_len - right_len;
             let left_spaces = total_spaces / 2;
             let right_spaces = total_spaces - left_spaces;
@@ -851,7 +847,6 @@ fn pr_data_contiguous<W: Write>(
     if !out_buf.is_empty() {
         output.write_all(&out_buf)?;
     }
-    let _ = visible_count;
     Ok(())
 }
 
