@@ -1,22 +1,12 @@
 use std::io::{self, Read, Write};
 
-use rayon::prelude::*;
-
 /// Maximum IoSlice entries per write_vectored batch.
 /// Linux UIO_MAXIOV is 1024; we use that as our batch limit.
 const MAX_IOV: usize = 1024;
 
-/// Stream buffer: 512KB — balances SIMD LUT amortization with pipeline latency.
-/// Large enough to cover SIMD setup overhead across many iterations, small enough
-/// that downstream pipeline stages aren't starved for long.
-const STREAM_BUF: usize = 512 * 1024;
-
-/// Minimum data size to engage rayon parallel processing for mmap/batch paths.
-/// For 10MB benchmark files, parallel tr translate was a 105% REGRESSION
-/// (rayon dispatch overhead exceeds the multi-core benefit for 10MB).
-/// Set to 64MB so only genuinely large files benefit from parallelism.
-/// Single-threaded AVX2 at 16 GB/s processes 10MB in 0.6ms which is fast enough.
-const PARALLEL_THRESHOLD: usize = 64 * 1024 * 1024;
+/// Stream buffer: 2MB — large enough to amortize syscall overhead while staying
+/// in L2 cache. Reduces write() syscalls 4x vs 512KB for streaming paths.
+const STREAM_BUF: usize = 2 * 1024 * 1024;
 
 /// Maximum data size for a single full-size output allocation.
 /// Files larger than this fall back to the chunked approach to avoid OOM.
@@ -2611,22 +2601,13 @@ fn translate_and_write_table(
     table: &[u8; 256],
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    if total >= PARALLEL_THRESHOLD {
-        let nt = rayon::current_num_threads().max(1);
-        let cs = (total / nt).max(32 * 1024);
-        buf[..total].par_chunks_mut(cs).for_each(|chunk| {
-            translate_inplace(chunk, table);
-        });
-    } else {
-        translate_inplace(&mut buf[..total], table);
-    }
+    translate_inplace(&mut buf[..total], table);
     writer.write_all(&buf[..total])
 }
 
 /// Streaming SIMD range translation — single buffer, in-place transform.
 /// Fills buffer fully before processing — SIMD translate is trivial compared
 /// to syscall overhead, so fewer larger write_all() calls win.
-/// For chunks >= PARALLEL_THRESHOLD, uses rayon par_chunks_mut for multi-core.
 fn translate_range_stream(
     lo: u8,
     hi: u8,
@@ -2654,15 +2635,7 @@ fn translate_and_write_range(
     offset: i8,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    if total >= PARALLEL_THRESHOLD {
-        let nt = rayon::current_num_threads().max(1);
-        let cs = (total / nt).max(32 * 1024);
-        buf[..total].par_chunks_mut(cs).for_each(|chunk| {
-            translate_range_simd_inplace(chunk, lo, hi, offset);
-        });
-    } else {
-        translate_range_simd_inplace(&mut buf[..total], lo, hi, offset);
-    }
+    translate_range_simd_inplace(&mut buf[..total], lo, hi, offset);
     writer.write_all(&buf[..total])
 }
 
@@ -2696,15 +2669,7 @@ fn translate_and_write_range_const(
     replacement: u8,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    if total >= PARALLEL_THRESHOLD {
-        let nt = rayon::current_num_threads().max(1);
-        let cs = (total / nt).max(32 * 1024);
-        buf[..total].par_chunks_mut(cs).for_each(|chunk| {
-            translate_range_to_constant_simd_inplace(chunk, lo, hi, replacement);
-        });
-    } else {
-        translate_range_to_constant_simd_inplace(&mut buf[..total], lo, hi, replacement);
-    }
+    translate_range_to_constant_simd_inplace(&mut buf[..total], lo, hi, replacement);
     writer.write_all(&buf[..total])
 }
 
@@ -3834,49 +3799,21 @@ pub fn translate_owned(
         return writer.write_all(data);
     }
 
-    // Parallel translate was a 105% regression at 10MB benchmark size.
-    // Single-threaded AVX2 is fast enough. Only parallelize for genuinely
-    // large files (>=64MB) where multi-core benefits clearly exceed overhead.
-    const OWNED_PARALLEL_MIN: usize = 64 * 1024 * 1024;
-
-    // SIMD range fast path (in-place)
+    // SIMD range fast path (in-place) — single-threaded is memory-bandwidth
+    // optimal; rayon thread-dispatch overhead exceeds any multi-core benefit.
     if let Some((lo, hi, offset)) = detect_range_offset(&table) {
-        if data.len() >= OWNED_PARALLEL_MIN {
-            let n_threads = rayon::current_num_threads().max(1);
-            let chunk_size = (data.len() / n_threads).max(32 * 1024);
-            data.par_chunks_mut(chunk_size).for_each(|chunk| {
-                translate_range_simd_inplace(chunk, lo, hi, offset);
-            });
-        } else {
-            translate_range_simd_inplace(data, lo, hi, offset);
-        }
+        translate_range_simd_inplace(data, lo, hi, offset);
         return writer.write_all(data);
     }
 
     // SIMD range-to-constant fast path (in-place)
     if let Some((lo, hi, replacement)) = detect_range_to_constant(&table) {
-        if data.len() >= OWNED_PARALLEL_MIN {
-            let n_threads = rayon::current_num_threads().max(1);
-            let chunk_size = (data.len() / n_threads).max(32 * 1024);
-            data.par_chunks_mut(chunk_size).for_each(|chunk| {
-                translate_range_to_constant_simd_inplace(chunk, lo, hi, replacement);
-            });
-        } else {
-            translate_range_to_constant_simd_inplace(data, lo, hi, replacement);
-        }
+        translate_range_to_constant_simd_inplace(data, lo, hi, replacement);
         return writer.write_all(data);
     }
 
     // General table lookup (in-place)
-    if data.len() >= OWNED_PARALLEL_MIN {
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-        data.par_chunks_mut(chunk_size).for_each(|chunk| {
-            translate_inplace(chunk, &table);
-        });
-    } else {
-        translate_inplace(data, &table);
-    }
+    translate_inplace(data, &table);
     writer.write_all(data)
 }
 
@@ -3884,15 +3821,14 @@ pub fn translate_owned(
 // Mmap-based functions (zero-copy input from byte slice)
 // ============================================================================
 
-/// Maximum data size for single-allocation translate approach.
 /// Translate bytes from an mmap'd byte slice.
 /// Detects single-range translations (e.g., a-z to A-Z) and uses SIMD vectorized
 /// arithmetic (AVX2: 32 bytes/iter, SSE2: 16 bytes/iter) for those cases.
 /// Falls back to scalar 256-byte table lookup for general translations.
 ///
-/// For data >= 2MB: uses rayon parallel processing across multiple cores.
-/// For data <= 16MB: single allocation + single write_all (1 syscall).
-/// For data > 16MB: chunked approach to limit memory (N syscalls where N = data/4MB).
+/// Uses 8MB chunked output to avoid large munmap overhead while keeping
+/// write() syscalls infrequent. Single-threaded SIMD is memory-bandwidth
+/// optimal — rayon dispatch overhead exceeds any benefit.
 pub fn translate_mmap(
     set1: &[u8],
     set2: &[u8],
@@ -3921,7 +3857,8 @@ pub fn translate_mmap(
     translate_mmap_table(data, writer, &table)
 }
 
-/// SIMD range translate for mmap data, with rayon parallel processing.
+/// SIMD range translate for mmap data — single-threaded chunked approach.
+/// 8MB chunks avoid large munmap overhead while keeping syscalls infrequent.
 fn translate_mmap_range(
     data: &[u8],
     writer: &mut impl Write,
@@ -3929,26 +3866,7 @@ fn translate_mmap_range(
     hi: u8,
     offset: i8,
 ) -> io::Result<()> {
-    // Parallel path: split data into chunks, translate each in parallel.
-    // Guard against OOM: only allocate full buffer when under the limit.
-    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
-        let mut buf = alloc_uninit_vec(data.len());
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        // Process chunks in parallel: each thread writes to its slice of buf
-        data.par_chunks(chunk_size)
-            .zip(buf.par_chunks_mut(chunk_size))
-            .for_each(|(src_chunk, dst_chunk)| {
-                translate_range_simd(src_chunk, &mut dst_chunk[..src_chunk.len()], lo, hi, offset);
-            });
-
-        return writer.write_all(&buf);
-    }
-
-    // Chunked SIMD translate: 2MB buffer — fewer write() syscalls for large files.
-    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 2 * 1024 * 1024;
+    const CHUNK: usize = 8 * 1024 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut buf = alloc_uninit_vec(buf_size);
     for chunk in data.chunks(CHUNK) {
@@ -3958,8 +3876,9 @@ fn translate_mmap_range(
     Ok(())
 }
 
-/// SIMD range-to-constant translate for mmap data.
+/// SIMD range-to-constant translate for mmap data — single-threaded chunked.
 /// Uses blendv (5 SIMD ops/32 bytes) for range-to-constant patterns.
+/// 8MB chunks avoid large munmap overhead while keeping syscalls infrequent.
 fn translate_mmap_range_to_constant(
     data: &[u8],
     writer: &mut impl Write,
@@ -3967,32 +3886,7 @@ fn translate_mmap_range_to_constant(
     hi: u8,
     replacement: u8,
 ) -> io::Result<()> {
-    // For mmap data (read-only), copy to buffer and translate in-place.
-    // Guard against OOM: only allocate full buffer when under the limit.
-    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
-        let mut buf = alloc_uninit_vec(data.len());
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        // Copy + translate in parallel
-        data.par_chunks(chunk_size)
-            .zip(buf.par_chunks_mut(chunk_size))
-            .for_each(|(src_chunk, dst_chunk)| {
-                dst_chunk[..src_chunk.len()].copy_from_slice(src_chunk);
-                translate_range_to_constant_simd_inplace(
-                    &mut dst_chunk[..src_chunk.len()],
-                    lo,
-                    hi,
-                    replacement,
-                );
-            });
-
-        return writer.write_all(&buf);
-    }
-
-    // Chunked translate: 2MB buffer — fewer write() syscalls for large files.
-    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 2 * 1024 * 1024;
+    const CHUNK: usize = 8 * 1024 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut buf = alloc_uninit_vec(buf_size);
     for chunk in data.chunks(CHUNK) {
@@ -4003,27 +3897,9 @@ fn translate_mmap_range_to_constant(
     Ok(())
 }
 
-/// General table-lookup translate for mmap data, with rayon parallel processing.
+/// General table-lookup translate for mmap data — single-threaded chunked.
 fn translate_mmap_table(data: &[u8], writer: &mut impl Write, table: &[u8; 256]) -> io::Result<()> {
-    // Parallel path: split data into chunks, translate each in parallel.
-    // Guard against OOM: only allocate full buffer when under the limit.
-    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
-        let mut buf = alloc_uninit_vec(data.len());
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        data.par_chunks(chunk_size)
-            .zip(buf.par_chunks_mut(chunk_size))
-            .for_each(|(src_chunk, dst_chunk)| {
-                translate_to(src_chunk, &mut dst_chunk[..src_chunk.len()], table);
-            });
-
-        return writer.write_all(&buf);
-    }
-
-    // Chunked translate: 2MB buffer — fewer write() syscalls for large files.
-    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 2 * 1024 * 1024;
+    const CHUNK: usize = 8 * 1024 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut buf = alloc_uninit_vec(buf_size);
     for chunk in data.chunks(CHUNK) {
@@ -4036,9 +3912,7 @@ fn translate_mmap_table(data: &[u8], writer: &mut impl Write, table: &[u8; 256])
 /// Translate bytes in-place on a mutable buffer (e.g., MAP_PRIVATE mmap).
 /// Eliminates the output buffer allocation entirely — the kernel's COW
 /// semantics mean only modified pages are physically copied.
-///
-/// For data >= PARALLEL_THRESHOLD: rayon parallel in-place translate.
-/// Otherwise: single-threaded in-place translate.
+/// Single-threaded SIMD is memory-bandwidth optimal.
 pub fn translate_mmap_inplace(
     set1: &[u8],
     set2: &[u8],
@@ -4053,57 +3927,26 @@ pub fn translate_mmap_inplace(
         return writer.write_all(data);
     }
 
-    // Always translate in-place. With MAP_PRIVATE + MADV_HUGEPAGE, COW faults
-    // use 2MB pages — even for 10MB files only ~5 COW faults (~10µs), which is
-    // far cheaper than allocating a separate 10MB output buffer (~300µs).
-    // This eliminates the output buffer allocation + data copy entirely.
-
     // Try SIMD fast path for single-range constant-offset translations (e.g., a-z -> A-Z)
     if let Some((lo, hi, offset)) = detect_range_offset(&table) {
-        if data.len() >= PARALLEL_THRESHOLD {
-            let n_threads = rayon::current_num_threads().max(1);
-            let chunk_size = (data.len() / n_threads).max(32 * 1024);
-            data.par_chunks_mut(chunk_size)
-                .for_each(|chunk| translate_range_simd_inplace(chunk, lo, hi, offset));
-        } else {
-            translate_range_simd_inplace(data, lo, hi, offset);
-        }
+        translate_range_simd_inplace(data, lo, hi, offset);
         return writer.write_all(data);
     }
 
     // Try SIMD fast path for range-to-constant translations
     if let Some((lo, hi, replacement)) = detect_range_to_constant(&table) {
-        if data.len() >= PARALLEL_THRESHOLD {
-            let n_threads = rayon::current_num_threads().max(1);
-            let chunk_size = (data.len() / n_threads).max(32 * 1024);
-            data.par_chunks_mut(chunk_size).for_each(|chunk| {
-                translate_range_to_constant_simd_inplace(chunk, lo, hi, replacement)
-            });
-        } else {
-            translate_range_to_constant_simd_inplace(data, lo, hi, replacement);
-        }
+        translate_range_to_constant_simd_inplace(data, lo, hi, replacement);
         return writer.write_all(data);
     }
 
     // General case: in-place table lookup
-    if data.len() >= PARALLEL_THRESHOLD {
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-        data.par_chunks_mut(chunk_size)
-            .for_each(|chunk| translate_inplace(chunk, &table));
-    } else {
-        translate_inplace(data, &table);
-    }
+    translate_inplace(data, &table);
     writer.write_all(data)
 }
 
 /// Translate from read-only source to a separate output buffer, avoiding COW faults.
 /// Uses the appropriate SIMD path (range offset, range-to-constant, or general nibble).
-///
-/// For data >= PARALLEL_THRESHOLD: parallel chunked translate into full-size buffer.
-/// For smaller data: single full-size allocation + single write_all for minimum
-/// syscall overhead. At 10MB, the allocation is cheap and a single write() is faster
-/// than multiple 4MB chunked writes.
+/// 8MB chunked approach avoids large munmap overhead.
 fn translate_to_separate_buf(
     data: &[u8],
     table: &[u8; 256],
@@ -4116,44 +3959,7 @@ fn translate_to_separate_buf(
         None
     };
 
-    // Guard against OOM: only allocate full buffer when under the limit.
-    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
-        // Parallel path: full-size output buffer, parallel translate, single write.
-        let mut out_buf = alloc_uninit_vec(data.len());
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        if let Some((lo, hi, offset)) = range_info {
-            data.par_chunks(chunk_size)
-                .zip(out_buf.par_chunks_mut(chunk_size))
-                .for_each(|(src, dst)| {
-                    translate_range_simd(src, &mut dst[..src.len()], lo, hi, offset);
-                });
-        } else if let Some((lo, hi, replacement)) = const_info {
-            data.par_chunks(chunk_size)
-                .zip(out_buf.par_chunks_mut(chunk_size))
-                .for_each(|(src, dst)| {
-                    translate_range_to_constant_simd(
-                        src,
-                        &mut dst[..src.len()],
-                        lo,
-                        hi,
-                        replacement,
-                    );
-                });
-        } else {
-            data.par_chunks(chunk_size)
-                .zip(out_buf.par_chunks_mut(chunk_size))
-                .for_each(|(src, dst)| {
-                    translate_to(src, &mut dst[..src.len()], table);
-                });
-        }
-        return writer.write_all(&out_buf);
-    }
-
-    // Chunked translate: 2MB buffer — fewer write() syscalls for large files.
-    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 2 * 1024 * 1024;
+    const CHUNK: usize = 8 * 1024 * 1024;
     let buf_size = data.len().min(CHUNK);
     let mut out_buf = alloc_uninit_vec(buf_size);
     for chunk in data.chunks(CHUNK) {
@@ -4196,10 +4002,7 @@ pub fn translate_mmap_readonly(
 }
 
 /// Translate + squeeze from mmap'd byte slice.
-///
-/// For data >= 2MB: two-phase approach: parallel translate, then sequential squeeze.
-/// For data <= 16MB: single-pass translate+squeeze into one buffer, one write syscall.
-/// For data > 16MB: chunked approach to limit memory.
+/// Single-threaded translate + in-place squeeze for memory-bandwidth optimality.
 pub fn translate_squeeze_mmap(
     set1: &[u8],
     set2: &[u8],
@@ -4209,40 +4012,20 @@ pub fn translate_squeeze_mmap(
     let table = build_translate_table(set1, set2);
     let squeeze_set = build_member_set(set2);
 
-    // For large data: two-phase approach
-    // Phase 1: parallel translate into buffer
-    // Phase 2: sequential squeeze IN-PLACE on the translated buffer
-    //          (squeeze only removes bytes, never grows, so no second allocation needed)
-    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
-        // Phase 1: parallel translate
+    // Two-phase for data that fits in memory:
+    // Phase 1: translate into buffer
+    // Phase 2: squeeze in-place (squeeze only removes, never grows)
+    if data.len() <= SINGLE_ALLOC_LIMIT {
         let mut translated = alloc_uninit_vec(data.len());
         let range_info = detect_range_offset(&table);
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
 
         if let Some((lo, hi, offset)) = range_info {
-            data.par_chunks(chunk_size)
-                .zip(translated.par_chunks_mut(chunk_size))
-                .for_each(|(src_chunk, dst_chunk)| {
-                    translate_range_simd(
-                        src_chunk,
-                        &mut dst_chunk[..src_chunk.len()],
-                        lo,
-                        hi,
-                        offset,
-                    );
-                });
+            translate_range_simd(data, &mut translated, lo, hi, offset);
         } else {
-            data.par_chunks(chunk_size)
-                .zip(translated.par_chunks_mut(chunk_size))
-                .for_each(|(src_chunk, dst_chunk)| {
-                    translate_to(src_chunk, &mut dst_chunk[..src_chunk.len()], &table);
-                });
+            translate_to(data, &mut translated, &table);
         }
 
         // Phase 2: squeeze in-place on the translated buffer.
-        // Since squeeze only removes bytes (never grows), we can read ahead and
-        // compact into the same buffer, saving a full data.len() heap allocation.
         let mut last_squeezed: u16 = 256;
         let len = translated.len();
         let mut wp = 0;
@@ -4266,31 +4049,6 @@ pub fn translate_squeeze_mmap(
             }
         }
         return writer.write_all(&translated[..wp]);
-    }
-
-    // Single-allocation translate+squeeze for small data; chunked for large.
-    if data.len() <= SINGLE_ALLOC_LIMIT {
-        let mut buf = alloc_uninit_vec(data.len());
-        translate_to(data, &mut buf, &table);
-        let mut last_squeezed: u16 = 256;
-        let mut wp = 0;
-        unsafe {
-            let ptr = buf.as_mut_ptr();
-            for i in 0..data.len() {
-                let b = *ptr.add(i);
-                if is_member(&squeeze_set, b) {
-                    if last_squeezed == b as u16 {
-                        continue;
-                    }
-                    last_squeezed = b as u16;
-                } else {
-                    last_squeezed = 256;
-                }
-                *ptr.add(wp) = b;
-                wp += 1;
-            }
-        }
-        return writer.write_all(&buf[..wp]);
     }
 
     // OOM-safe chunked translate+squeeze for files > SINGLE_ALLOC_LIMIT.
@@ -4319,10 +4077,7 @@ pub fn translate_squeeze_mmap(
 }
 
 /// Delete from mmap'd byte slice.
-///
-/// For data >= 2MB: uses rayon parallel processing across multiple cores.
-/// For data <= 16MB: delete into one buffer, one write syscall.
-/// For data > 16MB: chunked approach to limit memory.
+/// Uses density heuristic for zero-copy writev vs chunked compact.
 pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) -> io::Result<()> {
     if delete_chars.len() == 1 {
         return delete_single_char_mmap(delete_chars[0], data, writer);
@@ -4357,34 +4112,8 @@ pub fn delete_mmap(delete_chars: &[u8], data: &[u8], writer: &mut impl Write) ->
         return delete_bitset_zerocopy(data, &member, writer);
     }
 
-    // Dense delete: parallel compact with writev (avoids scatter-gather copy).
-    // Guard against OOM: only allocate full buffer when under the limit.
-    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        let mut outbuf = alloc_uninit_vec(data.len());
-        let chunk_lens: Vec<usize> = data
-            .par_chunks(chunk_size)
-            .zip(outbuf.par_chunks_mut(chunk_size))
-            .map(|(src_chunk, dst_chunk)| delete_chunk_bitset_into(src_chunk, &member, dst_chunk))
-            .collect();
-
-        // Use writev to write each chunk at its original position, avoiding
-        // the O(N) scatter-gather memmove. With ~4 threads, that's 4 IoSlice
-        // entries — far below MAX_IOV.
-        let slices: Vec<std::io::IoSlice> = chunk_lens
-            .iter()
-            .enumerate()
-            .filter(|&(_, &len)| len > 0)
-            .map(|(i, &len)| std::io::IoSlice::new(&outbuf[i * chunk_size..i * chunk_size + len]))
-            .collect();
-        return write_ioslices(writer, &slices);
-    }
-
-    // Streaming compact: 2MB buffer — fewer write() syscalls for large files.
-    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const COMPACT_BUF: usize = 2 * 1024 * 1024;
+    // Streaming compact: 8MB buffer for fewer write() syscalls.
+    const COMPACT_BUF: usize = 8 * 1024 * 1024;
     let mut outbuf = alloc_uninit_vec(COMPACT_BUF);
     for chunk in data.chunks(COMPACT_BUF) {
         let out_pos = delete_chunk_bitset_into(chunk, &member, &mut outbuf);
@@ -4420,33 +4149,8 @@ fn delete_range_mmap(data: &[u8], writer: &mut impl Write, lo: u8, hi: u8) -> io
         return delete_range_mmap_zerocopy(data, writer, lo, hi);
     }
 
-    // Dense deletes: parallel compact with writev (avoids scatter-gather copy).
-    // Guard against OOM: only allocate full buffer when under the limit.
-    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        let mut outbuf = alloc_uninit_vec(data.len());
-        let chunk_lens: Vec<usize> = data
-            .par_chunks(chunk_size)
-            .zip(outbuf.par_chunks_mut(chunk_size))
-            .map(|(src_chunk, dst_chunk)| delete_range_chunk(src_chunk, dst_chunk, lo, hi))
-            .collect();
-
-        // Use writev to write each chunk at its original position, avoiding
-        // the O(N) scatter-gather memmove.
-        let slices: Vec<std::io::IoSlice> = chunk_lens
-            .iter()
-            .enumerate()
-            .filter(|&(_, &len)| len > 0)
-            .map(|(i, &len)| std::io::IoSlice::new(&outbuf[i * chunk_size..i * chunk_size + len]))
-            .collect();
-        return write_ioslices(writer, &slices);
-    }
-
-    // Streaming compact: use 2MB buffer instead of full data.len() buffer.
-    // Also used as OOM-safe fallback for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 2 * 1024 * 1024;
+    // Streaming compact: 8MB buffer for fewer write() syscalls.
+    const CHUNK: usize = 8 * 1024 * 1024;
     let mut outbuf = alloc_uninit_vec(CHUNK);
     for chunk in data.chunks(CHUNK) {
         let kept = delete_range_chunk(chunk, &mut outbuf[..chunk.len()], lo, hi);
@@ -4999,10 +4703,7 @@ pub fn delete_squeeze_mmap(
 }
 
 /// Squeeze from mmap'd byte slice.
-///
-/// For data >= 2MB: uses rayon parallel processing with boundary fixup.
-/// For data <= 16MB: squeeze into one buffer, one write syscall.
-/// For data > 16MB: chunked approach to limit memory.
+/// Single-threaded — squeeze is inherently sequential (boundary state).
 pub fn squeeze_mmap(squeeze_chars: &[u8], data: &[u8], writer: &mut impl Write) -> io::Result<()> {
     if squeeze_chars.len() == 1 {
         return squeeze_single_mmap(squeeze_chars[0], data, writer);
@@ -5015,43 +4716,6 @@ pub fn squeeze_mmap(squeeze_chars: &[u8], data: &[u8], writer: &mut impl Write) 
     }
 
     let member = build_member_set(squeeze_chars);
-
-    // Parallel path: squeeze each chunk independently, then fix boundaries
-    if data.len() >= PARALLEL_THRESHOLD && data.len() <= SINGLE_ALLOC_LIMIT {
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        let results: Vec<Vec<u8>> = data
-            .par_chunks(chunk_size)
-            .map(|chunk| squeeze_chunk_bitset(chunk, &member))
-            .collect();
-
-        // Build IoSlice list, fixing boundaries: if chunk N ends with byte B
-        // and chunk N+1 starts with same byte B, and B is in squeeze set,
-        // skip the first byte(s) of chunk N+1 that equal B.
-        // Collect slices for writev to minimize syscalls.
-        let mut slices: Vec<std::io::IoSlice> = Vec::with_capacity(results.len());
-        for (idx, result) in results.iter().enumerate() {
-            if result.is_empty() {
-                continue;
-            }
-            if idx > 0 {
-                // Check boundary: does previous chunk end with same squeezable byte?
-                if let Some(&prev_last) = results[..idx].iter().rev().find_map(|r| r.last()) {
-                    if is_member(&member, prev_last) {
-                        // Skip leading bytes in this chunk that equal prev_last
-                        let skip = result.iter().take_while(|&&b| b == prev_last).count();
-                        if skip < result.len() {
-                            slices.push(std::io::IoSlice::new(&result[skip..]));
-                        }
-                        continue;
-                    }
-                }
-            }
-            slices.push(std::io::IoSlice::new(result));
-        }
-        return write_ioslices(writer, &slices);
-    }
 
     if data.len() <= SINGLE_ALLOC_LIMIT {
         // Single-allocation squeeze: full-size buffer, single write_all.
@@ -5112,81 +4776,11 @@ pub fn squeeze_mmap(squeeze_chars: &[u8], data: &[u8], writer: &mut impl Write) 
     Ok(())
 }
 
-/// Squeeze a single chunk using bitset membership. Returns squeezed output.
-fn squeeze_chunk_bitset(chunk: &[u8], member: &[u8; 32]) -> Vec<u8> {
-    let len = chunk.len();
-    let mut out = Vec::with_capacity(len);
-    let mut last_squeezed: u16 = 256;
-    let mut i = 0;
-
-    unsafe {
-        out.set_len(len);
-        let inp = chunk.as_ptr();
-        let outp: *mut u8 = out.as_mut_ptr();
-        let mut wp = 0;
-
-        while i < len {
-            let b = *inp.add(i);
-            if is_member(member, b) {
-                if last_squeezed != b as u16 {
-                    *outp.add(wp) = b;
-                    wp += 1;
-                    last_squeezed = b as u16;
-                }
-                i += 1;
-                while i < len && *inp.add(i) == b {
-                    i += 1;
-                }
-            } else {
-                last_squeezed = 256;
-                *outp.add(wp) = b;
-                wp += 1;
-                i += 1;
-            }
-        }
-        out.set_len(wp);
-    }
-    out
-}
-
 fn squeeze_multi_mmap<const N: usize>(
     chars: &[u8],
     data: &[u8],
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    // Parallel path for large data: squeeze each chunk, fix boundaries with writev
-    if data.len() >= PARALLEL_THRESHOLD {
-        let member = build_member_set(chars);
-        let n_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (data.len() / n_threads).max(32 * 1024);
-
-        let results: Vec<Vec<u8>> = data
-            .par_chunks(chunk_size)
-            .map(|chunk| squeeze_chunk_bitset(chunk, &member))
-            .collect();
-
-        // Build IoSlice list, fixing boundaries
-        let mut slices: Vec<std::io::IoSlice> = Vec::with_capacity(results.len());
-        for (idx, result) in results.iter().enumerate() {
-            if result.is_empty() {
-                continue;
-            }
-            if idx > 0 {
-                if let Some(&prev_last) = results[..idx].iter().rev().find_map(|r| r.last()) {
-                    if is_member(&member, prev_last) {
-                        let skip = result.iter().take_while(|&&b| b == prev_last).count();
-                        if skip < result.len() {
-                            slices.push(std::io::IoSlice::new(&result[skip..]));
-                        }
-                        continue;
-                    }
-                }
-            }
-            slices.push(std::io::IoSlice::new(result));
-        }
-        return write_ioslices(writer, &slices);
-    }
-
     // Zero-copy writev: build IoSlice entries pointing directly into
     // the original mmap'd data, keeping one byte per run of squeezable chars.
     // Each IoSlice points at the gap between squeeze points (inclusive of

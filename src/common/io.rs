@@ -502,6 +502,14 @@ pub fn try_mmap_stdin_with_hints(min_size: u64, sequential: bool) -> Option<Mmap
     #[cfg(target_os = "linux")]
     if let Some(ref m) = mmap {
         unsafe {
+            // HUGEPAGE first (before any page faults trigger 4KB allocation)
+            if m.len() >= 2 * 1024 * 1024 {
+                libc::madvise(
+                    m.as_ptr() as *mut libc::c_void,
+                    m.len(),
+                    libc::MADV_HUGEPAGE,
+                );
+            }
             if sequential {
                 libc::madvise(
                     m.as_ptr() as *mut libc::c_void,
@@ -509,12 +517,17 @@ pub fn try_mmap_stdin_with_hints(min_size: u64, sequential: bool) -> Option<Mmap
                     libc::MADV_SEQUENTIAL,
                 );
             }
-            if m.len() >= 2 * 1024 * 1024 {
-                libc::madvise(
-                    m.as_ptr() as *mut libc::c_void,
-                    m.len(),
-                    libc::MADV_HUGEPAGE,
-                );
+            // MADV_POPULATE_READ (Linux 5.14+, value 22) — prefault all pages
+            // to avoid per-page faults during the hot loop.
+            if m.len() >= 4 * 1024 * 1024 {
+                if libc::madvise(m.as_ptr() as *mut libc::c_void, m.len(), 22) != 0 {
+                    // Fallback for older kernels
+                    libc::madvise(
+                        m.as_ptr() as *mut libc::c_void,
+                        m.len(),
+                        libc::MADV_WILLNEED,
+                    );
+                }
             }
         }
     }
