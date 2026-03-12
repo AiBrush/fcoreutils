@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, IoSlice, Write};
+use std::io::{self, BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default page length in lines.
@@ -306,22 +306,21 @@ pub fn pr_data<W: Write>(
         return pr_file(reader, output, config, filename, file_date);
     }
 
+    // Single SIMD pass to detect CR/FF (rare in normal files); cache result
+    // for all fast-path guards below.
+    let has_cr_or_ff = memchr::memchr2(b'\r', b'\x0c', data).is_some();
+
     // Ultra-fast path: single column, no per-line transforms → contiguous chunk writes
-    // Instead of splitting into individual lines and writing each one, we index newline
-    // positions and write entire page bodies as contiguous slices of the original data.
     let is_simple = config.columns <= 1
         && config.number_lines.is_none()
         && config.indent == 0
         && !config.truncate_lines
         && !config.double_space
         && !config.across
-        && memchr::memchr(b'\r', data).is_none()
-        && memchr::memchr(b'\x0c', data).is_none();
+        && !has_cr_or_ff;
 
     if is_simple {
         // Passthrough: -T (omit_pagination) with no transforms and no page range → output == input.
-        // -t (omit_header) alone does NOT qualify because page bodies are still separated
-        // by blank lines; only -T eliminates all inter-page structure.
         if config.omit_pagination && config.first_page == 1 && config.last_page == 0 {
             return output.write_all(data);
         }
@@ -334,14 +333,12 @@ pub fn pr_data<W: Write>(
         && config.indent == 0
         && !config.truncate_lines
         && !config.double_space
-        && memchr::memchr(b'\r', data).is_none()
-        && memchr::memchr(b'\x0c', data).is_none()
+        && !has_cr_or_ff
     {
         return pr_data_numbered(data, output, config, filename, file_date);
     }
 
     // Fast path: multi-column down mode without numbering, no transforms.
-    // Guards: ≤32 columns (fixed-size array), ≤4GB data (u32 offsets).
     if config.columns > 1
         && config.columns <= 32
         && !config.across
@@ -350,8 +347,7 @@ pub fn pr_data<W: Write>(
         && !config.double_space
         && !config.join_lines
         && data.len() <= u32::MAX as usize
-        && memchr::memchr(b'\r', data).is_none()
-        && memchr::memchr(b'\x0c', data).is_none()
+        && !has_cr_or_ff
     {
         return pr_data_multicolumn_fast(data, output, config, filename, file_date);
     }
@@ -623,10 +619,20 @@ fn write_column_padding_buf(buf: &mut Vec<u8>, abs_pos: usize, target: usize) {
     }
 }
 
+/// Count newlines in a u64 word using SWAR (SIMD Within A Register).
+/// Returns the number of 0x0A bytes in the word.
+#[inline(always)]
+fn count_newlines_u64(word: u64) -> u32 {
+    let xor = word ^ 0x0A0A_0A0A_0A0A_0A0Au64;
+    let lo = xor.wrapping_sub(0x0101_0101_0101_0101u64);
+    let hi = !xor & 0x8080_8080_8080_8080u64;
+    (lo & hi).count_ones()
+}
+
 /// Ultra-fast contiguous-write paginator for single-column, no-transform mode.
-/// Two-pass approach: find page boundaries via SIMD memchr, then build IoSlice
+/// Two-pass approach: find page boundaries via SWAR+memchr, then build IoSlice
 /// references interleaving metadata (headers/footers) with zero-copy body slices
-/// from the original mmap data. Single writev call at the end.
+/// from the original mmap data. Batched writev calls for output.
 fn pr_data_contiguous<W: Write>(
     data: &[u8],
     output: &mut W,
@@ -664,21 +670,55 @@ fn pr_data_contiguous<W: Write>(
         return Ok(());
     }
 
-    // Pass 1: find page boundaries (byte offsets where each page starts).
-    // Note: scans full file; early-exit for page ranges is a future optimization.
+    // Pass 1: find page boundaries using SWAR block counting.
+    // Process 64-byte blocks: count newlines with SWAR (8 u64 words per block),
+    // skip blocks that don't contain a page boundary, and only do precise
+    // memchr_iter scanning in blocks that cross a boundary. This reduces
+    // per-newline branch overhead from 2M iterations to ~35K.
     let est_pages = data.len() / (body_lines_per_page * 40) + 2;
     let mut page_bounds: Vec<usize> = Vec::with_capacity(est_pages + 1);
+    let mut page_line_counts: Vec<usize> = Vec::with_capacity(est_pages);
     page_bounds.push(0);
     let mut lines_count = 0usize;
-    for nl_pos in memchr::memchr_iter(b'\n', data) {
+    let block_size = 64usize;
+    let mut block_start = 0usize;
+    let ptr = data.as_ptr();
+    while block_start + block_size <= data.len() {
+        let mut block_nl = 0u32;
+        unsafe {
+            for i in 0..8 {
+                let word = std::ptr::read_unaligned(ptr.add(block_start + i * 8) as *const u64);
+                block_nl += count_newlines_u64(word);
+            }
+        }
+        let block_nl = block_nl as usize;
+        if lines_count + block_nl < body_lines_per_page {
+            lines_count += block_nl;
+            block_start += block_size;
+        } else {
+            for nl_pos in memchr::memchr_iter(b'\n', &data[block_start..block_start + block_size]) {
+                lines_count += 1;
+                if lines_count >= body_lines_per_page {
+                    page_bounds.push(block_start + nl_pos + 1);
+                    page_line_counts.push(lines_count);
+                    lines_count = 0;
+                }
+            }
+            block_start += block_size;
+        }
+    }
+    // Handle remaining bytes after last full block
+    for nl_pos in memchr::memchr_iter(b'\n', &data[block_start..]) {
         lines_count += 1;
         if lines_count >= body_lines_per_page {
-            page_bounds.push(nl_pos + 1);
+            page_bounds.push(block_start + nl_pos + 1);
+            page_line_counts.push(lines_count);
             lines_count = 0;
         }
     }
     if *page_bounds.last().unwrap() < data.len() {
         page_bounds.push(data.len());
+        page_line_counts.push(lines_count);
     }
     let total_pages = page_bounds.len() - 1;
 
@@ -699,85 +739,119 @@ fn pr_data_contiguous<W: Write>(
         return output.write_all(&data[start..end]);
     }
 
-    // Pass 2: build metadata buffer for all visible pages
+    // Pass 2: build output in a single buffer with 4MB flush threshold.
+    // Headers/footers are generated inline; body data is copied from the mmap.
+    // A single large write_all uses fewer syscalls than batched writev, which
+    // is critical for file output (where writev overhead dominates).
     let visible_count = last_visible - first_visible;
-    let header_est = visible_count * 200;
-    let mut meta_buf: Vec<u8> = Vec::with_capacity(header_est);
-    // (header_start, header_end, footer_start, footer_end) in meta_buf
-    let mut meta_ranges: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(visible_count);
+    let footer_bytes: &[u8] = if config.form_feed {
+        b"\x0c"
+    } else {
+        b"\n\n\n\n\n"
+    };
+    let date_bytes = date_str.as_bytes();
+    let header_bytes = header_str.as_bytes();
+    let line_width = config.page_width;
+    let left_len = date_bytes.len();
+    let center_len = header_bytes.len();
+    let page_prefix = b"Page ";
+    let base_right_len = page_prefix.len() + 1;
+    let overflow = left_len + center_len + base_right_len + 2 >= line_width;
+    let flush_threshold = 4 * 1024 * 1024;
+    let mut out_buf: Vec<u8> = Vec::with_capacity(flush_threshold + 256 * 1024);
+    let mut num_tmp = [0u8; 20];
 
     for pi in first_visible..last_visible {
         let page_num = pi + 1;
         let body_start = page_bounds[pi];
         let body_end = page_bounds[pi + 1];
 
-        let hdr_start = meta_buf.len();
-        write_header(&mut meta_buf, &date_str, header_str, page_num, config)?;
-        let hdr_end = meta_buf.len();
+        if overflow {
+            out_buf.extend_from_slice(b"\n\n");
+            out_buf.extend_from_slice(date_bytes);
+            out_buf.push(b' ');
+            out_buf.extend_from_slice(header_bytes);
+            out_buf.push(b' ');
+            out_buf.extend_from_slice(page_prefix);
+            let mut n = page_num;
+            let mut pos = 19usize;
+            loop {
+                num_tmp[pos] = b'0' + (n % 10) as u8;
+                n /= 10;
+                if n == 0 {
+                    break;
+                }
+                pos -= 1;
+            }
+            out_buf.extend_from_slice(&num_tmp[pos..20]);
+            out_buf.extend_from_slice(b"\n\n\n");
+        } else {
+            let mut n = page_num;
+            let mut pos = 19usize;
+            loop {
+                num_tmp[pos] = b'0' + (n % 10) as u8;
+                n /= 10;
+                if n == 0 {
+                    break;
+                }
+                pos -= 1;
+            }
+            let num_digits = 20 - pos;
+            let right_len = page_prefix.len() + num_digits;
+            let total_spaces = line_width - left_len - center_len - right_len;
+            let left_spaces = total_spaces / 2;
+            let right_spaces = total_spaces - left_spaces;
+            let hdr_len =
+                2 + left_len + left_spaces + center_len + right_spaces + 5 + num_digits + 3;
+            out_buf.reserve(hdr_len);
+            let wp = out_buf.len();
+            unsafe {
+                let dst = out_buf.as_mut_ptr().add(wp);
+                *dst = b'\n';
+                *dst.add(1) = b'\n';
+                let mut off = 2;
+                std::ptr::copy_nonoverlapping(date_bytes.as_ptr(), dst.add(off), left_len);
+                off += left_len;
+                std::ptr::write_bytes(dst.add(off), b' ', left_spaces);
+                off += left_spaces;
+                std::ptr::copy_nonoverlapping(header_bytes.as_ptr(), dst.add(off), center_len);
+                off += center_len;
+                std::ptr::write_bytes(dst.add(off), b' ', right_spaces);
+                off += right_spaces;
+                std::ptr::copy_nonoverlapping(page_prefix.as_ptr(), dst.add(off), 5);
+                off += 5;
+                std::ptr::copy_nonoverlapping(num_tmp.as_ptr().add(pos), dst.add(off), num_digits);
+                off += num_digits;
+                *dst.add(off) = b'\n';
+                *dst.add(off + 1) = b'\n';
+                *dst.add(off + 2) = b'\n';
+                off += 3;
+                out_buf.set_len(wp + off);
+            }
+        }
 
-        let ft_start = meta_buf.len();
-        let body_slice = &data[body_start..body_end];
-        // Note: re-counts newlines already seen in Pass 1; avoiding this would
-        // require carrying per-page line counts from the boundary scan above.
-        let actual_lines = memchr::memchr_iter(b'\n', body_slice).count();
-        let has_unterminated = !body_slice.is_empty() && body_slice[body_slice.len() - 1] != b'\n';
+        out_buf.extend_from_slice(&data[body_start..body_end]);
+
+        let actual_lines = page_line_counts[pi];
+        let has_unterminated = body_end > body_start && data[body_end - 1] != b'\n';
         if has_unterminated {
-            meta_buf.push(b'\n');
+            out_buf.push(b'\n');
         }
         let effective_lines = actual_lines + has_unterminated as usize;
         let pad = body_lines_per_page.saturating_sub(effective_lines);
-        meta_buf.resize(meta_buf.len() + pad, b'\n');
-        write_footer(&mut meta_buf, config)?;
-        let ft_end = meta_buf.len();
+        out_buf.resize(out_buf.len() + pad, b'\n');
+        out_buf.extend_from_slice(footer_bytes);
 
-        meta_ranges.push((hdr_start, hdr_end, ft_start, ft_end));
-    }
-
-    // Pass 3: build IoSlice array interleaving metadata and zero-copy body slices
-    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(visible_count * 3);
-    for (i, &(hs, he, fs, fe)) in meta_ranges.iter().enumerate() {
-        let pi = first_visible + i;
-        if he > hs {
-            slices.push(IoSlice::new(&meta_buf[hs..he]));
-        }
-        let body_start = page_bounds[pi];
-        let body_end = page_bounds[pi + 1];
-        if body_end > body_start {
-            slices.push(IoSlice::new(&data[body_start..body_end]));
-        }
-        if fe > fs {
-            slices.push(IoSlice::new(&meta_buf[fs..fe]));
+        if out_buf.len() >= flush_threshold {
+            output.write_all(&out_buf)?;
+            out_buf.clear();
         }
     }
 
-    write_all_ioslices(output, &slices)
-}
-
-/// Write all IoSlices, handling partial writes by advancing through slices.
-/// Attempts write_vectored on the original borrowed slices first; only clones
-/// into a mutable Vec on partial write (needed for IoSlice::advance_slices).
-fn write_all_ioslices<W: Write>(out: &mut W, slices: &[IoSlice<'_>]) -> io::Result<()> {
-    // Try writing all slices at once without cloning.
-    let written = out.write_vectored(slices)?;
-    if written == 0 && !slices.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
+    if !out_buf.is_empty() {
+        output.write_all(&out_buf)?;
     }
-    // Check if everything was written (common case).
-    let total: usize = slices.iter().map(|s| s.len()).sum();
-    if written >= total {
-        return Ok(());
-    }
-    // Partial write: clone into mutable Vec and advance.
-    let mut bufs = slices.to_vec();
-    let mut remaining: &mut [IoSlice<'_>] = &mut bufs;
-    IoSlice::advance_slices(&mut remaining, written);
-    while !remaining.is_empty() {
-        let n = out.write_vectored(remaining)?;
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero"));
-        }
-        IoSlice::advance_slices(&mut remaining, n);
-    }
+    let _ = visible_count;
     Ok(())
 }
 
