@@ -4,8 +4,7 @@ use std::io::{self, Read, Write};
 /// Linux UIO_MAXIOV is 1024; we use that as our batch limit.
 const MAX_IOV: usize = 1024;
 
-/// Stream buffer: 2MB — large enough to amortize syscall overhead while staying
-/// in L2 cache. Reduces write() syscalls 4x vs 512KB for streaming paths.
+/// Stream buffer: 2MB — amortises write() syscall overhead (4x fewer calls vs 512KB).
 const STREAM_BUF: usize = 2 * 1024 * 1024;
 
 /// Maximum data size for a single full-size output allocation.
