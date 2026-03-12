@@ -1,0 +1,14 @@
+; Linux x86_64 syscall numbers
+%define SYS_WRITE       1
+%define SYS_STAT        4
+%define SYS_LSTAT       6
+%define SYS_LINK       86
+%define SYS_UNLINK     87
+%define SYS_SYMLINK    88
+%define SYS_EXIT       60
+%define SYS_RT_SIGPROCMASK 14
+
+; File descriptors
+%define STDIN           0
+%define STDOUT          1
+%define STDERR          2
