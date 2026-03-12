@@ -619,14 +619,22 @@ fn write_column_padding_buf(buf: &mut Vec<u8>, abs_pos: usize, target: usize) {
     }
 }
 
-/// Count newlines in a u64 word using SWAR (SIMD Within A Register).
-/// Returns the number of 0x0A bytes in the word.
+/// Count newlines in a u64 word.
+/// Uses direct byte comparison — LLVM optimizes this to SIMD on x86-64.
+/// The classic SWAR subtract-and-mask formula has a borrow-propagation bug:
+/// when byte[i]=0x0A and byte[i+1]=0x0B, the borrow from the zero-detection
+/// subtraction falsely sets the indicator for byte[i+1], overcounting.
 #[inline(always)]
 fn count_newlines_u64(word: u64) -> u32 {
-    let xor = word ^ 0x0A0A_0A0A_0A0A_0A0Au64;
-    let lo = xor.wrapping_sub(0x0101_0101_0101_0101u64);
-    let hi = !xor & 0x8080_8080_8080_8080u64;
-    (lo & hi).count_ones()
+    let b = word.to_ne_bytes();
+    (b[0] == b'\n') as u32
+        + (b[1] == b'\n') as u32
+        + (b[2] == b'\n') as u32
+        + (b[3] == b'\n') as u32
+        + (b[4] == b'\n') as u32
+        + (b[5] == b'\n') as u32
+        + (b[6] == b'\n') as u32
+        + (b[7] == b'\n') as u32
 }
 
 /// Ultra-fast contiguous-write paginator for single-column, no-transform mode.
@@ -797,8 +805,14 @@ fn pr_data_contiguous<W: Write>(
             let total_spaces = line_width - left_len - center_len - right_len;
             let left_spaces = total_spaces / 2;
             let right_spaces = total_spaces - left_spaces;
-            let hdr_len =
-                2 + left_len + left_spaces + center_len + right_spaces + 5 + num_digits + 3;
+            let hdr_len = 2
+                + left_len
+                + left_spaces
+                + center_len
+                + right_spaces
+                + page_prefix.len()
+                + num_digits
+                + 3;
             out_buf.reserve(hdr_len);
             let wp = out_buf.len();
             unsafe {
@@ -814,8 +828,12 @@ fn pr_data_contiguous<W: Write>(
                 off += center_len;
                 std::ptr::write_bytes(dst.add(off), b' ', right_spaces);
                 off += right_spaces;
-                std::ptr::copy_nonoverlapping(page_prefix.as_ptr(), dst.add(off), 5);
-                off += 5;
+                std::ptr::copy_nonoverlapping(
+                    page_prefix.as_ptr(),
+                    dst.add(off),
+                    page_prefix.len(),
+                );
+                off += page_prefix.len();
                 std::ptr::copy_nonoverlapping(num_tmp.as_ptr().add(pos), dst.add(off), num_digits);
                 off += num_digits;
                 *dst.add(off) = b'\n';
