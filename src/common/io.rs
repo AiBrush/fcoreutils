@@ -518,6 +518,7 @@ pub fn try_mmap_stdin_with_hints(min_size: u64, sequential: bool) -> Option<Mmap
                 );
             }
             // Async readahead hint — triggers kernel prefetch without blocking.
+            // Only for >= 4MB: smaller regions are covered by sequential readahead.
             // MADV_POPULATE_READ (synchronous prefault) was considered but adds
             // ~10ms startup latency for 100MB (~20% of total tr time), which
             // exceeds the benefit of avoiding per-page minor faults.

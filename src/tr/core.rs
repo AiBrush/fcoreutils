@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 /// Linux UIO_MAXIOV is 1024; we use that as our batch limit.
 const MAX_IOV: usize = 1024;
 
-/// Stream buffer: 2MB — amortises write() syscall overhead (4x fewer calls vs 512KB).
+/// Stream buffer: 2MB — amortises read()/write() syscall overhead (4x fewer calls vs 512KB).
 const STREAM_BUF: usize = 2 * 1024 * 1024;
 
 /// Maximum data size for a single full-size output allocation.
@@ -4020,6 +4020,8 @@ pub fn translate_squeeze_mmap(
 
         if let Some((lo, hi, offset)) = range_info {
             translate_range_simd(data, &mut translated, lo, hi, offset);
+        } else if let Some((lo, hi, repl)) = detect_range_to_constant(&table) {
+            translate_range_to_constant_simd(data, &mut translated, lo, hi, repl);
         } else {
             translate_to(data, &mut translated, &table);
         }
