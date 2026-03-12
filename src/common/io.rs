@@ -502,6 +502,14 @@ pub fn try_mmap_stdin_with_hints(min_size: u64, sequential: bool) -> Option<Mmap
     #[cfg(target_os = "linux")]
     if let Some(ref m) = mmap {
         unsafe {
+            // HUGEPAGE first (before any page faults trigger 4KB allocation)
+            if m.len() >= 2 * 1024 * 1024 {
+                libc::madvise(
+                    m.as_ptr() as *mut libc::c_void,
+                    m.len(),
+                    libc::MADV_HUGEPAGE,
+                );
+            }
             if sequential {
                 libc::madvise(
                     m.as_ptr() as *mut libc::c_void,
@@ -509,11 +517,16 @@ pub fn try_mmap_stdin_with_hints(min_size: u64, sequential: bool) -> Option<Mmap
                     libc::MADV_SEQUENTIAL,
                 );
             }
-            if m.len() >= 2 * 1024 * 1024 {
+            // Async readahead hint — triggers kernel prefetch without blocking.
+            // Only for >= 4MB: smaller regions are covered by sequential readahead.
+            // MADV_POPULATE_READ (synchronous prefault) was considered but adds
+            // ~10ms startup latency for 100MB (~20% of total tr time), which
+            // exceeds the benefit of avoiding per-page minor faults.
+            if m.len() >= 4 * 1024 * 1024 {
                 libc::madvise(
                     m.as_ptr() as *mut libc::c_void,
                     m.len(),
-                    libc::MADV_HUGEPAGE,
+                    libc::MADV_WILLNEED,
                 );
             }
         }
