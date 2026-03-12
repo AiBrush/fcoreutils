@@ -553,7 +553,7 @@ def check_tool_specific():
         tf.write("first\n")
         tmp = tf.name
     try:
-        rc, out, err = run([BIN, "-a", tmp], stdin_data=b"second\n")
+        _rc, _out, _err = run([BIN, "-a", tmp], stdin_data=b"second\n")
         with open(tmp, 'rb') as f:
             content = f.read()
         report_result(content == b"first\nsecond\n", "tee: -a append mode works")
@@ -565,7 +565,7 @@ def check_tool_specific():
          tempfile.NamedTemporaryFile(delete=False) as tf2:
         tmp1, tmp2 = tf1.name, tf2.name
     try:
-        rc, out, err = run([BIN, tmp1, tmp2], stdin_data=b"multi\n")
+        _rc, _out, _err = run([BIN, tmp1, tmp2], stdin_data=b"multi\n")
         with open(tmp1, 'rb') as f:
             c1 = f.read()
         with open(tmp2, 'rb') as f:
