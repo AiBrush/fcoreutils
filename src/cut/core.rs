@@ -1,19 +1,19 @@
 use memchr::memchr_iter;
 use std::io::{self, BufRead, IoSlice, Write};
 
-/// Minimum file size for parallel processing (32MB).
+/// Minimum file size for parallel processing (4MB).
 /// Files above this threshold use rayon parallel chunked processing.
-/// 32MB balances rayon init overhead + buffer allocation against parallel benefits.
-/// For 10MB files, sequential is faster due to thread coordination + memory overhead.
-const PARALLEL_THRESHOLD: usize = 32 * 1024 * 1024;
+/// Lowered from 32MB to enable parallelism on benchmark-sized (~7MB) inputs.
+/// Rayon pre-init in main() eliminates the 300-500us cold-start penalty.
+const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// Max iovec entries per writev call (Linux default).
 const MAX_IOV: usize = 1024;
 
-/// Input chunk size for sequential processing. 4MB reduces write_all syscalls
-/// (~3 calls for 10MB vs ~40 at 256KB). May exceed L2/L3 on smaller cores;
-/// the primary benefit is syscall reduction rather than cache residency.
-const SEQ_CHUNK: usize = 4 * 1024 * 1024;
+/// Input chunk size for sequential processing. 8MB ensures benchmark-sized
+/// (~7MB) inputs process in a single pass, avoiding chunk-boundary overhead.
+/// Reduces write_all syscalls (~2 calls for 10MB vs ~40 at 256KB).
+const SEQ_CHUNK: usize = 8 * 1024 * 1024;
 
 /// Process data in newline-aligned chunks, writing each chunk's output immediately.
 /// Avoids allocating a full-size output buffer (e.g. 12MB for 11MB input).
@@ -23,6 +23,15 @@ fn process_chunked(
     out: &mut impl Write,
     mut process_fn: impl FnMut(&[u8], &mut Vec<u8>),
 ) -> io::Result<()> {
+    // Fast path: data fits in one chunk, skip chunk-boundary scanning entirely.
+    if data.len() <= SEQ_CHUNK {
+        let mut buf = Vec::with_capacity(data.len() + 256);
+        process_fn(data, &mut buf);
+        if !buf.is_empty() {
+            out.write_all(&buf)?;
+        }
+        return Ok(());
+    }
     let mut buf = Vec::with_capacity(SEQ_CHUNK * 2);
     let mut start = 0;
     while start < data.len() {
@@ -369,7 +378,14 @@ fn multi_select_chunk(
                 mask |= 1u64 << (f - 1);
             }
         }
-        multi_select_twolevel(data, delim, line_delim, mask, max_field, suppress, buf);
+        // For small max_field, use single-pass memchr2 bitmask approach:
+        // scans for both delimiter and newline simultaneously, avoiding
+        // per-line iterator creation overhead on short lines.
+        if max_field <= 8 {
+            multi_select_chunk_bitmask(data, delim, line_delim, mask, max_field, suppress, buf);
+        } else {
+            multi_select_twolevel(data, delim, line_delim, mask, max_field, suppress, buf);
+        }
         return;
     }
 
@@ -394,10 +410,10 @@ fn multi_select_chunk(
     }
 }
 
-/// Per-line multi-field extraction with early termination after max_field.
-/// For `-f1,3,5` on 20-field CSV, this scans only 5 delimiters per line
-/// instead of all 20, reducing per-hit overhead by ~75%.
-#[allow(dead_code)]
+/// Single-pass memchr2 multi-field extraction with bitmask field selection.
+/// Scans for both delimiter and newline simultaneously, avoiding per-line
+/// memchr_iter creation overhead on short lines (~200K lines x ~35 bytes).
+/// Best for max_field <= 8 where most fields are selected.
 fn multi_select_chunk_bitmask(
     data: &[u8],
     delim: u8,
@@ -1084,15 +1100,12 @@ fn process_single_field(
 ) -> io::Result<()> {
     let target_idx = target - 1;
 
-    // For single-field extraction, parallelize at 16MB+ to match PARALLEL_THRESHOLD.
-    const FIELD_PARALLEL_MIN: usize = 16 * 1024 * 1024;
-
     if delim != line_delim {
         // Field 1 fast path: two-level scan (outer newline + inner first-delim).
         // For field 1, only needs to find the first delimiter per line.
         // Lines without delimiter are tracked as contiguous runs for bulk copy.
         if target_idx == 0 && !suppress {
-            if data.len() >= FIELD_PARALLEL_MIN {
+            if data.len() >= PARALLEL_THRESHOLD {
                 return single_field1_parallel(data, delim, line_delim, out);
             }
             return process_chunked(data, line_delim, out, |chunk, buf| {
@@ -1103,7 +1116,7 @@ fn process_single_field(
         // Two-level approach for field N: outer newline scan + inner delim scan
         // with early exit at target_idx. Faster than memchr2 single-pass because
         // we only scan delimiters up to target_idx per line (not all of them).
-        if data.len() >= FIELD_PARALLEL_MIN {
+        if data.len() >= PARALLEL_THRESHOLD {
             let chunks = split_for_scope(data, line_delim);
             let n = chunks.len();
             let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
@@ -1134,7 +1147,7 @@ fn process_single_field(
     }
 
     // Fallback for delim == line_delim: nested loop approach
-    if data.len() >= FIELD_PARALLEL_MIN {
+    if data.len() >= PARALLEL_THRESHOLD {
         let chunks = split_for_scope(data, line_delim);
         let n = chunks.len();
         let mut results: Vec<Vec<u8>> = (0..n).map(|_| Vec::new()).collect();
@@ -2534,14 +2547,13 @@ fn process_bytes_from_start(
     line_delim: u8,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    // For small data (< PARALLEL_THRESHOLD): check if all lines fit for zero-copy passthrough.
-    // The sequential scan + write_all is competitive with per-line processing for small data.
-    //
-    // For large data (>= PARALLEL_THRESHOLD): skip the all_fit scan entirely.
-    // The scan is sequential (~1.7ms for 10MB at memchr speed) while parallel per-line
-    // processing is much faster (~0.5ms for 10MB with 4 threads). Even when all lines fit,
-    // the parallel copy + write is faster than sequential scan + zero-copy write.
-    if data.len() < PARALLEL_THRESHOLD && max_bytes > 0 && max_bytes < usize::MAX {
+    // For data under 64MB: check if all lines fit for zero-copy passthrough.
+    // When all lines fit, output = input (single write_all, no per-line processing).
+    // The sequential scan (~1.7ms for 10MB at memchr speed) is cheaper than
+    // per-line truncation + buffer assembly even with parallelism.
+    // 64MB limit is independent of PARALLEL_THRESHOLD to preserve this fast path
+    // even when parallel threshold is lowered.
+    if data.len() < 64 * 1024 * 1024 && max_bytes > 0 && max_bytes < usize::MAX {
         let mut start = 0;
         let mut all_fit = true;
         for pos in memchr_iter(line_delim, data) {

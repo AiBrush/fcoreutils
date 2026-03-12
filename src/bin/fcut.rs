@@ -304,6 +304,14 @@ fn main() {
 
     enlarge_stdout_pipe();
 
+    // Pre-initialize rayon global thread pool to avoid 300-500us cold-start.
+    let cpus = std::thread::available_parallelism()
+        .map(|v| v.get().max(1))
+        .unwrap_or(1);
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(cpus.saturating_sub(1).max(1))
+        .build_global();
+
     let cli = parse_args();
 
     // Determine mode
