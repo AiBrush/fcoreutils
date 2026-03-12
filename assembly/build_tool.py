@@ -72,6 +72,10 @@ TOOLS = {
                 "modules": ["lib/io.asm"],
                 "include": "."},
     "arch":    {"type": "gas_unified",  "source": "farch_unified.s"},
+    "basename": {"type": "nasm_unified", "source": "fbasename_unified.asm"},
+    "printenv": {"type": "nasm_unified", "source": "fprintenv_unified.asm"},
+    "rmdir": {"type": "nasm_unified", "source": "frmdir_unified.asm"},
+    "link": {"type": "nasm_unified", "source": "flink_unified.asm"},
 }
 
 
