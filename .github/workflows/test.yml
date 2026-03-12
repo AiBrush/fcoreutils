@@ -273,7 +273,7 @@ jobs:
             chmod +x assembly/$tool/f$tool
           done
           # Modular ELF builds (tools with Makefile)
-          for tool in wc cat expand false nl od seq sort unexpand uniq paste; do
+          for tool in wc cat expand false nl od seq sort unexpand uniq paste nice date timeout; do
             make -C assembly/$tool dev
           done
           # arch (GAS syntax)
@@ -281,7 +281,7 @@ jobs:
           ld -o assembly/arch/farch /tmp/farch.o
           chmod +x assembly/arch/farch
           rm -f /tmp/farch.o
-          echo "All 32 assembly tools built successfully"
+          echo "All 35 assembly tools built successfully"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: assembly-binaries
@@ -318,8 +318,11 @@ jobs:
             assembly/paste/fpaste
             assembly/sha224sum/fsha224sum
             assembly/sha384sum/fsha384sum
+            assembly/nice/fnice
+            assembly/date/fdate
+            assembly/timeout/ftimeout
 
-  # ── Assembly: test each tool in parallel (32 x86 + 1 ARM64) ──────
+  # ── Assembly: test each tool in parallel (35 x86 + 1 ARM64) ──────
   # Skip on merge_group — tests already passed on the PR.
   assembly-test:
     if: github.event_name != 'merge_group'
@@ -329,7 +332,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum]
+        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout]
         runner: [ubuntu-latest]
         include:
           - tool: yes-arm64
