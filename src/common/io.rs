@@ -30,7 +30,7 @@ impl Deref for FileData {
 /// For files under 1MB, read() is faster since mmap has setup/teardown overhead
 /// (page table creation for up to 256 pages, TLB flush on munmap) that exceeds
 /// the zero-copy benefit.
-const MMAP_THRESHOLD: u64 = 1024 * 1024;
+pub const MMAP_THRESHOLD: u64 = 1024 * 1024;
 
 /// Track whether O_NOATIME is supported to avoid repeated failed open() attempts.
 /// After the first EPERM, we never try O_NOATIME again (saves one syscall per file).
@@ -448,7 +448,7 @@ fn read_stdin_generic() -> io::Result<Vec<u8>> {
 /// probe-read overhead of read_to_end.
 /// Fast path: regular file reads usually return the full buffer on the first call.
 #[inline]
-fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+pub fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
     // Fast path: first read() usually fills the entire buffer for regular files
     let n = reader.read(buf)?;
     if n == buf.len() || n == 0 {
