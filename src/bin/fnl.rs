@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{FileData, read_stdin};
+use coreutils_rs::common::io::{FileData, MmapHints, read_file_with_hints, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::nl::{self, NlConfig};
 
@@ -404,61 +404,6 @@ fn print_help() {
     );
 }
 
-/// Read file with lazy page faults: mmap + HUGEPAGE + SEQUENTIAL only.
-/// Skips POPULATE_READ: pages fault lazily during memchr scan, which overlaps
-/// with SIMD processing and avoids the upfront ~2ms populate cost for 10MB files.
-///
-/// Uses shared helpers from io.rs: `open_noatime` (cached O_NOATIME with proper
-/// EPERM handling), `MMAP_THRESHOLD`, and `read_full`.
-#[cfg(target_os = "linux")]
-fn read_file_nl(path: &std::path::Path) -> std::io::Result<FileData> {
-    use coreutils_rs::common::io::{MMAP_THRESHOLD, open_noatime, read_full};
-    use std::io::Read;
-
-    let file = open_noatime(path)?;
-    let metadata = file.metadata()?;
-    let len = metadata.len();
-
-    if len > 0 && metadata.file_type().is_file() {
-        if len < MMAP_THRESHOLD {
-            let mut buf = vec![0u8; len as usize];
-            let n = read_full(&mut &file, &mut buf)?;
-            buf.truncate(n);
-            return Ok(FileData::Owned(buf));
-        }
-
-        match unsafe { memmap2::MmapOptions::new().map(&file) } {
-            Ok(mmap) => {
-                if len >= 2 * 1024 * 1024 {
-                    let _ = mmap.advise(memmap2::Advice::HugePage);
-                }
-                let _ = mmap.advise(memmap2::Advice::Sequential);
-                // Deliberately skip PopulateRead: let pages fault lazily
-                // during the memchr SIMD scan, avoiding the upfront populate cost.
-                Ok(FileData::Mmap(mmap))
-            }
-            Err(_) => {
-                let mut buf = Vec::with_capacity(len as usize);
-                let mut reader = file;
-                reader.read_to_end(&mut buf)?;
-                Ok(FileData::Owned(buf))
-            }
-        }
-    } else if !metadata.file_type().is_file() {
-        let mut buf = Vec::new();
-        let mut reader = file;
-        reader.read_to_end(&mut buf)?;
-        Ok(FileData::Owned(buf))
-    } else {
-        Ok(FileData::Owned(Vec::new()))
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_file_nl(path: &std::path::Path) -> std::io::Result<FileData> {
-    coreutils_rs::common::io::read_file(path)
-}
-
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
@@ -478,7 +423,7 @@ fn main() {
     for filename in &files {
         let data = if filename == "-" {
             match read_stdin() {
-                Ok(d) => coreutils_rs::common::io::FileData::Owned(d),
+                Ok(d) => FileData::Owned(d),
                 Err(e) => {
                     eprintln!("nl: standard input: {}", io_error_msg(&e));
                     had_error = true;
@@ -486,7 +431,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file_nl(Path::new(filename)) {
+            match read_file_with_hints(Path::new(filename), MmapHints::Lazy) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("nl: {}: {}", filename, io_error_msg(&e));

@@ -64,9 +64,40 @@ pub fn open_noatime(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
+/// Controls mmap prefault strategy for `read_file_with_hints`.
+///
+/// Different tools benefit from different page-fault strategies:
+/// - **Eager** (default): `POPULATE_READ` prefaults all pages upfront, best when
+///   the entire file will be processed and startup latency is acceptable.
+/// - **Lazy**: skips `POPULATE_READ`, lets pages fault on demand during SIMD scans.
+///   Best for tools like `nl` where memchr overlaps with lazy faults, avoiding
+///   the ~2ms upfront populate cost on 10MB files.
+///
+/// Both modes always apply `HugePage` (>= 2MB) and `Sequential`.
+/// `WillNeed` is applied for files in the 1-4MB range in both modes, and as a
+/// fallback for `PopulateRead` failure in Eager mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmapHints {
+    /// Prefault pages eagerly via POPULATE_READ (or WillNeed fallback).
+    Eager,
+    /// Let pages fault lazily during access. Still applies WillNeed for 1-4MB
+    /// files where lazy faults won't overlap with processing.
+    Lazy,
+}
+
 /// Read a file with zero-copy mmap for large files or read() for small files.
 /// Opens once with O_NOATIME, uses fstat for metadata to save a syscall.
 pub fn read_file(path: &Path) -> io::Result<FileData> {
+    read_file_with_hints(path, MmapHints::Eager)
+}
+
+/// Read a file with configurable mmap prefault strategy.
+///
+/// See [`MmapHints`] for the available strategies. Use `MmapHints::Eager` for
+/// tools that benefit from upfront prefaulting, or `MmapHints::Lazy` for tools
+/// where SIMD scanning overlaps with lazy page faults.
+pub fn read_file_with_hints(path: &Path, hints: MmapHints) -> io::Result<FileData> {
+    let _ = &hints; // Used only on Linux for mmap advisory selection
     let file = open_noatime(path)?;
     let metadata = file.metadata()?;
     let len = metadata.len();
@@ -96,13 +127,26 @@ pub fn read_file(path: &Path) -> io::Result<FileData> {
                         let _ = mmap.advise(memmap2::Advice::HugePage);
                     }
                     let _ = mmap.advise(memmap2::Advice::Sequential);
-                    // POPULATE_READ (5.14+): prefault with huge pages. Fall back to WillNeed.
-                    if len >= 4 * 1024 * 1024 {
-                        if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
-                            let _ = mmap.advise(memmap2::Advice::WillNeed);
+                    match hints {
+                        MmapHints::Eager => {
+                            // POPULATE_READ (5.14+): prefault with huge pages.
+                            // Fall back to WillNeed on older kernels.
+                            if len >= 4 * 1024 * 1024 {
+                                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                                    let _ = mmap.advise(memmap2::Advice::WillNeed);
+                                }
+                            } else {
+                                let _ = mmap.advise(memmap2::Advice::WillNeed);
+                            }
                         }
-                    } else {
-                        let _ = mmap.advise(memmap2::Advice::WillNeed);
+                        MmapHints::Lazy => {
+                            // Skip PopulateRead: pages fault on demand during SIMD scans.
+                            // Still apply WillNeed for 1-4MB files where lazy faults
+                            // won't overlap with processing (cold-cache penalty).
+                            if len < 4 * 1024 * 1024 {
+                                let _ = mmap.advise(memmap2::Advice::WillNeed);
+                            }
+                        }
                     }
                 }
                 Ok(FileData::Mmap(mmap))
