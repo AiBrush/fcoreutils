@@ -131,9 +131,10 @@ impl Default for NumfmtConfig {
 }
 
 /// SI suffix table: suffix char -> multiplier.
-/// GNU coreutils uses lowercase 'k' for SI kilo (1e3), uppercase 'K' is IEC (1024).
+/// GNU coreutils 9.4 (Ubuntu 24.04) uses uppercase 'K' for SI kilo (1e3).
+/// GNU 9.7+ changed to lowercase 'k', but we target the CI runner's version.
 const SI_SUFFIXES: &[(char, f64)] = &[
-    ('k', 1e3),
+    ('K', 1e3),
     ('M', 1e6),
     ('G', 1e9),
     ('T', 1e12),
