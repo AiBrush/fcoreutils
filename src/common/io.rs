@@ -517,11 +517,15 @@ pub fn try_mmap_stdin_with_hints(min_size: u64, sequential: bool) -> Option<Mmap
                     libc::MADV_SEQUENTIAL,
                 );
             }
-            // MADV_POPULATE_READ (Linux 5.14+, value 22) — prefault all pages
-            // to avoid per-page faults during the hot loop.
+            // MADV_POPULATE_READ (Linux 5.14+) — synchronously prefault all
+            // pages to avoid per-page faults during the hot loop.
+            // libc doesn't export this yet, so we use the raw value.
+            const MADV_POPULATE_READ: libc::c_int = 22;
             if m.len() >= 4 * 1024 * 1024 {
-                if libc::madvise(m.as_ptr() as *mut libc::c_void, m.len(), 22) != 0 {
-                    // Fallback for older kernels
+                if libc::madvise(m.as_ptr() as *mut libc::c_void, m.len(), MADV_POPULATE_READ) != 0
+                {
+                    // On kernels < 5.14, trigger async readahead. This won't
+                    // eliminate page faults but reduces their latency.
                     libc::madvise(
                         m.as_ptr() as *mut libc::c_void,
                         m.len(),

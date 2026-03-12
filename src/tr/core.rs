@@ -4052,7 +4052,8 @@ pub fn translate_squeeze_mmap(
     }
 
     // OOM-safe chunked translate+squeeze for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 2 * 1024 * 1024;
+    // 8MB matches other mmap paths; bounded heap even for multi-GB files.
+    const CHUNK: usize = 8 * 1024 * 1024;
     let mut last_squeezed: u16 = 256;
     let mut buf = alloc_uninit_vec(CHUNK);
     for chunk in data.chunks(CHUNK) {
@@ -4677,7 +4678,7 @@ pub fn delete_squeeze_mmap(
     }
 
     // OOM-safe chunked delete+squeeze for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 2 * 1024 * 1024;
+    const CHUNK: usize = 8 * 1024 * 1024;
     let mut outbuf = alloc_uninit_vec(CHUNK);
     let mut last_squeezed: u16 = 256;
     for chunk in data.chunks(CHUNK) {
@@ -4753,7 +4754,7 @@ pub fn squeeze_mmap(squeeze_chars: &[u8], data: &[u8], writer: &mut impl Write) 
     }
 
     // OOM-safe chunked squeeze for files > SINGLE_ALLOC_LIMIT.
-    const CHUNK: usize = 2 * 1024 * 1024;
+    const CHUNK: usize = 8 * 1024 * 1024;
     let mut outbuf = alloc_uninit_vec(CHUNK);
     let mut last_squeezed: u16 = 256;
     for chunk in data.chunks(CHUNK) {
