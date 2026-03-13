@@ -263,25 +263,20 @@ jobs:
           # fyes (Python build script)
           cd assembly/yes && python3 build.py --no-verify && cd ../..
           # NASM unified tools (flat binary)
-          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install stat realpath dircolors printf mkdir mkfifo mknod mktemp chmod basename cksum dirname factor link nproc pathchk printenv readlink rmdir sum tee truncate uname unlink kill; do
+          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install stat realpath dircolors printf mkdir mkfifo mknod mktemp chmod basename cksum dirname factor link nproc pathchk printenv readlink rmdir sum tee truncate uname unlink kill arch nice unexpand seq uniq wc; do
             nasm -f bin assembly/$tool/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
           # NASM unified tools (unified/ subdirectory)
-          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum base32 basenc join pr sha1sum sha256sum sha512sum shred shuf tsort b2sum split nohup touch uptime users who chown chgrp fmt; do
+          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum base32 basenc join pr sha1sum sha256sum sha512sum shred shuf tsort b2sum split nohup touch uptime users who chown chgrp fmt ls dir vdir df du; do
             nasm -f bin assembly/$tool/unified/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
           # Modular ELF builds (tools with Makefile)
-          for tool in wc cat expand false nl od seq sort unexpand uniq paste nice date timeout ls dir vdir du df comm fold; do
+          for tool in cat expand false nl od sort paste date timeout comm fold; do
             make -C assembly/$tool dev
           done
-          # arch (GAS syntax)
-          as --64 assembly/arch/farch_unified.s -o /tmp/farch.o
-          ld -o assembly/arch/farch /tmp/farch.o
-          chmod +x assembly/arch/farch
-          rm -f /tmp/farch.o
-          echo "All 102 assembly tools built successfully"
+          echo "All assembly tools built successfully"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: assembly-binaries

@@ -3,7 +3,7 @@
 # Usage: bash tests/run_tests.sh ./fchroot
 
 BIN="${1:-./fchroot}"
-GNU="chroot"
+GNU="$(command -v chroot || echo /usr/sbin/chroot)"
 PASS=0
 FAIL=0
 ERRORS=()
