@@ -184,7 +184,7 @@ jobs:
               exit 1
             fi
           done
-          echo "All checks passed: lint, 107 command binary tests (3 platforms), assembly tests"
+          echo "All checks passed: lint, 107 command binary tests (3 platforms), assembly tests (64 tools)"
 
   # ── Required-check aliases (branch-protection expects these names) ──
   test-ubuntu:
@@ -247,7 +247,7 @@ jobs:
             exit 1
           fi
 
-  # ── Assembly: build all 42 tools once, upload as artifact ─────────
+  # ── Assembly: build all 46 tools once, upload as artifact ─────────
   # Skip on merge_group — tests already passed on the PR.
   assembly-build:
     name: Build assembly
@@ -263,7 +263,7 @@ jobs:
           # fyes (Python build script)
           cd assembly/yes && python3 build.py --no-verify && cd ../..
           # NASM unified tools (flat binary)
-          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp; do
+          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install; do
             nasm -f bin assembly/$tool/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
@@ -273,7 +273,7 @@ jobs:
             chmod +x assembly/$tool/f$tool
           done
           # Modular ELF builds (tools with Makefile)
-          for tool in wc cat expand false nl od seq sort unexpand uniq paste nice date timeout; do
+          for tool in wc cat expand false nl od seq sort unexpand uniq paste nice date timeout stat realpath dircolors printf ls dir vdir du df; do
             make -C assembly/$tool dev
           done
           # arch (GAS syntax)
@@ -281,7 +281,7 @@ jobs:
           ld -o assembly/arch/farch /tmp/farch.o
           chmod +x assembly/arch/farch
           rm -f /tmp/farch.o
-          echo "All 42 assembly tools built successfully"
+          echo "All 64 assembly tools built successfully"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: assembly-binaries
@@ -328,8 +328,30 @@ jobs:
             assembly/rm/frm
             assembly/mv/fmv
             assembly/cp/fcp
+            assembly/stat/fstat
+            assembly/realpath/frealpath
+            assembly/dircolors/fdircolors
+            assembly/printf/fprintf
+            assembly/chroot/fchroot
+            assembly/chcon/fchcon
+            assembly/runcon/fruncon
+            assembly/stty/fstty
+            assembly/stdbuf/fstdbuf
+            assembly/pinky/fpinky
+            assembly/ptx/fptx
+            assembly/numfmt/fnumfmt
+            assembly/dd/fdd
+            assembly/csplit/fcsplit
+            assembly/expr/fexpr
+            assembly/test/ftest
+            assembly/install/finstall
+            assembly/ls/fls
+            assembly/dir/fdir
+            assembly/vdir/fvdir
+            assembly/du/fdu
+            assembly/df/fdf
 
-  # ── Assembly: test each tool in parallel (42 x86 + 1 ARM64) ──────
+  # ── Assembly: test each tool in parallel (64 x86 + 1 ARM64) ──────
   # Skip on merge_group — tests already passed on the PR.
   assembly-test:
     if: github.event_name != 'merge_group'
@@ -339,7 +361,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp]
+        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp, stat, realpath, dircolors, printf, chroot, chcon, runcon, stty, stdbuf, pinky, ptx, numfmt, dd, csplit, expr, test, install, ls, dir, vdir, du, df]
         runner: [ubuntu-latest]
         include:
           - tool: yes-arm64
