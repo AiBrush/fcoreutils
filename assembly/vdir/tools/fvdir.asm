@@ -86,6 +86,9 @@ _start:
     mov     qword [rel nfiles], 0
     xor     r12d, r12d          ; out_buf_used = 0
 
+    ; Detect locale (C/POSIX vs UTF-8) for sort behavior
+    call    detect_locale
+
     ; Check invocation mode and set defaults
     movzx   eax, byte [rel invocation_mode]
     cmp     al, MODE_DIR
@@ -522,7 +525,7 @@ sort_entries:
     lea     rsi, [rel entry_names]
     add     rsi, rax
 
-    ; Compare using case-folding (ls sorts case-insensitively by locale)
+    ; Compare using C-locale byte order
     call    strcasecmp_ls
 
     ; If names[j] > names[key], shift
@@ -575,22 +578,23 @@ sort_entries:
     ret
 
 ; strcasecmp_ls(rdi=s1, rsi=s2) -> eax: <0, 0, >0
-; GNU ls ignores leading dots when sorting (locale-aware)
+; Locale-aware: C/POSIX locale uses byte-order sort.
+; Non-C locale skips leading dots and compares case-insensitively (glibc behavior).
 strcasecmp_ls:
-    ; Skip leading dot(s) on s1
+    cmp     byte [rel locale_c], 0
+    jne     .c_loop
+    ; Non-C locale: skip leading dot(s)
     cmp     byte [rdi], '.'
     jne     .skip1_done
     inc     rdi
 .skip1_done:
-    ; Skip leading dot(s) on s2
     cmp     byte [rsi], '.'
     jne     .skip2_done
     inc     rsi
 .skip2_done:
-.loop:
+.utf8_loop:
     movzx   eax, byte [rdi]
     movzx   ecx, byte [rsi]
-    ; tolower
     cmp     al, 'A'
     jb      .no_lower1
     cmp     al, 'Z'
@@ -609,7 +613,17 @@ strcasecmp_ls:
     jz      .equal
     inc     rdi
     inc     rsi
-    jmp     .loop
+    jmp     .utf8_loop
+.c_loop:
+    movzx   eax, byte [rdi]
+    movzx   ecx, byte [rsi]
+    cmp     al, cl
+    jne     .diff
+    test    al, al
+    jz      .equal
+    inc     rdi
+    inc     rsi
+    jmp     .c_loop
 .equal:
     xor     eax, eax
     ret
@@ -1619,6 +1633,122 @@ get_entry_blocks:
     ret
 
 ; ============================================================================
+;  detect_locale — Check LC_ALL / LC_COLLATE / LANG to determine sort behavior
+;  Sets locale_c = 1 if effective locale is C or POSIX (byte-order sort)
+;  Sets locale_c = 0 otherwise (skip leading dots when sorting, like glibc)
+; ============================================================================
+detect_locale:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+
+    ; Default: not C locale (skip dots when sorting)
+    mov     byte [rel locale_c], 0
+
+    ; Find envp: envp = argv + (argc + 1) * 8
+    mov     rax, [rel argc]
+    inc     rax
+    mov     rbx, [rel argv]
+    lea     r12, [rbx + rax*8]
+
+    ; First check LC_ALL (highest priority)
+    mov     r13, r12
+.dl_scan_lc_all:
+    mov     rdi, [r13]
+    test    rdi, rdi
+    jz      .dl_check_lc_collate
+    cmp     dword [rdi], 'LC_A'
+    jne     .dl_next_lc_all
+    cmp     word [rdi+4], 'LL'
+    jne     .dl_next_lc_all
+    cmp     byte [rdi+6], '='
+    jne     .dl_next_lc_all
+    lea     rdi, [rdi+7]
+    cmp     byte [rdi], 0
+    je      .dl_check_lc_collate
+    call    .dl_is_c_locale
+    jmp     .dl_done
+.dl_next_lc_all:
+    add     r13, 8
+    jmp     .dl_scan_lc_all
+
+.dl_check_lc_collate:
+    mov     r13, r12
+.dl_scan_lc_collate:
+    mov     rdi, [r13]
+    test    rdi, rdi
+    jz      .dl_check_lang
+    cmp     dword [rdi], 'LC_C'
+    jne     .dl_next_lc_collate
+    cmp     dword [rdi+4], 'OLLA'
+    jne     .dl_next_lc_collate
+    cmp     word [rdi+8], 'TE'
+    jne     .dl_next_lc_collate
+    cmp     byte [rdi+10], '='
+    jne     .dl_next_lc_collate
+    lea     rdi, [rdi+11]
+    cmp     byte [rdi], 0
+    je      .dl_check_lang
+    call    .dl_is_c_locale
+    jmp     .dl_done
+.dl_next_lc_collate:
+    add     r13, 8
+    jmp     .dl_scan_lc_collate
+
+.dl_check_lang:
+    mov     r13, r12
+.dl_scan_lang:
+    mov     rdi, [r13]
+    test    rdi, rdi
+    jz      .dl_default
+    cmp     dword [rdi], 'LANG'
+    jne     .dl_next_lang
+    cmp     byte [rdi+4], '='
+    jne     .dl_next_lang
+    lea     rdi, [rdi+5]
+    cmp     byte [rdi], 0
+    je      .dl_default
+    call    .dl_is_c_locale
+    jmp     .dl_done
+.dl_next_lang:
+    add     r13, 8
+    jmp     .dl_scan_lang
+
+.dl_default:
+    mov     byte [rel locale_c], 1
+    jmp     .dl_done
+
+.dl_is_c_locale:
+    cmp     byte [rdi], 'C'
+    jne     .dl_check_posix
+    cmp     byte [rdi+1], 0
+    je      .dl_set_c
+    cmp     byte [rdi+1], '.'
+    je      .dl_set_c
+    jmp     .dl_set_not_c
+.dl_check_posix:
+    cmp     dword [rdi], 'POSI'
+    jne     .dl_set_not_c
+    cmp     byte [rdi+4], 'X'
+    jne     .dl_set_not_c
+    cmp     byte [rdi+5], 0
+    jne     .dl_set_not_c
+.dl_set_c:
+    mov     byte [rel locale_c], 1
+    ret
+.dl_set_not_c:
+    mov     byte [rel locale_c], 0
+    ret
+
+.dl_done:
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ============================================================================
 ;                        ARGUMENT PARSING
 ; ============================================================================
 parse_args:
@@ -2363,6 +2493,7 @@ argv:               resq 1
 flags:              resw 1
 had_error:          resb 1
 multi_arg:          resb 1
+locale_c:           resb 1      ; 1 if C/POSIX locale (byte-order sort)
 nfiles:             resq 1
 file_ptrs:          resq MAX_FILES
 file_idx:           resq 1

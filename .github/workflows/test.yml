@@ -263,7 +263,7 @@ jobs:
           # fyes (Python build script)
           cd assembly/yes && python3 build.py --no-verify && cd ../..
           # NASM unified tools (flat binary)
-          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install stat realpath dircolors printf; do
+          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install stat realpath dircolors printf mkdir mkfifo mknod mktemp chmod; do
             nasm -f bin assembly/$tool/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
@@ -350,8 +350,13 @@ jobs:
             assembly/vdir/fvdir
             assembly/du/fdu
             assembly/df/fdf
+            assembly/mkdir/fmkdir
+            assembly/mkfifo/fmkfifo
+            assembly/mknod/fmknod
+            assembly/mktemp/fmktemp
+            assembly/chmod/fchmod
 
-  # ── Assembly: test each tool in parallel (64 x86 + 1 ARM64) ──────
+  # ── Assembly: test each tool in parallel ──────
   # Skip on merge_group — tests already passed on the PR.
   assembly-test:
     if: github.event_name != 'merge_group'
@@ -361,7 +366,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp, stat, realpath, dircolors, printf, chroot, chcon, runcon, stty, stdbuf, pinky, ptx, numfmt, dd, csplit, expr, test, install, ls, dir, vdir, du, df]
+        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp, stat, realpath, dircolors, printf, chroot, chcon, runcon, stty, stdbuf, pinky, ptx, numfmt, dd, csplit, expr, test, install, ls, dir, vdir, du, df, mkdir, mkfifo, mknod, mktemp, chmod]
         runner: [ubuntu-latest]
         include:
           - tool: yes-arm64

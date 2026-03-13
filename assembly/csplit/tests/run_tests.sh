@@ -2,7 +2,7 @@
 # Test suite for fcsplit
 # Usage: bash tests/run_tests.sh ./fcsplit
 
-BIN="${1:-./fcsplit}"
+BIN="$(cd "$(dirname "${1:-./fcsplit}")" && pwd)/$(basename "${1:-./fcsplit}")"
 GNU="csplit"
 PASS=0
 FAIL=0

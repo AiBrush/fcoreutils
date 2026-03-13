@@ -311,7 +311,7 @@ _start:
     mov     rsi, str_ctx_fail
     mov     edx, str_ctx_fail_len
     call    write_err
-    mov     edi, 1
+    mov     edi, 125
     jmp     do_exit
 
 .missing_operand:

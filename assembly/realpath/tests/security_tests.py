@@ -259,7 +259,7 @@ def check_error_handling():
         report_result(rc >= 0 and rc < 128, f"error: '{flag}' no signal death")
 
     rc, out, err = run([BIN, f"{TMPDIR}/nonexistent"])
-    report_result(rc == 1, "error: nonexistent exits 1")
+    report_result(rc == 0, "error: nonexistent in existing dir exits 0 (default mode)")
 
 
 def check_concurrency():

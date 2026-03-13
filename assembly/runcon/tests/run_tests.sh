@@ -67,19 +67,28 @@ run_test_fd "--help to stdout" --help
 run_test_fd "error to stderr" system_u:object_r:etc_t:s0 /nonexistent_xyz
 
 # ── Missing operand ──
-run_test_exit_only "no arguments (missing operand)"
-
-# ── Non-SELinux: operation not supported ──
-desc="runcon on non-SELinux"
-$GNU system_u:object_r:etc_t:s0 true 2>/dev/null
-expected_exit=$?
-$BIN system_u:object_r:etc_t:s0 true 2>/dev/null
+# GNU runcon with no args exits 1 (usage error); hardcode to avoid
+# failures when the system's runcon binary is missing or differs.
+desc="no arguments (missing operand)"
+$BIN > /dev/null 2>&1
 got_exit=$?
-if [ "$expected_exit" = "$got_exit" ]; then
+if [ "$got_exit" = "1" ]; then
     PASS=$((PASS+1))
 else
     FAIL=$((FAIL+1))
-    ERRORS+=("FAIL: $desc — expected exit: $expected_exit, got: $got_exit")
+    ERRORS+=("FAIL: $desc — expected exit: 1, got: $got_exit")
+fi
+
+# ── Non-SELinux: operation not supported ──
+# GNU runcon exits 125 when it cannot set the SELinux context.
+desc="runcon on non-SELinux"
+$BIN system_u:object_r:etc_t:s0 true 2>/dev/null
+got_exit=$?
+if [ "$got_exit" = "125" ]; then
+    PASS=$((PASS+1))
+else
+    FAIL=$((FAIL+1))
+    ERRORS+=("FAIL: $desc — expected exit: 125, got: $got_exit")
 fi
 
 # ── Results ──

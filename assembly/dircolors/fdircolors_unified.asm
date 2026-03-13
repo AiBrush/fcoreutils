@@ -127,7 +127,7 @@ _start:
     mov     rsi, str_try
     mov     edx, str_try_len
     call    do_write_err
-    mov     edi, 2
+    mov     edi, 1
     jmp     do_exit
 
 .set_sh:
@@ -211,7 +211,7 @@ _start:
     mov     edx, str_try_len
     call    do_write_err
     pop     rcx
-    mov     edi, 2
+    mov     edi, 1
     jmp     do_exit
 
 .pop_show_help:

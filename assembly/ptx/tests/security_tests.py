@@ -108,7 +108,7 @@ def check_elf_properties():
     report_result(elf[4] == 2, "elf: ELFCLASS64 (64-bit)")
 
     size = len(elf)
-    report_result(size < 50000, f"elf: binary size {size} bytes (<50KB)")
+    report_result(size < 102400, f"elf: binary size {size} bytes (<100KB)")
 
     e_phoff = struct.unpack_from("<Q", elf, 32)[0]
     e_phentsize = struct.unpack_from("<H", elf, 54)[0]

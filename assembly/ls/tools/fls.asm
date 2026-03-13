@@ -86,6 +86,9 @@ _start:
     mov     qword [rel nfiles], 0
     xor     r12d, r12d          ; out_buf_used = 0
 
+    ; Detect locale (C/POSIX vs UTF-8) for sort behavior
+    call    detect_locale
+
     ; Check invocation mode and set defaults
     movzx   eax, byte [rel invocation_mode]
     cmp     al, MODE_DIR
@@ -522,7 +525,7 @@ sort_entries:
     lea     rsi, [rel entry_names]
     add     rsi, rax
 
-    ; Compare using case-folding (ls sorts case-insensitively by locale)
+    ; Compare using C-locale byte order
     call    strcasecmp_ls
 
     ; If names[j] > names[key], shift
@@ -575,9 +578,12 @@ sort_entries:
     ret
 
 ; strcasecmp_ls(rdi=s1, rsi=s2) -> eax: <0, 0, >0
-; GNU ls ignores leading dots when sorting (locale-aware)
+; Locale-aware: C/POSIX locale uses byte-order sort.
+; Non-C locale skips leading dots and compares case-insensitively (glibc behavior).
 strcasecmp_ls:
-    ; Skip leading dot(s) on s1
+    cmp     byte [rel locale_c], 0
+    jne     .c_loop
+    ; Non-C locale: skip leading dot(s) on s1
     cmp     byte [rdi], '.'
     jne     .skip1_done
     inc     rdi
@@ -587,16 +593,18 @@ strcasecmp_ls:
     jne     .skip2_done
     inc     rsi
 .skip2_done:
-.loop:
+    ; Case-insensitive comparison
+.utf8_loop:
     movzx   eax, byte [rdi]
     movzx   ecx, byte [rsi]
-    ; tolower
+    ; tolower s1
     cmp     al, 'A'
     jb      .no_lower1
     cmp     al, 'Z'
     ja      .no_lower1
     add     al, 32
 .no_lower1:
+    ; tolower s2
     cmp     cl, 'A'
     jb      .no_lower2
     cmp     cl, 'Z'
@@ -609,7 +617,19 @@ strcasecmp_ls:
     jz      .equal
     inc     rdi
     inc     rsi
-    jmp     .loop
+    jmp     .utf8_loop
+
+    ; C locale: byte-order comparison
+.c_loop:
+    movzx   eax, byte [rdi]
+    movzx   ecx, byte [rsi]
+    cmp     al, cl
+    jne     .diff
+    test    al, al
+    jz      .equal
+    inc     rdi
+    inc     rsi
+    jmp     .c_loop
 .equal:
     xor     eax, eax
     ret
@@ -1619,6 +1639,141 @@ get_entry_blocks:
     ret
 
 ; ============================================================================
+;  detect_locale — Check LC_ALL / LC_COLLATE / LANG to determine sort behavior
+;  Sets locale_c = 1 if effective locale is C or POSIX (byte-order sort)
+;  Sets locale_c = 0 otherwise (skip leading dots when sorting, like glibc)
+; ============================================================================
+detect_locale:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+
+    ; Default: not C locale (skip dots when sorting)
+    mov     byte [rel locale_c], 0
+
+    ; Find envp: envp = argv + (argc + 1) * 8
+    mov     rax, [rel argc]
+    inc     rax                     ; argc + 1 (skip NULL terminator)
+    mov     rbx, [rel argv]
+    lea     r12, [rbx + rax*8]     ; r12 = envp
+
+    ; First check LC_ALL (highest priority)
+    mov     r13, r12
+.dl_scan_lc_all:
+    mov     rdi, [r13]
+    test    rdi, rdi
+    jz      .dl_check_lc_collate   ; end of env
+    ; Check if starts with "LC_ALL="
+    cmp     dword [rdi], 'LC_A'
+    jne     .dl_next_lc_all
+    cmp     word [rdi+4], 'LL'
+    jne     .dl_next_lc_all
+    cmp     byte [rdi+6], '='
+    jne     .dl_next_lc_all
+    ; Found LC_ALL=
+    lea     rdi, [rdi+7]           ; point to value
+    ; If empty, fall through to LC_COLLATE
+    cmp     byte [rdi], 0
+    je      .dl_check_lc_collate
+    call    .dl_is_c_locale
+    jmp     .dl_done
+
+.dl_next_lc_all:
+    add     r13, 8
+    jmp     .dl_scan_lc_all
+
+.dl_check_lc_collate:
+    mov     r13, r12
+.dl_scan_lc_collate:
+    mov     rdi, [r13]
+    test    rdi, rdi
+    jz      .dl_check_lang         ; end of env
+    ; Check if starts with "LC_COLLATE="
+    cmp     dword [rdi], 'LC_C'
+    jne     .dl_next_lc_collate
+    cmp     dword [rdi+4], 'OLLA'
+    jne     .dl_next_lc_collate
+    cmp     word [rdi+8], 'TE'
+    jne     .dl_next_lc_collate
+    cmp     byte [rdi+10], '='
+    jne     .dl_next_lc_collate
+    ; Found LC_COLLATE=
+    lea     rdi, [rdi+11]
+    cmp     byte [rdi], 0
+    je      .dl_check_lang
+    call    .dl_is_c_locale
+    jmp     .dl_done
+
+.dl_next_lc_collate:
+    add     r13, 8
+    jmp     .dl_scan_lc_collate
+
+.dl_check_lang:
+    mov     r13, r12
+.dl_scan_lang:
+    mov     rdi, [r13]
+    test    rdi, rdi
+    jz      .dl_default            ; end of env, no locale set -> C locale
+    ; Check if starts with "LANG="
+    cmp     dword [rdi], 'LANG'
+    jne     .dl_next_lang
+    cmp     byte [rdi+4], '='
+    jne     .dl_next_lang
+    ; Found LANG=
+    lea     rdi, [rdi+5]
+    cmp     byte [rdi], 0
+    je      .dl_default            ; empty LANG -> C locale
+    call    .dl_is_c_locale
+    jmp     .dl_done
+
+.dl_next_lang:
+    add     r13, 8
+    jmp     .dl_scan_lang
+
+.dl_default:
+    ; No locale env vars set — default is C locale
+    mov     byte [rel locale_c], 1
+    jmp     .dl_done
+
+; .dl_is_c_locale — Check if rdi points to "C", "C.xxx", "POSIX"
+; Sets locale_c accordingly
+.dl_is_c_locale:
+    ; Check for "C\0"
+    cmp     byte [rdi], 'C'
+    jne     .dl_check_posix
+    cmp     byte [rdi+1], 0
+    je      .dl_set_c
+    cmp     byte [rdi+1], '.'
+    je      .dl_set_c
+    ; "C" followed by something else — not C locale
+    jmp     .dl_set_not_c
+
+.dl_check_posix:
+    ; Check for "POSIX"
+    cmp     dword [rdi], 'POSI'
+    jne     .dl_set_not_c
+    cmp     byte [rdi+4], 'X'
+    jne     .dl_set_not_c
+    cmp     byte [rdi+5], 0
+    jne     .dl_set_not_c
+
+.dl_set_c:
+    mov     byte [rel locale_c], 1
+    ret
+
+.dl_set_not_c:
+    mov     byte [rel locale_c], 0
+    ret
+
+.dl_done:
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ============================================================================
 ;                        ARGUMENT PARSING
 ; ============================================================================
 parse_args:
@@ -2362,6 +2517,7 @@ flags:              resw 1
 had_error:          resb 1
 multi_arg:          resb 1
 invocation_mode:    resb 1      ; 0=ls, 1=dir, 2=vdir
+locale_c:           resb 1      ; 1 if C/POSIX locale (byte-order sort)
 nfiles:             resq 1
 file_ptrs:          resq MAX_FILES
 file_idx:           resq 1

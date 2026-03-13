@@ -2,6 +2,9 @@
 # Test suite for fvdir (assembly vdir)
 # Usage: bash tests/run_tests.sh ./fvdir
 
+# Force C locale so GNU vdir sorts by byte order, matching our assembly implementation
+export LC_ALL=C
+
 BIN="${1:-./fvdir}"
 GNU="vdir"
 PASS=0

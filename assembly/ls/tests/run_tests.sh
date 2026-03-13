@@ -2,6 +2,9 @@
 # Test suite for fls (assembly ls)
 # Usage: bash tests/run_tests.sh ./fls
 
+# Force C locale so GNU ls sorts by byte order, matching our assembly implementation
+export LC_ALL=C
+
 BIN="${1:-./fls}"
 GNU="ls"
 PASS=0

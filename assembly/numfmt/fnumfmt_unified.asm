@@ -494,7 +494,9 @@ process_number:
     mov     rcx, 1000
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_K
     mov     edx, 1
@@ -506,7 +508,9 @@ process_number:
     mov     rcx, 1000000
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_M
     mov     edx, 1
@@ -518,7 +522,9 @@ process_number:
     mov     rcx, 1000000000
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_G
     mov     edx, 1
@@ -530,7 +536,9 @@ process_number:
     mov     rcx, 1000000000000
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_T
     mov     edx, 1
@@ -542,7 +550,9 @@ process_number:
     mov     rcx, 1000000000000000
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_P
     mov     edx, 1
@@ -554,7 +564,9 @@ process_number:
     mov     rcx, 1000000000000000000
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_E
     mov     edx, 1
@@ -595,7 +607,9 @@ process_number:
     mov     rcx, 1024
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_K
     mov     edx, 1
@@ -606,7 +620,9 @@ process_number:
     mov     rcx, 1048576
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_M
     mov     edx, 1
@@ -617,7 +633,9 @@ process_number:
     mov     rcx, 1073741824
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_G
     mov     edx, 1
@@ -628,7 +646,9 @@ process_number:
     mov     rcx, 1099511627776
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_T
     mov     edx, 1
@@ -639,7 +659,9 @@ process_number:
     mov     rcx, 1125899906842624
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_P
     mov     edx, 1
@@ -650,7 +672,9 @@ process_number:
     mov     rcx, 1152921504606846976
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_E
     mov     edx, 1
@@ -686,7 +710,9 @@ process_number:
     mov     rcx, 1024
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_Ki
     mov     edx, 2
@@ -702,7 +728,9 @@ process_number:
     mov     rcx, 1048576
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_Mi
     mov     edx, 2
@@ -713,7 +741,9 @@ process_number:
     mov     rcx, 1073741824
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_Gi
     mov     edx, 2
@@ -724,7 +754,9 @@ process_number:
     mov     rcx, 1099511627776
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_Ti
     mov     edx, 2
@@ -735,7 +767,9 @@ process_number:
     mov     rcx, 1125899906842624
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_Pi
     mov     edx, 2
@@ -746,7 +780,9 @@ process_number:
     mov     rcx, 1152921504606846976
     div     rcx
     mov     rdi, rax
-    call    print_int64
+    mov     r8, rdx
+    mov     r9, rcx
+    call    print_scaled
     mov     edi, STDOUT
     mov     rsi, str_Ei
     mov     edx, 2
@@ -1023,6 +1059,32 @@ print_int64:
     pop     rbx
     ret
 
+; print_scaled: print integer part with one decimal place
+; rdi = integer part (quotient), r8 = remainder, r9 = divisor
+; Output: prints "N.D" where D = (remainder * 10) / divisor
+print_scaled:
+    push    rbx
+    push    r8
+    push    r9
+    ; Print integer part
+    call    print_int64
+    pop     r9
+    pop     r8
+    ; Compute decimal digit: (r8 * 10) / r9
+    mov     rax, r8
+    mov     rcx, 10
+    mul     rcx             ; rdx:rax = remainder * 10
+    div     r9              ; rax = decimal digit
+    add     al, '0'
+    mov     byte [dec_buf], '.'
+    mov     byte [dec_buf + 1], al
+    mov     edi, STDOUT
+    lea     rsi, [dec_buf]
+    mov     edx, 2
+    call    do_write
+    pop     rbx
+    ret
+
 ; ============================================================
 ; Data
 ; ============================================================
@@ -1149,6 +1211,7 @@ delimiter: db 0
            db 0, 0, 0  ; padding
 suffix_ptr: dq 0
 num_buf: times 32 db 0
+dec_buf: db 0, 0          ; 2 bytes for ".X"
 line_buf: times 4096 db 0
 
 mem_size equ $ - $$

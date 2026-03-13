@@ -39,6 +39,19 @@ ORG 0x400000
 %define LINK_BUF       (BSS_ADDR + 8768)    ; 4096 bytes - readlink buffer
 %define MODE_BUF       (BSS_ADDR + 12864)   ; 16 bytes - mode string
 %define OUT_POS        (BSS_ADDR + 12880)   ; 8 bytes - output buffer position
+%define STATX_BUF      (BSS_ADDR + 12896)   ; 256 bytes - struct statx
+
+; statx() syscall
+%define SYS_STATX      332
+%define AT_SYMLINK_NOFOLLOW     0x100
+%define AT_EMPTY_PATH           0x1000
+%define STATX_BASIC_STATS       0x7FF
+%define STATX_BTIME             0x800
+
+; struct statx offsets
+%define STATX_MASK              0
+%define STATX_BTIME_SEC         80    ; __s64 stx_btime.tv_sec
+%define STATX_BTIME_NSEC        88    ; __u32 stx_btime.tv_nsec
 
 ; struct stat offsets (x86-64 Linux)
 %define ST_DEV          0
@@ -373,6 +386,20 @@ _start:
     syscall
     test    rax, rax
     js      .stat_failed
+    ; rdi still has filename (preserved across syscall)
+    ; Call statx with AT_SYMLINK_NOFOLLOW to get birth time
+    mov     rsi, rdi                ; rsi = pathname
+    mov     eax, SYS_STATX
+    mov     edi, AT_FDCWD           ; dirfd
+    mov     edx, AT_SYMLINK_NOFOLLOW ; flags
+    mov     r10d, STATX_BASIC_STATS | STATX_BTIME  ; mask
+    mov     r8, STATX_BUF           ; statxbuf
+    syscall
+    ; If statx fails, zero out birth time
+    test    rax, rax
+    jns     .stat_ok
+    mov     qword [STATX_BUF + STATX_BTIME_SEC], 0
+    mov     dword [STATX_BUF + STATX_BTIME_NSEC], 0
     jmp     .stat_ok
 
 .do_stat_deref:
@@ -381,6 +408,20 @@ _start:
     syscall
     test    rax, rax
     js      .stat_failed
+    ; rdi still has filename (preserved across syscall)
+    ; Call statx without AT_SYMLINK_NOFOLLOW (follow symlinks) to get birth time
+    mov     rsi, rdi                ; rsi = pathname
+    mov     eax, SYS_STATX
+    mov     edi, AT_FDCWD           ; dirfd
+    xor     edx, edx               ; flags = 0 (follow symlinks)
+    mov     r10d, STATX_BASIC_STATS | STATX_BTIME  ; mask
+    mov     r8, STATX_BUF           ; statxbuf
+    syscall
+    ; If statx fails, zero out birth time
+    test    rax, rax
+    jns     .stat_ok
+    mov     qword [STATX_BUF + STATX_BTIME_SEC], 0
+    mov     dword [STATX_BUF + STATX_BTIME_NSEC], 0
     jmp     .stat_ok
 
 .do_statfs:
@@ -629,10 +670,24 @@ _start:
     mov     edx, 1
     call    buf_write
 
-    ; " Birth: -"
+    ; " Birth: <timestamp>" or " Birth: -"
+    mov     rdi, [STATX_BUF + STATX_BTIME_SEC]
+    test    rdi, rdi
+    jz      .def_birth_unknown
+    ; Have birth time - show " Birth: <timestamp>"
+    mov     rsi, str_birth_label
+    mov     edx, str_birth_label_len
+    call    buf_write
+    mov     rdi, [STATX_BUF + STATX_BTIME_SEC]
+    mov     esi, dword [STATX_BUF + STATX_BTIME_NSEC]
+    call    format_timestamp
+    call    buf_write
+    jmp     .def_birth_done
+.def_birth_unknown:
     mov     rsi, str_birth_ts
     mov     edx, str_birth_ts_len
     call    buf_write
+.def_birth_done:
     mov     rsi, str_newline
     mov     edx, 1
     call    buf_write
@@ -772,9 +827,9 @@ _start:
     mov     edx, 1
     call    buf_write
 
-    ; birth epoch (0 = unknown)
-    mov     rsi, str_zero
-    mov     edx, 1
+    ; birth epoch (from statx, 0 if unavailable)
+    mov     rdi, [STATX_BUF + STATX_BTIME_SEC]
+    call    format_u64
     call    buf_write
     mov     rsi, str_space
     mov     edx, 1
@@ -1179,8 +1234,18 @@ _start:
     inc     rdi
     jmp     .fc_loop
 
-.fc_pct_w:  ; birth time (-)
+.fc_pct_w:  ; birth time (formatted timestamp or "-")
     push    rdi
+    mov     rdi, [STATX_BUF + STATX_BTIME_SEC]
+    test    rdi, rdi
+    jz      .fc_pct_w_unknown
+    mov     esi, dword [STATX_BUF + STATX_BTIME_NSEC]
+    call    format_timestamp
+    call    buf_write
+    pop     rdi
+    inc     rdi
+    jmp     .fc_loop
+.fc_pct_w_unknown:
     mov     rsi, str_dash
     mov     edx, 1
     call    buf_write
@@ -1188,10 +1253,10 @@ _start:
     inc     rdi
     jmp     .fc_loop
 
-.fc_pct_W:  ; birth epoch (0)
+.fc_pct_W:  ; birth epoch (seconds or 0)
     push    rdi
-    mov     rsi, str_zero
-    mov     edx, 1
+    mov     rdi, [STATX_BUF + STATX_BTIME_SEC]
+    call    format_u64
     call    buf_write
     pop     rdi
     inc     rdi
@@ -1624,25 +1689,33 @@ format_hex_lower_full:
     sub     edx, ecx
     ret
 
-; format_octal_mode: format lower 12 bits of edi as 4-digit octal
+; format_octal_mode: format lower 12 bits of edi as octal (no leading zeros)
 ; Returns: rsi = start, edx = length
 format_octal_mode:
     and     edi, 0xFFF
     mov     eax, edi
     lea     rcx, [NUM_BUF + 10]
     mov     byte [rcx], 0
-    mov     r8d, 4              ; always 4 digits
+    ; Handle zero specially
+    test    eax, eax
+    jnz     .fom_loop
+    dec     rcx
+    mov     byte [rcx], '0'
+    jmp     .fom_done
 .fom_loop:
+    test    eax, eax
+    jz      .fom_done
     mov     edx, eax
     and     edx, 7
     add     dl, '0'
     dec     rcx
     mov     byte [rcx], dl
     shr     eax, 3
-    dec     r8d
-    jnz     .fom_loop
+    jmp     .fom_loop
+.fom_done:
     mov     rsi, rcx
-    mov     edx, 4
+    lea     edx, [NUM_BUF + 10]
+    sub     edx, ecx
     ret
 
 ; format_rwx_mode: format mode as drwxrwxrwx string (10 chars)
@@ -1791,6 +1864,13 @@ get_file_type_str:
     mov     edx, str_type_unknown_len
     ret
 .gft_reg:
+    ; Check if file size is 0 -> "regular empty file"
+    cmp     qword [STAT_BUF + ST_SIZE], 0
+    jne     .gft_reg_nonempty
+    mov     rsi, str_type_reg_empty
+    mov     edx, str_type_reg_empty_len
+    ret
+.gft_reg_nonempty:
     mov     rsi, str_type_reg
     mov     edx, str_type_reg_len
     ret
@@ -2266,10 +2346,14 @@ str_change_ts:     db "Change: "
 str_change_ts_len  equ $ - str_change_ts
 str_birth_ts:      db " Birth: -"
 str_birth_ts_len   equ $ - str_birth_ts
+str_birth_label:   db " Birth: "
+str_birth_label_len equ $ - str_birth_label
 
 ; File type strings
 str_type_reg:      db "regular file"
 str_type_reg_len   equ $ - str_type_reg
+str_type_reg_empty: db "regular empty file"
+str_type_reg_empty_len equ $ - str_type_reg_empty
 str_type_dir:      db "directory"
 str_type_dir_len   equ $ - str_type_dir
 str_type_lnk:      db "symbolic link"

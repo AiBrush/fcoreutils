@@ -804,14 +804,36 @@ eval_primary:
     call    str_len
     pop     r11
     pop     r10
-    ; pos is 1-based; if pos < 1 or pos > len, return ""
+    movsx   rcx, eax            ; rcx = string length
+    ; if length <= 0 or pos < 1 or pos > strlen, return ""
+    cmp     r11, 0
+    jle     .substr_empty
     cmp     r10, 1
     jl      .substr_empty
-    cmp     r10d, eax
+    cmp     r10, rcx
     jg      .substr_empty
-    ; result = string[pos-1 .. pos-1+length]
-    dec     r10                 ; 0-based
-    lea     rax, [r9 + r10]
+    ; Clamp length to remaining chars: remaining = strlen - (pos-1)
+    dec     r10                 ; 0-based start
+    mov     rax, rcx
+    sub     rax, r10            ; rax = remaining chars
+    cmp     r11, rax
+    jle     .substr_len_ok
+    mov     r11, rax            ; clamp length to remaining
+.substr_len_ok:
+    ; Copy r11 bytes from r9+r10 into result_buf
+    lea     rsi, [r9 + r10]    ; source
+    lea     rdi, [result_buf]  ; destination
+    xor     ecx, ecx
+.substr_copy:
+    cmp     rcx, r11
+    jge     .substr_copy_done
+    movzx   eax, byte [rsi + rcx]
+    mov     [rdi + rcx], al
+    inc     rcx
+    jmp     .substr_copy
+.substr_copy_done:
+    mov     byte [rdi + rcx], 0 ; null-terminate
+    mov     rax, rdi            ; return pointer to result_buf
     mov     r8d, 1              ; string result
     pop     rbx
     ret
