@@ -2463,10 +2463,7 @@ pub fn sort_and_output(inputs: &[String], config: &SortConfig) -> io::Result<()>
             };
             if is_sorted {
                 // Data is already sorted by numeric value
-                if !config.unique
-                    && !config.zero_terminated
-                    && memchr::memchr(b'\r', data).is_none()
-                {
+                if !config.unique && !config.zero_terminated && !has_cr {
                     if data.last() == Some(&b'\n') {
                         writer.write_all(data)?;
                     } else if !data.is_empty() {
