@@ -60,35 +60,25 @@ ehdr:
     dd 0                        ; flags
     dw ehdr_size                ; ELF header size
     dw phdr_size                ; program header entry size
-    dw 3                        ; 3 program headers
+    dw 2                        ; 2 program headers
     dw 64                       ; section header entry size
     dw 0                        ; section header count
     dw 0                        ; section name index
 ehdr_size equ $ - ehdr
 
-; --- Program Header 1: PT_LOAD (code + rodata) ---
+; --- Program Header 1: PT_LOAD (code + data + BSS) ---
 phdr:
     dd 1                        ; PT_LOAD
-    dd 5                        ; PF_R | PF_X
+    dd 7                        ; PF_R | PF_W | PF_X
     dq 0                        ; offset
     dq $$                       ; virtual address
     dq $$                       ; physical address
     dq file_size                ; file size
-    dq file_size                ; memory size
+    dq mem_size                 ; memory size (includes BSS)
     dq 0x200000                 ; alignment
 phdr_size equ $ - phdr
 
-; --- Program Header 2: PT_LOAD (BSS) ---
-    dd 1                        ; PT_LOAD
-    dd 6                        ; PF_R | PF_W
-    dq bss_start - $$          ; offset
-    dq bss_start                ; virtual address
-    dq bss_start                ; physical address
-    dq 0                        ; file size (0 for BSS)
-    dq bss_size                 ; memory size
-    dq 0x200000                 ; alignment
-
-; --- Program Header 3: PT_GNU_STACK (non-executable stack) ---
+; --- Program Header 2: PT_GNU_STACK (non-executable stack) ---
     dd 0x6474E551               ; PT_GNU_STACK
     dd 6                        ; PF_R | PF_W
     dq 0, 0, 0, 0, 0
@@ -3715,60 +3705,43 @@ str_eunknown:       db "Unknown error", 0
 ; ─── BSS Section ─────────────────────────────────────────
 
 ; ===============================================================
-; BSS (uninitialized data — mapped as zero-filled)
+; BSS (uninitialized data — zero-filled by ELF loader)
 ; ===============================================================
 file_size equ $ - $$
 
-align 4096
-bss_start:
-
-
-; Options
-opt_mode:               resb 1
-opt_flag_d:             resb 1
-opt_flag_u:             resb 1
-opt_count:              resb 1
-opt_case_insensitive:   resb 1
-opt_zero_terminated:    resb 1
-opt_allrep_method:      resb 1
-opt_group_method:       resb 1
-delimiter:              resb 1
-align 8
-opt_skip_fields:        resq 1
-opt_skip_chars:         resq 1
-opt_check_chars:        resq 1
-input_file:             resq 1
-output_file:            resq 1
-input_fd:               resd 1
-output_fd:              resd 1
-use_mmap:               resb 1
-
-; mmap state
-align 8
-mmap_addr:              resq 1
-mmap_len:               resq 1
-
-; mmap processing state
-prev_mmap_ptr:          resq 1
-prev_mmap_len:          resq 1
-
-; State (for slow path)
-align 8
-count:                  resq 1
-first_group:            resb 1
-align 8
-read_buf_pos:           resq 1
-read_buf_end:           resq 1
-prev_line_len:          resq 1
-cur_line_len:           resq 1
-
-; Buffers
-align 16
-read_buf:               resb READ_BUF_SIZE
-out_buf:                resb OUT_BUF_SIZE
-prev_line_buf:          resb LINE_BUF_SIZE
-cur_line_buf:           resb LINE_BUF_SIZE
-count_buf:              resb 32
-
-
-bss_size equ $ - bss_start
+; BSS layout using equ addresses (not resb, which bloats the binary)
+bss_base                equ $$ + file_size
+opt_mode                equ bss_base + 0             ; 1
+opt_flag_d              equ bss_base + 1             ; 1
+opt_flag_u              equ bss_base + 2             ; 1
+opt_count               equ bss_base + 3             ; 1
+opt_case_insensitive    equ bss_base + 4             ; 1
+opt_zero_terminated     equ bss_base + 5             ; 1
+opt_allrep_method       equ bss_base + 6             ; 1
+opt_group_method        equ bss_base + 7             ; 1
+delimiter               equ bss_base + 8             ; 1
+opt_skip_fields         equ bss_base + 16            ; 8 (align 8)
+opt_skip_chars          equ bss_base + 24            ; 8
+opt_check_chars         equ bss_base + 32            ; 8
+input_file              equ bss_base + 40            ; 8
+output_file             equ bss_base + 48            ; 8
+input_fd                equ bss_base + 56            ; 4
+output_fd               equ bss_base + 60            ; 4
+use_mmap                equ bss_base + 64            ; 1
+mmap_addr               equ bss_base + 72            ; 8 (align 8)
+mmap_len                equ bss_base + 80            ; 8
+prev_mmap_ptr           equ bss_base + 88            ; 8
+prev_mmap_len           equ bss_base + 96            ; 8
+count                   equ bss_base + 104           ; 8
+first_group             equ bss_base + 112           ; 1
+read_buf_pos            equ bss_base + 120           ; 8 (align 8)
+read_buf_end            equ bss_base + 128           ; 8
+prev_line_len           equ bss_base + 136           ; 8
+cur_line_len            equ bss_base + 144           ; 8
+read_buf                equ bss_base + 160           ; READ_BUF_SIZE = 131072 (align 16)
+out_buf                 equ read_buf + READ_BUF_SIZE ; OUT_BUF_SIZE = 1048576
+prev_line_buf           equ out_buf + OUT_BUF_SIZE   ; LINE_BUF_SIZE = 1048576
+cur_line_buf            equ prev_line_buf + LINE_BUF_SIZE ; LINE_BUF_SIZE = 1048576
+count_buf               equ cur_line_buf + LINE_BUF_SIZE  ; 32
+bss_end                 equ count_buf + 32
+mem_size                equ bss_end - $$

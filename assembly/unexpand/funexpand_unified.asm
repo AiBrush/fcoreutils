@@ -67,35 +67,25 @@ ehdr:
     dd 0                        ; flags
     dw ehdr_size                ; ELF header size
     dw phdr_size                ; program header entry size
-    dw 3                        ; 3 program headers
+    dw 2                        ; 2 program headers
     dw 64                       ; section header entry size
     dw 0                        ; section header count
     dw 0                        ; section name index
 ehdr_size equ $ - ehdr
 
-; --- Program Header 1: PT_LOAD (code + rodata) ---
+; --- Program Header 1: PT_LOAD (code + data + BSS) ---
 phdr:
     dd 1                        ; PT_LOAD
-    dd 5                        ; PF_R | PF_X
+    dd 7                        ; PF_R | PF_W | PF_X
     dq 0                        ; offset
     dq $$                       ; virtual address
     dq $$                       ; physical address
     dq file_size                ; file size
-    dq file_size                ; memory size
+    dq mem_size                 ; memory size (includes BSS)
     dq 0x200000                 ; alignment
 phdr_size equ $ - phdr
 
-; --- Program Header 2: PT_LOAD (BSS) ---
-    dd 1                        ; PT_LOAD
-    dd 6                        ; PF_R | PF_W
-    dq bss_start - $$          ; offset
-    dq bss_start                ; virtual address
-    dq bss_start                ; physical address
-    dq 0                        ; file size (0 for BSS)
-    dq bss_size                 ; memory size
-    dq 0x200000                 ; alignment
-
-; --- Program Header 3: PT_GNU_STACK (non-executable stack) ---
+; --- Program Header 2: PT_GNU_STACK (non-executable stack) ---
     dd 0x6474E551               ; PT_GNU_STACK
     dd 6                        ; PF_R | PF_W
     dq 0, 0, 0, 0, 0
@@ -1998,39 +1988,31 @@ str_eunknown:       db "Unknown error", 0
 ; ─── BSS Section ──────────────────────────────────────────
 
 ; ===============================================================
-; BSS (uninitialized data — mapped as zero-filled)
+; BSS (uninitialized data — zero-filled by ELF loader)
 ; ===============================================================
 file_size equ $ - $$
 
-align 4096
-bss_start:
-
-
-read_buf:           resb READ_BUF_SIZE
-out_buf:            resb OUT_BUF_SIZE
-pending_buf:        resb PENDING_SIZE
-
-; Configuration
-convert_entire_line: resb 1
-first_only:         resb 1
-tab_list_mode:      resb 1
-tab_is_pow2:        resb 1
-default_tab:        resd 1
-tab_pow2_mask:      resd 1
-num_tab_stops:      resd 1
-tab_stops:          resd MAX_TAB_STOPS
-num_files:          resd 1
-file_list:          resq MAX_FILES
-
-; Per-line state
-st_convert:         resb 1
-st_prev_blank:      resb 1
-st_one_blank_before: resb 1
-                    resb 1
-st_column:          resd 1
-st_next_tab_col:    resd 1
-st_tab_index:       resd 1
-st_pending:         resd 1
-
-
-bss_size equ $ - bss_start
+; BSS layout using equ addresses (not resb, which bloats the binary)
+bss_base            equ $$ + file_size
+read_buf            equ bss_base + 0                ; READ_BUF_SIZE = 131072
+out_buf             equ read_buf + READ_BUF_SIZE    ; OUT_BUF_SIZE = 1048576
+pending_buf         equ out_buf + OUT_BUF_SIZE      ; PENDING_SIZE = 65536
+convert_entire_line equ pending_buf + PENDING_SIZE   ; 1
+first_only          equ convert_entire_line + 1      ; 1
+tab_list_mode       equ first_only + 1               ; 1
+tab_is_pow2         equ tab_list_mode + 1            ; 1
+default_tab         equ tab_is_pow2 + 1              ; 4
+tab_pow2_mask       equ default_tab + 4              ; 4
+num_tab_stops       equ tab_pow2_mask + 4            ; 4
+tab_stops           equ num_tab_stops + 4            ; MAX_TAB_STOPS * 4 = 1024
+num_files           equ tab_stops + MAX_TAB_STOPS * 4 ; 4
+file_list           equ num_files + 4                ; MAX_FILES * 8 = 2048
+st_convert          equ file_list + MAX_FILES * 8    ; 1
+st_prev_blank       equ st_convert + 1               ; 1
+st_one_blank_before equ st_prev_blank + 1            ; 1
+st_column           equ st_one_blank_before + 2      ; 4 (align)
+st_next_tab_col     equ st_column + 4                ; 4
+st_tab_index        equ st_next_tab_col + 4          ; 4
+st_pending          equ st_tab_index + 4             ; 4
+bss_end             equ st_pending + 4
+mem_size            equ bss_end - $$
