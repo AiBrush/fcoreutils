@@ -28,8 +28,6 @@ def tool_specific_tests(fw):
     """13. unexpand-specific tests: space-to-tab conversion."""
     fw.log("\n=== 13. Tool-Specific: unexpand ===")
 
-    GNU = '/usr/bin/unexpand'
-
     # Basic unexpand — default converts initial spaces to tabs (8-space tab stops)
     data = b"        hello\n"
     rc_a, out_a, _ = fw.run_asm([], stdin_data=data)

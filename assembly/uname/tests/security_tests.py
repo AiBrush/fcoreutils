@@ -29,7 +29,6 @@ def tool_specific_tests(fw):
     """13. uname-specific tests: system information output."""
     fw.log("\n=== 13. Tool-Specific: uname ===")
 
-    GNU = '/usr/bin/uname'
     gnu_path = which('uname')
 
     # Default output (no flags) should be same as -s
