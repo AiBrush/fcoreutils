@@ -8,11 +8,11 @@
 ; - for stdin.
 ;
 ; BUILD:
-;   nasm -f bin fexpand_unified.asm -o fexpand_release && chmod +x fexpand_release
+;   nasm -f bin fexpand_unified.asm -o fexpand && chmod +x fexpand
 ; ============================================================
 
 BITS 64
-ORG 0x400000
+org 0x400000
 
 ; --- Syscall numbers ---
 %define SYS_READ         0
@@ -66,35 +66,25 @@ ehdr:
     dd 0                        ; flags
     dw ehdr_size                ; ELF header size
     dw phdr_size                ; program header entry size
-    dw 3                        ; 3 program headers
+    dw 2                        ; 2 program headers (PT_LOAD + PT_GNU_STACK)
     dw 64                       ; section header entry size
     dw 0                        ; section header count
     dw 0                        ; section name index
 ehdr_size equ $ - ehdr
 
-; --- Program Header 1: PT_LOAD (code + rodata) ---
+; --- Program Header 1: PT_LOAD (code + data + bss) ---
 phdr:
     dd 1                        ; PT_LOAD
-    dd 5                        ; PF_R | PF_X
+    dd 7                        ; PF_R | PF_W | PF_X
     dq 0                        ; offset
     dq $$                       ; virtual address
     dq $$                       ; physical address
     dq file_size                ; file size
-    dq file_size                ; memory size
+    dq mem_size                 ; memory size (includes BSS)
     dq 0x200000                 ; alignment
 phdr_size equ $ - phdr
 
-; --- Program Header 2: PT_LOAD (BSS) ---
-    dd 1                        ; PT_LOAD
-    dd 6                        ; PF_R | PF_W
-    dq bss_start - $$          ; offset
-    dq bss_start                ; virtual address
-    dq bss_start                ; physical address
-    dq 0                        ; file size (0 for BSS)
-    dq bss_size                 ; memory size
-    dq 0x200000                 ; alignment
-
-; --- Program Header 3: PT_GNU_STACK (non-executable stack) ---
+; --- Program Header 2: PT_GNU_STACK (non-executable stack) ---
     dd 0x6474E551               ; PT_GNU_STACK
     dd 6                        ; PF_R | PF_W
     dq 0, 0, 0, 0, 0
@@ -252,7 +242,6 @@ _start:
     jmp     .parse_next
 
 .parse_tabs_eq:
-    ; rsi still points to argv[i], skip "--tabs="
     mov     rsi, [r15 + rbx*8]
     add     rsi, 7
     push    rbx
@@ -263,11 +252,9 @@ _start:
     jmp     .parse_next
 
 .check_short:
-    ; Single '-' means stdin
     cmp     byte [rsi+1], 0
     je      .is_stdin_arg
 
-    ; Parse short options: -i, -t, -tN, -it4, etc.
     inc     rsi                     ; skip the '-'
     call    parse_short_opts
     test    eax, eax
@@ -275,10 +262,8 @@ _start:
     jmp     .parse_next
 
 .short_opt_error:
-    ; eax < 0 means we need the next argv for -t value
     cmp     eax, -1
     jne     .tab_parse_error
-    ; Need next arg for -t value
     inc     rbx
     cmp     rbx, r14
     jge     .done_args
@@ -370,7 +355,6 @@ _start:
     syscall
 
 ; --- parse_short_opts(rsi=ptr past '-') ---
-; Returns: 0 = ok, -1 = need next argv for -t value, >0 = error
 parse_short_opts:
     push    rbx
     mov     rbx, rsi
@@ -385,7 +369,7 @@ parse_short_opts:
     cmp     al, 't'
     je      .pso_tab
 
-    ; Unknown short option — exit with error
+    ; Unknown short option
     pop     rbx
     mov     rdi, 1
     mov     rax, SYS_EXIT
@@ -401,13 +385,12 @@ parse_short_opts:
     cmp     byte [rbx], 0
     je      .pso_need_next_arg
 
-    ; Value follows immediately
     mov     rsi, rbx
     push    rbx
     call    parse_tab_spec
     pop     rbx
     pop     rbx
-    ret                             ; return parse_tab_spec result in eax
+    ret
 
 .pso_need_next_arg:
     mov     eax, -1
@@ -420,29 +403,24 @@ parse_short_opts:
     ret
 
 ; --- parse_tab_spec(rsi=string) ---
-; Parses: "N" (uniform), "N1,N2,..." (list), with optional /N or +N last
-; Returns: 0=ok, 1=error
 parse_tab_spec:
     push    rbx
     push    r13
     push    r14
     push    r15
-    mov     rbx, rsi                ; save string start
+    mov     rbx, rsi
 
-    ; Check if string contains comma or space -> list mode
     mov     rdi, rbx
     call    has_separator
     test    eax, eax
     jnz     .pts_list_mode
 
-    ; Single value — check for / or + prefix
     movzx   eax, byte [rbx]
     cmp     al, '/'
     je      .pts_uniform_repeat
     cmp     al, '+'
     je      .pts_uniform_repeat
 
-    ; Plain number -> uniform tab stops
     mov     rsi, rbx
     call    parse_number
     test    rax, rax
@@ -454,7 +432,6 @@ parse_tab_spec:
     jmp     .pts_ok
 
 .pts_uniform_repeat:
-    ; /N or +N as sole argument -> uniform repeating from 0
     inc     rbx
     mov     rsi, rbx
     call    parse_number
@@ -467,15 +444,13 @@ parse_tab_spec:
     jmp     .pts_ok
 
 .pts_list_mode:
-    ; Parse comma/space-separated list
     mov     dword [tab_mode], 1
     mov     dword [num_tab_stops], 0
     mov     qword [repeat_interval], 0
     mov     byte [repeat_relative], 0
-    mov     r14, rbx                ; current parse position
+    mov     r14, rbx
 
 .pts_list_next:
-    ; Skip separators (comma, space)
     movzx   eax, byte [r14]
     test    al, al
     jz      .pts_list_done
@@ -490,14 +465,12 @@ parse_tab_spec:
     jmp     .pts_list_next
 
 .pts_list_parse_num:
-    ; Check for /N or +N prefix (only valid as last item)
     movzx   eax, byte [r14]
     cmp     al, '/'
     je      .pts_list_repeat
     cmp     al, '+'
     je      .pts_list_repeat_relative
 
-    ; Parse number
     mov     rsi, r14
     call    parse_number
     test    rax, rax
@@ -505,12 +478,10 @@ parse_tab_spec:
     test    rax, rax
     jz      .pts_zero_error
 
-    ; Store in tab_stops array
     mov     ecx, [num_tab_stops]
     cmp     ecx, MAX_TAB_STOPS
     jge     .pts_error
 
-    ; Validate ascending order
     test    ecx, ecx
     jz      .pts_list_store
     lea     rdi, [tab_stops]
@@ -524,14 +495,12 @@ parse_tab_spec:
     inc     ecx
     mov     [num_tab_stops], ecx
 
-    ; Advance past the number
     mov     rsi, r14
     call    skip_number
     mov     r14, rax
     jmp     .pts_list_next
 
 .pts_list_repeat:
-    ; /N — repeating interval (absolute)
     inc     r14
     mov     rsi, r14
     call    parse_number
@@ -547,7 +516,6 @@ parse_tab_spec:
     jmp     .pts_list_done
 
 .pts_list_repeat_relative:
-    ; +N — relative repeating from last stop
     inc     r14
     mov     rsi, r14
     call    parse_number
@@ -566,7 +534,6 @@ parse_tab_spec:
     jmp     .pts_ok
 
 .pts_not_ascending:
-    ; Print error: tab sizes must be ascending
     mov     rdi, STDERR
     mov     rsi, str_prefix
     mov     rdx, str_prefix_len
@@ -578,7 +545,6 @@ parse_tab_spec:
     jmp     .pts_error
 
 .pts_zero_error:
-    ; Print error: tab size cannot be 0
     mov     rdi, STDERR
     mov     rsi, str_prefix
     mov     rdx, str_prefix_len
@@ -624,7 +590,6 @@ has_separator:
     ret
 
 ; --- parse_number(rsi=str) -> rax=value, -1 if invalid ---
-; Stops at comma, space, or NUL
 parse_number:
     xor     rax, rax
     movzx   ecx, byte [rsi]
@@ -669,19 +634,6 @@ skip_number:
     ret
 
 ; --- process_fd(edi=fd) ---
-; Main processing: read input, expand tabs to spaces
-;
-; Register usage:
-;   rbx = fd (callee-saved)
-;   r13 = tab_width (callee-saved)
-;   r14 = current column (callee-saved)
-;   r15 = tab_mask for power-of-2, or 0 for div (callee-saved)
-;   r8  = input pointer (caller-saved, saved in BSS around calls)
-;   r9  = input end pointer (caller-saved)
-;   r10 = output pointer (caller-saved)
-;   r12 = out_buf_pos (global, callee-saved)
-;   ebp = had_error (global, callee-saved)
-
 process_fd:
     push    rbx
     push    r13
@@ -691,16 +643,15 @@ process_fd:
     mov     ebx, edi
     xor     r14d, r14d              ; column = 0
 
-    ; Pre-compute tab parameters in callee-saved registers
-    mov     r13, [uniform_tab]      ; tab width
+    mov     r13, [uniform_tab]
     mov     rax, r13
     dec     rax
     test    rax, r13
     jnz     .pf_not_pow2
-    mov     r15, rax                ; r15 = mask for power-of-2
+    mov     r15, rax
     jmp     .pf_setup_done
 .pf_not_pow2:
-    xor     r15d, r15d              ; r15 = 0 means "use div"
+    xor     r15d, r15d
 .pf_setup_done:
     mov     byte [init_done_flag], 0
 
@@ -718,7 +669,6 @@ process_fd:
     mov     r10, out_buf
     add     r10, r12
 
-    ; Check which processing mode to use
     cmp     byte [initial_only], 1
     je      .pf_initial_mode
 
@@ -764,7 +714,6 @@ process_fd:
     test    eax, eax
     jnz     .pf_fast_simd_special
 
-    ; No special chars in 16 bytes — bulk copy
     movdqu  xmm0, [r8]
     movdqu  [r10], xmm0
     add     r8, 16
@@ -947,7 +896,6 @@ process_fd:
     jmp     .pf_list_simd
 
 .pf_list_tab:
-    ; Update r12, save ptrs, call calc_tab_spaces
     mov     rax, out_buf
     sub     r10, rax
     mov     r12, r10
@@ -1032,11 +980,9 @@ process_fd:
     cmp     rax, 16
     jl      .pf_init_scalar
 
-    ; If initial_done, use passthrough mode
     cmp     byte [init_done_flag], 1
     je      .pf_init_passthrough_simd
 
-    ; In initial region: check for special chars
     movdqu  xmm0, [r8]
     movdqa  xmm4, xmm0
     pcmpeqb xmm4, xmm1
@@ -1050,7 +996,6 @@ process_fd:
     test    eax, eax
     jnz     .pf_init_simd_special
 
-    ; No special chars — copy 16 bytes, check for non-space
     movdqu  xmm0, [r8]
     movdqu  [r10], xmm0
     movdqu  xmm5, [r8]
@@ -1072,7 +1017,6 @@ process_fd:
 
     movzx   edx, cl
     add     r14, rdx
-    ; Check for non-space in bytes before special
     push    rdx
     xor     ecx, ecx
 .pf_init_pre_check:
@@ -1120,7 +1064,6 @@ process_fd:
     cmp     byte [init_done_flag], 1
     je      .pf_init_tab_pass
 
-    ; Expand tab (check mode)
     cmp     dword [tab_mode], 1
     je      .pf_init_tab_list
 
@@ -1260,7 +1203,6 @@ calc_tab_spaces:
     cmp     dword [tab_mode], 1
     je      .cts_list
 
-    ; Uniform mode: spaces = tab_width - (column % tab_width)
     mov     rax, r14
     xor     edx, edx
     mov     rcx, [uniform_tab]
@@ -1295,15 +1237,13 @@ calc_tab_spaces:
     test    rax, rax
     jz      .cts_list_single_space
 
-    ; Get last explicit stop
     mov     rdx, [rdi + (rcx-1)*8]
 
     cmp     byte [repeat_relative], 1
     je      .cts_list_repeat_relative
 
-    ; /N — repeating interval from column 0
-    mov     rcx, rax                ; interval
-    mov     rax, r14                ; column
+    mov     rcx, rax
+    mov     rax, r14
     xor     edx, edx
     div     rcx
     inc     rax
@@ -1312,16 +1252,15 @@ calc_tab_spaces:
     ret
 
 .cts_list_repeat_relative:
-    ; +N — repeating relative to last explicit stop
-    mov     rcx, rax                ; interval
-    push    rdx                     ; save last_stop
+    mov     rcx, rax
+    push    rdx
     mov     rax, r14
-    sub     rax, rdx                ; distance from last stop
+    sub     rax, rdx
     xor     edx, edx
     div     rcx
     inc     rax
     imul    rax, rcx
-    pop     rdx                     ; restore last_stop
+    pop     rdx
     add     rax, rdx
     sub     rax, r14
     ret
@@ -1393,17 +1332,6 @@ u_strncmp:
     mov     eax, 1
     ret
 
-; --- u_strlen(rdi=str) -> rax ---
-u_strlen:
-    xor     eax, eax
-.usl_loop:
-    cmp     byte [rdi + rax], 0
-    je      .usl_done
-    inc     rax
-    jmp     .usl_loop
-.usl_done:
-    ret
-
 ; ===============================================================
 ; DATA
 ; ===============================================================
@@ -1459,36 +1387,40 @@ version_text:
 version_text_len equ $ - version_text
 
 ; ===============================================================
-; BSS (uninitialized data — mapped as zero-filled)
+; BSS (uninitialized data — zero-filled by ELF loader)
 ; ===============================================================
 file_size equ $ - $$
 
-align 4096
-bss_start:
+bss_base        equ $$ + file_size
 
-tab_mode:           resd 1
-                    resd 1          ; padding
-uniform_tab:        resq 1
-num_tab_stops:      resd 1
-                    resd 1          ; padding
-tab_stops:          resq MAX_TAB_STOPS
-repeat_interval:    resq 1
-repeat_relative:    resb 1
-initial_only:       resb 1
-seen_dashdash:      resb 1
-init_done_flag:     resb 1
-                    resd 1          ; padding
-num_files:          resd 1
-                    resd 1          ; padding
-files:              resq MAX_FILES
+tab_mode        equ bss_base + 0                    ; 4
+_pad0           equ tab_mode + 4                    ; 4 (padding)
+uniform_tab     equ _pad0 + 4                       ; 8
+num_tab_stops   equ uniform_tab + 8                 ; 4
+_pad1           equ num_tab_stops + 4               ; 4 (padding)
+tab_stops       equ _pad1 + 4                       ; MAX_TAB_STOPS * 8 = 2048
+repeat_interval equ tab_stops + MAX_TAB_STOPS * 8   ; 8
+repeat_relative equ repeat_interval + 8             ; 1
+initial_only    equ repeat_relative + 1             ; 1
+seen_dashdash   equ initial_only + 1                ; 1
+init_done_flag  equ seen_dashdash + 1               ; 1
+_pad2           equ init_done_flag + 1              ; 4 (padding)
+num_files       equ _pad2 + 4                       ; 4
+_pad3           equ num_files + 4                   ; 4 (padding)
+files           equ _pad3 + 4                       ; MAX_FILES * 8 = 2048
 
-save_r8:            resq 1
-save_r9:            resq 1
-save_r10:           resq 1
+save_r8         equ files + MAX_FILES * 8           ; 8
+save_r9         equ save_r8 + 8                     ; 8
+save_r10        equ save_r9 + 8                     ; 8
 
-align 16
-read_buf:           resb READ_BUF_SIZE
-align 16
-out_buf:            resb OUT_BUF_SIZE
+; 16-byte alignment for SIMD: save_r10+8 is at a known offset from bss_base.
+; bss_base is page-aligned (it follows file_size which is the binary image).
+; The total offset from bss_base to save_r10+8 is deterministic — pad to 16.
+_pre_buf        equ save_r10 + 8
+_pre_buf_pad    equ 16 - (_pre_buf - bss_base) % 16
+read_buf        equ _pre_buf + _pre_buf_pad         ; READ_BUF_SIZE = 131072
+; out_buf also 16-byte aligned since READ_BUF_SIZE is a multiple of 16
+out_buf         equ read_buf + READ_BUF_SIZE        ; OUT_BUF_SIZE = 262144
 
-bss_size equ $ - bss_start
+bss_end         equ out_buf + OUT_BUF_SIZE
+mem_size        equ bss_end - $$

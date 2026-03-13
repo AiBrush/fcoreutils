@@ -1,11 +1,44 @@
 ; ============================================================
-; ftimeout_unified.asm — AUTO-GENERATED unified file
-; timeout (GNU coreutils compatible) — x86_64 Linux
-; Build: nasm -f bin ftimeout_unified.asm -o ftimeout_release
+; ftimeout_unified.asm — GNU-compatible 'timeout' command
+; Single nasm -f bin file with hand-crafted ELF header.
+;
+; timeout [OPTION] DURATION COMMAND [ARG]...
+; Start COMMAND, and kill it if still running after DURATION.
+;
+; Options:
+;   --foreground         don't create separate process group
+;   -k DURATION          send KILL after this duration if still alive
+;   -s SIGNAL            specify signal to send (default TERM)
+;   --help / --version
+;
+; BUILD:
+;   nasm -f bin ftimeout_unified.asm -o ftimeout && chmod +x ftimeout
 ; ============================================================
+
 BITS 64
 ORG 0x400000
 
+; --- Syscall numbers ---
+%define SYS_WRITE       1
+%define SYS_FORK       57
+%define SYS_EXECVE     59
+%define SYS_EXIT       60
+%define SYS_WAIT4      61
+%define SYS_KILL       62
+%define SYS_ALARM      37
+%define SYS_SETPGID    109
+%define SYS_RT_SIGACTION 13
+
+%define SIGALRM         14
+%define SIGTERM         15
+%define SIGKILL          9
+
+%define SA_RESTORER     0x04000000
+
+%define STDOUT          1
+%define STDERR          2
+
+; --- ELF Header (64 bytes) ---
 ehdr:
     db 0x7f, 'E','L','F'
     db 2, 1, 1, 0
@@ -25,9 +58,10 @@ ehdr:
     dw 0
 ehdr_size equ $ - ehdr
 
+; --- Program Header 1: PT_LOAD ---
 phdr:
     dd 1                        ; PT_LOAD
-    dd 7                        ; PF_R | PF_W | PF_X (flat binary)
+    dd 7                        ; PF_R | PF_W | PF_X
     dq 0
     dq $$
     dq $$
@@ -36,33 +70,24 @@ phdr:
     dq 0x200000
 phdr_size equ $ - phdr
 
+; --- Program Header 2: PT_GNU_STACK (NX) ---
     dd 0x6474e551               ; PT_GNU_STACK
     dd 6                        ; PF_R | PF_W
     dq 0, 0, 0, 0, 0
     dq 16
 
-%define SYS_WRITE       1
-%define SYS_FORK       57
-%define SYS_EXECVE     59
-%define SYS_EXIT       60
-%define SYS_WAIT4      61
-%define SYS_KILL       62
-%define SYS_ALARM      37
-%define SYS_SETPGID    109
-%define SYS_RT_SIGACTION 13
-%define SIGALRM         14
-%define SIGTERM         15
-%define SIGKILL          9
-%define SA_RESTORER     0x04000000
-%define STDOUT          1
-%define STDERR          2
-
-; Writable data
+; ===============================================================
+; Writable data (initialized, in-file)
+; ===============================================================
 child_pid: dq 0
 kill_signal: dd 15
 kill_duration: dq 0
 foreground_flag: db 0
 timed_out_flag: db 0
+
+; ===============================================================
+; Code
+; ===============================================================
 
 alarm_handler:
     mov     byte [timed_out_flag], 1
@@ -762,7 +787,10 @@ _start:
     mov     eax, SYS_EXIT
     syscall
 
-; @@DATA_START@@
+; ===============================================================
+; RODATA
+; ===============================================================
+
 str_help_t:
     db "Usage: timeout [OPTION] DURATION COMMAND [ARG]...", 10
     db "  or:  timeout [OPTION]", 10
@@ -820,7 +848,6 @@ str_inv_pre_len equ $ - str_inv_pre - 1
 str_inv_post:
     db "'", 10, 0
 str_inv_post_len equ $ - str_inv_post - 1
-; @@DATA_END@@
 
 s_help:
     db "--help", 0
@@ -841,11 +868,17 @@ s_INT:
 s_HUP:
     db "HUP", 0
 
+; ===============================================================
+; BSS (uninitialized data — zero-filled by ELF loader)
+; ===============================================================
 file_size equ $ - $$
 
-exec_argv: times 258*8 db 0
-path_buf: times 4096 db 0
-sigact: times 152 db 0
-sigact_old: times 152 db 0
+bss_base    equ $$ + file_size
 
-mem_size equ $ - $$
+exec_argv   equ bss_base + 0               ; 258 * 8 = 2064
+path_buf    equ bss_base + 2064            ; 4096
+sigact      equ bss_base + 6160            ; 152
+sigact_old  equ bss_base + 6312            ; 152
+
+bss_end     equ bss_base + 6464
+mem_size    equ bss_end - $$
