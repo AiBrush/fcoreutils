@@ -2,9 +2,11 @@ NASM      = nasm
 BUILD     = build
 TARGET    = fsplit
 
-.PHONY: all release clean test bench sizes
+.PHONY: all dev release clean test bench sizes
 
 all: release
+
+dev: release
 
 $(BUILD):
 	mkdir -p $(BUILD)
