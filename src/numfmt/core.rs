@@ -297,9 +297,24 @@ fn parse_number_with_suffix(s: &str, unit: ScaleUnit) -> Result<f64, String> {
     let suffix_str = &s[num_end..];
 
     // Parse the numeric part.
-    let value: f64 = num_str
-        .parse()
-        .map_err(|_| format!("invalid number: '{}'", s))?;
+    let value: f64 = num_str.parse().map_err(|_| {
+        // GNU distinguishes "invalid number" (no leading digits at all) from
+        // "invalid suffix in input" (valid numeric prefix but trailing junk).
+        let has_leading_digits = {
+            let b = num_str.as_bytes();
+            let start = if !b.is_empty() && (b[0] == b'+' || b[0] == b'-') {
+                1
+            } else {
+                0
+            };
+            start < b.len() && b[start].is_ascii_digit()
+        };
+        if has_leading_digits {
+            format!("invalid suffix in input: '{}'", s)
+        } else {
+            format!("invalid number: '{}'", s)
+        }
+    })?;
 
     // Apply suffix multiplier.
     let multiplier = if suffix_str.is_empty() {
