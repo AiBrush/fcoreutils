@@ -1,6 +1,7 @@
 # unexpand — Makefile (uses shared infrastructure)
 TARGET      = funexpand
 LIB_SRCS    = io.asm
+LDFLAGS     = --gc-sections -n
 
 include ../../Makefile.inc
 
