@@ -263,12 +263,12 @@ jobs:
           # fyes (Python build script)
           cd assembly/yes && python3 build.py --no-verify && cd ../..
           # NASM unified tools (flat binary)
-          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install stat realpath dircolors printf mkdir mkfifo mknod mktemp chmod; do
+          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install stat realpath dircolors printf mkdir mkfifo mknod mktemp chmod basename cksum dirname factor link nproc pathchk printenv readlink rmdir sum tee truncate uname unlink; do
             nasm -f bin assembly/$tool/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
           # NASM unified tools (unified/ subdirectory)
-          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum; do
+          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum base32 basenc comm fold join pr sha1sum sha256sum shred shuf tsort; do
             nasm -f bin assembly/$tool/unified/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
@@ -281,7 +281,7 @@ jobs:
           ld -o assembly/arch/farch /tmp/farch.o
           chmod +x assembly/arch/farch
           rm -f /tmp/farch.o
-          echo "All 64 assembly tools built successfully"
+          echo "All 91 assembly tools built successfully"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: assembly-binaries
@@ -355,6 +355,32 @@ jobs:
             assembly/mknod/fmknod
             assembly/mktemp/fmktemp
             assembly/chmod/fchmod
+            assembly/basename/fbasename
+            assembly/cksum/fcksum
+            assembly/dirname/fdirname
+            assembly/factor/ffactor
+            assembly/link/flink
+            assembly/nproc/fnproc
+            assembly/pathchk/fpathchk
+            assembly/printenv/fprintenv
+            assembly/readlink/freadlink
+            assembly/rmdir/frmdir
+            assembly/sum/fsum
+            assembly/tee/ftee
+            assembly/truncate/ftruncate
+            assembly/uname/funame
+            assembly/unlink/funlink
+            assembly/base32/fbase32
+            assembly/basenc/fbasenc
+            assembly/comm/fcomm
+            assembly/fold/ffold
+            assembly/join/fjoin
+            assembly/pr/fpr
+            assembly/sha1sum/fsha1sum
+            assembly/sha256sum/fsha256sum
+            assembly/shred/fshred
+            assembly/shuf/fshuf
+            assembly/tsort/ftsort
 
   # ── Assembly: test each tool in parallel ──────
   # Skip on merge_group — tests already passed on the PR.
@@ -366,7 +392,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp, stat, realpath, dircolors, printf, chroot, chcon, runcon, stty, stdbuf, pinky, ptx, numfmt, dd, csplit, expr, test, install, ls, dir, vdir, du, df, mkdir, mkfifo, mknod, mktemp, chmod]
+        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp, stat, realpath, dircolors, printf, chroot, chcon, runcon, stty, stdbuf, pinky, ptx, numfmt, dd, csplit, expr, test, install, ls, dir, vdir, du, df, mkdir, mkfifo, mknod, mktemp, chmod, basename, cksum, dirname, factor, link, nproc, pathchk, printenv, readlink, rmdir, sum, tee, truncate, uname, unlink, base32, basenc, comm, fold, join, pr, sha1sum, sha256sum, shred, shuf, tsort]
         runner: [ubuntu-latest]
         include:
           - tool: yes-arm64
