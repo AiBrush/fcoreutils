@@ -209,8 +209,8 @@ _start:
     mov     edx, eax
     mov     rsi, [r15 + 16]
     call    do_write_err
-    mov     rsi, str_sq_nl
-    mov     edx, 2
+    mov     rsi, str_csq_nl
+    mov     edx, 4
     call    do_write_err
     mov     rsi, str_try
     mov     edx, str_try_len
@@ -292,7 +292,7 @@ str_version_len equ $ - str_version
 
 str_prefix:      db "unlink: "
 str_prefix_len   equ $ - str_prefix
-str_extra:       db "extra operand '"
+str_extra:       db "extra operand ", 0xe2, 0x80, 0x98
 str_extra_len    equ $ - str_extra
 str_missing:     db "missing operand", 10
 str_missing_len  equ $ - str_missing
@@ -301,6 +301,7 @@ str_cannot_unlink_len equ $ - str_cannot_unlink
 str_sq_colon:    db "': "
 str_sq_colon_len equ $ - str_sq_colon
 str_sq_nl:       db "'", 10
+str_csq_nl:      db 0xe2, 0x80, 0x99, 10
 str_try:         db "Try 'unlink --help' for more information.", 10
 str_try_len      equ $ - str_try
 

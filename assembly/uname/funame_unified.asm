@@ -45,6 +45,8 @@ ORG 0x400000
 %define FLAG_I  6   ; hardware-platform
 %define FLAG_O  7   ; operating-system
 %define FLAG_ALL 0xFF
+; -a includes all fields (-p and -i use machine field, matching GNU 9.x)
+%define FLAG_ALL_A FLAG_ALL
 
 ; --- ELF Header (64 bytes) ---
 ehdr:
@@ -186,7 +188,7 @@ _start:
     inc     rdi
     jmp     .short_loop
 .set_a:
-    or      bl, FLAG_ALL
+    or      bl, FLAG_ALL_A
     inc     rdi
     jmp     .short_loop
 
@@ -342,7 +344,7 @@ _start:
     jmp     .parse_opts
 .pop_set_all:
     pop     rcx
-    or      bl, FLAG_ALL
+    or      bl, FLAG_ALL_A
     inc     ecx
     jmp     .parse_opts
 
@@ -358,13 +360,18 @@ _start:
     mov     rsi, str_extra
     mov     edx, str_extra_len
     call    do_write_err
+    ; Unicode left quote U+2018
+    mov     rsi, str_lquote
+    mov     edx, str_lquote_len
+    call    do_write_err
     mov     rdi, r8
     call    str_len
     mov     edx, eax
     mov     rsi, r8
     call    do_write_err
-    mov     rsi, str_sq_nl
-    mov     edx, 2
+    ; Unicode right quote U+2019 + newline
+    mov     rsi, str_rquote_nl
+    mov     edx, str_rquote_nl_len
     call    do_write_err
     mov     rsi, str_try
     mov     edx, str_try_len
@@ -583,7 +590,7 @@ str_unrecog:     db "unrecognized option '"
 str_unrecog_len  equ $ - str_unrecog
 str_invalid:     db "invalid option -- '"
 str_invalid_len  equ $ - str_invalid
-str_extra:       db "extra operand '"
+str_extra:       db "extra operand "
 str_extra_len    equ $ - str_extra
 str_sq_nl:       db "'", 10
 str_try:         db "Try 'uname --help' for more information.", 10
@@ -595,6 +602,15 @@ str_uname_fail_len equ $ - str_uname_fail
 str_newline:     db 10
 str_space:       db ' '
 str_gnu_linux:   db "GNU/Linux", 0
+str_unknown:     db "unknown", 0
+
+; Unicode curly quotes for extra-operand error (U+2018 / U+2019)
+str_lquote:      db 0xe2, 0x80, 0x98
+str_lquote_len   equ $ - str_lquote
+str_rquote:      db 0xe2, 0x80, 0x99
+str_rquote_len   equ $ - str_rquote
+str_rquote_nl:   db 0xe2, 0x80, 0x99, 10
+str_rquote_nl_len equ $ - str_rquote_nl
 
 str_help_flag:          db "--help", 0
 str_version_flag:       db "--version", 0

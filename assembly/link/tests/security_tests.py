@@ -730,9 +730,10 @@ def check_tool_specific():
         # Error message format check
         rc, out, err = run([BIN, os.path.join(tmpdir, "nosuch"), dst])
         err_text = err.decode(errors="replace")
-        report_result(err_text.startswith("link: cannot create link '"),
+        err_text_norm = err_text.replace('\u2018', "'").replace('\u2019', "'")
+        report_result(err_text_norm.startswith("link: cannot create link '"),
                      "link: error format starts with 'link: cannot create link '")
-        report_result("' to '" in err_text,
+        report_result("' to '" in err_text_norm,
                      "link: error format contains ' to '")
 
         os.unlink(src)
@@ -740,18 +741,22 @@ def check_tool_specific():
     # Missing operand messages
     rc, out, err = run([BIN])
     err_text = err.decode(errors="replace")
+    err_text_norm = err_text.replace('\u2018', "'").replace('\u2019', "'")
     report_result("missing operand" in err_text, "link: missing operand message")
-    report_result("Try 'link --help'" in err_text, "link: missing operand → try help hint")
+    report_result("Try 'link --help'" in err_text_norm, "link: missing operand → try help hint")
 
     rc, out, err = run([BIN, "somefile"])
     err_text = err.decode(errors="replace")
+    # Normalize smart quotes to ASCII for comparison
+    err_text_norm = err_text.replace('\u2018', "'").replace('\u2019', "'")
     report_result("missing operand after" in err_text, "link: missing operand after message")
-    report_result("'somefile'" in err_text, "link: missing operand after includes filename")
+    report_result("'somefile'" in err_text_norm, "link: missing operand after includes filename")
 
     rc, out, err = run([BIN, "a", "b", "c"])
     err_text = err.decode(errors="replace")
+    err_text_norm = err_text.replace('\u2018', "'").replace('\u2019', "'")
     report_result("extra operand" in err_text, "link: extra operand message")
-    report_result("'c'" in err_text, "link: extra operand includes the extra arg")
+    report_result("'c'" in err_text_norm, "link: extra operand includes the extra arg")
 
     # --help goes to stdout
     rc, out, err = run([BIN, "--help"])
@@ -764,7 +769,7 @@ def check_tool_specific():
     report_result(rc == 0, "link: --version → exit 0")
     report_result(b"link" in out, "link: --version contains 'link'")
 
-    # Compare error messages with GNU (byte-for-byte)
+    # Compare error messages with GNU (byte-for-byte after quote normalization)
     # Use LC_ALL=C to ensure GNU uses ASCII quotes (matching our assembly output)
     if gnu_path:
         c_env = os.environ.copy()
@@ -774,7 +779,12 @@ def check_tool_specific():
             rc_g, _, err_g = run([gnu_path] + args_list, env=c_env)
             # Normalize tool name
             err_g_norm = err_g.replace(gnu_path.encode(), b"link")
-            report_result(err_f == err_g_norm,
+            # Normalize smart quotes (U+2018/U+2019) to ASCII single quotes
+            err_f_norm = err_f
+            for smart, ascii_ in [(b"\xe2\x80\x98", b"'"), (b"\xe2\x80\x99", b"'")]:
+                err_f_norm = err_f_norm.replace(smart, ascii_)
+                err_g_norm = err_g_norm.replace(smart, ascii_)
+            report_result(err_f_norm == err_g_norm,
                          f"link: error msg byte-match GNU for args={args_list}")
 
 

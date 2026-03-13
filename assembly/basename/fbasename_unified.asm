@@ -267,8 +267,8 @@ _start:
     mov     edx, eax
     mov     rsi, r13
     call    do_write_err
-    mov     rsi, str_sq_nl
-    mov     edx, 2
+    mov     rsi, str_csq_nl
+    mov     edx, 4
     call    do_write_err
     mov     rsi, str_try
     mov     edx, str_try_len
@@ -560,11 +560,12 @@ str_unrecog:     db "unrecognized option '"
 str_unrecog_len  equ $ - str_unrecog
 str_invalid:     db "invalid option -- '"
 str_invalid_len  equ $ - str_invalid
-str_extra:       db "extra operand '"
+str_extra:       db "extra operand ", 0xe2, 0x80, 0x98
 str_extra_len    equ $ - str_extra
 str_missing:     db "missing operand", 10
 str_missing_len  equ $ - str_missing
 str_sq_nl:       db "'", 10
+str_csq_nl:      db 0xe2, 0x80, 0x99, 10
 str_try:         db "Try 'basename --help' for more information.", 10
 str_try_len      equ $ - str_try
 str_opt_req_arg: db "option requires an argument -- 's'", 10

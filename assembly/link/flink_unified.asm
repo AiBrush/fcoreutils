@@ -220,8 +220,8 @@ _start:
     mov     rsi, [r15 + 8]
     call    do_write_err
 
-    mov     rsi, str_sq_nl
-    mov     edx, 2
+    mov     rsi, str_csq_nl
+    mov     edx, 4
     call    do_write_err
 
     mov     rsi, str_try
@@ -247,8 +247,8 @@ _start:
     mov     rsi, [r15 + 24]
     call    do_write_err
 
-    mov     rsi, str_sq_nl
-    mov     edx, 2
+    mov     rsi, str_csq_nl
+    mov     edx, 4
     call    do_write_err
 
     mov     rsi, str_try
@@ -427,13 +427,14 @@ str_version_len equ $ - str_version
 
 str_prefix:      db "link: "
 str_prefix_len   equ $ - str_prefix
-str_extra:       db "extra operand '"
+str_extra:       db "extra operand ", 0xe2, 0x80, 0x98
 str_extra_len    equ $ - str_extra
 str_missing:     db "missing operand", 10
 str_missing_len  equ $ - str_missing
-str_missing_after: db "missing operand after '"
+str_missing_after: db "missing operand after ", 0xe2, 0x80, 0x98
 str_missing_after_len equ $ - str_missing_after
 str_sq_nl:       db "'", 10
+str_csq_nl:      db 0xe2, 0x80, 0x99, 10
 str_try:         db "Try 'link --help' for more information.", 10
 str_try_len      equ $ - str_try
 str_cannot_create: db "cannot create link '"
