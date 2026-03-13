@@ -2,20 +2,18 @@
 ; fchown_unified.asm -- GNU-compatible 'chown' command
 ; Builds with: nasm -f bin fchown_unified.asm -o fchown
 ;
-; chown: Change user and/or group ownership of files.
 ; Usage: chown [OPTION]... [OWNER][:[GROUP]] FILE...
 ;        chown [OPTION]... --reference=RFILE FILE...
 ;
-; Global register allocation (main loop):
+; Global register allocation (main):
 ;   r14d = argc, r15 = argv, ebx = flags, ebp = exit code
-;   r13d = current file arg index
-;   Target uid/gid stored in g_target_uid / g_target_gid
+;   r13d = file arg index
+;   Target uid/gid stored in g_target_uid / g_target_gid (writable globals)
 ;
 ; Flags in ebx:
 ;   bit 0 = -v (verbose)
 ;   bit 1 = -c (changes only)
 ;   bit 2 = -R (recursive)
-;   bit 3 = --reference mode
 ;   bit 4 = -h (--no-dereference)
 ;   bit 5 = --no-preserve-root
 ; ============================================================
@@ -88,7 +86,6 @@ phdr:
 
 ; ============================================================
 _start:
-    ; Block SIGPIPE
     sub     rsp, 16
     mov     qword [rsp], 0
     bts     qword [rsp], SIGPIPE
@@ -102,16 +99,14 @@ _start:
 
     mov     r14d, [rsp]
     lea     r15, [rsp + 8]
-
     xor     ebx, ebx
     xor     ebp, ebp
     mov     dword [g_target_uid], -1
     mov     dword [g_target_gid], -1
     mov     ecx, 1
 
-    ; ref_path on stack
     sub     rsp, 8
-    mov     qword [rsp], 0
+    mov     qword [rsp], 0      ; ref_path
 
 .parse_opts:
     cmp     ecx, r14d
@@ -130,16 +125,15 @@ _start:
     test    al, al
     jz      .next_opt
     cmp     al, 'v'
-    je      .s_verbose
+    je      .sv
     cmp     al, 'c'
-    je      .s_changes
+    je      .sc
     cmp     al, 'R'
-    je      .s_recursive
+    je      .sr
     cmp     al, 'h'
-    je      .s_noderef
+    je      .sh
     cmp     al, 'f'
-    je      .s_silent
-    ; Unknown
+    je      .sf
     push    rcx
     push    rdi
     mov     rsi, str_prefix
@@ -163,24 +157,19 @@ _start:
     pop     rcx
     jmp     .exit1
 
-.s_verbose:
-    or      bl, 1
+.sv: or bl, 1
     inc     rdi
     jmp     .short_loop
-.s_changes:
-    or      bl, 2
+.sc: or bl, 2
     inc     rdi
     jmp     .short_loop
-.s_recursive:
-    or      bl, 4
+.sr: or bl, 4
     inc     rdi
     jmp     .short_loop
-.s_noderef:
-    or      bl, 16
+.sh: or bl, 16
     inc     rdi
     jmp     .short_loop
-.s_silent:
-    inc     rdi
+.sf: inc rdi
     jmp     .short_loop
 
 .check_long:
@@ -192,67 +181,57 @@ _start:
     mov     rsi, str_help_flag
     call    str_eq
     test    eax, eax
-    jnz     .L_help
-
+    jnz     .Lhelp
     mov     rdi, r13
     mov     rsi, str_version_flag
     call    str_eq
     test    eax, eax
-    jnz     .L_version
-
+    jnz     .Lversion
     mov     rdi, r13
     mov     rsi, str_verbose_flag
     call    str_eq
     test    eax, eax
-    jnz     .L_verbose
-
+    jnz     .Lverbose
     mov     rdi, r13
     mov     rsi, str_changes_flag
     call    str_eq
     test    eax, eax
-    jnz     .L_changes
-
+    jnz     .Lchanges
     mov     rdi, r13
     mov     rsi, str_recursive_flag
     call    str_eq
     test    eax, eax
-    jnz     .L_recursive
-
+    jnz     .Lrecursive
     mov     rdi, r13
     mov     rsi, str_noderef_flag
     call    str_eq
     test    eax, eax
-    jnz     .L_noderef
-
+    jnz     .Lnoderef
     mov     rdi, r13
     mov     rsi, str_deref_flag
     call    str_eq
     test    eax, eax
-    jnz     .L_deref
-
+    jnz     .Lderef
     mov     rdi, r13
     mov     rsi, str_no_preserve_root
     call    str_eq
     test    eax, eax
-    jnz     .L_nopreserve
-
+    jnz     .Lnopreserve
     mov     rdi, r13
     mov     rsi, str_preserve_root
     call    str_eq
     test    eax, eax
-    jnz     .L_accept
-
+    jnz     .Laccept
     mov     rdi, r13
     mov     rsi, str_from_prefix
     call    str_starts_with
     test    eax, eax
-    jnz     .L_accept
-
+    jnz     .Laccept
     mov     rdi, r13
     mov     rsi, str_reference_prefix
     call    str_starts_with
     test    eax, eax
-    jnz     .L_reference
+    jnz     .Lreference
 
     ; Unrecognized
     mov     rsi, str_prefix
@@ -275,40 +254,40 @@ _start:
     pop     rcx
     jmp     .exit1
 
-.L_help:
+.Lhelp:
     pop     rcx
     jmp     .show_help
-.L_version:
+.Lversion:
     pop     rcx
     jmp     .show_version
-.L_verbose:
+.Lverbose:
     pop     rcx
     or      bl, 1
     jmp     .next_opt
-.L_changes:
+.Lchanges:
     pop     rcx
     or      bl, 2
     jmp     .next_opt
-.L_recursive:
+.Lrecursive:
     pop     rcx
     or      bl, 4
     jmp     .next_opt
-.L_noderef:
+.Lnoderef:
     pop     rcx
     or      bl, 16
     jmp     .next_opt
-.L_deref:
+.Lderef:
     pop     rcx
     and     bl, 0xEF
     jmp     .next_opt
-.L_nopreserve:
+.Lnopreserve:
     pop     rcx
     or      bl, 32
     jmp     .next_opt
-.L_accept:
+.Laccept:
     pop     rcx
     jmp     .next_opt
-.L_reference:
+.Lreference:
     pop     rcx
     lea     rax, [r13 + 12]
     mov     [rsp], rax
@@ -318,7 +297,6 @@ _start:
 .double_dash:
     inc     ecx
     jmp     .done_opts
-
 .next_opt:
     inc     ecx
     jmp     .parse_opts
@@ -330,10 +308,11 @@ _start:
 
     cmp     ecx, r14d
     jge     .err_missing_operand
-    mov     r13d, ecx           ; save arg index
+    mov     r13d, ecx
+
     mov     rdi, [r15 + rcx*8]
     call    parse_owner_group
-    ; eax = uid (-1 unch, -2 err), edx = gid (-1 unch)
+    ; eax = uid (-1 unchanged, -2 error), edx = gid (-1 unchanged)
     cmp     eax, -2
     je      .err_invalid_user
 
@@ -460,7 +439,6 @@ _start:
     mov     rsi, str_missing_after
     mov     edx, str_missing_after_len
     call    do_write_err
-    dec     r13d
     mov     rdi, [r15 + r13*8]
     call    str_len
     mov     edx, eax
@@ -488,9 +466,7 @@ _start:
     jmp     .exit1
 
 ; ============================================================
-; do_chown_file: chown one file (and recurse if -R)
-; Reads target uid/gid from g_target_uid / g_target_gid
-; Input: rdi = file path, ebx = flags, ebp = exit code
+; do_chown_file
 ; ============================================================
 do_chown_file:
     push    rbx
@@ -500,10 +476,9 @@ do_chown_file:
     push    r15
     sub     rsp, STAT_BUF_SIZE + 16
 
-    mov     r15, rdi            ; file path
-    mov     r13d, ebx           ; flags
+    mov     r15, rdi
+    mov     r13d, ebx
 
-    ; Stat the file
     mov     rdi, r15
     mov     rsi, rsp
     test    r13d, 16
@@ -517,15 +492,12 @@ do_chown_file:
     test    rax, rax
     js      .cf_stat_err
 
-    ; Old uid/gid
     mov     r12d, [rsp + STAT_UID]
     mov     r14d, [rsp + STAT_GID]
 
-    ; Target uid/gid
     mov     esi, [g_target_uid]
     mov     edx, [g_target_gid]
 
-    ; chown/lchown
     mov     rdi, r15
     test    r13d, 16
     jnz     .cf_lchown
@@ -540,45 +512,41 @@ do_chown_file:
     test    rax, rax
     js      .cf_chown_err
 
-    ; Verbose
     test    r13d, 3
     jz      .cf_recurse
 
     ; Compute actual new uid/gid
     mov     eax, [g_target_uid]
     cmp     eax, -1
-    jne     .cf_nuid_ok
+    jne     .cf_u1
     mov     eax, r12d
-.cf_nuid_ok:
-    mov     ecx, eax            ; new uid
+.cf_u1:
+    mov     [rsp + STAT_BUF_SIZE + 8], eax  ; new uid
 
     mov     eax, [g_target_gid]
     cmp     eax, -1
-    jne     .cf_ngid_ok
+    jne     .cf_g1
     mov     eax, r14d
-.cf_ngid_ok:
-    mov     edx, eax            ; new gid
+.cf_g1:
+    mov     [rsp + STAT_BUF_SIZE + 12], eax ; new gid
 
-    ; If -c, only print if changed
+    ; -c: only if changed
     test    r13d, 2
     jz      .cf_verbose
-    cmp     r12d, ecx
+    mov     eax, [rsp + STAT_BUF_SIZE + 8]
+    cmp     r12d, eax
     jne     .cf_verbose
-    cmp     r14d, edx
+    mov     eax, [rsp + STAT_BUF_SIZE + 12]
+    cmp     r14d, eax
     jne     .cf_verbose
     jmp     .cf_recurse
 
 .cf_verbose:
-    ; Save computed values
-    mov     [rsp + STAT_BUF_SIZE], r12d     ; old uid
-    mov     [rsp + STAT_BUF_SIZE + 4], r14d ; old gid
-    mov     [rsp + STAT_BUF_SIZE + 8], ecx  ; new uid
-    mov     [rsp + STAT_BUF_SIZE + 12], edx ; new gid
-
-    ; Did anything change?
-    cmp     r12d, ecx
+    mov     eax, [rsp + STAT_BUF_SIZE + 8]
+    cmp     r12d, eax
     jne     .cf_changed
-    cmp     r14d, edx
+    mov     eax, [rsp + STAT_BUF_SIZE + 12]
+    cmp     r14d, eax
     jne     .cf_changed
 
     ; Retained
@@ -593,12 +561,12 @@ do_chown_file:
     mov     rsi, str_retained
     mov     edx, str_retained_len
     call    do_write_stdout
-    mov     edi, [rsp + STAT_BUF_SIZE]
+    mov     edi, r12d
     call    print_uint
     mov     rsi, str_colon_char
     mov     edx, 1
     call    do_write_stdout
-    mov     edi, [rsp + STAT_BUF_SIZE + 4]
+    mov     edi, r14d
     call    print_uint
     mov     rsi, str_newline
     mov     edx, 1
@@ -617,12 +585,12 @@ do_chown_file:
     mov     rsi, str_sq_from
     mov     edx, str_sq_from_len
     call    do_write_stdout
-    mov     edi, [rsp + STAT_BUF_SIZE]
+    mov     edi, r12d
     call    print_uint
     mov     rsi, str_colon_char
     mov     edx, 1
     call    do_write_stdout
-    mov     edi, [rsp + STAT_BUF_SIZE + 4]
+    mov     edi, r14d
     call    print_uint
     mov     rsi, str_to
     mov     edx, str_to_len
@@ -711,7 +679,6 @@ do_chown_recurse:
     push    r13
     push    r14
     push    r15
-
     mov     r15, rdi
 
     mov     eax, SYS_OPENAT
@@ -721,7 +688,7 @@ do_chown_recurse:
     xor     r10d, r10d
     syscall
     test    rax, rax
-    js      .cr_open_err
+    js      .cr_err
     mov     r14d, eax
 
     sub     rsp, DIRBUF_SIZE + PATH_MAX + 8
@@ -741,7 +708,6 @@ do_chown_recurse:
 .cr_entry:
     cmp     r12d, r13d
     jge     .cr_read
-
     movzx   ecx, word [rsp + r12 + 16]
     lea     rdi, [rsp + r12 + 19]
 
@@ -767,8 +733,6 @@ do_chown_recurse:
     rep movsb
     mov     byte [rdi], '/'
     inc     rdi
-
-    ; Get entry name length
     pop     rcx
     push    rcx
     lea     rsi, [rsp + r12 + 19 + 8]
@@ -808,7 +772,7 @@ do_chown_recurse:
     pop     rbp
     ret
 
-.cr_open_err:
+.cr_err:
     neg     rax
     mov     r8d, eax
     mov     rsi, str_prefix
@@ -837,8 +801,8 @@ do_chown_recurse:
     ret
 
 ; ============================================================
-; parse_owner_group: parse OWNER[:GROUP]
-; rdi = string, returns eax=uid (-1 unch, -2 err), edx=gid (-1 unch)
+; parse_owner_group: rdi = "OWNER[:GROUP]"
+; Returns: eax = uid (-1 unchanged, -2 error), edx = gid (-1 unchanged)
 ; ============================================================
 parse_owner_group:
     push    rbx
@@ -863,24 +827,26 @@ parse_owner_group:
     jmp     .pog_scan
 
 .pog_nosep:
-    ; Whole string is OWNER
+    ; Entire string = OWNER
     mov     rdi, r15
     call    parse_number
     cmp     eax, -1
-    jne     .pog_uid_ok
+    jne     .pog_u
     mov     rdi, r15
     call    lookup_user
-    cmp     eax, -1
-    je      .pog_err
-.pog_uid_ok:
+    test    eax, eax
+    jz      .pog_err
+    dec     eax                 ; uid+1 -> uid
+.pog_u:
     mov     r12d, eax
     jmp     .pog_done
 
 .pog_sep:
+    ; ecx = index of ':'
     test    ecx, ecx
-    jz      .pog_grp
+    jz      .pog_grp            ; starts with ':', no owner
 
-    ; Copy owner part
+    ; Copy owner part to buffer
     lea     rdi, [rsp]
     mov     rsi, r15
     mov     r8d, ecx
@@ -891,35 +857,37 @@ parse_owner_group:
     pop     rcx
 
     push    rcx
-    lea     rdi, [rsp + 8]
+    lea     rdi, [rsp + 8]     ; buffer (pushed rcx offsets by 8)
     call    parse_number
     cmp     eax, -1
-    jne     .pog_uid2
+    jne     .pog_u2
     lea     rdi, [rsp + 8]
     call    lookup_user
-    cmp     eax, -1
-    je      .pog_err2
-.pog_uid2:
+    test    eax, eax
+    jz      .pog_err2
+    dec     eax
+.pog_u2:
     mov     r12d, eax
     pop     rcx
 
 .pog_grp:
-    ; Group part
+    ; Group part starts after ':'
     lea     rdi, [r15 + rcx + 1]
     cmp     byte [rdi], 0
-    je      .pog_done
+    je      .pog_done           ; empty group
 
     push    rcx
     call    parse_number
     cmp     eax, -1
-    jne     .pog_gid
+    jne     .pog_g
     pop     rcx
     push    rcx
     lea     rdi, [r15 + rcx + 1]
     call    lookup_group
-    cmp     eax, -1
-    je      .pog_err3
-.pog_gid:
+    test    eax, eax
+    jz      .pog_err3
+    dec     eax
+.pog_g:
     mov     r13d, eax
     pop     rcx
     jmp     .pog_done
@@ -942,7 +910,7 @@ parse_owner_group:
     ret
 
 ; ============================================================
-; lookup_user: rdi=name, returns eax=uid or -1
+; lookup_user: rdi=name, returns eax=uid+1 (0=not found)
 ; ============================================================
 lookup_user:
     push    rbx
@@ -1025,7 +993,7 @@ lookup_user:
     mov     eax, SYS_CLOSE
     mov     edi, r14d
     syscall
-    pop     rax
+    pop     rax              ; eax = uid+1
     pop     r15
     pop     r14
     pop     r13
@@ -1039,7 +1007,7 @@ lookup_user:
     mov     edi, r14d
     syscall
 .lu_fail:
-    mov     eax, -1
+    xor     eax, eax
     pop     r15
     pop     r14
     pop     r13
@@ -1048,7 +1016,7 @@ lookup_user:
     ret
 
 ; ============================================================
-; lookup_group: rdi=name, returns eax=gid or -1
+; lookup_group: rdi=name, returns eax=gid+1 (0=not found)
 ; ============================================================
 lookup_group:
     push    rbx
@@ -1145,7 +1113,7 @@ lookup_group:
     mov     edi, r14d
     syscall
 .lg_fail:
-    mov     eax, -1
+    xor     eax, eax
     pop     r15
     pop     r14
     pop     r13
@@ -1154,8 +1122,7 @@ lookup_group:
     ret
 
 ; ============================================================
-; match_passwd: rdi=line, rsi=name. Returns eax=uid or 0
-; Format: name:passwd:uid:...
+; match_passwd: rdi=line, rsi=name. Returns eax=uid+1 or 0
 ; ============================================================
 match_passwd:
     push    rbx
@@ -1202,39 +1169,16 @@ match_passwd:
     inc     ecx
     jmp     .mp_parse
 .mp_ok:
-    ; uid 0 is valid (root) - distinguish by setting a flag
-    ; Actually if uid=0, eax=0 looks like "no match". Fix:
-    ; Return eax=uid+1 for match? No, that's ugly. Let's use a
-    ; different approach: set eax high bit to indicate found, caller checks.
-    ; Simpler: return uid in eax, and set ebx=1 for match.
-    ; ... Actually, for uid 0, we can just return 0 and the test would fail.
-    ; But root uid is 0. So let's use a different indicator.
-    ; Return eax = uid | 0x80000000 to indicate match, caller masks it.
-    ; No, let's just increment and let caller decrement. Too hacky.
-    ; Best fix: return 1-based; caller subtracts 1. No.
-    ; Actually the simplest: we only call match_passwd when we need to find
-    ; a username. If we find "root" with uid 0, we return 0. The caller
-    ; tests "jnz" which would miss uid 0. Fix: test differently.
-    ; Let's return the uid in eax and set carry flag or use a separate register.
-    ; Change: return eax = uid, r8d = 1 for match, 0 for no match.
-    mov     r8d, 1
+    inc     eax
     pop     rbx
-    ; We want the caller to see eax != 0 for match. But uid can be 0.
-    ; The simplest fix: use r8d as return, but the caller uses "test eax,eax".
-    ; Let me change the protocol: return in r8d (1=found), uid in eax.
-    ; But the callers use "test eax,eax / jnz". Let me fix both.
-    ; Actually let's just always return uid+1 and have caller subtract 1.
-    inc     eax                 ; return uid+1 (0 means not found)
     ret
 .mp_no:
     xor     eax, eax
-    xor     r8d, r8d
     pop     rbx
     ret
 
 ; ============================================================
 ; match_group: rdi=line, rsi=name. Returns eax=gid+1 or 0
-; Format: name:passwd:gid:members
 ; ============================================================
 match_group:
     push    rbx
@@ -1281,7 +1225,7 @@ match_group:
     inc     ecx
     jmp     .mg_parse
 .mg_ok:
-    inc     eax                 ; return gid+1
+    inc     eax
     pop     rbx
     ret
 .mg_no:
@@ -1289,48 +1233,6 @@ match_group:
     pop     rbx
     ret
 
-; ============================================================
-; Wrappers: lookup_user and lookup_group callers need fix
-; The match functions return id+1 (0 = not found)
-; lookup_user/lookup_group test "jnz" which works with +1 scheme
-; Then they return eax which is id+1; we need to subtract 1
-; ============================================================
-; Fix: add dec eax after .lu_ok and .lg_ok
-; Already done below in the return path:
-; In .lu_ok: pop rax contains id+1. We need to dec before returning.
-; Let me patch the return paths:
-
-; Actually the code is already structured: after match returns nonzero,
-; it jumps to .lu_ok / .lg_ok, which pop rcx, add rsp, push rax (the match result),
-; close fd, pop rax, return. So eax = match result = id+1.
-; The callers (parse_owner_group, etc.) then check if eax == -1 for failure.
-; With the +1 scheme, id=0 returns 1 (not -1), so that works.
-; But we need to subtract 1 to get the real id.
-; Let me fix the return from lookup_user and lookup_group.
-
-; I need to go back and fix .lu_ok and .lg_ok to decrement.
-; Since the code is already written above, I'll add a fixup.
-; ... Actually the cleanest fix is to just adjust at the call sites.
-; In parse_owner_group, after calling lookup_user/lookup_group,
-; we check "cmp eax, -1" for error. With +1 scheme:
-;   - found uid 0: returns 1 (not -1, good)
-;   - found uid 1000: returns 1001 (not -1, good)
-;   - not found: returns 0... but we check "cmp eax, -1"
-;     So 0 != -1, and we'd think it succeeded with uid=0.
-;     That's wrong!
-; Let me rethink. I'll use a different scheme:
-; match returns: -1 (0xFFFFFFFF) for not found, actual id for found.
-; This way uid 0 works fine. But 0xFFFFFFFF as uid is not realistic.
-; Actually no - match_passwd/match_group currently return 0 for no match.
-; The simplest fix: have them return -1 for no match and actual id for match.
-; Let me redefine: match_passwd returns eax = uid on match, eax = -1 on no match.
-
-; OK I realize this file has gotten too tangled. Let me start the chown
-; file completely fresh with a clean design. The issue is managing the
-; uid=0 case. Let me write a clean version.
-
-; ============================================================
-; parse_number: rdi=string, returns eax=number or -1
 ; ============================================================
 parse_number:
     xor     eax, eax
@@ -1355,13 +1257,10 @@ parse_number:
     add     eax, ecx
     inc     rdi
     jmp     .pn_loop
-.pn_done:
-    ret
-.pn_fail:
-    mov     eax, -1
+.pn_done: ret
+.pn_fail: mov eax, -1
     ret
 
-; ============================================================
 print_uint:
     sub     rsp, 24
     lea     rcx, [rsp + 20]
@@ -1390,40 +1289,33 @@ print_uint:
     add     rsp, 24
     ret
 
-; ============================================================
 do_write:
     mov     eax, SYS_WRITE
     syscall
     cmp     rax, -4
     je      do_write
     ret
-
 do_write_stdout:
     mov     edi, STDOUT
     jmp     do_write
-
 do_write_err:
     mov     edi, STDERR
     jmp     do_write
-
 do_exit:
     mov     eax, SYS_EXIT
     syscall
 
 str_len:
     xor     eax, eax
-.sl:
-    cmp     byte [rdi + rax], 0
+.sl: cmp byte [rdi + rax], 0
     je      .sd
     inc     eax
     jmp     .sl
-.sd:
-    ret
+.sd: ret
 
 str_eq:
     xor     r8d, r8d
-.se:
-    movzx   eax, byte [rdi + r8]
+.se: movzx eax, byte [rdi + r8]
     movzx   edx, byte [rsi + r8]
     cmp     al, dl
     jne     .sn
@@ -1431,89 +1323,74 @@ str_eq:
     jz      .sy
     inc     r8d
     jmp     .se
-.sy:
-    mov     eax, 1
+.sy: mov eax, 1
     ret
-.sn:
-    xor     eax, eax
+.sn: xor eax, eax
     ret
 
 str_starts_with:
     xor     r8d, r8d
-.sw:
-    movzx   edx, byte [rsi + r8]
+.sw: movzx edx, byte [rsi + r8]
     test    dl, dl
     jz      .sm
     movzx   eax, byte [rdi + r8]
     cmp     al, dl
-    jne     .sf
+    jne     .sf2
     inc     r8d
     jmp     .sw
-.sm:
-    mov     eax, 1
+.sm: mov eax, 1
     ret
-.sf:
-    xor     eax, eax
+.sf2: xor eax, eax
     ret
 
 print_errno:
     cmp     eax, ENOENT
-    je      .pe_noent
+    je      .pe1
     cmp     eax, EACCES
-    je      .pe_acces
+    je      .pe2
     cmp     eax, EPERM
-    je      .pe_perm
+    je      .pe3
     cmp     eax, ENOTDIR
-    je      .pe_notdir
+    je      .pe4
     cmp     eax, EINVAL
-    je      .pe_inval
+    je      .pe5
     cmp     eax, EROFS
-    je      .pe_rofs
+    je      .pe6
     cmp     eax, ELOOP
-    je      .pe_loop
+    je      .pe7
     cmp     eax, ENAMETOOLONG
-    je      .pe_nametoolong
+    je      .pe8
     mov     rsi, str_err_unknown
     mov     edx, str_err_unknown_len
     jmp     do_write_err
-.pe_noent:
-    mov     rsi, str_err_noent
+.pe1: mov rsi, str_err_noent
     mov     edx, str_err_noent_len
     jmp     do_write_err
-.pe_acces:
-    mov     rsi, str_err_acces
+.pe2: mov rsi, str_err_acces
     mov     edx, str_err_acces_len
     jmp     do_write_err
-.pe_perm:
-    mov     rsi, str_err_perm
+.pe3: mov rsi, str_err_perm
     mov     edx, str_err_perm_len
     jmp     do_write_err
-.pe_notdir:
-    mov     rsi, str_err_notdir
+.pe4: mov rsi, str_err_notdir
     mov     edx, str_err_notdir_len
     jmp     do_write_err
-.pe_inval:
-    mov     rsi, str_err_inval
+.pe5: mov rsi, str_err_inval
     mov     edx, str_err_inval_len
     jmp     do_write_err
-.pe_rofs:
-    mov     rsi, str_err_rofs
+.pe6: mov rsi, str_err_rofs
     mov     edx, str_err_rofs_len
     jmp     do_write_err
-.pe_loop:
-    mov     rsi, str_err_loop
+.pe7: mov rsi, str_err_loop
     mov     edx, str_err_loop_len
     jmp     do_write_err
-.pe_nametoolong:
-    mov     rsi, str_err_nametoolong
+.pe8: mov rsi, str_err_nametoolong
     mov     edx, str_err_nametoolong_len
     jmp     do_write_err
 
 ; ============================================================
 ; Data
 ; ============================================================
-
-; Global mutable storage (in the single RWX segment)
 g_target_uid: dd 0xFFFFFFFF
 g_target_gid: dd 0xFFFFFFFF
 
