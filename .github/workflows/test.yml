@@ -268,7 +268,7 @@ jobs:
             chmod +x assembly/$tool/f$tool
           done
           # NASM unified tools (unified/ subdirectory)
-          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum base32 basenc join pr sha1sum sha256sum sha512sum shred shuf tsort b2sum split nohup touch uptime users who chown fmt; do
+          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum base32 basenc join pr sha1sum sha256sum sha512sum shred shuf tsort b2sum split nohup touch uptime users who chown chgrp fmt; do
             nasm -f bin assembly/$tool/unified/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
@@ -391,6 +391,7 @@ jobs:
             assembly/users/fusers
             assembly/who/fwho
             assembly/chown/fchown
+            assembly/chgrp/fchgrp
             assembly/fmt/ffmt
 
   # ── Assembly: test each tool in parallel ──────
@@ -403,7 +404,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp, stat, realpath, dircolors, printf, chroot, chcon, runcon, stty, stdbuf, pinky, ptx, numfmt, dd, csplit, expr, test, install, ls, dir, vdir, du, df, mkdir, mkfifo, mknod, mktemp, chmod, basename, cksum, dirname, factor, link, nproc, pathchk, printenv, readlink, rmdir, sum, tee, truncate, uname, unlink, base32, basenc, comm, fold, join, pr, sha1sum, sha256sum, sha512sum, shred, shuf, tsort, b2sum, split, kill, nohup, touch, uptime, users, who, chown, fmt]
+        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp, stat, realpath, dircolors, printf, chroot, chcon, runcon, stty, stdbuf, pinky, ptx, numfmt, dd, csplit, expr, test, install, ls, dir, vdir, du, df, mkdir, mkfifo, mknod, mktemp, chmod, basename, cksum, dirname, factor, link, nproc, pathchk, printenv, readlink, rmdir, sum, tee, truncate, uname, unlink, base32, basenc, comm, fold, join, pr, sha1sum, sha256sum, sha512sum, shred, shuf, tsort, b2sum, split, kill, nohup, touch, uptime, users, who, chown, chgrp, fmt]
         runner: [ubuntu-latest]
         include:
           - tool: yes-arm64
