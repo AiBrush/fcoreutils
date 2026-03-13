@@ -296,16 +296,17 @@ _start:
     jmp     do_exit
 
 .invalid_option:
+    mov     r13, [r15 + rcx*8]     ; save option string (rcx clobbered by syscall)
     mov     rsi, str_prefix
     mov     edx, str_prefix_len
     call    write_err
     mov     rsi, str_unrec
     mov     edx, str_unrec_len
     call    write_err
-    mov     rdi, [r15 + rcx*8]
+    mov     rdi, r13
     call    str_len
     mov     edx, eax
-    mov     rsi, [r15 + rcx*8]
+    mov     rsi, r13
     call    write_err
     mov     rsi, str_sq_nl
     mov     edx, 2

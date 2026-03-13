@@ -19,10 +19,10 @@ $(BUILD):
 $(BUILD)/%.o: lib/%.asm | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
-# Dev build — modular, fast iteration
-dev: tools/$(TARGET).asm $(LIB_OBJS) | $(BUILD)
-	$(NASM) $(NASMFLAGS) tools/$(TARGET).asm -o $(BUILD)/$(TARGET).o
-	$(LD) $(LDFLAGS) $(BUILD)/$(TARGET).o $(LIB_OBJS) -o $(TARGET)
+# Dev build — unified flat binary (same as release for dircolors)
+dev: $(TARGET)_unified.asm
+	nasm -f bin $(TARGET)_unified.asm -o $(TARGET)
+	chmod +x $(TARGET)
 
 # Release build — unified file, nasm -f bin, no linker
 release: $(TARGET)_unified.asm
