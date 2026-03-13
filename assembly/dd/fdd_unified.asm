@@ -300,7 +300,9 @@ _start:
     pop     rcx
     mov     rdi, [r15 + rcx*8]
     lea     rdi, [rdi + 3]
+    push    rcx
     call    parse_size
+    pop     rcx
     mov     [ibs_val], rax
     mov     [obs_val], rax
     inc     ecx
@@ -310,7 +312,9 @@ _start:
     pop     rcx
     mov     rdi, [r15 + rcx*8]
     lea     rdi, [rdi + 4]
+    push    rcx
     call    parse_size
+    pop     rcx
     mov     [ibs_val], rax
     inc     ecx
     jmp     .parse_args
@@ -319,7 +323,9 @@ _start:
     pop     rcx
     mov     rdi, [r15 + rcx*8]
     lea     rdi, [rdi + 4]
+    push    rcx
     call    parse_size
+    pop     rcx
     mov     [obs_val], rax
     inc     ecx
     jmp     .parse_args
@@ -328,7 +334,9 @@ _start:
     pop     rcx
     mov     rdi, [r15 + rcx*8]
     lea     rdi, [rdi + 6]
+    push    rcx
     call    parse_size
+    pop     rcx
     mov     [count_val], rax
     inc     ecx
     jmp     .parse_args
@@ -337,7 +345,9 @@ _start:
     pop     rcx
     mov     rdi, [r15 + rcx*8]
     lea     rdi, [rdi + 5]
+    push    rcx
     call    parse_size
+    pop     rcx
     mov     [skip_val], rax
     inc     ecx
     jmp     .parse_args
@@ -346,7 +356,9 @@ _start:
     pop     rcx
     mov     rdi, [r15 + rcx*8]
     lea     rdi, [rdi + 5]
+    push    rcx
     call    parse_size
+    pop     rcx
     mov     [seek_val], rax
     inc     ecx
     jmp     .parse_args
