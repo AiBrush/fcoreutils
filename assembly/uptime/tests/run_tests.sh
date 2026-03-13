@@ -72,6 +72,23 @@ run_fuzzy_test() {
         return
     fi
 
+    # For since mode: allow ±2 second drift (race between GNU and ASM invocations)
+    if echo "$desc" | grep -qi "since"; then
+        exp_epoch=$(date -d "$expected" +%s 2>/dev/null || echo "0")
+        got_epoch=$(date -d "$got" +%s 2>/dev/null || echo "0")
+        diff_secs=$(( exp_epoch - got_epoch ))
+        if [ "$diff_secs" -lt 0 ]; then diff_secs=$(( -diff_secs )); fi
+        if [ "$diff_secs" -le 2 ]; then
+            PASS=$((PASS+1))
+        else
+            FAIL=$((FAIL+1))
+            ERRORS+=("FAIL: $desc")
+            ERRORS+=("  expected: $(echo "$expected" | head -3)")
+            ERRORS+=("  got:      $(echo "$got" | head -3)")
+        fi
+        return
+    fi
+
     # For other cases, try exact match
     if [ "$expected" = "$got" ]; then
         PASS=$((PASS+1))

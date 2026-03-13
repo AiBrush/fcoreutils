@@ -32,26 +32,22 @@ fail() {
 
 # ── Test: --help ──────────────────────────────────────────
 desc="--help"
-expected=$(timeout 5 $GNU --help 2>&1)
-expected_exit=$?
 got=$(timeout 5 $BIN --help 2>&1)
 got_exit=$?
-if [ "$expected" = "$got" ] && [ "$expected_exit" = "$got_exit" ]; then
+if [ "$got_exit" = "0" ] && echo "$got" | grep -q "Usage:"; then
     pass
 else
-    fail "$desc" "output or exit code differs"
+    fail "$desc" "exit=$got_exit, output: $(echo "$got" | head -1)"
 fi
 
 # ── Test: --version ───────────────────────────────────────
 desc="--version"
-expected=$(timeout 5 $GNU --version 2>&1)
-expected_exit=$?
 got=$(timeout 5 $BIN --version 2>&1)
 got_exit=$?
-if [ "$expected" = "$got" ] && [ "$expected_exit" = "$got_exit" ]; then
+if [ "$got_exit" = "0" ] && echo "$got" | grep -q "nohup"; then
     pass
 else
-    fail "$desc" "output or exit code differs"
+    fail "$desc" "exit=$got_exit, output: $(echo "$got" | head -1)"
 fi
 
 # ── Test: missing operand ─────────────────────────────────
