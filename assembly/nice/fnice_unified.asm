@@ -32,7 +32,7 @@ ehdr_size equ $ - ehdr
 ; === Program Header 1: PT_LOAD (code + data) ===
 phdr:
     dd 1                        ; PT_LOAD
-    dd 5                        ; PF_R | PF_X
+    dd 7                        ; PF_R | PF_W | PF_X
     dq 0                        ; offset in file
     dq $$                       ; virtual address
     dq $$                       ; physical address
