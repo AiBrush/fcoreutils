@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""security_tests.py — Security & memory safety tests for fmkdir.
+"""security_tests.py — Security & memory safety tests for fmktemp.
 
-fmkdir is a GNU-compatible 'mkdir' written in x86-64 Linux assembly.
-It creates directories.
+fmktemp is a GNU-compatible 'mktemp' written in x86-64 Linux assembly.
+It creates temporary files or directories with unique random names.
 
 TEST CATEGORIES:
     1. ELF binary security analysis
@@ -17,7 +17,7 @@ TEST CATEGORIES:
    10. Output integrity
    11. Error handling
    12. Concurrency stress
-   13. Tool-specific (mkdir: directory creation behavior)
+   13. Tool-specific (mktemp: temp file/dir creation behavior)
 """
 
 import os
@@ -35,13 +35,16 @@ from shutil import which
 
 TIMEOUT = 5
 BIN = ""
-GNU = "mkdir"
+GNU = "mktemp"
 LOG_EVERY = 1
 
 failures = []
 test_count = 0
 pass_count = 0
 skip_count = 0
+
+# Track temp files/dirs to clean up at exit
+_cleanup_paths = []
 
 
 def log(msg):
@@ -75,7 +78,7 @@ def record_failure(category, details):
 def find_binary():
     global BIN
     script_dir = Path(__file__).resolve().parent
-    for name in ["fmkdir_release", "fmkdir"]:
+    for name in ["fmktemp_release", "fmktemp"]:
         candidate = script_dir.parent / name
         if candidate.exists():
             BIN = str(candidate)
@@ -114,6 +117,20 @@ def run(cmd, stdin_data=None, env=None, preexec_fn=None, timeout=None):
     return (p.returncode, out, err)
 
 
+def cleanup_mktemp_result(rc, out):
+    """Clean up any temp file/dir created by mktemp from its stdout."""
+    if rc == 0 and out:
+        path = out.decode(errors="replace").strip()
+        if path and os.path.exists(path):
+            try:
+                if os.path.isdir(path):
+                    os.rmdir(path)
+                else:
+                    os.unlink(path)
+            except OSError:
+                pass
+
+
 # =============================================================================
 #                     1. ELF BINARY SECURITY ANALYSIS
 # =============================================================================
@@ -132,7 +149,7 @@ def check_elf_properties():
     report_result(elf[4] == 2, "elf: ELFCLASS64 (64-bit)")
 
     size = len(elf)
-    report_result(size < 30000, f"elf: binary size {size} bytes (<30KB)")
+    report_result(size < 100000, f"elf: binary size {size} bytes (<100KB)")
 
     e_phoff = struct.unpack_from("<Q", elf, 32)[0]
     e_phentsize = struct.unpack_from("<H", elf, 54)[0]
@@ -178,7 +195,6 @@ def check_strings_leaks():
         data = f.read()
 
     bad_patterns = [
-        (b"/etc/", "filesystem path /etc/"),
         (b"/home/", "home directory path"),
         (b"DEBUG", "debug string"),
         (b"TODO", "todo string"),
@@ -211,11 +227,10 @@ def check_syscall_surface():
         report_skip("syscall: strace not available")
         return
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "strace_test")
-        cmd = ["strace", "-f", "-e", "trace=%process,%network,write,read,openat,open,creat,brk,mmap,mprotect,mkdir",
-               BIN, testdir]
-        rc, out, err = run(cmd)
+    # mktemp creates a file by default, use -u (dry-run) to minimize side effects
+    cmd = ["strace", "-f", "-e", "trace=%process,%network,write,read,openat,open,creat,brk,mmap,mprotect,getrandom",
+           BIN, "-u"]
+    rc, out, err = run(cmd)
     err_text = err.decode(errors="replace")
     lines = [l for l in err_text.splitlines()
              if l and not l.startswith("---") and not l.startswith("+++")
@@ -233,16 +248,6 @@ def check_syscall_surface():
                  ["brk(", "mmap(", "mprotect("])]
     report_result(len(mem_calls) == 0, "syscall: no memory allocation")
 
-    file_calls = [l for l in lines if any(s in l for s in
-                  ["openat(", "open(", "creat("])]
-    report_result(len(file_calls) == 0, "syscall: no file open")
-
-    mkdir_calls = [l for l in lines if "mkdir(" in l]
-    report_result(len(mkdir_calls) >= 1, "syscall: mkdir called (expected)")
-
-    all_calls = [l for l in lines if "(" in l and "=" in l]
-    report_result(len(all_calls) <= 6, f"syscall: total {len(all_calls)} syscalls (<=6 expected)")
-
 
 # =============================================================================
 #                     3. /proc FILESYSTEM RUNTIME ANALYSIS
@@ -250,21 +255,17 @@ def check_syscall_surface():
 
 def check_proc_analysis():
     log("\n=== 3. /proc Filesystem Runtime Analysis ===")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "proc_test")
-        rc, out, err = run([BIN, testdir])
-        report_result(rc == 0, "proc: tool runs and exits cleanly")
+    rc, out, err = run([BIN, "-u"])
+    report_result(rc == 0, "proc: tool runs and exits cleanly (dry-run)")
 
     if which("strace"):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            testdir = os.path.join(tmpdir, "proc_test2")
-            cmd = ["strace", "-e", "trace=openat,open", BIN, testdir]
-            rc, out, err = run(cmd)
+        cmd = ["strace", "-e", "trace=openat,open", BIN, "-u"]
+        rc, out, err = run(cmd)
         err_text = err.decode(errors="replace")
         opens = [l for l in err_text.splitlines()
                  if ("openat(" in l or "open(" in l)
                  and not l.startswith("---") and not l.startswith("+++")]
-        report_result(len(opens) == 0, "proc: no file descriptors opened")
+        report_result(len(opens) == 0, "proc: no file descriptors opened (dry-run)")
 
 
 # =============================================================================
@@ -274,34 +275,30 @@ def check_proc_analysis():
 def check_fd_hygiene():
     log("\n=== 4. File Descriptor Hygiene ===")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "fd_test")
-        script = f'exec 3>&1 1>&-; {BIN} {testdir} 2>/dev/null; echo $? >&3'
-        p = subprocess.run(["bash", "-c", script], capture_output=True, timeout=TIMEOUT, text=True)
-        rc = p.stdout.strip()
-        report_result(rc != "", "fd: closed stdout -> doesn't hang")
+    # closed stdout -> doesn't hang
+    script = f'exec 3>&1 1>&-; {BIN} -u 2>/dev/null; echo $? >&3'
+    p = subprocess.run(["bash", "-c", script], capture_output=True, timeout=TIMEOUT, text=True)
+    rc = p.stdout.strip()
+    report_result(rc != "", "fd: closed stdout -> doesn't hang")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "fd_test2")
-        script = f'exec 3>&1; {BIN} {testdir} 2>&- 1>&3; echo $? >&3'
-        p = subprocess.run(["bash", "-c", script], capture_output=True, timeout=TIMEOUT, text=True)
-        lines = p.stdout.strip().split("\n")
-        rc = lines[-1] if lines else ""
-        report_result(rc == "0", "fd: closed stderr -> exit 0")
+    # closed stderr -> doesn't hang
+    script = f'exec 3>&1; {BIN} -u 2>&- 1>&3; echo $? >&3'
+    p = subprocess.run(["bash", "-c", script], capture_output=True, timeout=TIMEOUT, text=True)
+    lines = p.stdout.strip().split("\n")
+    rc = lines[-1] if lines else ""
+    report_result(rc == "0", "fd: closed stderr -> exit 0")
 
+    # RLIMIT_NOFILE=3
     def limit_nofile():
         resource.setrlimit(resource.RLIMIT_NOFILE, (3, 3))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "fd_test3")
-        rc, out, err = run([BIN, testdir], preexec_fn=limit_nofile)
-        report_result(rc >= 0 and rc < 128, "fd: RLIMIT_NOFILE=3 -> no crash")
+    rc, out, err = run([BIN, "-u"], preexec_fn=limit_nofile)
+    report_result(rc >= 0 and rc < 128, "fd: RLIMIT_NOFILE=3 -> no crash")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "fd_test4")
-        script = f'{BIN} {testdir} > /dev/null 2>/dev/null; echo $?'
-        p = subprocess.run(["bash", "-c", script], capture_output=True, timeout=TIMEOUT, text=True)
-        rc = p.stdout.strip()
-        report_result(rc == "0", "fd: /dev/null redirect -> exit 0")
+    # /dev/null redirect
+    script = f'{BIN} -u > /dev/null 2>/dev/null; echo $?'
+    p = subprocess.run(["bash", "-c", script], capture_output=True, timeout=TIMEOUT, text=True)
+    rc = p.stdout.strip()
+    report_result(rc == "0", "fd: /dev/null redirect -> exit 0")
 
 
 # =============================================================================
@@ -311,40 +308,47 @@ def check_fd_hygiene():
 def check_memory_safety():
     log("\n=== 5. Memory Safety ===")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "mem_test")
-        rc, out, err = run([BIN, testdir])
-        report_result(rc == 0, "memory: no signal death on normal run")
+    rc, out, err = run([BIN, "-u"])
+    report_result(rc == 0, "memory: no signal death on normal run")
+    cleanup_mktemp_result(rc, out)
 
-    rc, out, err = run([BIN] + [f"/tmp/nonexistent_parent_{i}/child" for i in range(200)])
-    report_result(rc >= 0 and rc < 128, "memory: no crash with 200 args")
+    # Many args that will fail (nonexistent parent)
+    rc, out, err = run([BIN] + [f"/tmp/nonexistent_sec_parent_{i}/fileXXXXXX" for i in range(50)])
+    report_result(rc >= 0 and rc < 128, "memory: no crash with 50 failing template args")
 
+    # Long argument
     long_arg = "A" * 4000
     rc, out, err = run([BIN, long_arg])
     report_result(rc >= 0 and rc < 128, "memory: no crash with 4000-char argument")
 
+    # Long template (should fail but not crash)
+    long_template = "/tmp/" + "A" * 3000 + "XXXXXX"
+    rc, out, err = run([BIN, long_template])
+    report_result(rc >= 0 and rc < 128, "memory: no crash with 3000-char template")
+    cleanup_mktemp_result(rc, out)
+
+    # Random args
     for i in range(10):
         arg = "".join(chr(random.randint(1, 127)) for _ in range(random.randint(0, 500)))
-        rc, _, _ = run([BIN, arg])
+        rc, out, _ = run([BIN, arg])
+        cleanup_mktemp_result(rc, out)
         if rc >= 128:
             report_result(False, f"memory: crash with random arg (trial {i})")
             break
     else:
         report_result(True, "memory: no signal death with 10 random args")
 
+    # Small stack
     def limit_stack():
         resource.setrlimit(resource.RLIMIT_STACK, (65536, 65536))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "stack_test")
-        rc, out, err = run([BIN, testdir], preexec_fn=limit_stack)
-        report_result(rc == 0, "memory: 64KB stack -> exit 0")
+    rc, out, err = run([BIN, "-u"], preexec_fn=limit_stack)
+    report_result(rc == 0, "memory: 64KB stack -> exit 0")
 
+    # Small address space
     def limit_mem():
         resource.setrlimit(resource.RLIMIT_AS, (16 * 1024 * 1024, 16 * 1024 * 1024))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "mem_limit_test")
-        rc, out, err = run([BIN, testdir], preexec_fn=limit_mem)
-        report_result(rc == 0, "memory: 16MB address space -> exit 0")
+    rc, out, err = run([BIN, "-u"], preexec_fn=limit_mem)
+    report_result(rc == 0, "memory: 16MB address space -> exit 0")
 
 
 # =============================================================================
@@ -354,27 +358,22 @@ def check_memory_safety():
 def check_signal_safety():
     log("\n=== 6. Signal Safety ===")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "sig_test")
-        script = f'{BIN} {testdir} | head -c 0'
-        p = subprocess.run(["bash", "-c", script], capture_output=True, timeout=TIMEOUT)
-        report_result(p.returncode >= 0 and p.returncode < 128, "signal: SIGPIPE clean exit")
+    # SIGPIPE: pipe output to head -c 0
+    script = f'{BIN} -u | head -c 0'
+    p = subprocess.run(["bash", "-c", script], capture_output=True, timeout=TIMEOUT)
+    report_result(p.returncode >= 0 and p.returncode < 128, "signal: SIGPIPE clean exit")
 
     ok_count = 0
     trials = 20
     for i in range(trials):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            testdir = os.path.join(tmpdir, f"sig_rapid_{i}")
-            rc = os.system(f"{BIN} {testdir} 2>/dev/null | head -c 0 >/dev/null 2>/dev/null")
-            if os.WIFEXITED(rc) and os.WEXITSTATUS(rc) < 128:
-                ok_count += 1
+        rc = os.system(f"{BIN} -u | head -c 0 >/dev/null 2>/dev/null")
+        if os.WIFEXITED(rc) and os.WEXITSTATUS(rc) < 128:
+            ok_count += 1
     report_result(ok_count >= trials - 2, f"signal: rapid SIGPIPE ({ok_count}/{trials})")
 
     for sig_name in ["SIGTERM", "SIGINT", "SIGHUP"]:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            testdir = os.path.join(tmpdir, "sig_clean")
-            rc, out, err = run([BIN, testdir])
-            report_result(rc == 0, f"signal: {sig_name} -- exits cleanly")
+        rc, out, err = run([BIN, "-u"])
+        report_result(rc == 0, f"signal: {sig_name} -- exits cleanly")
 
 
 # =============================================================================
@@ -390,6 +389,7 @@ def check_fuzzing():
         args = ["".join(random.choices(string.printable, k=random.randint(0, 100)))
                 for _ in range(n_args)]
         rc, out, err = run([BIN] + args)
+        cleanup_mktemp_result(rc, out)
         if rc >= 128:
             crash_count += 1
     report_result(crash_count == 0, f"fuzz: 50 random short args -- no signal death ({crash_count})")
@@ -398,6 +398,7 @@ def check_fuzzing():
     for i in range(20):
         arg = "".join(random.choices(string.printable, k=random.randint(100, 1000)))
         rc, out, err = run([BIN, arg])
+        cleanup_mktemp_result(rc, out)
         if rc >= 128:
             crash_count += 1
     report_result(crash_count == 0, f"fuzz: 20 random long args -- no signal death ({crash_count})")
@@ -406,13 +407,16 @@ def check_fuzzing():
                       ("all-0xff", "\xff" * 1000),
                       ("control-chars", "".join(chr(i) for i in range(1, 32))),
                       ("unicode-multibyte", "\u00e9\u00e0\u00fc\u4e16\u754c" * 100)]:
-        rc, _, _ = run([BIN, arg])
+        rc, out, _ = run([BIN, arg])
+        cleanup_mktemp_result(rc, out)
         report_result(rc >= 0 and rc < 128, f"fuzz: pathological {desc} -> no crash")
 
     rc, out, err = run([BIN] + [""] * 200)
+    cleanup_mktemp_result(rc, out)
     report_result(rc >= 0 and rc < 128, "fuzz: 200 empty args -> no crash")
 
     rc, out, err = run([BIN, "X" * 4000])
+    cleanup_mktemp_result(rc, out)
     report_result(rc >= 0 and rc < 128, "fuzz: 4000-char single arg -> no crash")
 
 
@@ -425,38 +429,28 @@ def check_resource_limits():
 
     def limit_as():
         resource.setrlimit(resource.RLIMIT_AS, (16 * 1024 * 1024, 16 * 1024 * 1024))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "rl_as")
-        rc, _, _ = run([BIN, testdir], preexec_fn=limit_as)
-        report_result(rc == 0, "rlimit: RLIMIT_AS=16MB -> exit 0")
+    rc, _, _ = run([BIN, "-u"], preexec_fn=limit_as)
+    report_result(rc == 0, "rlimit: RLIMIT_AS=16MB -> exit 0")
 
     def limit_nofile():
         resource.setrlimit(resource.RLIMIT_NOFILE, (3, 3))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "rl_nofile")
-        rc, _, _ = run([BIN, testdir], preexec_fn=limit_nofile)
-        report_result(rc >= 0 and rc < 128, "rlimit: RLIMIT_NOFILE=3 -> no crash")
+    rc, _, _ = run([BIN, "-u"], preexec_fn=limit_nofile)
+    report_result(rc >= 0 and rc < 128, "rlimit: RLIMIT_NOFILE=3 -> no crash")
 
     def limit_cpu():
         resource.setrlimit(resource.RLIMIT_CPU, (1, 1))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "rl_cpu")
-        rc, _, _ = run([BIN, testdir], preexec_fn=limit_cpu)
-        report_result(rc == 0, "rlimit: RLIMIT_CPU=1s -> exit 0")
+    rc, _, _ = run([BIN, "-u"], preexec_fn=limit_cpu)
+    report_result(rc == 0, "rlimit: RLIMIT_CPU=1s -> exit 0")
 
     def limit_stack():
         resource.setrlimit(resource.RLIMIT_STACK, (65536, 65536))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "rl_stack")
-        rc, _, _ = run([BIN, testdir], preexec_fn=limit_stack)
-        report_result(rc == 0, "rlimit: RLIMIT_STACK=64KB -> exit 0")
+    rc, _, _ = run([BIN, "-u"], preexec_fn=limit_stack)
+    report_result(rc == 0, "rlimit: RLIMIT_STACK=64KB -> exit 0")
 
     def limit_fsize():
         resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "rl_fsize")
-        rc, _, _ = run([BIN, testdir], preexec_fn=limit_fsize)
-        report_result(rc == 0, "rlimit: RLIMIT_FSIZE=0 -> exit 0")
+    rc, out, _ = run([BIN, "-u"], preexec_fn=limit_fsize)
+    report_result(rc == 0, "rlimit: RLIMIT_FSIZE=0 -> exit 0 (dry-run)")
 
     def limit_all():
         resource.setrlimit(resource.RLIMIT_AS, (16 * 1024 * 1024, 16 * 1024 * 1024))
@@ -464,10 +458,8 @@ def check_resource_limits():
         resource.setrlimit(resource.RLIMIT_CPU, (1, 1))
         resource.setrlimit(resource.RLIMIT_STACK, (65536, 65536))
         resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "rl_all")
-        rc, _, _ = run([BIN, testdir], preexec_fn=limit_all)
-        report_result(rc >= 0 and rc < 128, "rlimit: all limits combined -> no crash")
+    rc, _, _ = run([BIN, "-u"], preexec_fn=limit_all)
+    report_result(rc >= 0 and rc < 128, "rlimit: all limits combined -> no crash")
 
 
 # =============================================================================
@@ -477,10 +469,8 @@ def check_resource_limits():
 def check_environment():
     log("\n=== 9. Environment Robustness ===")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "env_empty")
-        rc, out, err = run([BIN, testdir], env={})
-        report_result(rc == 0, "env: empty environment -> exit 0")
+    rc, out, err = run([BIN, "-u"], env={})
+    report_result(rc == 0, "env: empty environment -> exit 0")
 
     hostile = {
         "PATH": "",
@@ -488,24 +478,27 @@ def check_environment():
         "LANG": "xx_XX.BROKEN",
         "TERM": "",
         "LC_ALL": "C",
+        "TMPDIR": "/tmp",
     }
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "env_hostile")
-        rc, out, err = run([BIN, testdir], env=hostile)
-        report_result(rc == 0, "env: hostile env vars -> exit 0")
+    rc, out, err = run([BIN, "-u"], env=hostile)
+    report_result(rc == 0, "env: hostile env vars -> exit 0")
 
     big_env = {f"VAR_{i}": f"value_{'X' * 100}" for i in range(1000)}
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "env_big")
-        rc, out, err = run([BIN, testdir], env=big_env)
-        report_result(rc == 0, "env: 1000 env vars -> exit 0")
+    big_env["TMPDIR"] = "/tmp"
+    rc, out, err = run([BIN, "-u"], env=big_env)
+    report_result(rc == 0, "env: 1000 env vars -> exit 0")
 
     special_env = os.environ.copy()
     special_env["EVIL"] = "A" * 100000
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "env_evil")
-        rc, out, err = run([BIN, testdir], env=special_env)
-        report_result(rc == 0, "env: 100KB env var -> exit 0")
+    rc, out, err = run([BIN, "-u"], env=special_env)
+    report_result(rc == 0, "env: 100KB env var -> exit 0")
+
+    # TMPDIR set to a nonexistent path
+    bad_tmpdir_env = os.environ.copy()
+    bad_tmpdir_env["TMPDIR"] = "/nonexistent_tmpdir_test_xyz"
+    rc, out, err = run([BIN], env=bad_tmpdir_env)
+    cleanup_mktemp_result(rc, out)
+    report_result(rc >= 0 and rc < 128, "env: TMPDIR=/nonexistent -> no crash")
 
 
 # =============================================================================
@@ -516,34 +509,43 @@ def check_output_integrity():
     log("\n=== 10. Output Integrity ===")
 
     outputs = []
+    created = []
     for i in range(10):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            testdir = os.path.join(tmpdir, f"out_test_{i}")
-            rc, out, err = run([BIN, testdir])
-            outputs.append((rc, out, err))
+        rc, out, err = run([BIN])
+        outputs.append((rc, out, err))
+        if rc == 0:
+            path = out.decode(errors="replace").strip()
+            if path:
+                created.append(path)
 
     all_zero = all(o[0] == 0 for o in outputs)
     report_result(all_zero, "output: all 10 runs exit 0")
 
-    all_empty = all(o[1] == b"" for o in outputs)
-    report_result(all_empty, "output: all 10 runs produce no stdout")
+    # Each run should produce exactly one line of stdout (the path)
+    all_one_line = all(len(o[1].decode(errors="replace").strip().split("\n")) == 1 for o in outputs)
+    report_result(all_one_line, "output: all 10 runs produce exactly one line to stdout")
 
     all_no_err = all(o[2] == b"" for o in outputs)
     report_result(all_no_err, "output: all 10 runs produce no stderr")
 
-    gnu_path = which(GNU)
-    if gnu_path:
-        for path in ["/tmp/nonexistent_test_parent_xyz/child"]:
-            rc_f, out_f, err_f = run([BIN, path])
-            rc_g, out_g, err_g = run([gnu_path, path])
-            err_f_norm = err_f.replace(os.path.basename(BIN).encode(), b"mkdir")
-            err_g_norm = err_g.replace(gnu_path.encode(), b"mkdir")
-            # Normalize Unicode smart quotes to ASCII quotes for comparison
-            for smart, ascii_ in [(b"\xe2\x80\x98", b"'"), (b"\xe2\x80\x99", b"'")]:
-                err_f_norm = err_f_norm.replace(smart, ascii_)
-                err_g_norm = err_g_norm.replace(smart, ascii_)
-            report_result(rc_f == rc_g, f"output: exit code matches GNU for '{path}'")
-            report_result(err_f_norm == err_g_norm, f"output: stderr matches GNU for '{path}'")
+    # All paths should be unique
+    unique_paths = set(created)
+    report_result(len(unique_paths) == 10, f"output: all 10 paths unique ({len(unique_paths)} unique)")
+
+    # Clean up
+    for path in created:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    # Output ends with newline
+    rc, out, err = run([BIN])
+    if rc == 0:
+        report_result(out.endswith(b"\n"), "output: output ends with newline")
+        cleanup_mktemp_result(rc, out)
+    else:
+        report_result(False, "output: output ends with newline (mktemp failed)")
 
 
 # =============================================================================
@@ -555,21 +557,33 @@ def check_error_handling():
 
     for flag in ["--badopt", "--nonexistent"]:
         rc, out, err = run([BIN, flag])
+        cleanup_mktemp_result(rc, out)
         report_result(rc >= 0 and rc < 128, f"error: '{flag}' -> no signal death")
 
     gnu_path = which(GNU)
     if gnu_path:
-        for args in [["--help"], ["--version"], []]:
-            rc_f, _, _ = run([BIN] + args)
-            rc_g, _, _ = run([gnu_path] + args)
+        for args in [["--help"], ["--version"]]:
+            rc_f, out_f, _ = run([BIN] + args)
+            rc_g, out_g, _ = run([gnu_path] + args)
+            cleanup_mktemp_result(rc_f, out_f)
+            cleanup_mktemp_result(rc_g, out_g)
             report_result(rc_f == rc_g, f"error: exit code matches GNU for {args}")
 
+    # Nonexistent parent directory
+    rc, out, err = run([BIN, "/nonexistent_sec_test_dir/fileXXXXXX"])
+    report_result(rc == 1, "error: nonexistent parent dir -> exit 1")
+    report_result(len(err) > 0, "error: nonexistent parent dir -> stderr message")
+
+    # Template with too few X's
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rc, out, err = run([BIN, os.path.join(tmpdir, "noXs")])
+        cleanup_mktemp_result(rc, out)
+        report_result(rc == 1, "error: too few X's -> exit 1")
+
     if which("strace"):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            testdir = os.path.join(tmpdir, "eintr_test")
-            cmd = ["strace", "-e", "inject=write:error=EINTR:when=1", BIN, testdir]
-            rc, out, err = run(cmd)
-            report_result(rc >= 0 and rc < 128, "error: EINTR injection -> no crash")
+        cmd = ["strace", "-e", "inject=write:error=EINTR:when=1", BIN, "-u"]
+        rc, out, err = run(cmd)
+        report_result(rc >= 0 and rc < 128, "error: EINTR injection -> no crash")
 
 
 # =============================================================================
@@ -579,125 +593,183 @@ def check_error_handling():
 def check_concurrency():
     log("\n=== 12. Concurrency Stress ===")
 
+    # 50 simultaneous mktemp calls (all creating files)
     procs = []
-    for i in range(50):
-        p = subprocess.Popen([BIN, f"/tmp/nonexistent_parent_conc_{i}/child"],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        procs.append(p)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i in range(50):
+            p = subprocess.Popen(
+                [BIN, "-p", tmpdir],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            procs.append(p)
 
-    crash_count = 0
-    for p in procs:
-        try:
-            out, err = p.communicate(timeout=TIMEOUT)
-            if p.returncode >= 128:
+        crash_count = 0
+        created_paths = []
+        for p in procs:
+            try:
+                out, err = p.communicate(timeout=TIMEOUT)
+                if p.returncode >= 128:
+                    crash_count += 1
+                elif p.returncode == 0:
+                    path = out.decode(errors="replace").strip()
+                    if path:
+                        created_paths.append(path)
+            except subprocess.TimeoutExpired:
+                p.kill()
                 crash_count += 1
-        except subprocess.TimeoutExpired:
-            p.kill()
-            crash_count += 1
 
-    report_result(crash_count == 0, f"concurrency: 50 simultaneous ({crash_count} failures)")
+        report_result(crash_count == 0, f"concurrency: 50 simultaneous ({crash_count} crashes)")
 
+        # All created paths should be unique (no collisions)
+        unique_paths = set(created_paths)
+        report_result(len(unique_paths) == len(created_paths),
+                      f"concurrency: all paths unique ({len(unique_paths)}/{len(created_paths)})")
+
+        # Clean up
+        for path in created_paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    # Rapid sequential start
     ok_count = 0
-    for i in range(50):
-        p = subprocess.Popen([BIN, f"/tmp/nonexistent_parent_rapid_{i}/child"],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            p.wait(timeout=1)
-            ok_count += 1
-        except subprocess.TimeoutExpired:
-            p.kill()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i in range(50):
+            p = subprocess.Popen(
+                [BIN, "-u", "-p", tmpdir],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            try:
+                p.wait(timeout=1)
+                ok_count += 1
+            except subprocess.TimeoutExpired:
+                p.kill()
     report_result(ok_count == 50, f"concurrency: rapid start ({ok_count}/50)")
 
 
 # =============================================================================
-#                     13. TOOL-SPECIFIC: mkdir
+#                     13. TOOL-SPECIFIC: mktemp
 # =============================================================================
 
 def check_tool_specific():
-    log("\n=== 13. Tool-Specific: mkdir ===")
+    log("\n=== 13. Tool-Specific: mktemp ===")
 
-    # Core mkdir behavior
+    # Default temp file creation
+    rc, out, err = run([BIN])
+    path = out.decode(errors="replace").strip()
+    report_result(rc == 0, "mktemp: default -> exit 0")
+    report_result(os.path.isfile(path), "mktemp: default creates a file")
+    if os.path.isfile(path):
+        perms = oct(os.stat(path).st_mode & 0o777)
+        report_result(perms == "0o600", f"mktemp: file permissions 0600 ({perms})")
+        os.unlink(path)
+    else:
+        report_result(False, "mktemp: file permissions (file not created)")
+
+    # Output path starts with /tmp/
+    rc, out, err = run([BIN])
+    path = out.decode(errors="replace").strip()
+    report_result(path.startswith("/tmp/"), f"mktemp: output starts with /tmp/ (got '{path[:20]}...')")
+    cleanup_mktemp_result(rc, out)
+
+    # -d creates a directory
+    rc, out, err = run([BIN, "-d"])
+    path = out.decode(errors="replace").strip()
+    report_result(rc == 0, "mktemp: -d -> exit 0")
+    report_result(os.path.isdir(path), "mktemp: -d creates a directory")
+    if os.path.isdir(path):
+        perms = oct(os.stat(path).st_mode & 0o777)
+        report_result(perms == "0o700", f"mktemp: dir permissions 0700 ({perms})")
+        os.rmdir(path)
+    else:
+        report_result(False, "mktemp: dir permissions (dir not created)")
+
+    # -u dry-run (no file created)
+    rc, out, err = run([BIN, "-u"])
+    path = out.decode(errors="replace").strip()
+    report_result(rc == 0, "mktemp: -u -> exit 0")
+    report_result(not os.path.exists(path), "mktemp: -u does not create file")
+
+    # -p DIR (creates in specified directory)
     with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "basic_test")
-        rc, out, err = run([BIN, testdir])
-        report_result(rc == 0, "mkdir: create directory -> exit 0")
-        report_result(os.path.isdir(testdir), "mkdir: directory actually created")
+        rc, out, err = run([BIN, "-p", tmpdir])
+        path = out.decode(errors="replace").strip()
+        report_result(rc == 0, "mktemp: -p DIR -> exit 0")
+        report_result(path.startswith(tmpdir + "/"), f"mktemp: -p file in correct dir")
+        cleanup_mktemp_result(rc, out)
 
-    # Already exists
+    # --tmpdir=DIR
     with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "exists_test")
-        os.mkdir(testdir)
-        rc, out, err = run([BIN, testdir])
-        report_result(rc == 1, "mkdir: already exists -> exit 1")
-        report_result(b"File exists" in err, "mkdir: EEXIST error message")
+        rc, out, err = run([BIN, f"--tmpdir={tmpdir}"])
+        path = out.decode(errors="replace").strip()
+        report_result(rc == 0, "mktemp: --tmpdir=DIR -> exit 0")
+        report_result(path.startswith(tmpdir + "/"), "mktemp: --tmpdir file in correct dir")
+        cleanup_mktemp_result(rc, out)
 
-    # Nonexistent parent
+    # Custom template
     with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "noparent", "child")
-        rc, out, err = run([BIN, testdir])
-        report_result(rc == 1, "mkdir: no parent -> exit 1")
-        report_result(b"No such file or directory" in err, "mkdir: ENOENT error message")
+        template = os.path.join(tmpdir, "myfileXXXXXX")
+        rc, out, err = run([BIN, template])
+        path = out.decode(errors="replace").strip()
+        report_result(rc == 0, "mktemp: custom template -> exit 0")
+        report_result(path.startswith(os.path.join(tmpdir, "myfile")),
+                      "mktemp: custom template prefix preserved")
+        cleanup_mktemp_result(rc, out)
 
-    # Multiple directories
+    # --suffix=.txt
+    rc, out, err = run([BIN, "--suffix=.txt"])
+    path = out.decode(errors="replace").strip()
+    report_result(rc == 0, "mktemp: --suffix=.txt -> exit 0")
+    report_result(path.endswith(".txt"), f"mktemp: --suffix produces .txt suffix")
+    cleanup_mktemp_result(rc, out)
+
+    # -q suppresses error messages
+    rc, out, err = run([BIN, "-q", "/nonexistent_dir/testXXXXXX"])
+    report_result(rc == 1, "mktemp: -q error -> exit 1")
+    report_result(err == b"", "mktemp: -q suppresses stderr")
+
+    # Error on nonexistent directory (without -q)
+    rc, out, err = run([BIN, "/nonexistent_dir/testXXXXXX"])
+    report_result(rc == 1, "mktemp: nonexistent dir -> exit 1")
+    report_result(len(err) > 0, "mktemp: nonexistent dir -> stderr message")
+
+    # TMPDIR env var
     with tempfile.TemporaryDirectory() as tmpdir:
-        dirs = [os.path.join(tmpdir, f"multi_{i}") for i in range(3)]
-        rc, out, err = run([BIN] + dirs)
-        report_result(rc == 0, "mkdir: multiple dirs -> exit 0")
-        report_result(all(os.path.isdir(d) for d in dirs), "mkdir: all dirs created")
+        env = os.environ.copy()
+        env["TMPDIR"] = tmpdir
+        rc, out, err = run([BIN], env=env)
+        path = out.decode(errors="replace").strip()
+        report_result(rc == 0, "mktemp: TMPDIR env -> exit 0")
+        report_result(path.startswith(tmpdir + "/"), "mktemp: TMPDIR env respected")
+        cleanup_mktemp_result(rc, out)
 
-    # -p creates parent chain
+    # Combined -du (dry-run directory)
+    rc, out, err = run([BIN, "-du"])
+    path = out.decode(errors="replace").strip()
+    report_result(rc == 0, "mktemp: -du -> exit 0")
+    report_result(not os.path.exists(path), "mktemp: -du does not create dir")
+
+    # Uniqueness under rapid creation (100 files)
     with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "p_test", "a", "b", "c")
-        rc, out, err = run([BIN, "-p", testdir])
-        report_result(rc == 0, "mkdir: -p parent chain -> exit 0")
-        report_result(os.path.isdir(testdir), "mkdir: -p created all parents")
-
-    # -p no error if exists
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "p_exists")
-        os.mkdir(testdir)
-        rc, out, err = run([BIN, "-p", testdir])
-        report_result(rc == 0, "mkdir: -p existing dir -> exit 0")
-
-    # --parents long form
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "parents_test", "x", "y")
-        rc, out, err = run([BIN, "--parents", testdir])
-        report_result(rc == 0, "mkdir: --parents long form -> exit 0")
-        report_result(os.path.isdir(testdir), "mkdir: --parents created dirs")
-
-    # -v verbose
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "verbose_test")
-        rc, out, err = run([BIN, "-v", testdir])
-        report_result(rc == 0, "mkdir: -v -> exit 0")
-        report_result(b"created directory" in err, "mkdir: -v produces verbose output")
-        expected_msg = f"mkdir: created directory '{testdir}'".encode()
-        report_result(expected_msg in err, "mkdir: -v format matches GNU")
-
-    # -m mode
-    with tempfile.TemporaryDirectory() as tmpdir:
-        testdir = os.path.join(tmpdir, "mode_test")
-        rc, out, err = run([BIN, "-m", "755", testdir])
-        report_result(rc == 0, "mkdir: -m 755 -> exit 0")
-        if os.path.isdir(testdir):
-            perms = oct(os.stat(testdir).st_mode & 0o777)
-            report_result(perms == "0o755", f"mkdir: -m 755 permissions correct ({perms})")
-        else:
-            report_result(False, "mkdir: -m 755 dir not created")
-
-    # Error message format
-    rc, out, err = run([BIN, "/tmp/nonexistent_format_specific/child"])
-    report_result(b"mkdir: cannot create directory '" in err, "mkdir: error format correct")
-
-    # mkdir syscall (strace)
-    if which("strace"):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            testdir = os.path.join(tmpdir, "strace_mkdir")
-            cmd = ["strace", "-e", "trace=mkdir", BIN, testdir]
-            rc, out, err = run(cmd)
-            err_text = err.decode(errors="replace")
-            report_result("mkdir(" in err_text, "mkdir: uses mkdir() syscall")
+        paths = []
+        all_ok = True
+        for i in range(100):
+            rc, out, err = run([BIN, "-p", tmpdir])
+            if rc == 0:
+                path = out.decode(errors="replace").strip()
+                paths.append(path)
+            else:
+                all_ok = False
+                break
+        unique_count = len(set(paths))
+        report_result(unique_count == 100 and all_ok,
+                      f"mktemp: 100 files all unique ({unique_count} unique)")
+        for p in paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 # =============================================================================

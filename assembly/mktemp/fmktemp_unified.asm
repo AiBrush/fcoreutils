@@ -82,7 +82,7 @@ _start:
     ; Block SIGPIPE
     sub     rsp, 16
     mov     qword [rsp], 0
-    bts     qword [rsp], SIGPIPE
+    bts     qword [rsp], (SIGPIPE - 1)  ; signal mask is 0-indexed: bit N-1 for signal N
     mov     eax, SYS_RT_SIGPROCMASK
     mov     edi, SIG_BLOCK
     mov     rsi, rsp
@@ -765,14 +765,14 @@ _start:
 ; Output: eax = 1 if has '/', 0 otherwise
 ; ============================================================
 has_slash:
-    xor     r8d, r8d
+    xor     ecx, ecx
 .hs_loop:
-    movzx   eax, byte [rdi + r8]
+    movzx   eax, byte [rdi + rcx]
     test    al, al
     jz      .hs_no
     cmp     al, '/'
     je      .hs_yes
-    inc     r8d
+    inc     ecx
     jmp     .hs_loop
 .hs_yes:
     mov     eax, 1
@@ -949,7 +949,7 @@ str_invalid_len  equ $ - str_invalid
 str_sq_nl:       db "'", 10
 str_try:         db "Try 'mktemp --help' for more information.", 10
 str_try_len      equ $ - str_try
-str_failed:      db "failed to create "
+str_failed:      db "failed to create '"
 str_failed_len   equ $ - str_failed
 str_colon_sep:   db "': "
 str_colon_sep_len equ $ - str_colon_sep

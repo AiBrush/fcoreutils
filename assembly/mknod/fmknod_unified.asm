@@ -603,25 +603,25 @@ makedev:
 parse_decimal:
     xor     eax, eax
     xor     r9d, r9d
-    movzx   ecx, byte [rdi]
-    test    cl, cl
+    movzx   edx, byte [rdi]
+    test    dl, dl
     jz      .pd_err
 .pd_loop:
-    movzx   ecx, byte [rdi]
-    test    cl, cl
+    movzx   edx, byte [rdi]
+    test    dl, dl
     jz      .pd_done
-    cmp     cl, '0'
+    cmp     dl, '0'
     jb      .pd_err
-    cmp     cl, '9'
+    cmp     dl, '9'
     ja      .pd_err
-    ; eax = eax * 10 + (cl - '0')
+    ; eax = eax * 10 + (dl - '0')
     mov     r9d, eax
     shl     eax, 1              ; *2
     shl     r9d, 3              ; *8
     add     eax, r9d            ; *10
-    sub     cl, '0'
-    movzx   ecx, cl
-    add     eax, ecx
+    sub     dl, '0'
+    movzx   edx, dl
+    add     eax, edx
     inc     rdi
     jmp     .pd_loop
 .pd_done:
