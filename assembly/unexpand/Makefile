@@ -1,36 +1,8 @@
-NASM      = nasm
-LD        = ld
-NASMFLAGS = -f elf64 -I ./
-LDFLAGS   = --gc-sections -n
-BUILD     = build
-TARGET    = funexpand
+# unexpand — Makefile (uses shared infrastructure)
+TARGET      = funexpand
+LIB_SRCS    = io.asm
 
-LIB_SRCS  = lib/io.asm
-LIB_OBJS  = $(LIB_SRCS:lib/%.asm=$(BUILD)/%.o)
-
-.PHONY: all dev release clean test bench
-
-all: dev
-
-$(BUILD):
-	mkdir -p $(BUILD)
-
-$(BUILD)/%.o: lib/%.asm | $(BUILD)
-	$(NASM) $(NASMFLAGS) $< -o $@
-
-dev: tools/$(TARGET).asm $(LIB_OBJS) | $(BUILD)
-	$(NASM) $(NASMFLAGS) tools/$(TARGET).asm -o $(BUILD)/$(TARGET).o
-	$(LD) $(LDFLAGS) $(BUILD)/$(TARGET).o $(LIB_OBJS) -o $(TARGET)
-
-release: unified/$(TARGET)_unified.asm
-	nasm -f bin unified/$(TARGET)_unified.asm -o $(TARGET)_release
-	chmod +x $(TARGET)_release
-
-clean:
-	rm -rf $(BUILD) $(TARGET) $(TARGET)_release
-
-test: dev
-	bash tests/run_tests.sh ./$(TARGET)
+include ../../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark: funexpand vs GNU unexpand ==="

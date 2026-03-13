@@ -1,20 +1,11 @@
-NASM      = nasm
+# Makefile for fsum — uses shared build infrastructure
 TARGET    = fsum
+LIB_SRCS  = io.asm args.asm str.asm
+UNIFIED_SRC = $(TARGET)_unified.asm
+TEST_DEP  = release
+TEST_BIN  = ./$(TARGET)_release
 
-.PHONY: all release clean test
-
-all: release
-
-# Release build — unified file, nasm -f bin, no linker
-release: $(TARGET)_unified.asm
-	nasm -f bin $(TARGET)_unified.asm -o $(TARGET)_release
-	chmod +x $(TARGET)_release
-
-clean:
-	rm -f $(TARGET)_release
-
-test: release
-	bash tests/run_tests.sh ./$(TARGET)_release
+include ../../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU (startup-dominated) ==="
@@ -24,9 +15,3 @@ bench: release
 	@echo "--- asm fsum ---"
 	@hyperfine --warmup 3 './fsum_release /usr/bin/sort' 2>/dev/null || \
 		bash -c 'time (for i in $$(seq 1000); do ./fsum_release /usr/bin/sort > /dev/null 2>&1; done)'
-
-sizes:
-	@echo "=== Binary sizes ==="
-	@ls -la $(TARGET)_release 2>/dev/null
-	@echo "--- GNU sum ---"
-	@ls -la $$(which sum)

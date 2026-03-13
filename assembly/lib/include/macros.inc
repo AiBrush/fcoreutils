@@ -45,6 +45,14 @@
     syscall
 %endmacro
 
+; FSTAT fd, stat_buf — fstat file descriptor
+%macro FSTAT 2
+    mov     rax, SYS_FSTAT
+    mov     rdi, %1
+    mov     rsi, %2
+    syscall
+%endmacro
+
 ; BLOCK_SIGPIPE — block SIGPIPE so write returns EPIPE instead of killing us
 %macro BLOCK_SIGPIPE 0
     sub     rsp, 16

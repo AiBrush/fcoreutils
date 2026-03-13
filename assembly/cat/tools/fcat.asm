@@ -7,17 +7,22 @@
 ; Pipe/special fallback: read/write loop with 128KB buffer
 ; Flagged path: buffered transform with 128KB read / 256KB output buffer
 ;
-; SIGPIPE: blocked via rt_sigprocmask, check for -EPIPE on writes
+; SIGPIPE: blocked via rt_sigprocmask, check for EPIPE on writes
 ; EINTR: retried on all blocking syscalls
 ; Partial writes: handled in asm_write_all
 ;
-; Build (modular):
-;   nasm -f elf64 -I ./ tools/fcat.asm -o build/fcat.o
-;   nasm -f elf64 -I ./ lib/io.asm -o build/io.o
-;   ld --gc-sections build/fcat.o build/io.o -o fcat
+; Build (modular, via shared Makefile.inc):
+;   nasm -f elf64 -I ./ -I ../../lib/ tools/fcat.asm -o build/fcat.o
+;   nasm -f elf64 -I ./ -I ../../lib/ ../../lib/io.asm -o build/shared_io.o
+;   ld --gc-sections build/fcat.o build/shared_io.o -o fcat
 
 %include "include/linux.inc"
 %include "include/macros.inc"
+
+; Tool-specific constants (not in shared linux.inc)
+%define READ_BUF_SIZE   131072     ; 128KB read buffer
+%define OUT_BUF_SIZE    262144     ; 256KB output buffer (worst case: -v doubles size)
+%define FLUSH_THRESHOLD 131072     ; flush when output buffer >= 128KB
 
 extern asm_write_all
 extern asm_read
@@ -46,7 +51,7 @@ section .text
 ;                           ENTRY POINT
 ; ============================================================================
 _start:
-    ; ── Block SIGPIPE so write() returns -EPIPE instead of killing us ──
+    ; ── Block SIGPIPE so write() returns EPIPE instead of killing us ──
     sub     rsp, 16
     mov     qword [rsp], 0x1000         ; sigset: bit 12 = SIGPIPE (signal 13)
     mov     eax, SYS_RT_SIGPROCMASK
@@ -159,7 +164,7 @@ _start:
     syscall
 
 .final_write_error:
-    cmp     rax, -EPIPE
+    cmp     rax, EPIPE
     je      .epipe_exit
     lea     rdi, [rel str_write_error]
     call    print_error_simple
@@ -420,7 +425,7 @@ process_fd:
 .pf_sf_count_ok:
     syscall
 
-    cmp     rax, -EINTR
+    cmp     rax, EINTR
     je      .pf_sendfile_loop           ; EINTR, retry
 
     test    rax, rax
@@ -431,7 +436,7 @@ process_fd:
     jmp     .pf_sendfile_loop
 
 .pf_sendfile_error:
-    cmp     rax, -EPIPE
+    cmp     rax, EPIPE
     je      .pf_epipe
     ; sendfile failed (e.g., incompatible fd types) — fall back to read/write
     jmp     .pf_readwrite
@@ -472,7 +477,7 @@ process_fd:
     jmp     .pf_done
 
 .pf_write_error:
-    cmp     rax, -EPIPE
+    cmp     rax, EPIPE
     je      .pf_epipe
     mov     byte [rel had_error], 1
     jmp     .pf_done
@@ -896,7 +901,7 @@ process_fd_flagged:
     jmp     .pff_done
 
 .pff_write_error:
-    cmp     rax, -EPIPE
+    cmp     rax, EPIPE
     je      .pff_epipe
     mov     byte [rel had_error], 1
     jmp     .pff_done
@@ -933,7 +938,7 @@ emit_byte:
     ret
 
 .eb_write_error:
-    cmp     rax, -EPIPE
+    cmp     rax, EPIPE
     je      .eb_epipe
     mov     byte [rel had_error], 1
     ret

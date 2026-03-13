@@ -1,22 +1,23 @@
-NASM = nasm
-NASM_FLAGS = -f bin
-
+# Makefile for fsha256sum — SHA-256 hash tool
+TARGET      = fsha256sum
+LIB_SRCS    = io.asm str.asm args.asm
+TOOL_SRCS   = tools/fsha256sum.asm
 UNIFIED_SRC = unified/fsha256sum_unified.asm
-UNIFIED_BIN = fsha256sum
 
-.PHONY: all clean test test-security
+include ../../Makefile.inc
 
-all: $(UNIFIED_BIN)
+# Override dev to build from unified since tools/fsha256sum.asm is a stub
+dev: $(UNIFIED_SRC)
+	$(NASM) -f bin $(UNIFIED_SRC) -o $(TARGET)
+	chmod +x $(TARGET)
 
-$(UNIFIED_BIN): $(UNIFIED_SRC)
-	$(NASM) $(NASM_FLAGS) $< -o $@
-	chmod +x $@
-
-clean:
-	rm -f $(UNIFIED_BIN)
-
-test: $(UNIFIED_BIN)
-	bash tests/run_tests.sh ./$(UNIFIED_BIN)
-
-test-security: $(UNIFIED_BIN)
-	python3 tests/security_tests.py
+bench: dev
+	@echo "=== Benchmark vs GNU sha256sum ==="
+	@dd if=/dev/urandom bs=1M count=10 of=/tmp/bench_sha256.bin 2>/dev/null
+	@echo "--- GNU sha256sum ---"
+	@hyperfine --warmup 3 'sha256sum /tmp/bench_sha256.bin' 2>/dev/null || \
+		bash -c 'time sha256sum /tmp/bench_sha256.bin > /dev/null'
+	@echo "--- asm fsha256sum ---"
+	@hyperfine --warmup 3 './fsha256sum < /tmp/bench_sha256.bin' 2>/dev/null || \
+		bash -c 'time ./fsha256sum < /tmp/bench_sha256.bin > /dev/null'
+	@rm -f /tmp/bench_sha256.bin
