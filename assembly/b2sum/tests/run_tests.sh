@@ -11,11 +11,11 @@ FAIL=0
 ERRORS=()
 
 normalize_gnu() {
-    sed -e "s|$GNU|PROG|g" -e "s|Usage: $TOOL|Usage: PROG|g" -e "s|^$TOOL |PROG |g"
+    sed -e "s|$GNU|PROG|g" -e "s|Usage: $TOOL|Usage: PROG|g" -e "s|^$TOOL:|PROG:|g" -e "s|^$TOOL |PROG |g"
 }
 
 normalize_our() {
-    sed -e "s|$BIN|PROG|g" -e "s|Usage: $TOOL|Usage: PROG|g" -e "s|^$TOOL |PROG |g"
+    sed -e "s|$BIN|PROG|g" -e "s|Usage: $TOOL|Usage: PROG|g" -e "s|^$TOOL:|PROG:|g" -e "s|^$TOOL |PROG |g"
 }
 
 run_test() {

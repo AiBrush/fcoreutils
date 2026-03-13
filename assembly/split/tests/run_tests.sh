@@ -3,6 +3,8 @@
 # Usage: bash tests/run_tests.sh ./fsplit
 
 BIN="${1:-./fsplit}"
+# Convert to absolute path so cd into temp dirs still works
+BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 GNU="split"
 PASS=0
 FAIL=0
@@ -155,12 +157,8 @@ our_dir="$TMPDIR/recon_our"
 mkdir -p "$gnu_dir" "$our_dir"
 
 (cd "$our_dir" && $BIN -l 5 "$TMPDIR/input25.txt")
-reconstructed=""
-for f in $(ls -1 "$our_dir" | sort); do
-    reconstructed="${reconstructed}$(cat "$our_dir/$f")"
-done
-original=$(cat "$TMPDIR/input25.txt")
-if [ "$reconstructed" = "$original" ]; then
+cat "$our_dir"/x* > "$TMPDIR/recon_lines.txt" 2>/dev/null
+if diff "$TMPDIR/input25.txt" "$TMPDIR/recon_lines.txt" > /dev/null 2>&1; then
     PASS=$((PASS+1))
 else
     FAIL=$((FAIL+1))

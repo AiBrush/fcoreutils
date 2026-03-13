@@ -764,7 +764,9 @@ sha512_to_hex:
     cmp     ecx, 8
     jge     .done
     mov     rax, [hash_state + rcx*8]
-    bswap   rax           ; convert to big-endian for display
+    ; Note: hash state is stored as native 64-bit integers.
+    ; The nibble loop below extracts LSB-first, storing right-to-left,
+    ; which already produces correct big-endian hex output. No bswap needed.
     ; Convert 8 bytes to 16 hex chars
     push    rcx
     push    r9

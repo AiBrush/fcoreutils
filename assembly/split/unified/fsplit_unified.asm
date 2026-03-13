@@ -502,7 +502,7 @@ do_split_lines:
     xor     r12d, r12d
     xor     r14d, r14d
     mov     r13, [split_lines]
-    call    open_next_output
+    ; NOTE: do NOT open output file here; lazy-open on first write
 .read_loop:
     mov     rax, SYS_READ
     mov     rdi, [input_fd]
@@ -535,11 +535,23 @@ do_split_lines:
     cmp     r12, r13
     jl      .scan_loop      ; not at threshold yet
     ; Write chunk from r8 to r15
+    ; Lazy-open output file if not yet open
     push    rbx
     push    r15
     push    r8
+    cmp     qword [out_fd], -1
+    jne     .fn_write
+    call    open_next_output
+.fn_write:
     mov     rdx, r15
-    sub     rdx, r8         ; length
+    sub     rdx, r8         ; length (r15/r8 from stack not yet popped, but still in regs)
+    ; Recalculate from stack since open_next_output may clobber regs
+    pop     r8
+    pop     r15
+    push    r15
+    push    r8
+    mov     rdx, r15
+    sub     rdx, r8
     mov     rsi, r8         ; buffer start
     mov     rdi, [out_fd]
     call    write_all
@@ -547,13 +559,12 @@ do_split_lines:
     pop     r15
     pop     rbx
     add     r14, 1          ; mark that we wrote something
-    ; Reset line counter, rotate files
+    ; Reset line counter, close file (lazy: don't open next yet)
     xor     r12d, r12d
     xor     r14d, r14d
     push    rbx
     push    r15
     call    close_output
-    call    open_next_output
     pop     r15
     pop     rbx
     ; New chunk starts at current position
@@ -565,14 +576,27 @@ do_split_lines:
     sub     rdx, r8
     test    rdx, rdx
     jz      .read_loop      ; nothing to flush
+    ; Lazy-open output file if not yet open
     push    r8
+    push    rdx
+    cmp     qword [out_fd], -1
+    jne     .fl_write
+    call    open_next_output
+.fl_write:
+    pop     rdx
+    pop     r8
+    ; Recalculate rdx since r15 is still valid
+    mov     rdx, r15
+    sub     rdx, r8
     mov     rsi, r8
     mov     rdi, [out_fd]
     call    write_all
-    pop     r8
     add     r14, 1
     jmp     .read_loop
 .read_done:
+    ; If no file was ever opened (empty input), just exit
+    cmp     qword [out_fd], -1
+    je      .exit_ok
     ; Check if we need to elide empty last file
     cmp     byte [flag_elide], 0
     je      .close_last
@@ -612,7 +636,7 @@ do_split_bytes:
     ; r13 = bytes per file
     xor     r12d, r12d
     mov     r13, [split_bytes]
-    call    open_next_output
+    ; NOTE: do NOT open output file here; lazy-open on first write
 .read_loop:
     mov     rax, SYS_READ
     mov     rdi, [input_fd]
@@ -630,18 +654,26 @@ do_split_bytes:
 .write_loop:
     test    rcx, rcx
     jz      .read_loop
+    ; Lazy-open output file if not yet open
+    cmp     qword [out_fd], -1
+    jne     .have_fd
+    push    rcx
+    push    rsi
+    call    open_next_output
+    pop     rsi
+    pop     rcx
+.have_fd:
     ; How many bytes can we write to current file?
     mov     rax, r13
     sub     rax, r12        ; remaining capacity
     cmp     rax, rcx
     jle     .write_partial
-    ; Write all remaining bytes
-    mov     rdi, [out_fd]
-    mov     rdx, rcx
+    ; Write all remaining bytes using write_all for EINTR safety
     push    rcx
     push    rsi
-    mov     rax, SYS_WRITE
-    syscall
+    mov     rdi, [out_fd]
+    mov     rdx, rcx
+    call    write_all
     pop     rsi
     pop     rcx
     add     r12, rcx
@@ -653,23 +685,26 @@ do_split_bytes:
     push    rsi
     push    rdx
     mov     rdi, [out_fd]
-    mov     rax, SYS_WRITE
-    syscall
+    call    write_all
     pop     rdx
     pop     rsi
     pop     rcx
     add     rsi, rdx
     sub     rcx, rdx
-    ; Rotate files
+    add     r12, rdx
+    ; Close current file (don't open next yet - lazy open)
     push    rcx
     push    rsi
     call    close_output
-    call    open_next_output
     pop     rsi
     pop     rcx
     xor     r12d, r12d
     jmp     .write_loop
 .read_done:
+    ; If no file was ever opened (empty input), just exit
+    cmp     qword [out_fd], -1
+    je      .exit_ok
+    ; Check elide
     cmp     byte [flag_elide], 0
     je      .close_last
     cmp     r12, 0

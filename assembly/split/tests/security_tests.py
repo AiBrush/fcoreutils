@@ -646,7 +646,7 @@ def check_tool_specific():
         rc, out, err = run([BIN, "--verbose", "-l", "5", testfile], cwd=tmpdir)
         err_text = err.decode(errors="replace")
         report_result("creating file" in err_text, "split: --verbose prints creating messages")
-        for fn in [f for f in os.listdir(tmpdir) if fn.startswith("x")]:
+        for fn in [f for f in os.listdir(tmpdir) if f.startswith("x")]:
             os.unlink(os.path.join(tmpdir, fn))
 
         # Test 13: --help

@@ -263,12 +263,12 @@ jobs:
           # fyes (Python build script)
           cd assembly/yes && python3 build.py --no-verify && cd ../..
           # NASM unified tools (flat binary)
-          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install stat realpath dircolors printf mkdir mkfifo mknod mktemp chmod basename cksum dirname factor link nproc pathchk printenv readlink rmdir sum tee truncate uname unlink; do
+          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install stat realpath dircolors printf mkdir mkfifo mknod mktemp chmod basename cksum dirname factor link nproc pathchk printenv readlink rmdir sum tee truncate uname unlink kill; do
             nasm -f bin assembly/$tool/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
           # NASM unified tools (unified/ subdirectory)
-          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum base32 basenc join pr sha1sum sha256sum shred shuf tsort; do
+          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum base32 basenc join pr sha1sum sha256sum sha512sum shred shuf tsort b2sum split nohup touch uptime users who chown fmt; do
             nasm -f bin assembly/$tool/unified/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
@@ -281,7 +281,7 @@ jobs:
           ld -o assembly/arch/farch /tmp/farch.o
           chmod +x assembly/arch/farch
           rm -f /tmp/farch.o
-          echo "All 91 assembly tools built successfully"
+          echo "All 102 assembly tools built successfully"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: assembly-binaries
@@ -381,6 +381,17 @@ jobs:
             assembly/shred/fshred
             assembly/shuf/fshuf
             assembly/tsort/ftsort
+            assembly/sha512sum/fsha512sum
+            assembly/b2sum/fb2sum
+            assembly/split/fsplit
+            assembly/kill/fkill
+            assembly/nohup/fnohup
+            assembly/touch/ftouch
+            assembly/uptime/fuptime
+            assembly/users/fusers
+            assembly/who/fwho
+            assembly/chown/fchown
+            assembly/fmt/ffmt
 
   # ── Assembly: test each tool in parallel ──────
   # Skip on merge_group — tests already passed on the PR.
@@ -392,7 +403,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp, stat, realpath, dircolors, printf, chroot, chcon, runcon, stty, stdbuf, pinky, ptx, numfmt, dd, csplit, expr, test, install, ls, dir, vdir, du, df, mkdir, mkfifo, mknod, mktemp, chmod, basename, cksum, dirname, factor, link, nproc, pathchk, printenv, readlink, rmdir, sum, tee, truncate, uname, unlink, base32, basenc, comm, fold, join, pr, sha1sum, sha256sum, shred, shuf, tsort]
+        tool: [yes, true, arch, logname, hostid, tty, whoami, pwd, sync, sleep, echo, head, tail, tac, rev, wc, cut, tr, base64, md5sum, cat, expand, false, nl, od, seq, sort, unexpand, uniq, paste, sha224sum, sha384sum, nice, date, timeout, env, groups, id, ln, rm, mv, cp, stat, realpath, dircolors, printf, chroot, chcon, runcon, stty, stdbuf, pinky, ptx, numfmt, dd, csplit, expr, test, install, ls, dir, vdir, du, df, mkdir, mkfifo, mknod, mktemp, chmod, basename, cksum, dirname, factor, link, nproc, pathchk, printenv, readlink, rmdir, sum, tee, truncate, uname, unlink, base32, basenc, comm, fold, join, pr, sha1sum, sha256sum, sha512sum, shred, shuf, tsort, b2sum, split, kill, nohup, touch, uptime, users, who, chown, fmt]
         runner: [ubuntu-latest]
         include:
           - tool: yes-arm64
@@ -411,6 +422,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends strace
       - name: Functional tests
         if: matrix.tool != 'yes-arm64'
+        timeout-minutes: 5
         run: |
           if [ "${{ matrix.tool }}" = "yes" ]; then
             cd assembly/yes
@@ -420,6 +432,7 @@ jobs:
           fi
       - name: Security tests
         if: matrix.tool != 'yes' && matrix.tool != 'yes-arm64'
+        timeout-minutes: 5
         run: python3 assembly/${{ matrix.tool }}/tests/security_tests.py
       - name: Build ARM64 fyes
         if: matrix.tool == 'yes-arm64'
