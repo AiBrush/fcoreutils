@@ -1,3 +1,7 @@
+# Makefile for farch — GAS (GNU Assembler) tool
+# NOTE: arch uses GAS syntax (.s), not NASM, so it cannot use ../../Makefile.inc
+# which is NASM-specific. This Makefile is self-contained.
+
 AS        = as
 LD        = ld
 ASFLAGS   = --64 -I ./
