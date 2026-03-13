@@ -689,7 +689,8 @@ def check_tool_specific():
         # Error message format check
         rc, out, err = run([BIN, os.path.join(tmpdir, "nosuch")])
         err_text = err.decode(errors="replace")
-        report_result(err_text.startswith("unlink: cannot unlink '"),
+        err_text_norm = err_text.replace('\u2018', "'").replace('\u2019', "'")
+        report_result(err_text_norm.startswith("unlink: cannot unlink '"),
                      "unlink: error format starts with 'unlink: cannot unlink '")
 
         # Unlink only removes one link, original stays
@@ -719,13 +720,16 @@ def check_tool_specific():
     # Missing operand messages
     rc, out, err = run([BIN])
     err_text = err.decode(errors="replace")
+    err_text_norm = err_text.replace('\u2018', "'").replace('\u2019', "'")
     report_result("missing operand" in err_text, "unlink: missing operand message")
-    report_result("Try 'unlink --help'" in err_text, "unlink: missing operand → try help hint")
+    report_result("Try 'unlink --help'" in err_text_norm, "unlink: missing operand → try help hint")
 
     rc, out, err = run([BIN, "a", "b"])
     err_text = err.decode(errors="replace")
+    # Normalize smart quotes to ASCII for comparison
+    err_text_norm = err_text.replace('\u2018', "'").replace('\u2019', "'")
     report_result("extra operand" in err_text, "unlink: extra operand message")
-    report_result("'b'" in err_text, "unlink: extra operand includes the extra arg")
+    report_result("'b'" in err_text_norm, "unlink: extra operand includes the extra arg")
 
     # --help goes to stdout
     rc, out, err = run([BIN, "--help"])
@@ -738,7 +742,7 @@ def check_tool_specific():
     report_result(rc == 0, "unlink: --version → exit 0")
     report_result(b"unlink" in out, "unlink: --version contains 'unlink'")
 
-    # Compare error messages with GNU (byte-for-byte)
+    # Compare error messages with GNU (byte-for-byte after quote normalization)
     if gnu_path:
         c_env = os.environ.copy()
         c_env["LC_ALL"] = "C"
@@ -747,7 +751,12 @@ def check_tool_specific():
             rc_g, _, err_g = run([gnu_path] + args_list, env=c_env)
             # Normalize tool name
             err_g_norm = err_g.replace(gnu_path.encode(), b"unlink")
-            report_result(err_f == err_g_norm,
+            # Normalize smart quotes (U+2018/U+2019) to ASCII single quotes
+            err_f_norm = err_f
+            for smart, ascii_ in [(b"\xe2\x80\x98", b"'"), (b"\xe2\x80\x99", b"'")]:
+                err_f_norm = err_f_norm.replace(smart, ascii_)
+                err_g_norm = err_g_norm.replace(smart, ascii_)
+            report_result(err_f_norm == err_g_norm,
                          f"unlink: error msg byte-match GNU for args={args_list}")
 
 

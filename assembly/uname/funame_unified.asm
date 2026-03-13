@@ -45,8 +45,8 @@ ORG 0x400000
 %define FLAG_I  6   ; hardware-platform
 %define FLAG_O  7   ; operating-system
 %define FLAG_ALL 0xFF
-; -a omits -p and -i when they are "unknown" (always on Linux)
-%define FLAG_ALL_A (FLAG_ALL & ~((1 << FLAG_P) | (1 << FLAG_I)))
+; -a includes all fields (-p and -i use machine field, matching GNU 9.x)
+%define FLAG_ALL_A FLAG_ALL
 
 ; --- ELF Header (64 bytes) ---
 ehdr:
@@ -429,13 +429,13 @@ _start:
 .check_p:
     test    bl, (1 << FLAG_P)
     jz      .check_i
-    lea     rsi, str_unknown
+    lea     rsi, [UTSNAME_BUF + UTS_MACHINE]
     call    .print_field
 
 .check_i:
     test    bl, (1 << FLAG_I)
     jz      .check_o
-    lea     rsi, str_unknown
+    lea     rsi, [UTSNAME_BUF + UTS_MACHINE]
     call    .print_field
 
 .check_o:

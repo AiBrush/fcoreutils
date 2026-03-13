@@ -268,12 +268,12 @@ jobs:
             chmod +x assembly/$tool/f$tool
           done
           # NASM unified tools (unified/ subdirectory)
-          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum base32 basenc comm fold join pr sha1sum sha256sum shred shuf tsort; do
+          for tool in head tail tac rev cut tr base64 md5sum sha224sum sha384sum base32 basenc join pr sha1sum sha256sum shred shuf tsort; do
             nasm -f bin assembly/$tool/unified/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
           # Modular ELF builds (tools with Makefile)
-          for tool in wc cat expand false nl od seq sort unexpand uniq paste nice date timeout ls dir vdir du df; do
+          for tool in wc cat expand false nl od seq sort unexpand uniq paste nice date timeout ls dir vdir du df comm fold; do
             make -C assembly/$tool dev
           done
           # arch (GAS syntax)
