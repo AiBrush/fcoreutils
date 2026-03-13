@@ -1,12 +1,33 @@
 ; ============================================================
-; fdate_unified.asm — AUTO-GENERATED unified file
-; date (GNU coreutils compatible) — x86_64 Linux
-; Build: nasm -f bin fdate_unified.asm -o fdate_release
+; fdate_unified.asm — GNU-compatible 'date' command
+; Single nasm -f bin file with hand-crafted ELF header.
+;
+; date: display the system date and time
+; - date             — print current date/time in default format
+; - date -u          — use UTC
+; - date +FORMAT     — custom format string
+; - date -R          — RFC 5322 date format
+; - date -I[FMT]     — ISO 8601 format
+; - date --help / --version
+;
+; Uses clock_gettime(228) syscall, always UTC.
+;
+; BUILD:
+;   nasm -f bin fdate_unified.asm -o fdate && chmod +x fdate
 ; ============================================================
+
 BITS 64
 ORG 0x400000
 
-; === ELF Header (64 bytes) ===
+; --- Syscall numbers ---
+%define SYS_WRITE       1
+%define SYS_EXIT       60
+%define SYS_CLOCK_GETTIME 228
+
+%define STDOUT          1
+%define STDERR          2
+
+; --- ELF Header (64 bytes) ---
 ehdr:
     db 0x7f, 'E','L','F'
     db 2, 1, 1, 0
@@ -26,9 +47,10 @@ ehdr:
     dw 0
 ehdr_size equ $ - ehdr
 
+; --- Program Header 1: PT_LOAD ---
 phdr:
     dd 1                        ; PT_LOAD
-    dd 7                        ; PF_R | PF_W | PF_X (flat binary needs writable data)
+    dd 7                        ; PF_R | PF_W | PF_X
     dq 0
     dq $$
     dq $$
@@ -37,23 +59,15 @@ phdr:
     dq 0x200000
 phdr_size equ $ - phdr
 
+; --- Program Header 2: PT_GNU_STACK (NX) ---
     dd 0x6474e551               ; PT_GNU_STACK
     dd 6                        ; PF_R | PF_W
     dq 0, 0, 0, 0, 0
     dq 16
 
-; ============================================================
-; Constants
-; ============================================================
-%define SYS_WRITE       1
-%define SYS_EXIT       60
-%define SYS_CLOCK_GETTIME 228
-%define STDOUT          1
-%define STDERR          2
-
-; ============================================================
-; Writable data (in-file, flat binary)
-; ============================================================
+; ===============================================================
+; Writable data (initialized, in-file)
+; ===============================================================
 day_names:
     db "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 mon_names:
@@ -74,11 +88,12 @@ dt_sec:    db 0
 dt_wday:   db 0
 dt_yday:   dw 0
 dt_format: db 0
+            db 0                ; padding
 dt_fmt_ptr: dq 0
 
-; ============================================================
+; ===============================================================
 ; Code
-; ============================================================
+; ===============================================================
 
 format_2digit:
     push    rbx
@@ -1016,7 +1031,10 @@ _start:
     mov     eax, SYS_EXIT
     syscall
 
-; @@DATA_START@@
+; ===============================================================
+; RODATA
+; ===============================================================
+
 str_help:
     db "Usage: date [OPTION]... [+FORMAT]", 10
     db "  or:  date [-u|--utc|--universal] [MMDDhhmm[[CC]YY][.ss]]", 10
@@ -1057,7 +1075,6 @@ str_err_post_len equ $ - str_err_post - 1
 str_clock_err:
     db "date: cannot get time", 10
 str_clock_err_len equ $ - str_clock_err
-; @@DATA_END@@
 
 str_opt_help:
     db "--help", 0
@@ -1070,9 +1087,15 @@ str_opt_universal:
 str_opt_rfc_email:
     db "--rfc-email", 0
 
+; ===============================================================
+; BSS (uninitialized data — zero-filled by ELF loader)
+; ===============================================================
 file_size equ $ - $$
 
-out_buf: times 256 db 0
-num_tmp: times 32 db 0
+bss_base    equ $$ + file_size
 
-mem_size equ $ - $$
+out_buf     equ bss_base + 0            ; 256 bytes
+num_tmp     equ bss_base + 256          ; 32 bytes
+
+bss_end     equ bss_base + 288
+mem_size    equ bss_end - $$
