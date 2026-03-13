@@ -314,7 +314,7 @@ mod tests {
         child.stdin.take().unwrap().write_all(b"1000\n").unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.0k");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.0K");
     }
 
     #[test]
@@ -378,7 +378,7 @@ mod tests {
     fn test_numfmt_arg_mode() {
         let output = cmd().args(["--to=si", "1000"]).output().unwrap();
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.0k");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.0K");
     }
 
     #[test]
