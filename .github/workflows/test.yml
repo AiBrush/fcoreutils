@@ -422,6 +422,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends strace
       - name: Functional tests
         if: matrix.tool != 'yes-arm64'
+        timeout-minutes: 5
         run: |
           if [ "${{ matrix.tool }}" = "yes" ]; then
             cd assembly/yes
@@ -431,6 +432,7 @@ jobs:
           fi
       - name: Security tests
         if: matrix.tool != 'yes' && matrix.tool != 'yes-arm64'
+        timeout-minutes: 5
         run: python3 assembly/${{ matrix.tool }}/tests/security_tests.py
       - name: Build ARM64 fyes
         if: matrix.tool == 'yes-arm64'
