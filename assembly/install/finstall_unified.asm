@@ -388,13 +388,13 @@ _start:
     dec     eax
     mov     rsi, [r15 + rax*8]     ; dest
 
-    ; If -D, create leading directories
+    ; If -D, create leading directories (parent dirs only, not dest itself)
     cmp     dword [flag_create_leading], 0
     je      .do_install_file
     push    rdi
     push    rsi
     mov     rdi, rsi
-    call    mkdir_parents
+    call    mkdir_leading
     pop     rsi
     pop     rdi
 
@@ -685,6 +685,40 @@ copy_file:
     ret
 
 ; ============================================================
+; mkdir_leading: create parent directories of a file path
+; rdi = file path (e.g. /a/b/c/file.txt creates /a/b/c)
+; ============================================================
+mkdir_leading:
+    push    rbx
+    push    r12
+    mov     r12, rdi            ; save original path
+
+    ; Find last / in path
+    call    str_len
+    mov     ebx, eax            ; length
+    dec     ebx
+.ml_find_slash:
+    cmp     ebx, 0
+    jl      .ml_done            ; no slash found, nothing to create
+    cmp     byte [r12 + rbx], '/'
+    je      .ml_found
+    dec     ebx
+    jmp     .ml_find_slash
+
+.ml_found:
+    ; Temporarily null-terminate at last slash
+    mov     byte [r12 + rbx], 0
+    mov     rdi, r12
+    call    mkdir_parents
+    ; Restore the slash
+    mov     byte [r12 + rbx], '/'
+
+.ml_done:
+    pop     r12
+    pop     rbx
+    ret
+
+; ============================================================
 ; mkdir_parents: create directory and all parents
 ; rdi = path
 ; ============================================================
@@ -735,6 +769,9 @@ mkdir_parents:
     pop     rcx
     lea     rdi, [path_buf]
     mov     byte [rdi + rcx], '/'
+    ; Skip .mp_next_char write — al is clobbered by syscall
+    inc     ecx
+    jmp     .mp_scan
 
 .mp_next_char:
     mov     [rdi + rcx], al
