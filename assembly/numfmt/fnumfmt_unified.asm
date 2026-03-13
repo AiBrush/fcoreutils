@@ -15,7 +15,7 @@
 ;
 ; SI suffixes: K(1e3), M(1e6), G(1e9), T(1e12), P(1e15), E(1e18)
 ; IEC suffixes: Ki(1024), Mi(1024^2), Gi(1024^3), etc.
-; IMPORTANT: SI kilo is uppercase 'K' (matching GNU 9.4 on CI)
+; IMPORTANT: SI kilo uses uppercase 'K' (matching GNU 9.4 on ubuntu-latest CI)
 ; ============================================================
 
 BITS 64
@@ -1187,7 +1187,8 @@ str_si_val:         db "si", 0
 str_iec_val:        db "iec", 0
 str_ieci_val:       db "iec-i", 0
 
-; SI kilo is uppercase 'K' (matching GNU 9.4 on CI)
+; SI kilo: use uppercase 'K' to match GNU 9.4 on ubuntu-latest CI
+; The assembly test compares against the local GNU, so this must match.
 str_K:              db "K"
 str_M:              db "M"
 str_G:              db "G"
