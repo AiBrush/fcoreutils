@@ -572,7 +572,7 @@ _start:
     mov     rsi, str_uid_label
     mov     edx, str_uid_label_len
     call    buf_write
-    movzx   edi, dword [STAT_BUF + ST_UID]
+    mov     edi, dword [STAT_BUF + ST_UID]
     call    format_u64_rdi
     call    buf_write
     mov     rsi, str_uid_sep
@@ -582,7 +582,7 @@ _start:
     mov     rsi, str_gid_label
     mov     edx, str_gid_label_len
     call    buf_write
-    movzx   edi, dword [STAT_BUF + ST_GID]
+    mov     edi, dword [STAT_BUF + ST_GID]
     call    format_u64_rdi
     call    buf_write
     mov     rsi, str_gid_sep
@@ -686,7 +686,7 @@ _start:
     call    buf_write
 
     ; uid
-    movzx   edi, dword [STAT_BUF + ST_UID]
+    mov     edi, dword [STAT_BUF + ST_UID]
     call    format_u64_rdi
     call    buf_write
     mov     rsi, str_space
@@ -694,7 +694,7 @@ _start:
     call    buf_write
 
     ; gid
-    movzx   edi, dword [STAT_BUF + ST_GID]
+    mov     edi, dword [STAT_BUF + ST_GID]
     call    format_u64_rdi
     call    buf_write
     mov     rsi, str_space
@@ -1027,7 +1027,7 @@ _start:
 
 .fc_pct_g:  ; gid
     push    rdi
-    movzx   edi, dword [STAT_BUF + ST_GID]
+    mov     edi, dword [STAT_BUF + ST_GID]
     call    format_u64_rdi
     call    buf_write
     pop     rdi
@@ -1036,7 +1036,7 @@ _start:
 
 .fc_pct_G:  ; group name (just numeric for assembly)
     push    rdi
-    movzx   edi, dword [STAT_BUF + ST_GID]
+    mov     edi, dword [STAT_BUF + ST_GID]
     call    format_u64_rdi
     call    buf_write
     pop     rdi
@@ -1163,7 +1163,7 @@ _start:
 
 .fc_pct_u:  ; uid
     push    rdi
-    movzx   edi, dword [STAT_BUF + ST_UID]
+    mov     edi, dword [STAT_BUF + ST_UID]
     call    format_u64_rdi
     call    buf_write
     pop     rdi
@@ -1172,7 +1172,7 @@ _start:
 
 .fc_pct_U:  ; user name (just numeric)
     push    rdi
-    movzx   edi, dword [STAT_BUF + ST_UID]
+    mov     edi, dword [STAT_BUF + ST_UID]
     call    format_u64_rdi
     call    buf_write
     pop     rdi
@@ -1557,7 +1557,7 @@ format_u64:
 
 ; format_u64_rdi: same but for 32-bit values zero-extended
 format_u64_rdi:
-    movzx   rdi, edi
+    mov     edi, edi            ; zero-extend edi to rdi
     jmp     format_u64
 
 ; format_hex_lower: format edi as lowercase hex (no leading zeros, no 0x prefix)

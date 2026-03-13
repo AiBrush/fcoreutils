@@ -80,7 +80,7 @@ _start:
 
     ; Check argc
     cmp     r14d, 2
-    jl      .err_missing_operand
+    jl      err_missing_operand
 
     ; Check for --help and --version
     mov     rdi, [r15 + 8]      ; argv[1]
@@ -89,13 +89,13 @@ _start:
     call    str_eq
     test    eax, eax
     pop     rdi
-    jnz     .show_help
+    jnz     show_help
     push    rdi
     mov     rsi, str_version_flag
     call    str_eq
     test    eax, eax
     pop     rdi
-    jnz     .show_version
+    jnz     show_version
 
     ; argv[1] is the format string
     mov     r12, [r15 + 8]
@@ -772,7 +772,7 @@ buf_flush:
 ; ============================================================
 ; Error handling
 ; ============================================================
-.err_missing_operand:
+err_missing_operand:
     mov     rsi, str_prefix
     mov     edx, str_prefix_len
     call    do_write_err
@@ -785,7 +785,7 @@ buf_flush:
     mov     edi, 1
     jmp     do_exit
 
-.show_help:
+show_help:
     mov     edi, STDOUT
     mov     rsi, str_help
     mov     edx, str_help_len
@@ -793,7 +793,7 @@ buf_flush:
     xor     edi, edi
     jmp     do_exit
 
-.show_version:
+show_version:
     mov     edi, STDOUT
     mov     rsi, str_version
     mov     edx, str_version_len

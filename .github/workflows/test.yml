@@ -263,7 +263,7 @@ jobs:
           # fyes (Python build script)
           cd assembly/yes && python3 build.py --no-verify && cd ../..
           # NASM unified tools (flat binary)
-          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install; do
+          for tool in true logname hostid tty whoami pwd sync sleep echo env groups id ln rm mv cp chroot chcon runcon stty stdbuf pinky ptx numfmt dd csplit expr test install stat realpath dircolors printf; do
             nasm -f bin assembly/$tool/f${tool}_unified.asm -o assembly/$tool/f$tool
             chmod +x assembly/$tool/f$tool
           done
@@ -273,7 +273,7 @@ jobs:
             chmod +x assembly/$tool/f$tool
           done
           # Modular ELF builds (tools with Makefile)
-          for tool in wc cat expand false nl od seq sort unexpand uniq paste nice date timeout stat realpath dircolors printf ls dir vdir du df; do
+          for tool in wc cat expand false nl od seq sort unexpand uniq paste nice date timeout ls dir vdir du df; do
             make -C assembly/$tool dev
           done
           # arch (GAS syntax)

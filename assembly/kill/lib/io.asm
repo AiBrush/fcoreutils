@@ -1,0 +1,60 @@
+; io.asm — Shared I/O routines
+%include "include/linux.inc"
+
+global asm_write
+global asm_write_all
+global asm_exit
+
+section .text
+
+; asm_write(rdi=fd, rsi=buf, rdx=len) -> rax=bytes_written
+asm_write:
+.retry:
+    mov     rax, SYS_WRITE
+    syscall
+    cmp     rax, -EINTR
+    je      .retry
+    ret
+
+; asm_write_all(rdi=fd, rsi=buf, rdx=len) -> rax=0 on success
+asm_write_all:
+    push    rbx
+    push    r12
+    push    r13
+    mov     rbx, rdi
+    mov     r12, rsi
+    mov     r13, rdx
+.loop:
+    test    r13, r13
+    jle     .success
+    mov     rdi, rbx
+    mov     rsi, r12
+    mov     rdx, r13
+    mov     rax, SYS_WRITE
+    syscall
+    cmp     rax, -EINTR
+    je      .loop
+    test    rax, rax
+    js      .error
+    add     r12, rax
+    sub     r13, rax
+    jmp     .loop
+.success:
+    xor     eax, eax
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+.error:
+    mov     rax, -1
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; asm_exit(rdi=code)
+asm_exit:
+    mov     rax, SYS_EXIT
+    syscall
+
+section .note.GNU-stack noalloc noexec nowrite progbits
