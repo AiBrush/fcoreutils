@@ -1,41 +1,12 @@
-NASM      = nasm
-LD        = ld
-NASMFLAGS = -f elf64 -I ./
-LDFLAGS   = --gc-sections
-BUILD     = build
-TARGET    = flink
+# Makefile for flink — create hard links via link()
+TARGET      = flink
+LIB_SRCS    = io.asm str.asm args.asm
+TOOL_SRCS   = tools/flink.asm
+UNIFIED_SRC = flink_unified.asm
 
-LIB_SRCS  = lib/io.asm lib/args.asm lib/str.asm
-LIB_OBJS  = $(LIB_SRCS:lib/%.asm=$(BUILD)/%.o)
+include ../../Makefile.inc
 
-.PHONY: all dev release clean test bench sizes
-
-all: dev
-
-$(BUILD):
-	mkdir -p $(BUILD)
-
-# Compile lib objects
-$(BUILD)/%.o: lib/%.asm | $(BUILD)
-	$(NASM) $(NASMFLAGS) $< -o $@
-
-# Dev build — modular, fast iteration
-dev: tools/$(TARGET).asm $(LIB_OBJS) | $(BUILD)
-	$(NASM) $(NASMFLAGS) tools/$(TARGET).asm -o $(BUILD)/$(TARGET).o
-	$(LD) $(LDFLAGS) $(BUILD)/$(TARGET).o $(LIB_OBJS) -o $(TARGET)
-
-# Release build — unified file, nasm -f bin, no linker
-release: $(TARGET)_unified.asm
-	nasm -f bin $(TARGET)_unified.asm -o $(TARGET)_release
-	chmod +x $(TARGET)_release
-
-clean:
-	rm -rf $(BUILD) $(TARGET) $(TARGET)_release
-
-test: release
-	bash tests/run_tests.sh ./$(TARGET)_release
-
-bench: release
+bench: dev
 	@echo "=== Benchmark vs GNU (startup-dominated) ==="
 	@echo "--- GNU link ---"
 	@hyperfine --warmup 3 'link /tmp/bench_src /tmp/bench_dst && rm /tmp/bench_dst' 2>/dev/null || \
@@ -43,9 +14,3 @@ bench: release
 	@echo "--- asm flink ---"
 	@hyperfine --warmup 3 './flink_release /tmp/bench_src /tmp/bench_dst && rm /tmp/bench_dst' 2>/dev/null || \
 		bash -c 'touch /tmp/bench_src; time (for i in $$(seq 100); do ./flink_release /tmp/bench_src /tmp/bench_dst_$$i; done); rm -f /tmp/bench_src /tmp/bench_dst_*'
-
-sizes:
-	@echo "=== Binary sizes ==="
-	@ls -la $(TARGET)_release 2>/dev/null
-	@echo "--- GNU link ---"
-	@ls -la $$(which link)

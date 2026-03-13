@@ -1,26 +1,17 @@
-NASM      = nasm
-TARGET    = fbase32
+# Makefile for fbase32 — base32 encode/decode tool
+# NOTE: base32 currently only has a unified build (no modular tools/ source).
+# The shared Makefile.inc dev target won't work until a modular source is added.
+TARGET      = fbase32
+LIB_SRCS    = io.asm str.asm args.asm
+TOOL_SRCS   = tools/fbase32.asm
+UNIFIED_SRC = unified/fbase32_unified.asm
 
-.PHONY: all dev release clean test bench sizes
+include ../../Makefile.inc
 
-all: dev
-
-# Dev build — unified file, nasm -f bin, no linker
-dev: unified/fbase32_unified.asm
-	$(NASM) -f bin unified/fbase32_unified.asm -o $(TARGET)
+# Override dev to build from unified since no modular source exists yet
+dev: $(UNIFIED_SRC)
+	$(NASM) -f bin $(UNIFIED_SRC) -o $(TARGET)
 	chmod +x $(TARGET)
-
-# Release build — same as dev for unified builds
-release: dev
-
-clean:
-	rm -f $(TARGET)
-
-test: dev
-	bash tests/test_fbase32.sh ./$(TARGET)
-
-security-test: dev
-	python3 tests/security_tests.py
 
 bench: dev
 	@echo "=== Benchmark vs GNU base32 ==="
@@ -39,9 +30,3 @@ bench: dev
 	@hyperfine --warmup 3 './fbase32 -d /tmp/bench_b32.enc > /dev/null' 2>/dev/null || \
 		bash -c 'time ./fbase32 -d /tmp/bench_b32.enc > /dev/null'
 	@rm -f /tmp/bench_b32.bin /tmp/bench_b32.enc
-
-sizes:
-	@echo "=== Binary sizes ==="
-	@ls -la $(TARGET) 2>/dev/null
-	@echo "--- GNU base32 ---"
-	@ls -la /usr/bin/base32

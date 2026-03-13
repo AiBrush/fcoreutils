@@ -6,6 +6,11 @@ UNIFIED_SRC = unified/fb2sum_unified.asm
 
 include ../../Makefile.inc
 
+# Override dev to build from unified since tools/fb2sum.asm is a placeholder
+dev: $(UNIFIED_SRC)
+	$(NASM) -f bin $(UNIFIED_SRC) -o $(TARGET)
+	chmod +x $(TARGET)
+
 bench: dev
 	@echo "=== Benchmark vs GNU b2sum ==="
 	@dd if=/dev/urandom bs=1M count=10 of=/tmp/bench_b2sum.bin 2>/dev/null

@@ -11,7 +11,6 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
-from shutil import which
 
 config = {
     'tool_name': 'cksum',
@@ -28,8 +27,6 @@ config = {
 def tool_specific_tests(fw):
     """13. cksum-specific tests: CRC checksum behavior."""
     fw.log("\n=== 13. Tool-Specific: cksum ===")
-
-    GNU = '/usr/bin/cksum'
 
     # Known CRC values via stdin
     known_values = [
@@ -69,8 +66,8 @@ def tool_specific_tests(fw):
             fw.report_result(lines[1].startswith("3015617425 6 "), "cksum: second file CRC correct")
 
     # Compare with GNU for various file contents
-    gnu_path = which('cksum')
-    if gnu_path:
+    gnu_path = fw.gnu_path
+    if os.path.exists(gnu_path):
         with tempfile.TemporaryDirectory() as td:
             for i, content in enumerate([b"test data\n", b"\x00" * 100,
                                           b"A" * 10000, bytes(range(256))]):
