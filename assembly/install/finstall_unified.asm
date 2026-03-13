@@ -212,7 +212,9 @@ _start:
     jge     .err_missing_arg
     mov     rdi, [r15 + rcx*8]
 .parse_mode_inline:
+    push    rcx
     call    parse_mode
+    pop     rcx
     mov     [mode_val], rax
     inc     ecx
     jmp     .parse_opts
