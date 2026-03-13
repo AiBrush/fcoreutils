@@ -21,28 +21,61 @@ use coreutils_rs::cut::{self, CutMode};
 #[cfg(target_os = "linux")]
 struct VmspliceWriter {
     raw: ManuallyDrop<std::fs::File>,
-    is_pipe: bool,
+    /// Whether stdout is a pipe (detected at construction via fstat).
+    stdout_is_pipe: bool,
+    /// Whether the current write source is safe for vmsplice (i.e., backed by
+    /// mmap or a persistent buffer that won't be freed/reused while the pipe
+    /// reader might still reference the pages). Callers toggle this before
+    /// writing mmap-backed data directly.
+    vmsplice_enabled: bool,
 }
 
 #[cfg(target_os = "linux")]
 impl VmspliceWriter {
     fn new() -> Self {
         let raw = unsafe { ManuallyDrop::new(std::fs::File::from_raw_fd(1)) };
-        // Disable vmsplice: it passes user-space pages by reference to the pipe,
-        // but cut creates temporary Vec<u8> buffers that are freed after write_all
-        // returns. The pipe reader may then read from freed/reused memory, causing
-        // data corruption. Always use regular write for correctness.
+        // Detect if stdout is a pipe using fstat. vmsplice only works on pipes.
+        let stdout_is_pipe = {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let rc = unsafe { libc::fstat(1, &mut stat) };
+            rc == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
+        };
         Self {
             raw,
-            is_pipe: false,
+            stdout_is_pipe,
+            // Default off: only enable for writes from mmap-backed or
+            // persistent buffers where pages remain valid after write returns.
+            vmsplice_enabled: false,
         }
+    }
+
+    /// Enable or disable vmsplice for subsequent writes.
+    ///
+    /// # Safety contract
+    /// Only enable when the data being written is backed by mmap pages or a
+    /// buffer that will NOT be freed/reused until the pipe consumer reads it.
+    /// vmsplice passes pages by reference to the pipe; if the backing memory
+    /// is freed or overwritten before the reader consumes it, data corruption
+    /// occurs.
+    #[inline]
+    fn set_vmsplice_enabled(&mut self, enabled: bool) {
+        self.vmsplice_enabled = enabled;
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl VmspliceWriter {
+    /// Whether vmsplice is currently active (stdout is pipe AND caller enabled it).
+    #[inline(always)]
+    fn use_vmsplice(&self) -> bool {
+        self.stdout_is_pipe && self.vmsplice_enabled
     }
 }
 
 #[cfg(target_os = "linux")]
 impl Write for VmspliceWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if !self.is_pipe || buf.is_empty() {
+        if !self.use_vmsplice() || buf.is_empty() {
             return (&*self.raw).write(buf);
         }
         loop {
@@ -58,13 +91,13 @@ impl Write for VmspliceWriter {
             if err.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            self.is_pipe = false;
+            self.vmsplice_enabled = false;
             return (&*self.raw).write(buf);
         }
     }
 
     fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
-        if !self.is_pipe || buf.is_empty() {
+        if !self.use_vmsplice() || buf.is_empty() {
             return (&*self.raw).write_all(buf);
         }
         while !buf.is_empty() {
@@ -82,7 +115,7 @@ impl Write for VmspliceWriter {
                 if err.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                self.is_pipe = false;
+                self.vmsplice_enabled = false;
                 return (&*self.raw).write_all(buf);
             }
         }
@@ -90,7 +123,7 @@ impl Write for VmspliceWriter {
     }
 
     fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
-        if !self.is_pipe || bufs.is_empty() {
+        if !self.use_vmsplice() || bufs.is_empty() {
             return (&*self.raw).write_vectored(bufs);
         }
         // SAFETY: IoSlice is #[repr(transparent)] over iovec on Unix,
@@ -108,7 +141,7 @@ impl Write for VmspliceWriter {
             if err.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            self.is_pipe = false;
+            self.vmsplice_enabled = false;
             return (&*self.raw).write_vectored(bufs);
         }
     }
@@ -513,10 +546,13 @@ fn main() {
             #[cfg(unix)]
             {
                 if stdin_inplace_done {
-                    // Write in-place processed data directly to output
+                    // Write in-place processed data directly to output.
+                    // Enable vmsplice: the backing memory (mmap or Vec) persists
+                    // until end of main(), so pipe pages remain valid.
                     #[cfg(target_os = "linux")]
                     {
-                        if splice_inplace_len > 0 {
+                        out.set_vmsplice_enabled(true);
+                        let res = if splice_inplace_len > 0 {
                             if let Some(ref mmap_data) = splice_mmap {
                                 out.write_all(&mmap_data[..splice_inplace_len])
                             } else {
@@ -526,7 +562,9 @@ fn main() {
                             out.write_all(data)
                         } else {
                             Ok(())
-                        }
+                        };
+                        out.set_vmsplice_enabled(false);
+                        res
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
