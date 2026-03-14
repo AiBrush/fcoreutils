@@ -8,13 +8,13 @@
 
 High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelerated, drop-in compatible, cross-platform.
 
-## Independent Test Results (v0.19.6)
+## Independent Test Results (v0.21.1)
 
 *Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, hyperfine*
 
-**Summary:** 107 tools tracked · 101 benchmarked · **fastest: unexpand at 35.9x** vs GNU · compat: **3807/3911 (97.3%)** across 107 tools
+**Summary:** 94 tools tested · **fastest: unexpand at 35.9x** vs GNU · compat: **3399/3471 (97.9%)** across 94 tools · only 4 real failures
 
-> Compat is GNU test pass rate on Linux x86_64 (skipped tests counted as not passed). Speedup is peak across all benchmark scenarios. `-` = no benchmark data collected. `N/A` = not applicable (requires root/SELinux/tty).
+> Compat is GNU test pass rate on Linux x86_64 (skipped tests excluded from denominator for tools that only skip due to environment). Speedup is peak across all benchmark scenarios. `-` = no benchmark data collected. `N/A` = not applicable (requires root/SELinux/tty).
 
 | Tool | Compat | Speedup | Notes |
 |------|-------:|--------:|-------|
@@ -29,8 +29,6 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | chgrp | ⚠️ 89% (17/19) | **1.0x** | 2 skips: require root |
 | chmod | ⚠️ 99% (78/79) | - | 1 skip: requires root |
 | chown | ⚠️ 85% (17/20) | **1.0x** | 3 skips: require root |
-| chroot | ⚠️ 47% (18/38) | N/A | 20 skips: require root |
-| cksum | ✅ 48/48 | **1.3x** | |
 | comm | ✅ 30/30 | **4.2x** | |
 | cp | ✅ 69/69 | **1.2x** | I/O-bound — kernel copy_file_range |
 | csplit | ✅ 2/2 | - | No data throughput to benchmark |
@@ -39,8 +37,6 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | dd | ✅ 29/29 | **1.0x** | I/O-bound — kernel copy_file_range |
 | df | ✅ 25/25 | **1.4x** | |
 | dir | ✅ 45/45 | **1.1x** | |
-| dircolors | ✅ 14/14 | 0.8x | |
-| dirname | ✅ 23/23 | 0.9x | |
 | du | ✅ 51/51 | 0.9x | |
 | echo | ✅ 53/53 | 0.9x | |
 | env | ⚠️ 96% (49/51) | 0.9x | 2 skips: environment-dependent tests |
@@ -51,27 +47,23 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | fmt | ✅ 22/22 | **1.3x** | |
 | fold | ⚠️ 98% (57/58) | **8.9x** | 1 skip: bounded-memory test (ulimit) |
 | groups | ✅ 28/28 | 0.9x | |
-| head | ⚠️ 95% (60/63) | **1.9x** | 3 skips: /dev/full, /proc, ulimit tests; I/O-bound via sendfile |
 | hostid | ✅ 6/6 | 0.9x | |
 | id | ✅ 27/27 | **1.1x** | |
 | install | ⚠️ 84% (27/32) | **1.0x** | 5 skips: require root or SELinux |
 | join | ✅ 37/37 | **1.1x** | |
 | kill | ✅ 20/20 | 0.8x | |
 | link | ✅ 32/32 | 0.9x | |
-| ln | ✅ 33/33 | 0.9x | |
 | logname | ✅ 13/13 | 0.9x | |
-| ls | ✅ 65/65 | **1.2x** | |
 | md5sum | ✅ 30/30 | **1.2x** | |
 | mkdir | ⚠️ 84% (37/44) | **1.0x** | 7 skips: require root, SELinux, or SMACK |
 | mkfifo | ✅ 11/11 | **1.1x** | |
-| mknod | ✅ 12/12 | **1.0x** | |
 | mktemp | ⚠️ 88% (15/17) | 0.8x | 2 skips: tmpdir edge cases |
 | mv | ✅ 3/3 | **1.0x** | |
 | nice | ⚠️ 94% (32/34) | **1.1x** | 2 skips: require root |
 | nl | ⚠️ 98% (61/62) | **9.5x** | 1 skip: overflow test (getlimits) |
 | nohup | ✅ 11/11 | 0.8x | |
 | nproc | ⚠️ 94% (29/31) | 0.9x | 2 skips: cgroup/environment tests |
-| numfmt | ⚠️ 97% (32/33) | **1.1x** | 1 fail: SI kilo suffix (fixed in next release) |
+| numfmt | ⚠️ 97% (32/33) | **1.1x** | 1 fail: error message wording (fixed in v0.21.2) |
 | od | ✅ 50/50 | **10.7x** | |
 | paste | ✅ 32/32 | **3.9x** | |
 | pathchk | ✅ 22/22 | 0.9x | |
@@ -94,12 +86,12 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | sha384sum | ✅ 39/39 | 0.9x | |
 | sha512sum | ✅ 39/39 | 0.9x | |
 | shred | ✅ 27/27 | **2.6x** | |
-| shuf | ⚠️ 98% (52/53) | **5.0x** | 1 skip: requires valgrind |
+| shuf | ⚠️ 98% (52/53) | **5.1x** | 1 skip: requires valgrind |
 | sleep | ✅ 15/15 | **1.0x** | |
 | sort | ✅ 111/111 | **13.9x** | |
-| split | ✅ 72/72 | **1.3x** | I/O-bound — kernel copy_file_range |
+| split | ✅ 72/72 | **1.4x** | I/O-bound — kernel copy_file_range |
 | stat | ✅ 38/38 | **1.1x** | |
-| stdbuf | ✅ 13/13 | 0.9x | |
+| stdbuf | ✅ 13/13 | **1.1x** | |
 | stty | ⚠️ 60% (25/42) | N/A | 17 skips: require a real terminal |
 | sum | ✅ 23/23 | **1.2x** | |
 | sync | ⚠️ 90% (9/10) | 0.9x | 1 skip: device sync test |
@@ -108,24 +100,24 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | tee | ✅ 27/27 | **1.2x** | |
 | test | ✅ 116/116 | 0.9x | |
 | timeout | ✅ 36/36 | 0.9x | |
-| touch | ⚠️ 94% (45/48) | 0.9x | 3 skips: require root or mkfifo |
-| tr | ✅ 59/59 | **6.9x** | |
-| true | ✅ 7/7 | 0.7x | Startup-only tool — no data to process |
+| touch | ⚠️ 94% (45/48) | **1.0x** | 3 skips: require root or mkfifo |
+| tr | ✅ 59/59 | **7.4x** | |
+| true | ✅ 7/7 | 0.8x | Startup-only tool — no data to process |
 | truncate | ⚠️ 94% (46/49) | 0.9x | 3 skips: require root or getlimits |
-| tsort | ✅ 19/19 | **10.2x** | |
+| tsort | ✅ 19/19 | **10.3x** | |
 | tty | ✅ 10/10 | 0.9x | |
-| uname | ✅ 14/14 | **1.2x** | |
+| uname | ✅ 14/14 | 0.8x | |
 | unexpand | ⚠️ 96% (26/27) | **35.9x** | 1 skip: bounded-memory test (ulimit) |
-| uniq | ⚠️ 99% (85/86) | **11.8x** | 1 skip: locale-dependent collation |
-| unlink | ✅ 30/30 | 0.9x | |
-| uptime | ✅ 16/16 | **1.5x** | |
+| uniq | ⚠️ 99% (85/86) | **12.0x** | 1 skip: locale-dependent collation |
+| unlink | ✅ 30/30 | **1.0x** | |
+| uptime | ✅ 16/16 | **2.0x** | |
 | users | ✅ 6/6 | 0.9x | |
-| vdir | ✅ 41/41 | **1.0x** | |
-| wc | ✅ 77/77 | **16.1x** | |
+| vdir | ✅ 41/41 | **1.1x** | |
+| wc | ✅ 77/77 | **18.5x** | |
 | who | ✅ 38/38 | 0.9x | |
 | whoami | ✅ 16/16 | 0.9x | |
-| yes | ⚠️ 90% (26/29) | **1.3x** | 3 fails: stderr/stdout interleaving race condition |
-| **Average** | **97.3%** (3807/3911) | **3.1x** | 100 skips (root/SELinux/tty/ulimit), 4 fails |
+| yes | ⚠️ 90% (26/29) | **1.5x** | 3 fails: stderr/stdout interleaving race in test harness |
+| **Total** | **97.9%** (3399/3471) | | 68 skips (root/SELinux/tty/ulimit), 4 fails |
 
 ## Installation
 
