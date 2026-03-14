@@ -69,7 +69,12 @@ def tool_specific_tests(fw):
         outfiles = sorted(fn for fn in os.listdir(tmpdir) if fn.startswith("x"))
         fw.report_result(len(outfiles) == 5,
                         f"split: -l 5 on 25 lines -> 5 files (got {len(outfiles)})")
-        all_5 = all(len(open(os.path.join(tmpdir, fn)).readlines()) == 5 for fn in outfiles)
+        all_5 = True
+        for fn in outfiles:
+            with open(os.path.join(tmpdir, fn)) as f:
+                if len(f.readlines()) != 5:
+                    all_5 = False
+                    break
         fw.report_result(all_5, "split: each piece has exactly 5 lines")
         _cleanup_outputs(tmpdir)
 

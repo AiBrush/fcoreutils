@@ -67,7 +67,7 @@ def tool_specific_tests(fw):
             fh.write("original")
         with open(f2, "w") as fh:
             fh.write("new")
-        rc, out, err = fw.run_asm(["-n", f2, f1])
+        _ = fw.run_asm(["-n", f2, f1])
         with open(f1) as fh:
             fw.report_result(fh.read() == "original", "cp: -n preserved dest")
 

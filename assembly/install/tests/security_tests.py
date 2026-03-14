@@ -39,7 +39,7 @@ def tool_specific_tests(fw):
     with tempfile.NamedTemporaryFile(delete=False) as df:
         dst = df.name
     try:
-        rc, out, err = fw.run_asm([src, dst])
+        _ = fw.run_asm([src, dst])
         with open(dst, "r") as f:
             content = f.read()
         fw.report_result(content == "test content\n", "install: basic file copy")
