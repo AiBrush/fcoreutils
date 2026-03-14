@@ -336,11 +336,11 @@ All 107 tools are tested by the [independent test suite](https://github.com/AiBr
 | wc | ✅ 23/23 | ✅ 95/95 | 30.4 KB | **1.5x** |
 | who | ✅ 25/25 | ✅ 65/70 | 12.4 KB | — |
 | whoami | ✅ 4/4 | ✅ 78/80 | 12.4 KB | — |
-| yes | ✅ 884/884 | — | 1.8 KB | — |
-| **Totals** | **3560/3560** | **8976/9158** | avg **10.4 KB** | up to **18.5x** |
+| yes | ✅ 884/884 | ✅ 956/956 | 1.8 KB | — |
+| **Totals** | **3560/3560** | **9932/10114** | avg **10.4 KB** | up to **18.5x** |
 
 - **107 tools implemented**, all 107 buildable and tested as static ELF binaries
-- **All 107 tools pass 100% of compat tests** — security tests pass 98.0% with **0 failures** (all shortfall is CI environment skips: `/proc` permissions, `mktemp` variants)
+- **All 107 tools pass 100% of compat tests** — security tests pass 98.2% with **0 failures** (all shortfall is CI environment skips: `/proc` permissions, `mktemp` variants)
 - **Size** — Stripped static ELF binary on disk. Assembly averages **10.4 KB** across all 107 tools
 - **Speedup** — Wall-clock throughput on a 10 MB file (hyperfine, warmup). `—` means the tool is not benchmarked. Top performers: seq (18.5x), pr (10.7x), nl/od (10.3x), rev (9.8x), fold (7.2x)
 - **Security** — 65-133 point security audit per tool: ELF hardening, syscall surface, memory safety, signal handling, fuzzing
