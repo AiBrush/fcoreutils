@@ -12,7 +12,7 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 
 *Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, hyperfine*
 
-**Summary:** 108 tools tested · **fastest: unexpand at 36.2x** vs GNU · compat: **3806/3811 (99.9%)** across 108 tools · only 5 real failures
+**Summary:** 108 tools tested · **fastest: unexpand at 36.2x** vs GNU · compat: **3807/3811 (99.9%)** across 108 tools · only 4 real failures
 
 > Compat is GNU test pass rate on Linux x86_64 (skipped tests excluded from denominator for tools that only skip due to environment). Speedup is peak across all benchmark scenarios. `-` = no benchmark data collected. `N/A` = not applicable (requires root/SELinux/tty).
 
@@ -20,7 +20,7 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 |------|-------:|--------:|-------|
 | arch | ✅ 17/17 | 0.8x | |
 | b2sum | ✅ 25/25 | 1.3x | |
-| base32 | ✅ 29/29 | 1.7x | |
+| base32 | ✅ 29/29 | **2.3x** | |
 | base64 | ✅ 33/33 | **6.9x** | |
 | basename | ✅ 26/26 | 0.9x | |
 | basenc | ✅ 95/95 | **2.6x** | |
@@ -34,7 +34,7 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | comm | ✅ 30/30 | **5.8x** | |
 | cp | ✅ 69/69 | 1.0x | I/O-bound — kernel copy_file_range |
 | csplit | ✅ 2/2 | - | |
-| cut | ✅ 96/96 | **7.5x** | |
+| cut | ✅ 96/96 | **7.7x** | |
 | date | ✅ 46/46 | 0.9x | |
 | dd | ✅ 29/29 | 1.1x | |
 | df | ✅ 25/25 | 1.2x | |
@@ -68,7 +68,7 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | mktemp | ✅ 15/15 | 1.1x | |
 | mv | ✅ 3/3 | 1.1x | |
 | nice | ✅ 32/32 | 0.9x | 2 skips: require root |
-| nl | ✅ 61/61 | **11.2x** | |
+| nl | ✅ 61/61 | **12.1x** | |
 | nohup | ✅ 11/11 | 1.0x | |
 | nproc | ✅ 29/29 | 0.9x | |
 | numfmt | ⚠️ 97% (32/33) | 1.4x | 1 fail: locale-specific error message (GNU gettext i18n) |
@@ -93,11 +93,11 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | sha256sum | ✅ 34/34 | 1.2x | |
 | sha384sum | ✅ 39/39 | 0.9x | |
 | sha512sum | ✅ 39/39 | 0.9x | |
-| shred | ✅ 27/27 | **2.2x** | |
+| shred | ✅ 27/27 | **2.4x** | |
 | shuf | ✅ 52/52 | **6.8x** | |
 | sleep | ✅ 15/15 | 1.0x | |
 | sort | ✅ 111/111 | **13.9x** | |
-| split | ✅ 72/72 | 1.0x | I/O-bound — kernel copy_file_range |
+| split | ✅ 72/72 | 1.5x | |
 | stat | ✅ 38/38 | 1.1x | |
 | stdbuf | ✅ 13/13 | 0.9x | |
 | stty | ✅ 25/25 | N/A | 17 skips: require a real terminal |
@@ -109,10 +109,10 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | test | ✅ 116/116 | 0.9x | |
 | timeout | ✅ 36/36 | 0.9x | |
 | touch | ✅ 45/45 | 0.9x | |
-| tr | ✅ 59/59 | **7.0x** | |
+| tr | ✅ 59/59 | **7.5x** | |
 | true | ✅ 7/7 | 0.8x | Startup-only tool — no data to process |
 | truncate | ✅ 46/46 | 1.0x | |
-| tsort | ✅ 19/19 | **9.9x** | |
+| tsort | ✅ 19/19 | **10.2x** | |
 | tty | ✅ 10/10 | 0.8x | |
 | uname | ✅ 14/14 | 1.0x | |
 | unexpand | ✅ 26/26 | **36.2x** | |
@@ -124,8 +124,8 @@ High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelera
 | wc | ✅ 77/77 | **24.8x** | |
 | who | ✅ 38/38 | 0.9x | |
 | whoami | ✅ 16/16 | 0.9x | |
-| yes | ⚠️ 86% (25/29) | 1.1x | 4 fails: stderr/stdout interleaving race in test harness |
-| **Total** | **99.9%** (3806/3811) | | 100 skips (root/SELinux/tty/ulimit), 5 fails |
+| yes | ⚠️ 90% (26/29) | 1.1x | 3 fails: stderr/stdout interleaving race in test harness |
+| **Total** | **99.9%** (3807/3811) | | 100 skips (root/SELinux/tty/ulimit), 4 fails |
 
 ## Installation
 
@@ -226,7 +226,7 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **40 tools** are implemented in assembly — static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
 
-Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. Speedups **>1.0x** vs GNU are **bold**. The table below covers the 30 tools included in the independent test suite's ASM matrix; 10 additional tools (base32, basenc, comm, factor, join, paste, pr, shred, shuf, tsort) are implemented and tested internally.
+Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. Speedups **>1.0x** vs GNU are **bold**. The table below covers the 30 tools included in the independent test suite's ASM matrix; 11 additional tools (base32, basenc, comm, factor, join, paste, pr, shred, shuf, tsort, yes) will be added to the ASM matrix in the next CI run.
 
 | Tool | Compat | Security | Asm Size | Speedup vs GNU |
 |------|-------:|---------:|---------:|---------------:|
