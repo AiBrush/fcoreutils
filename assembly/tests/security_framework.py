@@ -658,10 +658,10 @@ class SecurityTestFramework:
         test_args = self.test_args
         test_stdin = self.test_stdin
 
-        # Tools with non-deterministic or environment-dependent output
+        # Tools with non-deterministic, environment-dependent, or format-divergent output
         nondeterministic = self.tool_name in (
             'shuf', 'mktemp', 'uptime', 'pinky', 'users', 'who',
-            'df', 'dircolors', 'vdir',
+            'df', 'dircolors', 'vdir', 'ptx',
         )
 
         # Deterministic output
