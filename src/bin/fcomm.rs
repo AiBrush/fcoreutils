@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process;
 
 use coreutils_rs::comm::{self, CommConfig, OrderCheck};
-use coreutils_rs::common::io::{read_file, read_stdin};
+use coreutils_rs::common::io::{MmapHints, read_file_with_hints, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 
 struct Cli {
@@ -117,7 +117,7 @@ fn read_input(filename: &str, tool_name: &str) -> coreutils_rs::common::io::File
             }
         }
     } else {
-        match read_file(Path::new(filename)) {
+        match read_file_with_hints(Path::new(filename), MmapHints::Lazy) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("{}: {}: {}", tool_name, filename, io_error_msg(&e));
