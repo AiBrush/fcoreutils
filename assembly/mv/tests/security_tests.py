@@ -1,31 +1,22 @@
 #!/usr/bin/env python3
 """Security tests for fmv — uses shared framework."""
-import atexit
 import os
-import shutil
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
-# Create temp file and temp dir for test_args (mv moves src into dst dir)
-# Each framework run recreates the source file since mv removes it
-_td = tempfile.mkdtemp()
-_src = os.path.join(_td, "mv_test_src")
-_dst_dir = os.path.join(_td, "mv_test_dst")
-os.makedirs(_dst_dir, exist_ok=True)
-with open(_src, "w") as _f:
-    _f.write("test\n")
-atexit.register(shutil.rmtree, _td, True)
-
+# Use nonexistent source so mv fails idempotently (exit 1 every time).
+# mv consumes (deletes) the source, so a real file would disappear after
+# the first of the framework's 10+ calls (determinism, EINTR, etc.).
 config = {
     'tool_name': 'mv',
     'bin_name': 'fmv',
     'gnu_path': '/usr/bin/mv',
     'bss_size': 4096,
     'max_binary_size': 30000,
-    'test_args': [_src, _dst_dir],
+    'test_args': ['/nonexistent/__fmv_src__', '/tmp/__fmv_dst__'],
     'test_stdin': None,
     'timeout': 5,
 }

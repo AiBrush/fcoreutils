@@ -13,7 +13,7 @@ def _cleanup_shred_test_file():
     try:
         os.unlink(_shred_test_file)
     except OSError:
-        pass
+        pass  # best-effort cleanup; file may already be removed by shred -u
 _setup_shred_test_file()
 atexit.register(_cleanup_shred_test_file)
 

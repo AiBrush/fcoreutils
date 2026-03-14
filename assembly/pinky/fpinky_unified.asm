@@ -185,6 +185,7 @@ _start:
     test    eax, eax
     jnz     .show_help
     ; Check --version
+    mov     rcx, [rsp]             ; reload (str_eq clobbers rcx)
     mov     rdi, [r15 + rcx*8]
     mov     rsi, str_version_flag
     call    str_eq

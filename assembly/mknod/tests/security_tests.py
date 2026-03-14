@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 """Security tests for fmknod — uses shared framework."""
-import atexit
 import os
-import sys
 import stat
+import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
-# Create temp path for test_args (mknod creates a named pipe)
-_td = tempfile.mkdtemp()
-_pipe_path = os.path.join(_td, 'test_pipe')
-atexit.register(lambda: os.unlink(_pipe_path) if os.path.exists(_pipe_path) else None)
-atexit.register(lambda: os.rmdir(_td) if os.path.exists(_td) else None)
-
+# Use nonexistent parent so mknod fails idempotently (exit 1 every time).
+# mknod creates the named pipe on success, so a real path would cause EEXIST
+# on the second of the framework's 10+ calls (determinism, EINTR, etc.).
 config = {
     'tool_name': 'mknod',
     'bin_name': 'fmknod',
     'gnu_path': '/usr/bin/mknod',
     'bss_size': 4096,
     'max_binary_size': 30000,
-    'test_args': [_pipe_path, 'p'],
+    'test_args': ['/nonexistent/__fmknod_pipe__', 'p'],
     'test_stdin': None,
     'timeout': 5,
 }

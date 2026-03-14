@@ -279,7 +279,7 @@ class SecurityTestFramework:
         )
         # strace -c inherits tracee's exit code; non-zero is valid
         # (e.g. false exits 1, tty exits 1, runcon exits 125 without SELinux)
-        self.report_result(rc < 128 or rc == 124, "syscall: strace -c completed")
+        self.report_result(rc < 128, "syscall: strace -c completed")
 
     # =========================================================================
     #                     3. /proc FILESYSTEM RUNTIME ANALYSIS
@@ -661,7 +661,7 @@ class SecurityTestFramework:
         # Tools with non-deterministic, environment-dependent, or format-divergent output
         nondeterministic = self.tool_name in (
             'shuf', 'mktemp', 'uptime', 'pinky', 'users', 'who',
-            'df', 'dircolors', 'vdir', 'ptx',
+            'df', 'dircolors', 'ptx',
         )
 
         # Deterministic output
@@ -712,7 +712,7 @@ class SecurityTestFramework:
                    self.bin_path] + self.test_args
             rc, _, _ = self.run(cmd, stdin_data=self.test_stdin)
             # Any non-signal exit is acceptable (tool may legitimately error)
-            self.report_result(rc < 128 or rc == 124, "error: EINTR injection on write")
+            self.report_result(rc < 128, "error: EINTR injection on write")
         else:
             self.skip_test("error: EINTR injection", "no strace")
 
