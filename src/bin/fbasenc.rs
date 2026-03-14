@@ -1156,6 +1156,8 @@ fn z85_encode_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
 
 fn decode_data(data: &[u8], encoding: Encoding, ignore_garbage: bool) -> DecodeOutput {
     match encoding {
+        Encoding::Base64 if !ignore_garbage => decode_base64_simd(data, B64_STANDARD),
+        Encoding::Base64Url if !ignore_garbage => decode_base64_simd(data, B64_URL_SAFE),
         Encoding::Base64 => base64_decode(data, &BASE64_DECODE, ignore_garbage),
         Encoding::Base64Url => base64_decode(data, &BASE64URL_DECODE, ignore_garbage),
         Encoding::Base32 => base32_decode(data, &BASE32_DECODE, ignore_garbage),
@@ -1164,6 +1166,107 @@ fn decode_data(data: &[u8], encoding: Encoding, ignore_garbage: bool) -> DecodeO
         Encoding::Base2Msbf => base2msbf_decode(data, ignore_garbage),
         Encoding::Base2Lsbf => base2lsbf_decode(data, ignore_garbage),
         Encoding::Z85 => z85_decode(data, ignore_garbage),
+    }
+}
+
+/// SIMD-accelerated base64 decode for Base64 and Base64Url.
+/// Strips newlines from input, pads if necessary, then uses base64_simd for decode.
+/// Falls back to scalar path for --ignore-garbage (handled by caller).
+fn decode_base64_simd(data: &[u8], engine: &base64_simd::Base64) -> DecodeOutput {
+    if data.is_empty() {
+        return DecodeOutput {
+            data: Vec::new(),
+            error: None,
+        };
+    }
+
+    // Strip \n and \r from input using SIMD gap-copy via memchr.
+    // Scans for the next newline with SIMD, bulk-copies the gap, repeat.
+    // If no newlines exist, avoid allocation entirely.
+    let clean: std::borrow::Cow<'_, [u8]> = match memchr::memchr2(b'\n', b'\r', data) {
+        None => std::borrow::Cow::Borrowed(data),
+        Some(first_nl) => {
+            let mut buf = Vec::with_capacity(data.len());
+            buf.extend_from_slice(&data[..first_nl]);
+            let mut pos = first_nl + 1;
+            while pos < data.len() {
+                match memchr::memchr2(b'\n', b'\r', &data[pos..]) {
+                    Some(offset) => {
+                        buf.extend_from_slice(&data[pos..pos + offset]);
+                        pos += offset + 1;
+                    }
+                    None => {
+                        buf.extend_from_slice(&data[pos..]);
+                        break;
+                    }
+                }
+            }
+            std::borrow::Cow::Owned(buf)
+        }
+    };
+
+    let clean = &*clean;
+    if clean.is_empty() {
+        return DecodeOutput {
+            data: Vec::new(),
+            error: None,
+        };
+    }
+
+    // Try SIMD decode. Handle missing padding: GNU basenc accepts truncated
+    // padding but reports "invalid input" for incomplete final groups.
+    let remainder = clean.len() % 4;
+    let (decode_input, needs_error) = if remainder == 0 {
+        (std::borrow::Cow::Borrowed(clean), false)
+    } else if remainder == 2 || remainder == 3 {
+        // Missing padding — add it. GNU basenc decodes what it can but
+        // reports "invalid input" and exits 1 for incomplete final groups.
+        let mut padded = Vec::with_capacity(clean.len() + (4 - remainder));
+        padded.extend_from_slice(clean);
+        padded.extend(std::iter::repeat_n(b'=', 4 - remainder));
+        (std::borrow::Cow::Owned(padded), true)
+    } else {
+        // remainder == 1: genuinely invalid (6 bits isn't enough for any output byte)
+        return DecodeOutput {
+            data: Vec::new(),
+            error: Some(format!("{}: invalid input", TOOL_NAME)),
+        };
+    };
+
+    // Pre-allocate output buffer with exact decoded size
+    let pad_count = decode_input
+        .iter()
+        .rev()
+        .take(2)
+        .filter(|&&b| b == b'=')
+        .count();
+    let decoded_size = decode_input.len() * 3 / 4 - pad_count;
+    let mut out_buf: Vec<u8> = Vec::with_capacity(decoded_size);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        out_buf.set_len(decoded_size);
+    }
+
+    match engine.decode(&decode_input, out_buf[..decoded_size].as_out()) {
+        Ok(decoded) => {
+            let len = decoded.len();
+            out_buf.truncate(len);
+            DecodeOutput {
+                data: out_buf,
+                error: if needs_error {
+                    Some(format!("{}: invalid input", TOOL_NAME))
+                } else {
+                    None
+                },
+            }
+        }
+        Err(_) => {
+            // SIMD decode failed — return error
+            DecodeOutput {
+                data: Vec::new(),
+                error: Some(format!("{}: invalid input", TOOL_NAME)),
+            }
+        }
     }
 }
 
