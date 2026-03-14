@@ -13,7 +13,7 @@ from security_framework import SecurityTestFramework
 
 config = {
     'tool_name': 'truncate',
-    'bin_name': 'ftruncate_release',
+    'bin_name': 'ftruncate',
     'gnu_path': '/usr/bin/truncate',
     'bss_size': 65536,
     'max_binary_size': 30000,

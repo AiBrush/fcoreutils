@@ -178,28 +178,12 @@ _start:
     jmp     do_exit
 
 .list_all_signals:
-    ; Print all signals: " 1) HUP\n 2) INT\n ..."
+    ; Print all signals: "HUP INT QUIT ... STKFLT\nCHLD CONT ... SYS\n"
+    ; GNU format: space-separated names, newline after signal 16 and 31
     mov     r12, 1              ; signal number
 .list_loop:
     cmp     r12, 31
     ja      .list_done
-
-    ; Print number (use stack buffer)
-    sub     rsp, 32
-    mov     rdi, r12
-    mov     rsi, rsp
-    call    itoa
-    mov     rdx, rax
-    mov     rsi, rsp
-    mov     edi, STDOUT
-    call    do_write
-    add     rsp, 32
-
-    ; Print ") "
-    mov     edi, STDOUT
-    lea     rsi, [rel str_paren_space]
-    mov     edx, 2
-    call    do_write
 
     ; Print signal name
     mov     rax, r12
@@ -215,12 +199,26 @@ _start:
     mov     edi, STDOUT
     call    do_write
 
-    ; Print newline
+    ; After signal 16 or 31, print newline; otherwise space
+    cmp     r12, 16
+    je      .list_newline
+    cmp     r12, 31
+    je      .list_newline
+
+    ; Print space separator
+    mov     edi, STDOUT
+    lea     rsi, [rel str_space]
+    mov     edx, 1
+    call    do_write
+    jmp     .list_next
+
+.list_newline:
     mov     edi, STDOUT
     lea     rsi, [rel newline]
     mov     edx, 1
     call    do_write
 
+.list_next:
     inc     r12
     jmp     .list_loop
 
@@ -720,8 +718,8 @@ str_paren_close_err:
     db ") - No such process", 10
 str_paren_close_err_len equ $ - str_paren_close_err
 
-str_paren_space:
-    db ") "
+str_space:
+    db " "
 
 newline:
     db 10
@@ -756,7 +754,7 @@ sig_name_table:
     db "VTALRM",0,0,0,0,0,0,0,0,0,0               ; 26
     db "PROF",0,0,0,0,0,0,0,0,0,0,0,0             ; 27
     db "WINCH",0,0,0,0,0,0,0,0,0,0,0              ; 28
-    db "IO",0,0,0,0,0,0,0,0,0,0,0,0,0,0          ; 29
+    db "POLL",0,0,0,0,0,0,0,0,0,0,0,0             ; 29
     db "PWR",0,0,0,0,0,0,0,0,0,0,0,0,0           ; 30
     db "SYS",0,0,0,0,0,0,0,0,0,0,0,0,0           ; 31
 

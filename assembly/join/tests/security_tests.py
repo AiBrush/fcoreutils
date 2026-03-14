@@ -12,13 +12,21 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
+# Create temp files for test_args (join needs two sorted file arguments)
+_f1 = tempfile.NamedTemporaryFile(mode='wb', suffix='.txt', delete=False)
+_f1.write(b"a 1\nb 2\nc 3\n")
+_f1.close()
+_f2 = tempfile.NamedTemporaryFile(mode='wb', suffix='.txt', delete=False)
+_f2.write(b"b x\nc y\nd z\n")
+_f2.close()
+
 config = {
     'tool_name': 'join',
     'bin_name': 'fjoin',
     'gnu_path': '/usr/bin/join',
     'bss_size': 65536,
     'max_binary_size': 200000,
-    'test_args': ['--help'],
+    'test_args': [_f1.name, _f2.name],
     'test_stdin': None,
     'timeout': 5,
 }
@@ -91,7 +99,7 @@ def tool_specific_tests(fw):
             try:
                 os.unlink(f)
             except OSError:
-                pass
+                pass  # temp file already removed or never created
 
     # Correctness verification
     fw.log("\n=== Tool-Specific: join correctness ===")
@@ -138,9 +146,16 @@ def tool_specific_tests(fw):
             try:
                 os.unlink(f)
             except OSError:
-                pass
+                pass  # temp file already removed or never created
 
 
 if __name__ == '__main__':
-    fw = SecurityTestFramework(config)
-    fw.run_all(tool_specific_fn=tool_specific_tests)
+    try:
+        fw = SecurityTestFramework(config)
+        fw.run_all(tool_specific_fn=tool_specific_tests)
+    finally:
+        for _f in [_f1.name, _f2.name]:
+            try:
+                os.unlink(_f)
+            except OSError:
+                pass  # best-effort cleanup of config temp files

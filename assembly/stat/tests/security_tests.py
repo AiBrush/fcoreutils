@@ -5,13 +5,16 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
+# Use -c format for test_args: default stat output includes device numbers,
+# timestamps, and username lookups that differ between environments.
+# The format specifiers are individually tested in tool_specific_tests below.
 config = {
     'tool_name': 'stat',
     'bin_name': 'fstat',
     'gnu_path': '/usr/bin/stat',
     'bss_size': 65536,
     'max_binary_size': 30000,
-    'test_args': ['/etc/hosts'],
+    'test_args': ['-c', '%s %u %g %a', '/etc/hosts'],
     'test_stdin': None,
     'timeout': 5,
 }

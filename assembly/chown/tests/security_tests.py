@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Security tests for fchown — uses shared framework."""
-import sys, os, tempfile
+import atexit, sys, os, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
+
+# Create temp file for test_args (chown needs owner:group + file)
+_tf = tempfile.NamedTemporaryFile(delete=False)
+_tf.close()
+atexit.register(os.unlink, _tf.name)
 
 config = {
     'tool_name': 'chown',
@@ -10,7 +15,7 @@ config = {
     'gnu_path': '/usr/bin/chown',
     'bss_size': 65536,
     'max_binary_size': 100000,
-    'test_args': ['--help'],
+    'test_args': [f'{os.getuid()}:{os.getgid()}', _tf.name],
     'test_stdin': None,
     'timeout': 5,
 }

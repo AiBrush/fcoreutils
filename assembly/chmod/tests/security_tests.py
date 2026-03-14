@@ -5,6 +5,7 @@ Uses shared SecurityTestFramework.
 fchmod changes file mode bits (like GNU chmod).
 """
 
+import atexit
 import os
 import sys
 import shutil
@@ -14,13 +15,18 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
+# Create temp file for test_args (chmod needs mode + file)
+_tf = tempfile.NamedTemporaryFile(delete=False)
+_tf.close()
+atexit.register(os.unlink, _tf.name)
+
 config = {
     'tool_name': 'chmod',
     'bin_name': 'fchmod',
     'gnu_path': '/usr/bin/chmod',
     'bss_size': 65536,
     'max_binary_size': 102400,
-    'test_args': ['--help'],
+    'test_args': ['644', _tf.name],
     'test_stdin': None,
     'timeout': 5,
 }

@@ -157,13 +157,22 @@ def tool_specific_tests(fw):
                              f"readlink: -f matches GNU for '{os.path.basename(path) or path}'")
 
 
+# Create temp symlink for test_args (readlink needs a real symlink)
+_td = tempfile.mkdtemp(prefix="freadlink_cfg_")
+_real = os.path.join(_td, 'real')
+Path(_real).touch()
+_sym = os.path.join(_td, 'link')
+os.symlink(_real, _sym)
+import atexit, shutil as _shutil
+atexit.register(_shutil.rmtree, _td, True)
+
 config = {
     'tool_name': 'readlink',
     'bin_name': 'freadlink',
     'gnu_path': '/usr/bin/readlink',
     'bss_size': 65536,
     'max_binary_size': 30000,
-    'test_args': ['/usr/bin/sort'],
+    'test_args': [_sym],
     'test_stdin': None,
     'timeout': 5,
 }
