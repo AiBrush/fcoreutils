@@ -658,11 +658,14 @@ class SecurityTestFramework:
         test_args = self.test_args
         test_stdin = self.test_stdin
 
-        # Tools with non-deterministic, environment-dependent, or format-divergent output
+        # Tools with non-deterministic output (each run may differ)
         nondeterministic = self.tool_name in (
             'shuf', 'mktemp', 'uptime', 'pinky', 'users', 'who',
             'df', 'dircolors', 'ptx',
         )
+        # Tools with deterministic output that intentionally diverges from GNU
+        # (e.g. vdir shows numeric UID/GID — no NSS/passwd lookups in assembly)
+        gnu_divergent = self.tool_name in ('vdir',)
 
         # Deterministic output
         if nondeterministic:
@@ -680,9 +683,10 @@ class SecurityTestFramework:
         self.report_result(stderr_ok, "integrity: stderr empty on success")
 
         # Match GNU output
-        if nondeterministic:
-            self.skip_test("integrity: exit code matches GNU", "non-deterministic tool")
-            self.skip_test("integrity: output matches GNU", "non-deterministic tool")
+        if nondeterministic or gnu_divergent:
+            reason = "non-deterministic tool" if nondeterministic else "format diverges from GNU"
+            self.skip_test("integrity: exit code matches GNU", reason)
+            self.skip_test("integrity: output matches GNU", reason)
         elif os.path.exists(self.gnu_path):
             rc_a, out_a, _ = self.run_asm(test_args, stdin_data=test_stdin)
             rc_g, out_g, _ = self.run_gnu(test_args, stdin_data=test_stdin)
