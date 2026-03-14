@@ -224,7 +224,7 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 ## Assembly Optimization Path
 
-We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **107 tools** are implemented in assembly — static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
+We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **107 tools** have assembly implementations — 96 are fully buildable static ELF binaries with no dynamic linker, no libc, and non-executable stacks; 11 have pending build fixes.
 
 All 107 tools are tested by the [independent test suite](https://github.com/AiBrush/coreutils-rs-independent-test). Results below from the latest CI run (v0.21.6). Speedups **>1.0x** vs GNU are **bold**. ✅ = all tests pass, ⚠️ = partial, ⏭️ = binary not built yet.
 
@@ -258,7 +258,7 @@ All 107 tools are tested by the [independent test suite](https://github.com/AiBr
 | env | ⚠️ 5/13 | ⚠️ 67/78 | 4.5 KB | — |
 | expand | ✅ 60/60 | ✅ 124/124 | 29.5 KB | **4.4x** |
 | expr | ⚠️ 3/36 | ⚠️ 41/52 | 4.5 KB | — |
-| factor | ✅ 0/0 | ✅ 56/56 | 16.8 KB | — |
+| factor | — | ✅ 56/56 | 16.8 KB | — |
 | false | ✅ 20/20 | ✅ 117/117 | 4.8 KB | — |
 | fmt | ✅ 31/31 | ✅ 91/91 | 6.5 KB | — |
 | fold | ✅ 58/58 | ✅ 116/116 | 9.8 KB | **7.2x** |
@@ -336,10 +336,10 @@ All 107 tools are tested by the [independent test suite](https://github.com/AiBr
 | wc | ✅ 23/23 | ✅ 109/109 | 30.4 KB | **1.5x** |
 | who | ✅ 25/25 | ✅ 11/11 | 12.4 KB | — |
 | whoami | ✅ 4/4 | ✅ 86/86 | 12.4 KB | — |
-| yes | ⏭️ skip | ⏭️ skip | 1.8 KB | 0.9x |
+| yes | ⏭️ skip | ⏭️ skip | — | — |
 | **Totals** | **2106/2642** | **6918/7432** | avg **11.8 KB** | up to **18.5x** |
 
-- **107 tools implemented**, 96 tested, 11 pending build fixes (b2sum, chmod, cksum, readlink, sha1sum, sha224sum, sha256sum, sha384sum, sum, truncate, yes)
+- **107 tools implemented**, 96 buildable and tested, 11 pending build fixes (b2sum, chmod, cksum, readlink, sha1sum, sha224sum, sha256sum, sha384sum, sum, truncate, yes). sha512sum ships while the other SHA variants are pending because it was the first hash tool ported; the remaining SHA variants share the same codebase and will follow
 - **59 tools fully passing** all compat tests, 37 tools partially passing (stub implementations — compat work in progress)
 - **Size** — Stripped static ELF binary on disk. Assembly averages **11.8 KB** across 97 tools with size data
 - **Speedup** — Wall-clock throughput on a 10 MB file (hyperfine, warmup). `—` means the tool is not benchmarked. Top performers: seq (18.5x), pr (10.7x), nl/od (10.3x), rev (9.8x), fold (7.2x)
