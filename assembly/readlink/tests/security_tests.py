@@ -160,9 +160,11 @@ def tool_specific_tests(fw):
 # Create temp symlink for test_args (readlink needs a real symlink)
 _td = tempfile.mkdtemp(prefix="freadlink_cfg_")
 _real = os.path.join(_td, 'real')
-open(_real, 'w').close()
+Path(_real).touch()
 _sym = os.path.join(_td, 'link')
 os.symlink(_real, _sym)
+import atexit, shutil as _shutil
+atexit.register(_shutil.rmtree, _td, True)
 
 config = {
     'tool_name': 'readlink',

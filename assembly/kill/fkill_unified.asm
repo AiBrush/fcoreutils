@@ -718,9 +718,6 @@ str_paren_close_err:
     db ") - No such process", 10
 str_paren_close_err_len equ $ - str_paren_close_err
 
-str_paren_space:
-    db ") "
-
 str_space:
     db " "
 

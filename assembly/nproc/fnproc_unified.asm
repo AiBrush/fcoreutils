@@ -250,29 +250,9 @@ _start:
     js      .affinity_failed
 
     ; Count set bits in the mask (rax = bytes returned)
-    mov     ecx, eax            ; number of bytes
-    xor     ebx, ebx            ; total bit count
-    xor     r8d, r8d            ; byte index
-.popcount_loop:
-    cmp     r8d, ecx
-    jge     .popcount_done
-    movzx   eax, byte [rsp + r8]
-    ; Count bits using Kernighan's method
-.kernighan:
-    test    al, al
-    jz      .next_byte
-    inc     ebx
-    mov     edx, eax
-    dec     edx
-    and     eax, edx
-    jmp     .kernighan
-.next_byte:
-    inc     r8d
-    jmp     .popcount_loop
-
-.popcount_done:
+    mov     ecx, eax            ; number of bytes to scan
+    call    count_mask_bits     ; returns count in ebx
     add     rsp, 128
-    ; ebx = number of available CPUs
     jmp     .apply_ignore
 
 .affinity_failed:
@@ -349,25 +329,8 @@ _start:
     test    rax, rax
     js      .fallback_one
 
-    mov     ecx, eax
-    xor     ebx, ebx
-    xor     r8d, r8d
-.popcount_loop2:
-    cmp     r8d, ecx
-    jge     .popcount_done2
-    movzx   eax, byte [rsp + r8]
-.kernighan2:
-    test    al, al
-    jz      .next_byte2
-    inc     ebx
-    mov     edx, eax
-    dec     edx
-    and     eax, edx
-    jmp     .kernighan2
-.next_byte2:
-    inc     r8d
-    jmp     .popcount_loop2
-.popcount_done2:
+    mov     ecx, eax            ; number of bytes to scan
+    call    count_mask_bits     ; returns count in ebx
     add     rsp, 128
     jmp     .apply_ignore
 
@@ -453,7 +416,9 @@ parse_cpu_range:
     ; Parse end of range
     inc     rdi
     call    parse_uint_pcr
-    ; eax = end, ebx = start
+    ; eax = end, ebx = start; guard against malformed end < start
+    cmp     eax, ebx
+    jl      .pcr_separator
     sub     eax, ebx
     inc     eax                 ; count = end - start + 1
     add     r12d, eax
@@ -491,6 +456,33 @@ parse_uint_pcr:
     inc     rdi
     jmp     .pupc_loop
 .pupc_done:
+    ret
+
+; ============================================================
+; count_mask_bits: count set bits in [rsp+retaddr] mask buffer
+; Input: ecx = byte count to scan, mask at rsp+8 (after call)
+; Output: ebx = bit count
+; Clobbers: eax, edx, r8d
+; ============================================================
+count_mask_bits:
+    xor     ebx, ebx            ; total bit count
+    xor     r8d, r8d            ; byte index
+.cmb_loop:
+    cmp     r8d, ecx
+    jge     .cmb_done
+    movzx   eax, byte [rsp + 8 + r8]  ; +8 to skip return address
+.cmb_kernighan:
+    test    al, al
+    jz      .cmb_next
+    inc     ebx
+    mov     edx, eax
+    dec     edx
+    and     eax, edx
+    jmp     .cmb_kernighan
+.cmb_next:
+    inc     r8d
+    jmp     .cmb_loop
+.cmb_done:
     ret
 
 ; ============================================================

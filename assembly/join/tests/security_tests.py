@@ -99,7 +99,7 @@ def tool_specific_tests(fw):
             try:
                 os.unlink(f)
             except OSError:
-                pass
+                pass  # temp file already removed or never created
 
     # Correctness verification
     fw.log("\n=== Tool-Specific: join correctness ===")
@@ -146,7 +146,7 @@ def tool_specific_tests(fw):
             try:
                 os.unlink(f)
             except OSError:
-                pass
+                pass  # temp file already removed or never created
 
 
 if __name__ == '__main__':
@@ -158,4 +158,4 @@ if __name__ == '__main__':
             try:
                 os.unlink(_f)
             except OSError:
-                pass
+                pass  # best-effort cleanup of config temp files
