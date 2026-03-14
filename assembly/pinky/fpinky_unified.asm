@@ -122,7 +122,7 @@ _start:
     cmp     byte [rdi], '-'
     jne     .no_more_opts
     cmp     byte [rdi + 1], '-'
-    je      .no_more_opts
+    je      .check_long_opt
     cmp     byte [rdi + 1], 0
     je      .no_more_opts
     ; Parse short flags
@@ -173,6 +173,52 @@ _start:
 .next_opt:
     inc     ecx
     jmp     .parse_opts
+
+.check_long_opt:
+    ; rdi points to arg starting with "--"
+    cmp     byte [rdi + 2], 0
+    je      .no_more_opts          ; bare "--" ends option parsing
+    ; Check --help
+    push    rcx
+    mov     rsi, str_help_flag
+    call    str_eq
+    test    eax, eax
+    jnz     .show_help
+    ; Check --version
+    mov     rcx, [rsp]             ; reload (str_eq clobbers rcx)
+    mov     rdi, [r15 + rcx*8]
+    mov     rsi, str_version_flag
+    call    str_eq
+    test    eax, eax
+    jnz     .show_version
+    pop     rcx
+    ; Unknown long option — report error
+    mov     rdi, [r15 + rcx*8]
+    jmp     .invalid_long
+
+.invalid_long:
+    ; rdi = the unknown option string
+    push    rdi
+    mov     rsi, str_prefix
+    mov     edx, str_prefix_len
+    call    write_err
+    mov     rsi, str_unrecognized
+    mov     edx, str_unrecognized_len
+    call    write_err
+    pop     rdi
+    push    rdi
+    call    str_len
+    mov     edx, eax
+    pop     rsi
+    call    write_err
+    mov     rsi, str_sq_nl
+    mov     edx, 2
+    call    write_err
+    mov     rsi, str_try
+    mov     edx, str_try_len
+    call    write_err
+    mov     edi, 1
+    jmp     do_exit
 
 .no_more_opts:
     ; ecx = first non-option arg (user filter)
@@ -477,6 +523,8 @@ str_try:            db "Try 'pinky --help' for more information.", 10
 str_try_len         equ $ - str_try
 str_invalid:        db "invalid option -- '"
 str_invalid_len     equ $ - str_invalid
+str_unrecognized:   db "unrecognized option '"
+str_unrecognized_len equ $ - str_unrecognized
 str_sq_nl:          db "'", 10
 
 str_heading:        db "Login    Name                 TTY", 10

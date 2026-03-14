@@ -11,7 +11,10 @@ config = {
     'gnu_path': '/usr/bin/mkdir',
     'bss_size': 4096,
     'max_binary_size': 30000,
-    'test_args': ['/tmp/__fmkdir_security_test__'],
+    # Use nonexistent parent so mkdir fails idempotently (exit 1 every time).
+    # This avoids issues with test_args creating filesystem objects that persist
+    # across repeated runs by the framework (determinism checks, concurrency).
+    'test_args': ['/nonexistent/__fmkdir_test__/child'],
     'test_stdin': None,
 }
 
@@ -103,16 +106,5 @@ def tool_specific_tests(fw):
             fw.report_result("mkdir(" in err_text, "mkdir: uses mkdir() syscall")
 
 if __name__ == '__main__':
-    # Clean up test dir that may exist from test_args
-    test_dir = config['test_args'][0]
-    try:
-        os.rmdir(test_dir)
-    except OSError:
-        pass
     fw = SecurityTestFramework(config)
     fw.run_all(tool_specific_fn=tool_specific_tests)
-    # Clean up
-    try:
-        os.rmdir(test_dir)
-    except OSError:
-        pass

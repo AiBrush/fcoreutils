@@ -86,7 +86,7 @@ def tool_specific_tests(fw):
     fw.report_result(rc == 0 and len(out) > 0, "rmdir: --version works")
 
 if __name__ == '__main__':
-    # rmdir needs --help for the framework's generic tests (no temp dir needed)
-    config['test_args'] = ['--help']
+    # Use a nonexistent path so rmdir fails consistently (exit 1, error to stderr)
+    config['test_args'] = ['/nonexistent/__frmdir_test__']
     fw = SecurityTestFramework(config)
     fw.run_all(tool_specific_fn=tool_specific_tests)

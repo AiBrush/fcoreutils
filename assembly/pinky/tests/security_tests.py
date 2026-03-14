@@ -17,7 +17,7 @@ config = {
     'gnu_path': '/usr/bin/pinky',
     'bss_size': 4096,
     'max_binary_size': 50000,
-    'test_args': ['--help'],
+    'test_args': [],
     'test_stdin': None,
     'timeout': 10,
 }

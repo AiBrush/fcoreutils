@@ -10,14 +10,12 @@ config = {
     'gnu_path': '/usr/bin/link',
     'bss_size': 4096,
     'max_binary_size': 30000,
-    'test_args': ['/tmp/_flink_test_src', '/tmp/_flink_test_dst'],
+    # Use nonexistent source so link fails idempotently (exit 1 every time).
+    # This avoids issues with test_args creating filesystem objects that persist
+    # across repeated runs by the framework (determinism checks, concurrency).
+    'test_args': ['/nonexistent/__flink_test_src__', '/tmp/_flink_test_dst'],
     'test_stdin': None,
 }
-
-# Create test source file for framework's generic tests
-if not os.path.exists('/tmp/_flink_test_src'):
-    with open('/tmp/_flink_test_src', 'w') as f:
-        f.write('test')
 
 def tool_specific_tests(fw):
     """13. Tool-specific: link — hard link creation behavior."""
@@ -72,9 +70,8 @@ def tool_specific_tests(fw):
     rc, out, err = fw.run_asm(['--version'])
     fw.report_result(rc == 0, "link: --version exits 0")
 
-    # Cleanup
+    # Cleanup (test_args dst may have been created by framework runs)
     try:
-        os.unlink('/tmp/_flink_test_src')
         os.unlink('/tmp/_flink_test_dst')
     except OSError:
         pass

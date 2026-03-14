@@ -4,12 +4,24 @@
 Uses shared SecurityTestFramework with tool-specific csplit tests.
 """
 
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
+
+# Create temp file with content for test_args (csplit needs file + pattern).
+# Use -f with a temp directory prefix so output files (xx00, xx01, ...) don't
+# leak into cwd — they go into the temp dir which is cleaned up at exit.
+_tf = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
+_tf.write("line1\nline2\nline3\n")
+_tf.close()
+_out_dir = tempfile.mkdtemp(prefix='fcsplit_out_')
+atexit.register(os.unlink, _tf.name)
+atexit.register(shutil.rmtree, _out_dir, True)
 
 config = {
     'tool_name': 'csplit',
@@ -17,7 +29,7 @@ config = {
     'gnu_path': '/usr/bin/csplit',
     'bss_size': 65536,
     'max_binary_size': 30000,
-    'test_args': ['--help'],
+    'test_args': ['-f', os.path.join(_out_dir, 'xx'), _tf.name, '2'],
     'test_stdin': None,
     'timeout': 5,
 }

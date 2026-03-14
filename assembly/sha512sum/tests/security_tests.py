@@ -6,7 +6,7 @@ from security_framework import SecurityTestFramework
 
 config = {
     'tool_name': 'sha512sum',
-    'bin_name': 'fsha512sum_release',
+    'bin_name': 'fsha512sum',
     'gnu_path': '/usr/bin/sha512sum',
     'bss_size': 65536,
     'max_binary_size': 30000,

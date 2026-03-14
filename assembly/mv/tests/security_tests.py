@@ -7,13 +7,16 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
+# Use nonexistent source so mv fails idempotently (exit 1 every time).
+# mv consumes (deletes) the source, so a real file would disappear after
+# the first of the framework's 10+ calls (determinism, EINTR, etc.).
 config = {
     'tool_name': 'mv',
     'bin_name': 'fmv',
     'gnu_path': '/usr/bin/mv',
     'bss_size': 4096,
     'max_binary_size': 30000,
-    'test_args': ['--help'],
+    'test_args': ['/nonexistent/__fmv_src__', '/tmp/__fmv_dst__'],
     'test_stdin': None,
     'timeout': 5,
 }

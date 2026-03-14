@@ -10,7 +10,7 @@ config = {
     'gnu_path': '/usr/bin/runcon',
     'bss_size': 65536,
     'max_binary_size': 50000,
-    'test_args': ['--help'],
+    'test_args': ['invalid_context', '/bin/true'],
     'test_stdin': None,
     'timeout': 10,
 }

@@ -10,7 +10,7 @@ config = {
     'gnu_path': '/usr/bin/stdbuf',
     'bss_size': 65536,
     'max_binary_size': 50000,
-    'test_args': ['--help'],
+    'test_args': ['-oL', 'true'],
     'test_stdin': None,
     'timeout': 10,
 }

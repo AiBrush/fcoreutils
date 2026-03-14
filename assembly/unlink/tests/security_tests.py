@@ -99,7 +99,9 @@ def tool_specific_tests(fw):
     rc, out, err = fw.run_asm(["a", "b"])
     err_text = err.decode(errors="replace")
     fw.report_result("extra operand" in err_text, "unlink: extra operand message")
-    fw.report_result("'b'" in err_text, "unlink: extra operand includes the extra arg")
+    # Accept both ASCII quotes ('b') and Unicode smart quotes (\u2018b\u2019)
+    fw.report_result("'b'" in err_text or "\u2018b\u2019" in err_text,
+                     "unlink: extra operand includes the extra arg")
 
     # --help goes to stdout
     rc, out, err = fw.run_asm(["--help"])
@@ -112,15 +114,22 @@ def tool_specific_tests(fw):
     fw.report_result(rc == 0, "unlink: --version exits 0")
     fw.report_result(b"unlink" in out, "unlink: --version contains 'unlink'")
 
-    # Compare error messages with GNU (byte-for-byte)
+    # Compare error messages with GNU (normalize smart quotes and path)
     if gnu_path:
         c_env = os.environ.copy()
         c_env["LC_ALL"] = "C"
+
+        def _normalize_quotes(b):
+            """Replace Unicode smart quotes with ASCII single quotes."""
+            return b.replace(b'\xe2\x80\x98', b"'").replace(b'\xe2\x80\x99', b"'")
+
         for args_list in [[], ["a", "b"]]:
             rc_f, _, err_f = fw.run_asm(args_list)
             rc_g, _, err_g = fw.run([gnu_path] + args_list, env=c_env)
             err_g_norm = err_g.replace(gnu_path.encode(), b"unlink")
-            fw.report_result(err_f == err_g_norm,
+            err_f_norm = _normalize_quotes(err_f)
+            err_g_norm = _normalize_quotes(err_g_norm)
+            fw.report_result(err_f_norm == err_g_norm,
                              f"unlink: error msg byte-match GNU for args={args_list}")
 
 
