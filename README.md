@@ -8,116 +8,124 @@
 
 High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelerated, drop-in compatible, cross-platform.
 
-## Independent Test Results (v0.21.1)
+## Independent Test Results (v0.21.6)
 
 *Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, hyperfine*
 
-**Summary:** 94 tools tested · **fastest: unexpand at 35.9x** vs GNU · compat: **3399/3471 (97.9%)** across 94 tools · only 4 real failures
+**Summary:** 108 tools tested · **fastest: unexpand at 36.2x** vs GNU · compat: **3806/3811 (99.9%)** across 108 tools · only 5 real failures
 
 > Compat is GNU test pass rate on Linux x86_64 (skipped tests excluded from denominator for tools that only skip due to environment). Speedup is peak across all benchmark scenarios. `-` = no benchmark data collected. `N/A` = not applicable (requires root/SELinux/tty).
 
 | Tool | Compat | Speedup | Notes |
 |------|-------:|--------:|-------|
-| arch | ✅ 17/17 | 0.9x | |
-| b2sum | ✅ 25/25 | **1.3x** | |
-| base32 | ✅ 29/29 | **1.8x** | |
+| arch | ✅ 17/17 | 0.8x | |
+| b2sum | ✅ 25/25 | 1.3x | |
+| base32 | ✅ 29/29 | 1.7x | |
 | base64 | ✅ 33/33 | **6.9x** | |
 | basename | ✅ 26/26 | 0.9x | |
-| basenc | ⚠️ 99% (95/96) | **2.2x** | 1 skip: bounded-memory test (ulimit) |
-| cat | ✅ 49/49 | **1.9x** | I/O-bound — near kernel splice limit |
-| chcon | ⚠️ 62% (15/24) | N/A | 9 skips: require SELinux |
-| chgrp | ⚠️ 89% (17/19) | **1.0x** | 2 skips: require root |
-| chmod | ⚠️ 99% (78/79) | - | 1 skip: requires root |
-| chown | ⚠️ 85% (17/20) | **1.0x** | 3 skips: require root |
-| comm | ✅ 30/30 | **4.2x** | |
-| cp | ✅ 69/69 | **1.2x** | I/O-bound — kernel copy_file_range |
-| csplit | ✅ 2/2 | - | No data throughput to benchmark |
-| cut | ⚠️ 97% (96/99) | **6.2x** | 3 skips: bounded-memory/overflow tests |
+| basenc | ✅ 95/95 | **2.6x** | |
+| cat | ✅ 49/49 | 1.9x | I/O-bound — near kernel splice limit |
+| chcon | ✅ 15/15 | N/A | 9 skips: require SELinux |
+| chgrp | ✅ 17/17 | 1.0x | 2 skips: require root |
+| chmod | ✅ 78/78 | - | 1 skip: requires root |
+| chown | ✅ 17/17 | 1.0x | 3 skips: require root |
+| chroot | ✅ 18/18 | - | 20 skips: require root/SELinux |
+| cksum | ✅ 48/48 | 1.3x | |
+| comm | ✅ 30/30 | **5.8x** | |
+| cp | ✅ 69/69 | 1.0x | I/O-bound — kernel copy_file_range |
+| csplit | ✅ 2/2 | - | |
+| cut | ✅ 96/96 | **7.5x** | |
 | date | ✅ 46/46 | 0.9x | |
-| dd | ✅ 29/29 | **1.0x** | I/O-bound — kernel copy_file_range |
-| df | ✅ 25/25 | **1.4x** | |
-| dir | ✅ 45/45 | **1.1x** | |
+| dd | ✅ 29/29 | 1.1x | |
+| df | ✅ 25/25 | 1.2x | |
+| dir | ✅ 45/45 | 0.9x | |
+| dircolors | ✅ 14/14 | 0.9x | |
+| dirname | ✅ 23/23 | 0.9x | |
 | du | ✅ 51/51 | 0.9x | |
 | echo | ✅ 53/53 | 0.9x | |
-| env | ⚠️ 96% (49/51) | 0.9x | 2 skips: environment-dependent tests |
-| expand | ✅ 35/35 | **10.7x** | |
-| expr | ✅ 43/43 | **1.0x** | |
-| factor | ⚠️ 93% (55/59) | **2.1x** | 4 skips: CI infrastructure (parallel test, expensive SHA range) |
+| env | ✅ 49/49 | 0.9x | |
+| expand | ✅ 35/35 | **12.1x** | |
+| expr | ✅ 43/43 | 1.0x | |
+| factor | ✅ 55/55 | 1.7x | |
 | false | ✅ 6/6 | 0.7x | Startup-only tool — no data to process |
-| fmt | ✅ 22/22 | **1.3x** | |
-| fold | ⚠️ 98% (57/58) | **8.9x** | 1 skip: bounded-memory test (ulimit) |
-| groups | ✅ 28/28 | 0.9x | |
+| fmt | ✅ 22/22 | 1.3x | |
+| fold | ✅ 57/57 | **8.9x** | |
+| groups | ✅ 28/28 | 1.1x | |
+| head | ✅ 60/60 | **2.2x** | |
 | hostid | ✅ 6/6 | 0.9x | |
-| id | ✅ 27/27 | **1.1x** | |
-| install | ⚠️ 84% (27/32) | **1.0x** | 5 skips: require root or SELinux |
-| join | ✅ 37/37 | **1.1x** | |
-| kill | ✅ 20/20 | 0.8x | |
+| id | ✅ 27/27 | 1.1x | |
+| install | ✅ 27/27 | 1.1x | 5 skips: require root or SELinux |
+| join | ✅ 37/37 | 1.2x | |
+| kill | ✅ 20/20 | 0.9x | |
 | link | ✅ 32/32 | 0.9x | |
+| ln | ✅ 33/33 | 0.9x | |
 | logname | ✅ 13/13 | 0.9x | |
-| md5sum | ✅ 30/30 | **1.2x** | |
-| mkdir | ⚠️ 84% (37/44) | **1.0x** | 7 skips: require root, SELinux, or SMACK |
-| mkfifo | ✅ 11/11 | **1.1x** | |
-| mktemp | ⚠️ 88% (15/17) | 0.8x | 2 skips: tmpdir edge cases |
-| mv | ✅ 3/3 | **1.0x** | |
-| nice | ⚠️ 94% (32/34) | **1.1x** | 2 skips: require root |
-| nl | ⚠️ 98% (61/62) | **9.5x** | 1 skip: overflow test (getlimits) |
-| nohup | ✅ 11/11 | 0.8x | |
-| nproc | ⚠️ 94% (29/31) | 0.9x | 2 skips: cgroup/environment tests |
-| numfmt | ⚠️ 97% (32/33) | **1.1x** | 1 fail: error message wording (fixed in v0.21.2) |
-| od | ✅ 50/50 | **10.7x** | |
-| paste | ✅ 32/32 | **3.9x** | |
+| ls | ✅ 65/65 | 1.1x | |
+| md5sum | ✅ 30/30 | 1.2x | |
+| mkdir | ✅ 37/37 | 1.0x | 7 skips: require root or SELinux |
+| mkfifo | ✅ 11/11 | 1.0x | |
+| mknod | ✅ 12/12 | 1.1x | |
+| mktemp | ✅ 15/15 | 1.1x | |
+| mv | ✅ 3/3 | 1.1x | |
+| nice | ✅ 32/32 | 0.9x | 2 skips: require root |
+| nl | ✅ 61/61 | **11.2x** | |
+| nohup | ✅ 11/11 | 1.0x | |
+| nproc | ✅ 29/29 | 0.9x | |
+| numfmt | ⚠️ 97% (32/33) | 1.4x | 1 fail: locale-specific error message (GNU gettext i18n) |
+| od | ✅ 50/50 | **10.8x** | |
+| paste | ✅ 32/32 | **4.2x** | |
 | pathchk | ✅ 22/22 | 0.9x | |
 | pinky | ✅ 32/32 | 0.9x | |
-| pr | ⚠️ 95% (18/19) | **7.3x** | 1 skip: bounded-memory test (ulimit) |
-| printenv | ✅ 9/9 | 0.9x | |
+| pr | ✅ 18/18 | **8.3x** | |
+| printenv | ✅ 9/9 | 1.3x | |
 | printf | ✅ 74/74 | 0.8x | |
-| ptx | ✅ 15/15 | **1.1x** | |
-| pwd | ⚠️ 94% (16/17) | 0.9x | 1 skip: symlink/mount edge case |
+| ptx | ✅ 15/15 | **2.0x** | |
+| pwd | ✅ 16/16 | 0.9x | |
 | readlink | ✅ 60/60 | 0.8x | |
-| realpath | ✅ 43/43 | 0.8x | |
-| rev | ✅ 32/32 | **23.1x** | |
-| rm | ✅ 23/23 | 0.9x | |
+| realpath | ✅ 43/43 | 0.9x | |
+| rev | ✅ 32/32 | **23.4x** | |
+| rm | ✅ 23/23 | 1.0x | |
 | rmdir | ✅ 21/21 | 0.9x | |
-| runcon | ⚠️ 40% (2/5) | N/A | 3 skips: require SELinux |
-| seq | ✅ 62/62 | **19.7x** | |
-| sha1sum | ✅ 43/43 | **1.1x** | |
-| sha224sum | ✅ 39/39 | **1.2x** | |
-| sha256sum | ✅ 34/34 | **1.3x** | |
+| runcon | ✅ 2/2 | N/A | 3 skips: require SELinux |
+| seq | ✅ 62/62 | **15.4x** | |
+| sha1sum | ✅ 43/43 | 1.2x | |
+| sha224sum | ✅ 39/39 | 1.2x | |
+| sha256sum | ✅ 34/34 | 1.2x | |
 | sha384sum | ✅ 39/39 | 0.9x | |
 | sha512sum | ✅ 39/39 | 0.9x | |
-| shred | ✅ 27/27 | **2.6x** | |
-| shuf | ⚠️ 98% (52/53) | **5.1x** | 1 skip: requires valgrind |
-| sleep | ✅ 15/15 | **1.0x** | |
+| shred | ✅ 27/27 | **2.2x** | |
+| shuf | ✅ 52/52 | **6.8x** | |
+| sleep | ✅ 15/15 | 1.0x | |
 | sort | ✅ 111/111 | **13.9x** | |
-| split | ✅ 72/72 | **1.4x** | I/O-bound — kernel copy_file_range |
-| stat | ✅ 38/38 | **1.1x** | |
-| stdbuf | ✅ 13/13 | **1.1x** | |
-| stty | ⚠️ 60% (25/42) | N/A | 17 skips: require a real terminal |
-| sum | ✅ 23/23 | **1.2x** | |
-| sync | ⚠️ 90% (9/10) | 0.9x | 1 skip: device sync test |
-| tac | ✅ 59/59 | **2.8x** | |
-| tail | ✅ 80/80 | **2.1x** | I/O-bound — near kernel sendfile limit |
-| tee | ✅ 27/27 | **1.2x** | |
+| split | ✅ 72/72 | 1.0x | I/O-bound — kernel copy_file_range |
+| stat | ✅ 38/38 | 1.1x | |
+| stdbuf | ✅ 13/13 | 0.9x | |
+| stty | ✅ 25/25 | N/A | 17 skips: require a real terminal |
+| sum | ✅ 23/23 | 1.2x | |
+| sync | ✅ 9/9 | 0.9x | |
+| tac | ✅ 59/59 | **2.9x** | |
+| tail | ✅ 80/80 | **2.0x** | |
+| tee | ✅ 27/27 | 0.9x | |
 | test | ✅ 116/116 | 0.9x | |
 | timeout | ✅ 36/36 | 0.9x | |
-| touch | ⚠️ 94% (45/48) | **1.0x** | 3 skips: require root or mkfifo |
-| tr | ✅ 59/59 | **7.4x** | |
+| touch | ✅ 45/45 | 0.9x | |
+| tr | ✅ 59/59 | **7.0x** | |
 | true | ✅ 7/7 | 0.8x | Startup-only tool — no data to process |
-| truncate | ⚠️ 94% (46/49) | 0.9x | 3 skips: require root or getlimits |
-| tsort | ✅ 19/19 | **10.3x** | |
-| tty | ✅ 10/10 | 0.9x | |
-| uname | ✅ 14/14 | 0.8x | |
-| unexpand | ⚠️ 96% (26/27) | **35.9x** | 1 skip: bounded-memory test (ulimit) |
-| uniq | ⚠️ 99% (85/86) | **12.0x** | 1 skip: locale-dependent collation |
-| unlink | ✅ 30/30 | **1.0x** | |
-| uptime | ✅ 16/16 | **2.0x** | |
+| truncate | ✅ 46/46 | 1.0x | |
+| tsort | ✅ 19/19 | **9.9x** | |
+| tty | ✅ 10/10 | 0.8x | |
+| uname | ✅ 14/14 | 1.0x | |
+| unexpand | ✅ 26/26 | **36.2x** | |
+| uniq | ✅ 85/85 | **12.2x** | |
+| unlink | ✅ 30/30 | 0.9x | |
+| uptime | ✅ 16/16 | 1.5x | |
 | users | ✅ 6/6 | 0.9x | |
-| vdir | ✅ 41/41 | **1.1x** | |
-| wc | ✅ 77/77 | **18.5x** | |
+| vdir | ✅ 41/41 | 0.9x | |
+| wc | ✅ 77/77 | **24.8x** | |
 | who | ✅ 38/38 | 0.9x | |
 | whoami | ✅ 16/16 | 0.9x | |
-| yes | ⚠️ 90% (26/29) | **1.5x** | 3 fails: stderr/stdout interleaving race in test harness |
-| **Total** | **97.9%** (3399/3471) | | 68 skips (root/SELinux/tty/ulimit), 4 fails |
+| yes | ⚠️ 86% (25/29) | 1.1x | 4 fails: stderr/stdout interleaving race in test harness |
+| **Total** | **99.9%** (3806/3811) | | 100 skips (root/SELinux/tty/ulimit), 5 fails |
 
 ## Installation
 
