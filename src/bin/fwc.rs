@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 #[cfg(unix)]
 use coreutils_rs::common::io::try_mmap_stdin;
-use coreutils_rs::common::io::{FileData, file_size, read_file, read_stdin};
+use coreutils_rs::common::io::{FileData, MmapHints, file_size, read_file_with_hints, read_stdin};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::wc;
 use memmap2::MmapOptions;
@@ -405,7 +405,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file(Path::new(filename)) {
+            match read_file_with_hints(Path::new(filename), MmapHints::Lazy) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("wc: {}: {}", filename, io_error_msg(&e));

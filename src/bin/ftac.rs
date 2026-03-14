@@ -8,7 +8,7 @@ use std::process;
 
 #[cfg(unix)]
 use coreutils_rs::common::io::try_mmap_stdin_with_hints;
-use coreutils_rs::common::io::{FileData, read_file, read_stdin};
+use coreutils_rs::common::io::{FileData, MmapHints, read_file_with_hints, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::tac;
 
@@ -172,7 +172,7 @@ fn run(cli: &Cli, files: &[String], out: &mut impl Write) -> bool {
             // Use read_file which auto-selects read() for <1MB and mmap for larger.
             // read() avoids mmap setup/teardown overhead (page table creation, TLB flush)
             // that dominates for small files. For large files, mmap enables zero-copy writev.
-            match read_file(Path::new(filename)) {
+            match read_file_with_hints(Path::new(filename), MmapHints::Lazy) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("tac: {}: {}", filename, io_error_msg(&e));

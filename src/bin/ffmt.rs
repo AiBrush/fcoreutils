@@ -6,7 +6,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{FileData, read_file, read_stdin};
+use coreutils_rs::common::io::{FileData, MmapHints, read_file_with_hints, read_stdin};
 use coreutils_rs::common::io_error_msg;
 use coreutils_rs::fmt::{FmtConfig, fmt_data};
 
@@ -313,7 +313,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file(Path::new(filename)) {
+            match read_file_with_hints(Path::new(filename), MmapHints::Lazy) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!(
