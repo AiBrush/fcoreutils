@@ -1,26 +1,15 @@
-NASM      = nasm
-TARGET    = fbasenc
+# Makefile for fbasenc — uses shared build infrastructure
+# fbasenc is unified-only (no modular dev build)
+TARGET      = fbasenc
+LIB_SRCS    =
+UNIFIED_SRC = unified/fbasenc_unified.asm
 
-.PHONY: all dev release clean test bench sizes
+include ../../Makefile.inc
 
-all: dev
-
-# Dev build — unified file, nasm -f bin, no linker
-dev: unified/fbasenc_unified.asm
-	$(NASM) -f bin unified/fbasenc_unified.asm -o $(TARGET)
+# Override dev: fbasenc is unified-only, no modular build
+dev: $(UNIFIED_SRC)
+	$(NASM) -f bin $(UNIFIED_SRC) -o $(TARGET)
 	chmod +x $(TARGET)
-
-# Release build — same as dev for unified builds
-release: dev
-
-clean:
-	rm -f $(TARGET)
-
-test: dev
-	TOOL=./$(TARGET) bash tests/test_fbasenc.sh
-
-security-test: dev
-	python3 tests/security_tests.py
 
 bench: dev
 	@echo "=== Benchmark vs GNU basenc ==="
@@ -39,9 +28,3 @@ bench: dev
 	@hyperfine --warmup 3 './fbasenc --base64 -d /tmp/bench_benc.enc > /dev/null' 2>/dev/null || \
 		bash -c 'time ./fbasenc --base64 -d /tmp/bench_benc.enc > /dev/null'
 	@rm -f /tmp/bench_benc.bin /tmp/bench_benc.enc
-
-sizes:
-	@echo "=== Binary sizes ==="
-	@ls -la $(TARGET) 2>/dev/null
-	@echo "--- GNU basenc ---"
-	@ls -la /usr/bin/basenc

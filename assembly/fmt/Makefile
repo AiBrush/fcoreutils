@@ -1,21 +1,6 @@
-NASM ?= nasm
-TOOL = ffmt
+# fmt — GNU-compatible text formatter in x86-64 assembly
+TARGET    = ffmt
+LIB_SRCS  = io.asm
+UNIFIED_SRC = unified/ffmt_unified.asm
 
-.PHONY: all clean dev release test
-
-all: $(TOOL)
-
-$(TOOL): unified/ffmt_unified.asm
-	$(NASM) -f bin $< -o $@
-	chmod +x $@
-
-dev: $(TOOL)
-
-release: $(TOOL)
-	cp $(TOOL) $(TOOL)_release
-
-clean:
-	rm -f $(TOOL) $(TOOL)_release
-
-test: $(TOOL)
-	bash tests/run_tests.sh ./$(TOOL)
+include ../../Makefile.inc

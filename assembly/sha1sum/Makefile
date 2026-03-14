@@ -1,19 +1,7 @@
-NASM = nasm
-NASM_FLAGS = -f bin
+# Makefile for fsha1sum — compute SHA-1 message digest
+TARGET      = fsha1sum
+LIB_SRCS    = io.asm str.asm args.asm
+TOOL_SRCS   = tools/fsha1sum.asm
+UNIFIED_SRC = unified/fsha1sum_unified.asm
 
-TARGET = fsha1sum
-SRC = unified/fsha1sum_unified.asm
-
-.PHONY: all clean test
-
-all: $(TARGET)
-
-$(TARGET): $(SRC)
-	$(NASM) $(NASM_FLAGS) $< -o $@
-	chmod +x $@
-
-clean:
-	rm -f $(TARGET)
-
-test: $(TARGET)
-	bash tests/run_tests.sh ./$(TARGET)
+include ../../Makefile.inc
