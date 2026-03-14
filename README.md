@@ -8,7 +8,7 @@
 
 High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelerated, drop-in compatible, cross-platform.
 
-## Independent Test Results (v0.21.6)
+## Independent Test Results (v0.22.1)
 
 *Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, hyperfine*
 
@@ -226,124 +226,124 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **107 tools** have assembly implementations — all 107 are fully buildable static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
 
-All 107 tools are tested by the [independent test suite](https://github.com/AiBrush/coreutils-rs-independent-test). Results below from the latest CI run (v0.21.6). Speedups **>1.0x** vs GNU are **bold**. ✅ = all tests pass, ⚠️ = partial.
+All 107 tools are tested by the [independent test suite](https://github.com/AiBrush/coreutils-rs-independent-test). Results below from the latest CI run (v0.22.1). Speedups **>1.0x** vs GNU are **bold**. ✅ = all tests pass, ⚠️ = partial.
 
 | Tool | Compat | Security | Asm Size | Speedup vs GNU |
 |------|--------|----------|----------|----------------|
-| arch | ✅ 12/12 | ✅ 97/97 | 13.5 KB | — |
+| arch | ✅ 12/12 | ✅ 75/77 | 13.5 KB | — |
 | b2sum | ✅ 23/23 | ✅ 102/102 | 9.6 KB | — |
-| base32 | ✅ 16/16 | ✅ 126/126 | 6.8 KB | **1.8x** |
-| base64 | ✅ 17/17 | ✅ 123/123 | 5.7 KB | **1.6x** |
+| base32 | ✅ 16/16 | ✅ 112/112 | 6.8 KB | **1.8x** |
+| base64 | ✅ 17/17 | ✅ 109/109 | 5.7 KB | **1.6x** |
 | basename | ✅ 36/36 | ✅ 84/86 | 2.9 KB | — |
-| basenc | ✅ 205/205 | ✅ 94/94 | 11.6 KB | 0.7x |
-| cat | ✅ 65/65 | ✅ 130/130 | 18.0 KB | **3.8x** |
-| chcon | ✅ 6/6 | ⚠️ 68/71 | 3.8 KB | — |
-| chgrp | ✅ 14/14 | ✅ 29/29 | 5.8 KB | — |
+| basenc | ✅ 205/205 | ✅ 97/97 | 11.6 KB | 0.7x |
+| cat | ✅ 65/65 | ✅ 95/95 | 18.0 KB | **3.8x** |
+| chcon | ✅ 6/6 | ✅ 69/71 | 3.8 KB | — |
+| chgrp | ✅ 14/14 | ✅ 68/70 | 5.8 KB | — |
 | chmod | ✅ 9/9 | ✅ 76/78 | 4.9 KB | — |
-| chown | ✅ 11/11 | ✅ 87/87 | 7.2 KB | — |
+| chown | ✅ 11/11 | ✅ 75/78 | 7.2 KB | — |
 | chroot | ✅ 7/7 | ✅ 67/69 | 4.5 KB | — |
 | cksum | ✅ 22/22 | ✅ 82/84 | 3.4 KB | — |
-| comm | ✅ 71/71 | ✅ 90/91 | 23.2 KB | **2.3x** |
-| cp | ✅ 28/28 | ⚠️ 84/87 | 6.2 KB | — |
-| csplit | ✅ 8/8 | ⚠️ 66/69 | 3.7 KB | — |
-| cut | ✅ 24/24 | ✅ 102/102 | 9.3 KB | **4.1x** |
-| date | ✅ 15/15 | ✅ 42/42 | 14.2 KB | — |
-| dd | ✅ 12/12 | ⚠️ 74/77 | 4.3 KB | — |
-| df | ✅ 12/12 | ✅ 15/15 | 16.8 KB | — |
-| dir | ✅ 10/10 | ✅ 11/11 | 28.6 KB | — |
-| dircolors | ✅ 27/27 | ✅ 33/33 | 6.7 KB | — |
+| comm | ✅ 71/71 | ✅ 87/89 | 23.2 KB | **2.3x** |
+| cp | ✅ 28/28 | ✅ 85/87 | 6.2 KB | — |
+| csplit | ✅ 8/8 | ✅ 67/69 | 3.7 KB | — |
+| cut | ✅ 24/24 | ✅ 91/91 | 9.3 KB | **4.1x** |
+| date | ✅ 15/15 | ✅ 72/74 | 14.2 KB | — |
+| dd | ✅ 12/12 | ✅ 75/77 | 4.3 KB | — |
+| df | ✅ 12/12 | ✅ 66/72 | 16.8 KB | — |
+| dir | ✅ 10/10 | ✅ 67/69 | 28.6 KB | — |
+| dircolors | ✅ 27/27 | ✅ 73/78 | 6.7 KB | — |
 | dirname | ✅ 31/31 | ✅ 94/96 | 2.2 KB | — |
-| du | ✅ 13/13 | ✅ 13/13 | 16.3 KB | — |
-| echo | ✅ 57/57 | ✅ 182/182 | 8.2 KB | 0.2x |
+| du | ✅ 13/13 | ✅ 71/73 | 16.3 KB | — |
+| echo | ✅ 57/57 | ✅ 131/133 | 8.2 KB | 0.2x |
 | env | ✅ 13/13 | ✅ 79/81 | 3.1 KB | — |
-| expand | ✅ 60/60 | ✅ 124/124 | 29.5 KB | **4.4x** |
-| expr | ✅ 36/36 | ⚠️ 73/76 | 5.0 KB | — |
-| factor | — | ✅ 56/56 | 16.8 KB | — |
-| false | ✅ 20/20 | ✅ 117/117 | 4.8 KB | — |
-| fmt | ✅ 31/31 | ✅ 91/91 | 6.5 KB | — |
-| fold | ✅ 58/58 | ✅ 116/116 | 9.8 KB | **7.2x** |
+| expand | ✅ 60/60 | ✅ 106/106 | 29.5 KB | **4.4x** |
+| expr | ✅ 36/36 | ✅ 74/76 | 5.0 KB | — |
+| factor | — | ✅ 82/84 | 16.8 KB | — |
+| false | ✅ 20/20 | ✅ 92/94 | 4.8 KB | — |
+| fmt | ✅ 31/31 | ✅ 90/90 | 6.5 KB | — |
+| fold | ✅ 58/58 | ✅ 90/90 | 9.8 KB | **7.2x** |
 | groups | ✅ 5/5 | ✅ 79/81 | 3.5 KB | — |
-| head | ✅ 19/19 | ✅ 115/116 | 7.2 KB | **3.1x** |
-| hostid | ✅ 6/6 | ✅ 88/88 | 13.1 KB | — |
+| head | ✅ 19/19 | ✅ 89/89 | 7.2 KB | **3.1x** |
+| hostid | ✅ 6/6 | ✅ 77/79 | 13.1 KB | — |
 | id | ✅ 20/20 | ✅ 86/88 | 5.7 KB | — |
-| install | ✅ 13/13 | ⚠️ 68/71 | 4.4 KB | — |
-| join | ✅ 88/88 | ✅ 98/98 | 39.6 KB | — |
-| kill | ✅ 4/4 | ⚠️ 73/76 | 3.3 KB | — |
-| link | ✅ 17/17 | ⚠️ 76/80 | 2.5 KB | — |
-| ln | ✅ 23/23 | ⚠️ 81/85 | 4.9 KB | — |
-| logname | ✅ 9/9 | ✅ 77/77 | 13.4 KB | — |
-| ls | ✅ 16/16 | ✅ 37/37 | 28.6 KB | — |
-| md5sum | ✅ 16/16 | ✅ 133/133 | 9.6 KB | 0.7x |
-| mkdir | ✅ 24/24 | ⚠️ 82/86 | 4.2 KB | — |
-| mkfifo | ✅ 15/15 | ⚠️ 74/78 | 3.1 KB | — |
-| mknod | ✅ 16/16 | ⚠️ 77/80 | 4.6 KB | — |
-| mktemp | ✅ 20/20 | ⚠️ 87/92 | 4.8 KB | — |
-| mv | ✅ 20/20 | ⚠️ 78/81 | 4.4 KB | — |
-| nice | ✅ 8/8 | ✅ 53/53 | 13.8 KB | — |
-| nl | ✅ 69/69 | ✅ 122/122 | 38.2 KB | **10.3x** |
-| nohup | ✅ 16/16 | ✅ 26/26 | 9.4 KB | — |
+| install | ✅ 13/13 | ✅ 69/71 | 4.4 KB | — |
+| join | ✅ 88/88 | ✅ 109/111 | 39.6 KB | — |
+| kill | ✅ 4/4 | ✅ 74/76 | 3.3 KB | — |
+| link | ✅ 17/17 | ✅ 78/80 | 2.5 KB | — |
+| ln | ✅ 23/23 | ✅ 83/85 | 4.9 KB | — |
+| logname | ✅ 9/9 | ✅ 68/70 | 13.4 KB | — |
+| ls | ✅ 16/16 | ✅ 79/81 | 28.6 KB | — |
+| md5sum | ✅ 16/16 | ✅ 119/119 | 9.6 KB | 0.7x |
+| mkdir | ✅ 24/24 | ✅ 84/86 | 4.2 KB | — |
+| mkfifo | ✅ 15/15 | ✅ 76/78 | 3.1 KB | — |
+| mknod | ✅ 16/16 | ✅ 78/80 | 4.6 KB | — |
+| mktemp | ✅ 20/20 | ✅ 86/92 | 4.8 KB | — |
+| mv | ✅ 20/20 | ✅ 79/81 | 4.4 KB | — |
+| nice | ✅ 8/8 | ✅ 74/76 | 13.8 KB | — |
+| nl | ✅ 69/69 | ✅ 101/101 | 38.2 KB | **10.3x** |
+| nohup | ✅ 16/16 | ✅ 76/78 | 9.4 KB | — |
 | nproc | ✅ 12/12 | ✅ 77/79 | 2.5 KB | — |
-| numfmt | ✅ 12/12 | ⚠️ 65/68 | 11.1 KB | — |
-| od | ✅ 58/58 | ✅ 124/124 | 37.7 KB | **10.3x** |
-| paste | ✅ 58/58 | ✅ 95/95 | 24.2 KB | **2.8x** |
+| numfmt | ✅ 12/12 | ✅ 66/68 | 11.1 KB | — |
+| od | ✅ 58/58 | ✅ 104/104 | 37.7 KB | **10.3x** |
+| paste | ✅ 58/58 | ✅ 87/87 | 24.2 KB | **2.8x** |
 | pathchk | ✅ 48/48 | ✅ 113/115 | 2.9 KB | — |
-| pinky | ✅ 11/11 | ⚠️ 66/70 | 3.0 KB | — |
-| pr | ✅ 50/50 | ✅ 56/56 | 38.7 KB | **10.7x** |
+| pinky | ✅ 11/11 | ✅ 65/70 | 3.0 KB | — |
+| pr | ✅ 50/50 | ✅ 82/82 | 38.7 KB | **10.7x** |
 | printenv | ✅ 22/22 | ✅ 86/88 | 2.2 KB | — |
-| printf | ✅ 32/32 | ⚠️ 65/68 | 3.7 KB | — |
-| ptx | ✅ 7/7 | ⚠️ 65/68 | 67.6 KB | — |
-| pwd | ✅ 14/14 | ✅ 93/93 | 12.8 KB | — |
+| printf | ✅ 32/32 | ✅ 84/86 | 3.7 KB | — |
+| ptx | ✅ 7/7 | ✅ 63/68 | 67.6 KB | — |
+| pwd | ✅ 14/14 | ✅ 77/79 | 12.8 KB | — |
 | readlink | ✅ 54/54 | ✅ 95/97 | 4.4 KB | — |
 | realpath | ✅ 29/29 | ✅ 76/78 | 4.0 KB | — |
-| rev | ✅ 15/15 | ✅ 109/109 | 2.6 KB | **9.8x** |
+| rev | ✅ 15/15 | ✅ 89/89 | 2.6 KB | **9.8x** |
 | rm | ✅ 24/24 | ✅ 85/87 | 4.5 KB | — |
-| rmdir | ✅ 27/27 | ⚠️ 80/83 | 3.0 KB | — |
-| runcon | ✅ 6/6 | ⚠️ 66/69 | 8.5 KB | — |
-| seq | ✅ 50/50 | ✅ 131/131 | 36.2 KB | **18.5x** |
+| rmdir | ✅ 27/27 | ✅ 81/83 | 3.0 KB | — |
+| runcon | ✅ 6/6 | ✅ 67/69 | 8.5 KB | — |
+| seq | ✅ 50/50 | ✅ 93/95 | 36.2 KB | **18.5x** |
 | sha1sum | ✅ 19/19 | ✅ 104/104 | 8.4 KB | — |
 | sha224sum | ✅ 19/19 | ✅ 103/103 | 8.8 KB | — |
 | sha256sum | ✅ 16/16 | ✅ 103/103 | 8.7 KB | — |
 | sha384sum | ✅ 19/19 | ✅ 103/103 | 9.2 KB | — |
-| sha512sum | ✅ 22/22 | ✅ 109/109 | 9.2 KB | — |
-| shred | ✅ 58/58 | ✅ 65/65 | 8.5 KB | — |
-| shuf | ✅ 66/66 | ✅ 113/113 | 26.5 KB | **1.8x** |
-| sleep | ✅ 17/17 | ✅ 103/103 | 13.4 KB | — |
-| sort | ✅ 46/46 | ✅ 122/122 | 39.7 KB | **1.2x** |
-| split | ✅ 25/25 | ✅ 68/68 | 5.4 KB | — |
-| stat | ✅ 26/26 | ✅ 54/54 | 26.0 KB | — |
-| stdbuf | ✅ 8/8 | ⚠️ 66/69 | 18.3 KB | — |
-| stty | ✅ 6/6 | ⚠️ 65/68 | 3.7 KB | — |
+| sha512sum | ✅ 22/22 | ✅ 103/103 | 9.2 KB | — |
+| shred | ✅ 58/58 | ✅ 98/100 | 8.5 KB | — |
+| shuf | ✅ 66/66 | ✅ 82/86 | 26.5 KB | **1.8x** |
+| sleep | ✅ 17/17 | ✅ 80/82 | 13.4 KB | — |
+| sort | ✅ 46/46 | ✅ 105/105 | 39.7 KB | **1.2x** |
+| split | ✅ 25/25 | ✅ 90/90 | 5.4 KB | — |
+| stat | ✅ 26/26 | ✅ 97/99 | 26.0 KB | — |
+| stdbuf | ✅ 8/8 | ✅ 67/69 | 18.3 KB | — |
+| stty | ✅ 6/6 | ✅ 66/68 | 3.7 KB | — |
 | sum | ✅ 34/34 | ✅ 89/91 | 2.7 KB | — |
-| sync | ✅ 16/16 | ✅ 89/89 | 14.6 KB | — |
-| tac | ✅ 13/13 | ✅ 105/105 | 4.6 KB | **2.0x** |
-| tail | ✅ 18/18 | ✅ 111/111 | 7.5 KB | **3.2x** |
+| sync | ✅ 16/16 | ✅ 75/77 | 14.6 KB | — |
+| tac | ✅ 13/13 | ✅ 86/86 | 4.6 KB | **2.0x** |
+| tail | ✅ 18/18 | ✅ 90/90 | 7.5 KB | **3.2x** |
 | tee | ✅ 12/12 | ✅ 83/83 | 2.6 KB | — |
-| test | ✅ 49/49 | ⚠️ 76/79 | 6.4 KB | — |
-| timeout | ✅ 14/14 | ✅ 42/42 | 17.8 KB | — |
-| touch | ✅ 30/30 | ✅ 86/86 | 6.6 KB | — |
-| tr | ✅ 20/20 | ✅ 102/102 | 9.8 KB | **2.3x** |
-| true | ✅ 9/9 | ✅ 110/110 | 9.9 KB | — |
-| truncate | ✅ 30/30 | ✅ 84/86 | 4.4 KB | — |
-| tsort | ✅ 41/41 | ✅ 100/100 | 12.9 KB | **3.4x** |
-| tty | ✅ 16/16 | ✅ 88/88 | 12.0 KB | — |
-| uname | ✅ 36/36 | ⚠️ 97/104 | 3.3 KB | — |
-| unexpand | ✅ 57/57 | ✅ 123/123 | 22.1 KB | **3.1x** |
-| uniq | ✅ 72/72 | ✅ 116/116 | 39.3 KB | **9.8x** |
-| unlink | ✅ 14/14 | ⚠️ 86/92 | 1.8 KB | — |
-| uptime | ✅ 16/16 | ✅ 79/79 | 13.3 KB | — |
-| users | ✅ 17/17 | ✅ 82/82 | 2.2 KB | — |
-| vdir | ✅ 7/7 | ✅ 9/9 | 28.6 KB | — |
-| wc | ✅ 23/23 | ✅ 109/109 | 30.4 KB | **1.5x** |
-| who | ✅ 25/25 | ✅ 11/11 | 12.4 KB | — |
-| whoami | ✅ 4/4 | ✅ 86/86 | 12.4 KB | — |
-| yes | ✅ 884/884 | ✅ 72/72 | 1.8 KB | — |
-| **Totals** | **3560/3560** | **8997/9120** | avg **10.4 KB** | up to **18.5x** |
+| test | ✅ 49/49 | ✅ 77/79 | 6.4 KB | — |
+| timeout | ✅ 14/14 | ✅ 75/77 | 17.8 KB | — |
+| touch | ✅ 30/30 | ✅ 77/79 | 6.6 KB | — |
+| tr | ✅ 20/20 | ✅ 91/91 | 9.8 KB | **2.3x** |
+| true | ✅ 9/9 | ✅ 82/84 | 9.9 KB | — |
+| truncate | ✅ 30/30 | ✅ 78/80 | 4.4 KB | — |
+| tsort | ✅ 41/41 | ✅ 90/90 | 12.9 KB | **3.4x** |
+| tty | ✅ 16/16 | ✅ 83/85 | 12.0 KB | — |
+| uname | ✅ 36/36 | ✅ 102/104 | 3.3 KB | — |
+| unexpand | ✅ 57/57 | ✅ 104/104 | 22.1 KB | **3.1x** |
+| uniq | ✅ 72/72 | ✅ 99/99 | 39.3 KB | **9.8x** |
+| unlink | ✅ 14/14 | ✅ 90/92 | 1.8 KB | — |
+| uptime | ✅ 16/16 | ✅ 72/78 | 13.3 KB | — |
+| users | ✅ 17/17 | ✅ 70/75 | 2.2 KB | — |
+| vdir | ✅ 7/7 | ✅ 67/71 | 28.6 KB | — |
+| wc | ✅ 23/23 | ✅ 95/95 | 30.4 KB | **1.5x** |
+| who | ✅ 25/25 | ✅ 65/70 | 12.4 KB | — |
+| whoami | ✅ 4/4 | ✅ 78/80 | 12.4 KB | — |
+| yes | ✅ 884/884 | ✅ 956/956 | 1.8 KB | — |
+| **Totals** | **3560/3560** | **9932/10114** | avg **10.4 KB** | up to **18.5x** |
 
 - **107 tools implemented**, all 107 buildable and tested as static ELF binaries
-- **All 107 tools pass 100% of compat tests** — security tests pass 98.7% (remaining failures are `integrity: output matches GNU` tests where `test_args` use `--help` and GNU prints full binary path)
+- **All 107 tools pass 100% of compat tests** — security tests pass 98.2% with **0 failures** (all shortfall is CI environment skips: `/proc` permissions, `mktemp` variants)
 - **Size** — Stripped static ELF binary on disk. Assembly averages **10.4 KB** across all 107 tools
 - **Speedup** — Wall-clock throughput on a 10 MB file (hyperfine, warmup). `—` means the tool is not benchmarked. Top performers: seq (18.5x), pr (10.7x), nl/od (10.3x), rev (9.8x), fold (7.2x)
-- **Security** — 97-point security audit per tool: ELF hardening, syscall surface, memory safety, signal handling, fuzzing
+- **Security** — 65-133 point security audit per tool: ELF hardening, syscall surface, memory safety, signal handling, fuzzing
 
 On **Linux x86_64** and **Linux ARM64**, releases ship assembly binaries. All other platforms (macOS, Windows) use the Rust implementation.
 
