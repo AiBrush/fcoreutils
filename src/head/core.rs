@@ -232,7 +232,15 @@ pub fn head_file_direct(filename: &str, n: u64, delimiter: u8) -> io::Result<boo
             }
         };
 
-        let mut buf = [0u8; 8192];
+        // Hint sequential readahead for better throughput on large-N line counts.
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+            }
+        }
+
+        let mut buf = [0u8; 65536];
         let mut count = 0u64;
 
         loop {
@@ -292,6 +300,14 @@ pub fn sendfile_bytes(path: &Path, n: u64, out_fd: i32) -> io::Result<bool> {
         .custom_flags(libc::O_NOATIME)
         .open(path)
         .or_else(|_| std::fs::File::open(path))?;
+
+    // Hint sequential readahead for sendfile throughput.
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        }
+    }
 
     let metadata = file.metadata()?;
     let file_size = metadata.len();
@@ -371,9 +387,17 @@ fn head_lines_streaming_file(
     let file = std::fs::File::open(path)?;
 
     let mut file = file;
-    // Use 8KB buffer: default 10 lines almost always fits in one read.
-    // Avoids reading 65KB just to extract the first few lines.
-    let mut buf = [0u8; 8192];
+
+    // Hint sequential readahead for better throughput on large-N line counts.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        }
+    }
+
+    let mut buf = [0u8; 65536];
     let mut count = 0u64;
 
     loop {
