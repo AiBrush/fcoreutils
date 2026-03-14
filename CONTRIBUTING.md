@@ -1,6 +1,6 @@
 # Contributing to fcoreutils
 
-Thank you for your interest in contributing! This guide will help you get started.
+Thank you for your interest in contributing to fcoreutils! This guide will help you get started.
 
 ## Getting Started
 
