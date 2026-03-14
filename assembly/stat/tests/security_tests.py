@@ -11,7 +11,7 @@ config = {
     'gnu_path': '/usr/bin/stat',
     'bss_size': 65536,
     'max_binary_size': 30000,
-    'test_args': ['/etc/hosts'],
+    'test_args': ['-c', '%s %u %g %a', '/etc/hosts'],
     'test_stdin': None,
     'timeout': 5,
 }
