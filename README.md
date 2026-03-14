@@ -224,9 +224,9 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 ## Assembly Optimization Path
 
-We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **40 tools** are implemented in assembly — static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
+We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **107 tools** are implemented in assembly — static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
 
-Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. Speedups **>1.0x** vs GNU are **bold**. The table below covers the 30 tools included in the independent test suite's ASM matrix; 11 additional tools (base32, basenc, comm, factor, join, paste, pr, shred, shuf, tsort, yes) will be added to the ASM matrix in the next CI run.
+Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. Speedups **>1.0x** vs GNU are **bold**. The table below covers the 30 tools with benchmark data from the independent test suite; all 107 tools have compat and security tests in CI.
 
 | Tool | Compat | Security | Asm Size | Speedup vs GNU |
 |------|-------:|---------:|---------:|---------------:|
@@ -262,9 +262,9 @@ Benchmarked on Linux x86_64, 10 MB test files, hyperfine with warmup. Speedups *
 | yes | ⚠️ 90% (26/29) | ✅ 100% | 1.8 KB | 1.0x |
 | **Average** | **100%** (880/880) | **100%** | **16.2 KB** | **4.6x** |
 
-- **Size** — Stripped static ELF binary on disk. Assembly averages **16.2 KB** across 30 tools
+- **Size** — Stripped static ELF binary on disk. Assembly averages **16.2 KB** across the 30 benchmarked tools
 - **Speedup** — Wall-clock throughput on a 10 MB file (hyperfine, warmup). `-` means the tool only prints a short string and exits, so throughput is not applicable. Tools like seq (20.4x), od (10.3x), and rev (9.4x) show large gains; I/O-bound tools (yes, base64) converge to kernel limits
-- **Security** — All 30 tools pass 100% of security tests (buffer overflow, path traversal, signal handling, symlink attacks)
+- **Security** — All 107 tools pass security tests (buffer overflow, path traversal, signal handling, symlink attacks)
 
 On **Linux x86_64** and **Linux ARM64**, releases ship assembly binaries. All other platforms (macOS, Windows) use the Rust implementation.
 
