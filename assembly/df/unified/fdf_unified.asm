@@ -738,7 +738,9 @@ parse_args:
     pop     r14
     pop     r13
     pop     rbx
-    jmp     .pa_next
+    ; Unknown long option — print error and exit
+    mov     rsi, [r14 + rbx*8]     ; the unknown option string
+    jmp     .pa_bad_long
 
 .pa_do_help:
     pop     r15
@@ -766,6 +768,39 @@ parse_args:
     mov     edx, version_text_len
     call    do_write_all
     xor     edi, edi
+    mov     eax, SYS_EXIT
+    syscall
+
+.pa_bad_long:
+    ; rsi = the unknown option string (e.g., "--invalid-flag-xyz")
+    push    rsi
+    mov     edi, STDERR
+    mov     rsi, str_prefix
+    mov     edx, str_prefix_len
+    call    do_write_all
+    mov     edi, STDERR
+    mov     rsi, str_unrecognized
+    mov     edx, str_unrecognized_len
+    call    do_write_all
+    pop     rsi
+    push    rsi
+    mov     rdi, rsi
+    call    str_len
+    mov     rdx, rax
+    pop     rsi
+    push    rsi
+    mov     edi, STDERR
+    call    do_write_all
+    mov     edi, STDERR
+    mov     rsi, str_sq_nl
+    mov     edx, str_sq_nl_len
+    call    do_write_all
+    mov     edi, STDERR
+    mov     rsi, str_try
+    mov     edx, str_try_len
+    call    do_write_all
+    pop     rsi
+    mov     edi, 1
     mov     eax, SYS_EXIT
     syscall
 
@@ -1214,6 +1249,12 @@ etc_mtab_path: db "/etc/mtab", 0
 str_enoent: db "No such file or directory", 0
 str_eacces: db "Permission denied", 0
 str_eunknown: db "Unknown error", 0
+str_unrecognized: db "unrecognized option '"
+str_unrecognized_len equ $ - str_unrecognized
+str_sq_nl: db "'", 10
+str_sq_nl_len equ $ - str_sq_nl
+str_try: db "Try 'df --help' for more information.", 10
+str_try_len equ $ - str_try
 
 header_normal:
     db "Filesystem           1K-blocks      Used Available Use% Mounted on"

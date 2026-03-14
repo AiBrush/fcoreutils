@@ -4,6 +4,7 @@
 Uses shared SecurityTestFramework with tool-specific csplit tests.
 """
 
+import atexit
 import os
 import sys
 import tempfile
@@ -11,13 +12,19 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
+# Create temp file with content for test_args (csplit needs file + pattern)
+_tf = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
+_tf.write("line1\nline2\nline3\n")
+_tf.close()
+atexit.register(os.unlink, _tf.name)
+
 config = {
     'tool_name': 'csplit',
     'bin_name': 'fcsplit',
     'gnu_path': '/usr/bin/csplit',
     'bss_size': 65536,
     'max_binary_size': 30000,
-    'test_args': ['--help'],
+    'test_args': [_tf.name, '2'],
     'test_stdin': None,
     'timeout': 5,
 }

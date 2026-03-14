@@ -11,7 +11,7 @@ config = {
     'gnu_path': '/usr/bin/who',
     'bss_size': 65536,
     'max_binary_size': 200000,
-    'test_args': ['--help'],
+    'test_args': [],
     'test_stdin': None,
     'timeout': 5,
 }

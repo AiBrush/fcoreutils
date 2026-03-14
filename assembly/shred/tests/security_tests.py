@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 """Security tests for fshred — uses shared framework."""
-import sys, os, re, tempfile, shutil
+import sys, os, re, tempfile, shutil, atexit
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
+
+# Create a temp file for test_args (shred on /dev/null hangs GNU shred)
+_shred_test_file = '/tmp/__fshred_security_test__.dat'
+def _setup_shred_test_file():
+    with open(_shred_test_file, 'wb') as f:
+        f.write(b'security test data\n')
+def _cleanup_shred_test_file():
+    try:
+        os.unlink(_shred_test_file)
+    except OSError:
+        pass
+_setup_shred_test_file()
+atexit.register(_cleanup_shred_test_file)
 
 config = {
     'tool_name': 'shred',
@@ -10,7 +23,7 @@ config = {
     'gnu_path': '/usr/bin/shred',
     'bss_size': 65536,
     'max_binary_size': 100000,
-    'test_args': ['-n', '1', '/dev/null'],
+    'test_args': ['-n', '1', _shred_test_file],
     'test_stdin': None,
     'timeout': 10,
 }

@@ -5,6 +5,7 @@ Uses the shared SecurityTestFramework for categories 1-12,
 plus tool-specific tests for install behavior.
 """
 
+import atexit
 import sys
 import os
 import tempfile
@@ -12,13 +13,22 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
+# Create temp files for test_args (install needs src + dst)
+_src = tempfile.NamedTemporaryFile(delete=False)
+_src.write(b"test\n")
+_src.close()
+_dst = tempfile.NamedTemporaryFile(delete=False)
+_dst.close()
+atexit.register(os.unlink, _src.name)
+atexit.register(os.unlink, _dst.name)
+
 config = {
     'tool_name': 'install',
     'bin_name': 'finstall',
     'gnu_path': '/usr/bin/install',
     'bss_size': 65536,
     'max_binary_size': 30000,
-    'test_args': ['--help'],
+    'test_args': [_src.name, _dst.name],
     'test_stdin': None,
     'timeout': 5,
 }

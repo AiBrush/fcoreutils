@@ -12,13 +12,19 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
+import atexit, shutil
+_td = tempfile.mkdtemp(prefix="fvdir_cfg_")
+Path(_td, "aaa").touch()
+Path(_td, "bbb").touch()
+atexit.register(shutil.rmtree, _td, True)
+
 config = {
     'tool_name': 'vdir',
     'bin_name': 'fvdir',
     'gnu_path': '/usr/bin/vdir',
     'bss_size': 65536,
     'max_binary_size': 100000,
-    'test_args': ['/tmp'],
+    'test_args': [_td],
     'test_stdin': None,
     'timeout': 10,
 }

@@ -14,7 +14,7 @@ config = {
     'gnu_path': '/usr/bin/chcon',
     'bss_size': 65536,
     'max_binary_size': 50000,
-    'test_args': ['--help'],
+    'test_args': ['system_u:object_r:tmp_t:s0', '/nonexistent'],
     'test_stdin': None,
     'timeout': 10,
 }

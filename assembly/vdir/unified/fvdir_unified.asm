@@ -2261,12 +2261,49 @@ parse_args:
     test    eax, eax
     jnz     .pa_color_auto
 
-    ; Unknown long option — skip it (be lenient for now)
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    jmp     .pa_next
+    ; Unknown long option — print error and exit with code 2
+    ; Retrieve the original arg pointer: r13 and rbx are on the stack
+    ; Stack state (top to bottom): r14, r13, r12, rbx
+    mov     r15, [rsp+8]        ; r13 (argv)
+    mov     rcx, [rsp+24]       ; rbx (arg index)
+    mov     r14, [r15 + rcx*8]  ; pointer to the unknown option string
+
+    ; Print "vdir: " prefix
+    mov     rdi, STDERR
+    lea     rsi, [str_prefix]
+    mov     rdx, str_prefix_len
+    call    asm_write_all
+
+    ; Print "unrecognized option '"
+    mov     rdi, STDERR
+    lea     rsi, [str_unrecognized_opt]
+    mov     rdx, str_unrecognized_opt_len
+    call    asm_write_all
+
+    ; Print the actual option string
+    mov     rdi, r14
+    call    asm_strlen
+    mov     rdx, rax
+    mov     rdi, STDERR
+    mov     rsi, r14
+    call    asm_write_all
+
+    ; Print "'\n"
+    mov     rdi, STDERR
+    lea     rsi, [str_squote_nl]
+    mov     rdx, 2
+    call    asm_write_all
+
+    ; Print "Try 'vdir --help' for more information.\n"
+    mov     rdi, STDERR
+    lea     rsi, [str_try_help]
+    mov     rdx, str_try_help_len
+    call    asm_write_all
+
+    ; Exit with code 2
+    mov     edi, 2
+    mov     eax, SYS_EXIT
+    syscall
 
 .pa_do_help:
     pop     r14
@@ -3049,7 +3086,14 @@ str_cannot_open: db "cannot open directory "
 str_cannot_open_len equ $ - str_cannot_open
 
 str_squote:     db "'"
+str_squote_nl:  db "'", 10
 str_squote_colon: db "': "
+
+str_unrecognized_opt: db "unrecognized option '"
+str_unrecognized_opt_len equ $ - str_unrecognized_opt
+
+str_try_help:   db "Try 'vdir --help' for more information.", 10
+str_try_help_len equ $ - str_try_help
 
 newline_str:    db 10
 colon_nl_str:   db ":", 10

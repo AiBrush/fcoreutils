@@ -20,7 +20,7 @@ config = {
     'gnu_path': '/usr/bin/chroot',
     'bss_size': 65536,
     'max_binary_size': 50000,
-    'test_args': ['--help'],
+    'test_args': ['/nonexistent'],
     'test_stdin': None,
     'timeout': 10,
 }

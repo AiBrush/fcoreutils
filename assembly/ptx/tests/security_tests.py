@@ -7,9 +7,17 @@ fptx produces a permuted index.
 
 import os
 import sys
+import tempfile
+import atexit
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
+
+_tf = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+_tf.write('hello world\nfoo bar baz\n')
+_tf.flush()
+_tf.close()
+atexit.register(os.unlink, _tf.name)
 
 config = {
     'tool_name': 'ptx',
@@ -17,7 +25,7 @@ config = {
     'gnu_path': '/usr/bin/ptx',
     'bss_size': 65536,
     'max_binary_size': 102400,
-    'test_args': ['--help'],
+    'test_args': [_tf.name],
     'test_stdin': None,
     'timeout': 10,
 }

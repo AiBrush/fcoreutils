@@ -4,6 +4,7 @@
 Uses shared SecurityTestFramework with tool-specific cp tests.
 """
 
+import atexit
 import os
 import sys
 import tempfile
@@ -11,13 +12,22 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tests'))
 from security_framework import SecurityTestFramework
 
+# Create temp files for test_args (cp needs src + dst)
+_src = tempfile.NamedTemporaryFile(delete=False)
+_src.write(b"test\n")
+_src.close()
+_dst = tempfile.NamedTemporaryFile(delete=False)
+_dst.close()
+atexit.register(os.unlink, _src.name)
+atexit.register(os.unlink, _dst.name)
+
 config = {
     'tool_name': 'cp',
     'bin_name': 'fcp',
     'gnu_path': '/usr/bin/cp',
     'bss_size': 65536,
     'max_binary_size': 30000,
-    'test_args': ['--help'],
+    'test_args': [_src.name, _dst.name],
     'test_stdin': None,
     'timeout': 5,
 }
