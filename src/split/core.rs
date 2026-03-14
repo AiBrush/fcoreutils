@@ -3,6 +3,8 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::common::io::FileData;
+
 #[cfg(unix)]
 use rayon::prelude::*;
 
@@ -555,14 +557,14 @@ fn split_by_number_extract(input_path: &str, k: u64, n: u64) -> io::Result<()> {
 }
 
 /// Read all input data into a buffer.
-fn read_input_data(input_path: &str) -> io::Result<Vec<u8>> {
+fn read_input_data(input_path: &str) -> io::Result<FileData> {
     if input_path == "-" {
         let mut buf = Vec::new();
         io::stdin().lock().read_to_end(&mut buf)?;
-        Ok(buf)
+        Ok(FileData::Owned(buf))
     } else {
         let data = crate::common::io::read_file(Path::new(input_path))?;
-        Ok(data.to_vec())
+        Ok(data)
     }
 }
 
