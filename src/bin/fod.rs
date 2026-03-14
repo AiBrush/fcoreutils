@@ -365,7 +365,10 @@ fn main() {
             process::exit(1);
         }
     } else if operands.len() == 1 && operands[0] != "-" {
-        match coreutils_rs::common::io::read_file(std::path::Path::new(&operands[0])) {
+        match coreutils_rs::common::io::read_file_with_hints(
+            std::path::Path::new(&operands[0]),
+            coreutils_rs::common::io::MmapHints::Lazy,
+        ) {
             Ok(data) => {
                 if let Err(e) = od_process(data.as_ref(), &mut out, &config) {
                     eprintln!("{}: {}", TOOL_NAME, e);

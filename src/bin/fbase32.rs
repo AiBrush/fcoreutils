@@ -39,7 +39,8 @@ fn write_all_fd1(buf: &[u8]) -> bool {
 const TOOL_NAME: &str = "base32";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Base32 alphabet per RFC 4648
+/// Base32 alphabet per RFC 4648 (used only in test encode helper)
+#[cfg(test)]
 const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 /// Build a decoding table: maps ASCII byte -> 5-bit value (0-31), 0xFF for invalid.
@@ -373,18 +374,33 @@ fn base32_decode(input: &[u8], ignore_garbage: bool) -> Result<Vec<u8>, String> 
     Ok(result)
 }
 
+/// Map a 5-bit index (0-31) to its base32 ASCII character.
+/// A-Z = 0-25, 2-7 = 26-31. Pure arithmetic, no table lookup.
+#[inline(always)]
+const fn b32_char(idx: u8) -> u8 {
+    if idx < 26 {
+        idx + b'A'
+    } else {
+        idx - 26 + b'2'
+    }
+}
+
 /// Encode 5 bytes into 8 base32 characters directly into output buffer.
-/// Returns 8 (bytes written). Caller must ensure `out` has at least 8 bytes.
+/// SWAR approach: packs 5 bytes into a u64, extracts 8 groups of 5 bits,
+/// and converts each to a base32 character via arithmetic (no table lookup).
 #[inline(always)]
 fn encode_5_to_8(b0: u8, b1: u8, b2: u8, b3: u8, b4: u8, out: &mut [u8]) {
-    out[0] = BASE32_ALPHABET[(b0 >> 3) as usize];
-    out[1] = BASE32_ALPHABET[((b0 & 0x07) << 2 | b1 >> 6) as usize];
-    out[2] = BASE32_ALPHABET[((b1 >> 1) & 0x1F) as usize];
-    out[3] = BASE32_ALPHABET[((b1 & 0x01) << 4 | b2 >> 4) as usize];
-    out[4] = BASE32_ALPHABET[((b2 & 0x0F) << 1 | b3 >> 7) as usize];
-    out[5] = BASE32_ALPHABET[((b3 >> 2) & 0x1F) as usize];
-    out[6] = BASE32_ALPHABET[((b3 & 0x03) << 3 | b4 >> 5) as usize];
-    out[7] = BASE32_ALPHABET[(b4 & 0x1F) as usize];
+    let val: u64 =
+        (b0 as u64) << 32 | (b1 as u64) << 24 | (b2 as u64) << 16 | (b3 as u64) << 8 | (b4 as u64);
+
+    out[0] = b32_char(((val >> 35) & 0x1F) as u8);
+    out[1] = b32_char(((val >> 30) & 0x1F) as u8);
+    out[2] = b32_char(((val >> 25) & 0x1F) as u8);
+    out[3] = b32_char(((val >> 20) & 0x1F) as u8);
+    out[4] = b32_char(((val >> 15) & 0x1F) as u8);
+    out[5] = b32_char(((val >> 10) & 0x1F) as u8);
+    out[6] = b32_char(((val >> 5) & 0x1F) as u8);
+    out[7] = b32_char((val & 0x1F) as u8);
 }
 
 /// Encode and write with line wrapping using raw fd1 writes.
@@ -459,18 +475,23 @@ fn encode_streaming(data: &[u8], wrap: usize) -> io::Result<()> {
         let (b0, b1, b2, b3, b4) = (padded[0], padded[1], padded[2], padded[3], padded[4]);
 
         let mut partial = [b'='; 8];
-        partial[0] = BASE32_ALPHABET[(b0 >> 3) as usize];
-        partial[1] = BASE32_ALPHABET[((b0 & 0x07) << 2 | b1 >> 6) as usize];
+        let val: u64 = (b0 as u64) << 32
+            | (b1 as u64) << 24
+            | (b2 as u64) << 16
+            | (b3 as u64) << 8
+            | (b4 as u64);
+        partial[0] = b32_char(((val >> 35) & 0x1F) as u8);
+        partial[1] = b32_char(((val >> 30) & 0x1F) as u8);
         if remainder >= 2 {
-            partial[2] = BASE32_ALPHABET[((b1 >> 1) & 0x1F) as usize];
-            partial[3] = BASE32_ALPHABET[((b1 & 0x01) << 4 | b2 >> 4) as usize];
+            partial[2] = b32_char(((val >> 25) & 0x1F) as u8);
+            partial[3] = b32_char(((val >> 20) & 0x1F) as u8);
         }
         if remainder >= 3 {
-            partial[4] = BASE32_ALPHABET[((b2 & 0x0F) << 1 | b3 >> 7) as usize];
+            partial[4] = b32_char(((val >> 15) & 0x1F) as u8);
         }
         if remainder >= 4 {
-            partial[5] = BASE32_ALPHABET[((b3 >> 2) & 0x1F) as usize];
-            partial[6] = BASE32_ALPHABET[((b3 & 0x03) << 3 | b4 >> 5) as usize];
+            partial[5] = b32_char(((val >> 10) & 0x1F) as u8);
+            partial[6] = b32_char(((val >> 5) & 0x1F) as u8);
         }
 
         if wrap == 0 {

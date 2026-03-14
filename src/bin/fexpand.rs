@@ -6,7 +6,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::{read_file, read_stdin};
+use coreutils_rs::common::io::{MmapHints, read_file_with_hints, read_stdin};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::expand::{TabStops, expand_bytes, parse_tab_stops};
 
@@ -171,7 +171,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file(Path::new(filename)) {
+            match read_file_with_hints(Path::new(filename), MmapHints::Lazy) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("expand: {}: {}", filename, io_error_msg(&e));

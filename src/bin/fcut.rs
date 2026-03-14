@@ -8,9 +8,9 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::process;
 
-use coreutils_rs::common::io::read_file;
 #[cfg(unix)]
 use coreutils_rs::common::io::try_mmap_stdin;
+use coreutils_rs::common::io::{MmapHints, read_file_with_hints};
 use coreutils_rs::common::{enlarge_stdout_pipe, io_error_msg};
 use coreutils_rs::cut::{self, CutMode};
 
@@ -612,7 +612,7 @@ fn main() {
                 }
             }
         } else {
-            match read_file(Path::new(filename)) {
+            match read_file_with_hints(Path::new(filename), MmapHints::Lazy) {
                 Ok(data) => cut::process_cut_data(&data, &cfg, &mut out),
                 Err(e) => {
                     eprintln!("cut: {}: {}", filename, io_error_msg(&e));
