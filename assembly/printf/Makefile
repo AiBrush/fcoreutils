@@ -5,7 +5,7 @@ UNIFIED_SRC = fprintf_unified.asm
 TEST_DEP    = release
 TEST_BIN    = ./fprintf_release
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU (startup-dominated) ==="

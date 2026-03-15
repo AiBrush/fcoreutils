@@ -4,7 +4,7 @@ TARGET      = fbasenc
 LIB_SRCS    =
 UNIFIED_SRC = unified/fbasenc_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 # Override dev: fbasenc is unified-only, no modular build
 dev: $(UNIFIED_SRC)

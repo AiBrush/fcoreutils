@@ -4,7 +4,7 @@ LIB_SRCS    = io.asm str.asm args.asm
 TOOL_SRCS   = tools/fstat.asm
 UNIFIED_SRC = fstat_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU stat ==="

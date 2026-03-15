@@ -3,4 +3,4 @@ TARGET    = fexpand
 LIB_SRCS  = io.asm
 UNIFIED_SRC = fexpand_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

@@ -3,7 +3,7 @@ TARGET      = fchmod
 LIB_SRCS    =
 UNIFIED_SRC = fchmod_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU chmod ==="

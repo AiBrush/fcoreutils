@@ -3,4 +3,4 @@ TARGET    = ffold
 LIB_SRCS  = io.asm
 UNIFIED_SRC = unified/ffold_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

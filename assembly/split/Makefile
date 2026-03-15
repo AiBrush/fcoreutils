@@ -3,7 +3,7 @@ TARGET      = fsplit
 LIB_SRCS    =
 UNIFIED_SRC = unified/fsplit_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 # Override dev to build from unified since no modular source exists yet
 dev: $(UNIFIED_SRC)

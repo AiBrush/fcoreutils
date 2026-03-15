@@ -5,4 +5,4 @@ UNIFIED_SRC = fmv_unified.asm
 TEST_DEP    = release
 TEST_BIN    = ./fmv_release
 
-include ../../Makefile.inc
+include ../Makefile.inc

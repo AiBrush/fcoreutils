@@ -10,10 +10,10 @@
 
 NASM          ?= nasm
 LD            ?= ld
-NASMFLAGS     ?= -f elf64 -I ./ -I ../../lib/
+NASMFLAGS     ?= -f elf64 -I ./ -I ../lib/
 LDFLAGS       ?= --gc-sections
 BUILD         ?= build
-SHARED_LIB_DIR = ../../lib
+SHARED_LIB_DIR = ../lib
 
 TOOL_SRCS     ?= tools/$(TARGET).asm
 UNIFIED_SRC   ?= $(TARGET)_unified.asm
@@ -24,14 +24,14 @@ TEST_BIN      ?= ./$(TARGET)
 SHARED_LIB_OBJS = $(LIB_SRCS:%.asm=$(BUILD)/shared_%.o)
 TOOL_OBJS       = $(patsubst %.asm,$(BUILD)/%.o,$(notdir $(TOOL_SRCS)))
 
-.PHONY: all dev release clean test bench sizes
+.PHONY: all dev modular release clean test bench sizes
 
 all: dev
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
-# Pattern rule: assemble shared lib .asm -> .o (from ../../lib/)
+# Pattern rule: assemble shared lib .asm -> .o (from ../lib/)
 $(BUILD)/shared_%.o: $(SHARED_LIB_DIR)/%.asm | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
@@ -39,8 +39,13 @@ $(BUILD)/shared_%.o: $(SHARED_LIB_DIR)/%.asm | $(BUILD)
 $(BUILD)/%.o: tools/%.asm | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
-# Dev build — modular, fast iteration
-dev: $(TOOL_SRCS) $(SHARED_LIB_OBJS) | $(BUILD)
+# Dev build — unified flat binary (matches CI)
+dev: $(UNIFIED_SRC)
+	nasm -f bin $(UNIFIED_SRC) -o $(TARGET)
+	chmod +x $(TARGET)
+
+# Modular build — elf64 + ld, for tools with complete modular sources
+modular: $(TOOL_SRCS) $(SHARED_LIB_OBJS) | $(BUILD)
 	$(NASM) $(NASMFLAGS) $(TOOL_SRCS) -o $(BUILD)/$(TARGET).o
 	$(LD) $(LDFLAGS) $(BUILD)/$(TARGET).o $(SHARED_LIB_OBJS) -o $(TARGET)
 

@@ -4,7 +4,7 @@ LIB_SRCS    = io.asm str.asm args.asm
 TOOL_SRCS   = tools/fbase64.asm
 UNIFIED_SRC = unified/fbase64_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU base64 ==="

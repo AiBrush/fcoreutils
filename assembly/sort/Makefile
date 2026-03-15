@@ -3,4 +3,4 @@ TARGET    = fsort
 LIB_SRCS  = io.asm str.asm
 UNIFIED_SRC = unified/fsort_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

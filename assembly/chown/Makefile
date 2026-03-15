@@ -3,7 +3,7 @@ TARGET    = fchown
 LIB_SRCS  =
 UNIFIED_SRC = unified/fchown_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 # Override dev to build from unified since no tools/ dir
 dev: $(UNIFIED_SRC)

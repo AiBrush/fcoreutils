@@ -5,7 +5,7 @@ UNIFIED_SRC = fcksum_unified.asm
 TEST_DEP    = release
 TEST_BIN    = ./fcksum_release
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU (startup-dominated) ==="

@@ -6,7 +6,7 @@ UNIFIED_SRC = ftee_unified.asm
 TEST_DEP    = release
 TEST_BIN    = ./ftee_release
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU ==="

@@ -4,7 +4,7 @@ LIB_SRCS    = io.asm str.asm args.asm
 TOOL_SRCS   = tools/fsha256sum.asm
 UNIFIED_SRC = unified/fsha256sum_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 # Override dev to build from unified since tools/fsha256sum.asm is a stub
 dev: $(UNIFIED_SRC)

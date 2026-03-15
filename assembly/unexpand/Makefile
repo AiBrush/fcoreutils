@@ -3,7 +3,7 @@ TARGET      = funexpand
 LIB_SRCS    = io.asm
 LDFLAGS     = --gc-sections -n
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark: funexpand vs GNU unexpand ==="

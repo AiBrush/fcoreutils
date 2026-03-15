@@ -3,4 +3,4 @@ TARGET    = ffactor
 LIB_SRCS  = io.asm str.asm
 UNIFIED_SRC = ffactor_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

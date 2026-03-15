@@ -5,7 +5,7 @@ UNIFIED_SRC = unified/fsha512sum_unified.asm
 TEST_DEP    = release
 TEST_BIN    = ./fsha512sum_release
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU sha512sum ==="

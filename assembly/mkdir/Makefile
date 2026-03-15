@@ -4,7 +4,7 @@ LIB_SRCS    = io.asm args.asm str.asm
 TOOL_SRCS   = tools/fmkdir.asm
 UNIFIED_SRC = fmkdir_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU mkdir ==="

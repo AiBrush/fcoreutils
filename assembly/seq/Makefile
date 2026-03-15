@@ -3,7 +3,7 @@ TARGET      = fseq
 LIB_SRCS    = io.asm str.asm
 TOOL_SRCS   = tools/fseq.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU seq ==="
