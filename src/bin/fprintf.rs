@@ -5,6 +5,9 @@
 use std::io::{BufWriter, Write};
 use std::process;
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+
 const TOOL_NAME: &str = "printf";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -53,9 +56,25 @@ fn main() {
     coreutils_rs::common::reset_sigpipe();
 
     // Collect args once into a single Vec<String>. We skip(1) to drop argv[0].
+    // On Unix, use OsStr::as_bytes() to preserve raw bytes (GNU compat: no U+FFFD
+    // replacement for invalid UTF-8). The printf engine scans only ASCII format
+    // specifiers, so non-UTF-8 bytes pass through to the output correctly.
     let args: Vec<String> = std::env::args_os()
         .skip(1)
-        .map(|s| s.to_string_lossy().into_owned())
+        .map(|s| {
+            #[cfg(unix)]
+            {
+                // SAFETY: printf format processing scans only for ASCII characters
+                // (%, \, etc.) and writes all other bytes verbatim. Treating raw OS
+                // bytes as str preserves non-UTF-8 byte sequences exactly as GNU does.
+                let bytes = s.as_bytes();
+                unsafe { String::from_utf8_unchecked(bytes.to_vec()) }
+            }
+            #[cfg(not(unix))]
+            {
+                s.to_string_lossy().into_owned()
+            }
+        })
         .collect();
 
     if args.is_empty() {
