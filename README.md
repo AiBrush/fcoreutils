@@ -8,7 +8,7 @@
 
 High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelerated, drop-in compatible, cross-platform.
 
-## Independent Test Results (v0.22.3)
+## Independent Test Results (v0.22.5)
 
 *Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, hyperfine*
 
@@ -226,7 +226,7 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **107 tools** have assembly implementations — all 107 are fully buildable static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
 
-All 107 tools are tested by the [independent test suite](https://github.com/AiBrush/coreutils-rs-independent-test). Results below from the latest CI run (v0.22.3). Speedups **>1.0x** vs GNU are **bold**. ✅ = all tests pass, ⚠️ = partial.
+All 107 tools are tested by the [independent test suite](https://github.com/AiBrush/coreutils-rs-independent-test). Results below from the latest CI run (v0.22.5). Speedups **>1.0x** vs GNU are **bold**. ✅ = all tests pass, ⚠️ = partial.
 
 | Tool | Compat | Security | Asm Size | Speedup vs GNU |
 |------|--------|----------|----------|----------------|
@@ -235,7 +235,7 @@ All 107 tools are tested by the [independent test suite](https://github.com/AiBr
 | base32 | ✅ 16/16 | ✅ 112/112 | 6.8 KB | **1.8x** |
 | base64 | ✅ 17/17 | ✅ 109/109 | 5.7 KB | **1.6x** |
 | basename | ✅ 36/36 | ✅ 84/86 | 2.9 KB | — |
-| basenc | ✅ 205/205 | ✅ 97/97 | 11.6 KB | 0.7x |
+| basenc | ✅ 205/205 | ✅ 97/97 | 11.6 KB | **1.8x** |
 | cat | ✅ 65/65 | ✅ 95/95 | 18.0 KB | **3.8x** |
 | chcon | ✅ 6/6 | ✅ 69/71 | 3.8 KB | — |
 | chgrp | ✅ 14/14 | ✅ 68/70 | 5.8 KB | — |
