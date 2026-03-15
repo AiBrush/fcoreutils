@@ -65,31 +65,21 @@ ehdr:
     dd 0
     dw ehdr_size
     dw phdr_size
-    dw 3
+    dw 2
     dw 0, 0, 0
 ehdr_size equ $ - ehdr
 
 ; ─── Program Headers ─────────────────────────────────────
 phdr:
     dd 1                    ; PT_LOAD
-    dd 5                    ; PF_R | PF_X
+    dd 7                    ; PF_R | PF_W | PF_X
     dq 0
     dq 0x400000
     dq 0x400000
-    dq file_end - ehdr
-    dq file_end - ehdr
+    dq file_size
+    dq file_size + bss_size ; memsz includes BSS
     dq 0x1000
 phdr_size equ $ - phdr
-
-    ; PT_LOAD for BSS (read+write)
-    dd 1                    ; PT_LOAD
-    dd 6                    ; PF_R | PF_W
-    dq bss_file_offset
-    dq bss_start
-    dq bss_start
-    dq 0
-    dq bss_end - bss_start
-    dq 0x1000
 
     ; PT_GNU_STACK (NX)
     dd 0x6474E551           ; PT_GNU_STACK
@@ -164,26 +154,26 @@ _start:
     mov     r14, [rsp]
     lea     r15, [rsp + 8]
 
-    mov     byte [rel opt_suppress1], 0
-    mov     byte [rel opt_suppress2], 0
-    mov     byte [rel opt_suppress3], 0
-    mov     byte [rel opt_order_check], ORDER_DEFAULT
-    mov     byte [rel opt_total], 0
-    mov     byte [rel opt_zero_terminated], 0
-    mov     qword [rel opt_delim_len], 0
-    mov     byte [rel opt_delim_set], 0
-    mov     qword [rel file1_path], 0
-    mov     qword [rel file2_path], 0
+    mov     byte [opt_suppress1], 0
+    mov     byte [opt_suppress2], 0
+    mov     byte [opt_suppress3], 0
+    mov     byte [opt_order_check], ORDER_DEFAULT
+    mov     byte [opt_total], 0
+    mov     byte [opt_zero_terminated], 0
+    mov     qword [opt_delim_len], 0
+    mov     byte [opt_delim_set], 0
+    mov     qword [file1_path], 0
+    mov     qword [file2_path], 0
 
     mov     rbx, 1
     xor     ecx, ecx
-    mov     [rel seen_dashdash], cl
+    mov     [seen_dashdash], cl
 
 .parse_loop:
     cmp     rbx, r14
     jge     .parse_done
     mov     rsi, [r15 + rbx*8]
-    cmp     byte [rel seen_dashdash], 0
+    cmp     byte [seen_dashdash], 0
     jne     .is_operand
     cmp     byte [rsi], '-'
     jne     .is_operand
@@ -215,19 +205,19 @@ _start:
     syscall
 
 .short_1:
-    mov     byte [rel opt_suppress1], 1
+    mov     byte [opt_suppress1], 1
     inc     rdi
     jmp     .parse_short_opts
 .short_2:
-    mov     byte [rel opt_suppress2], 1
+    mov     byte [opt_suppress2], 1
     inc     rdi
     jmp     .parse_short_opts
 .short_3:
-    mov     byte [rel opt_suppress3], 1
+    mov     byte [opt_suppress3], 1
     inc     rdi
     jmp     .parse_short_opts
 .short_z:
-    mov     byte [rel opt_zero_terminated], 1
+    mov     byte [opt_zero_terminated], 1
     inc     rdi
     jmp     .parse_short_opts
 
@@ -306,17 +296,17 @@ _start:
 
 .long_check_order:
     pop     rbx
-    mov     byte [rel opt_order_check], ORDER_STRICT
+    mov     byte [opt_order_check], ORDER_STRICT
     jmp     .parse_next
 .long_nocheck_order:
     pop     rbx
-    mov     byte [rel opt_order_check], ORDER_NONE
+    mov     byte [opt_order_check], ORDER_NONE
     jmp     .parse_next
 .long_outdelim:
     mov     rsi, [r15 + rbx*8]
     lea     rdi, [rsi+19]
     call    copy_output_delimiter
-    mov     byte [rel opt_delim_set], 1
+    mov     byte [opt_delim_set], 1
     pop     rbx
     jmp     .parse_next
 .long_outdelim_space:
@@ -326,25 +316,25 @@ _start:
     jge     .err_missing_delim_arg
     mov     rdi, [r15 + rbx*8]
     call    copy_output_delimiter
-    mov     byte [rel opt_delim_set], 1
+    mov     byte [opt_delim_set], 1
     jmp     .parse_next
 .long_total:
     pop     rbx
-    mov     byte [rel opt_total], 1
+    mov     byte [opt_total], 1
     jmp     .parse_next
 .long_zeroterm:
     pop     rbx
-    mov     byte [rel opt_zero_terminated], 1
+    mov     byte [opt_zero_terminated], 1
     jmp     .parse_next
 
 .set_dashdash:
-    mov     byte [rel seen_dashdash], 1
+    mov     byte [seen_dashdash], 1
     jmp     .parse_next
 
 .is_operand:
-    cmp     qword [rel file1_path], 0
+    cmp     qword [file1_path], 0
     je      .set_file1
-    cmp     qword [rel file2_path], 0
+    cmp     qword [file2_path], 0
     je      .set_file2
     push    rbx
     lea     rdi, [rel str_prefix]
@@ -375,11 +365,11 @@ _start:
 
 .set_file1:
     mov     rax, [r15 + rbx*8]
-    mov     [rel file1_path], rax
+    mov     [file1_path], rax
     jmp     .parse_next
 .set_file2:
     mov     rax, [r15 + rbx*8]
-    mov     [rel file2_path], rax
+    mov     [file2_path], rax
     jmp     .parse_next
 
 .parse_next:
@@ -387,79 +377,79 @@ _start:
     jmp     .parse_loop
 
 .parse_done:
-    cmp     qword [rel file1_path], 0
+    cmp     qword [file1_path], 0
     je      .err_missing_operand
-    cmp     qword [rel file2_path], 0
+    cmp     qword [file2_path], 0
     je      .err_missing_operand_after
 
-    cmp     byte [rel opt_zero_terminated], 0
+    cmp     byte [opt_zero_terminated], 0
     jne     .use_nul_delim
-    mov     byte [rel line_delim], 10
+    mov     byte [line_delim], 10
     jmp     .setup_delim_done
 .use_nul_delim:
-    mov     byte [rel line_delim], 0
+    mov     byte [line_delim], 0
 .setup_delim_done:
-    cmp     byte [rel opt_delim_set], 0
+    cmp     byte [opt_delim_set], 0
     jne     .delim_already_set
-    mov     byte [rel opt_delim_buf], 9
-    mov     qword [rel opt_delim_len], 1
+    mov     byte [opt_delim_buf], 9
+    mov     qword [opt_delim_len], 1
 .delim_already_set:
 
-    mov     rdi, [rel file1_path]
+    mov     rdi, [file1_path]
     call    open_and_mmap_file
     test    rax, rax
     js      .err_open_file1
-    mov     [rel file1_addr], rax
-    mov     [rel file1_len], rdx
+    mov     [file1_addr], rax
+    mov     [file1_len], rdx
 
-    mov     rdi, [rel file2_path]
+    mov     rdi, [file2_path]
     call    open_and_mmap_file
     test    rax, rax
     js      .err_open_file2
-    mov     [rel file2_addr], rax
-    mov     [rel file2_len], rdx
+    mov     [file2_addr], rax
+    mov     [file2_len], rdx
 
-    mov     qword [rel count1], 0
-    mov     qword [rel count2], 0
-    mov     qword [rel count3], 0
-    mov     byte [rel had_order_error], 0
-    mov     byte [rel warned1], 0
-    mov     byte [rel warned2], 0
-    mov     qword [rel out_buf_used], 0
+    mov     qword [count1], 0
+    mov     qword [count2], 0
+    mov     qword [count3], 0
+    mov     byte [had_order_error], 0
+    mov     byte [warned1], 0
+    mov     byte [warned2], 0
+    mov     qword [out_buf_used], 0
 
-    mov     rax, [rel file1_addr]
-    mov     [rel f1_base], rax
-    mov     rax, [rel file2_addr]
-    mov     [rel f2_base], rax
+    mov     rax, [file1_addr]
+    mov     [f1_base], rax
+    mov     rax, [file2_addr]
+    mov     [f2_base], rax
 
     xor     r12d, r12d
     xor     r13d, r13d
-    mov     r14, [rel file1_len]
-    mov     r15, [rel file2_len]
+    mov     r14, [file1_len]
+    mov     r15, [file2_len]
 
     test    r14, r14
     jz      .no_strip1
-    mov     rax, [rel f1_base]
-    movzx   ecx, byte [rel line_delim]
+    mov     rax, [f1_base]
+    movzx   ecx, byte [line_delim]
     cmp     byte [rax + r14 - 1], cl
     jne     .no_strip1
     dec     r14
 .no_strip1:
     test    r15, r15
     jz      .no_strip2
-    mov     rax, [rel f2_base]
-    movzx   ecx, byte [rel line_delim]
+    mov     rax, [f2_base]
+    movzx   ecx, byte [line_delim]
     cmp     byte [rax + r15 - 1], cl
     jne     .no_strip2
     dec     r15
 .no_strip2:
 
-    mov     qword [rel prev1_ptr], 0
-    mov     qword [rel prev1_len], 0
-    mov     qword [rel prev2_ptr], 0
-    mov     qword [rel prev2_len], 0
-    mov     byte [rel has_prev1], 0
-    mov     byte [rel has_prev2], 0
+    mov     qword [prev1_ptr], 0
+    mov     qword [prev1_len], 0
+    mov     qword [prev2_ptr], 0
+    mov     qword [prev2_len], 0
+    mov     byte [has_prev1], 0
+    mov     byte [has_prev2], 0
 
 .merge_loop:
     cmp     r12, r14
@@ -467,28 +457,28 @@ _start:
     cmp     r13, r15
     jge     .drain_file1
 
-    mov     rax, [rel f1_base]
+    mov     rax, [f1_base]
     lea     rdi, [rax + r12]
-    mov     [rel cur_line1_ptr], rdi
+    mov     [cur_line1_ptr], rdi
     mov     rsi, r14
     sub     rsi, r12
-    movzx   edx, byte [rel line_delim]
+    movzx   edx, byte [line_delim]
     call    find_delim
-    mov     [rel cur_line1_len], rax
+    mov     [cur_line1_len], rax
 
-    mov     rax, [rel f2_base]
+    mov     rax, [f2_base]
     lea     rdi, [rax + r13]
-    mov     [rel cur_line2_ptr], rdi
+    mov     [cur_line2_ptr], rdi
     mov     rsi, r15
     sub     rsi, r13
-    movzx   edx, byte [rel line_delim]
+    movzx   edx, byte [line_delim]
     call    find_delim
-    mov     [rel cur_line2_len], rax
+    mov     [cur_line2_len], rax
 
-    mov     rdi, [rel cur_line1_ptr]
-    mov     rsi, [rel cur_line1_len]
-    mov     rdx, [rel cur_line2_ptr]
-    mov     rcx, [rel cur_line2_len]
+    mov     rdi, [cur_line1_ptr]
+    mov     rsi, [cur_line1_len]
+    mov     rdx, [cur_line2_ptr]
+    mov     rcx, [cur_line2_len]
     call    compare_lines
 
     test    rax, rax
@@ -500,20 +490,20 @@ _start:
     call    check_order_file1
     test    rax, rax
     jnz     .early_exit_order
-    cmp     byte [rel opt_suppress1], 0
+    cmp     byte [opt_suppress1], 0
     jne     .skip_col1_output
-    mov     rdi, [rel cur_line1_ptr]
-    mov     rsi, [rel cur_line1_len]
+    mov     rdi, [cur_line1_ptr]
+    mov     rsi, [cur_line1_len]
     xor     edx, edx
     call    output_line
 .skip_col1_output:
-    inc     qword [rel count1]
-    mov     rax, [rel cur_line1_ptr]
-    mov     [rel prev1_ptr], rax
-    mov     rax, [rel cur_line1_len]
-    mov     [rel prev1_len], rax
-    mov     byte [rel has_prev1], 1
-    add     r12, [rel cur_line1_len]
+    inc     qword [count1]
+    mov     rax, [cur_line1_ptr]
+    mov     [prev1_ptr], rax
+    mov     rax, [cur_line1_len]
+    mov     [prev1_len], rax
+    mov     byte [has_prev1], 1
+    add     r12, [cur_line1_len]
     cmp     r12, r14
     jge     .merge_loop
     inc     r12
@@ -523,64 +513,64 @@ _start:
     call    check_order_file2
     test    rax, rax
     jnz     .early_exit_order
-    cmp     byte [rel opt_suppress2], 0
+    cmp     byte [opt_suppress2], 0
     jne     .skip_col2_output
-    cmp     byte [rel opt_suppress1], 0
+    cmp     byte [opt_suppress1], 0
     jne     .col2_no_prefix
     mov     edx, 1
     jmp     .col2_write
 .col2_no_prefix:
     xor     edx, edx
 .col2_write:
-    mov     rdi, [rel cur_line2_ptr]
-    mov     rsi, [rel cur_line2_len]
+    mov     rdi, [cur_line2_ptr]
+    mov     rsi, [cur_line2_len]
     call    output_line
 .skip_col2_output:
-    inc     qword [rel count2]
-    mov     rax, [rel cur_line2_ptr]
-    mov     [rel prev2_ptr], rax
-    mov     rax, [rel cur_line2_len]
-    mov     [rel prev2_len], rax
-    mov     byte [rel has_prev2], 1
-    add     r13, [rel cur_line2_len]
+    inc     qword [count2]
+    mov     rax, [cur_line2_ptr]
+    mov     [prev2_ptr], rax
+    mov     rax, [cur_line2_len]
+    mov     [prev2_len], rax
+    mov     byte [has_prev2], 1
+    add     r13, [cur_line2_len]
     cmp     r13, r15
     jge     .merge_loop
     inc     r13
     jmp     .merge_loop
 
 .lines_equal:
-    cmp     byte [rel opt_suppress3], 0
+    cmp     byte [opt_suppress3], 0
     jne     .skip_col3_output
     xor     edx, edx
-    cmp     byte [rel opt_suppress1], 0
+    cmp     byte [opt_suppress1], 0
     jne     .col3_check2
     inc     edx
 .col3_check2:
-    cmp     byte [rel opt_suppress2], 0
+    cmp     byte [opt_suppress2], 0
     jne     .col3_write
     inc     edx
 .col3_write:
-    mov     rdi, [rel cur_line1_ptr]
-    mov     rsi, [rel cur_line1_len]
+    mov     rdi, [cur_line1_ptr]
+    mov     rsi, [cur_line1_len]
     call    output_line
 .skip_col3_output:
-    inc     qword [rel count3]
-    mov     rax, [rel cur_line1_ptr]
-    mov     [rel prev1_ptr], rax
-    mov     rax, [rel cur_line1_len]
-    mov     [rel prev1_len], rax
-    mov     byte [rel has_prev1], 1
-    mov     rax, [rel cur_line2_ptr]
-    mov     [rel prev2_ptr], rax
-    mov     rax, [rel cur_line2_len]
-    mov     [rel prev2_len], rax
-    mov     byte [rel has_prev2], 1
-    add     r12, [rel cur_line1_len]
+    inc     qword [count3]
+    mov     rax, [cur_line1_ptr]
+    mov     [prev1_ptr], rax
+    mov     rax, [cur_line1_len]
+    mov     [prev1_len], rax
+    mov     byte [has_prev1], 1
+    mov     rax, [cur_line2_ptr]
+    mov     [prev2_ptr], rax
+    mov     rax, [cur_line2_len]
+    mov     [prev2_len], rax
+    mov     byte [has_prev2], 1
+    add     r12, [cur_line1_len]
     cmp     r12, r14
     jge     .adv_pos2_equal
     inc     r12
 .adv_pos2_equal:
-    add     r13, [rel cur_line2_len]
+    add     r13, [cur_line2_len]
     cmp     r13, r15
     jge     .merge_loop
     inc     r13
@@ -589,31 +579,31 @@ _start:
 .drain_file1:
     cmp     r12, r14
     jge     .after_drain
-    mov     rax, [rel f1_base]
+    mov     rax, [f1_base]
     lea     rdi, [rax + r12]
-    mov     [rel cur_line1_ptr], rdi
+    mov     [cur_line1_ptr], rdi
     mov     rsi, r14
     sub     rsi, r12
-    movzx   edx, byte [rel line_delim]
+    movzx   edx, byte [line_delim]
     call    find_delim
-    mov     [rel cur_line1_len], rax
+    mov     [cur_line1_len], rax
     call    check_order_file1
     test    rax, rax
     jnz     .early_exit_order
-    cmp     byte [rel opt_suppress1], 0
+    cmp     byte [opt_suppress1], 0
     jne     .skip_drain1_output
-    mov     rdi, [rel cur_line1_ptr]
-    mov     rsi, [rel cur_line1_len]
+    mov     rdi, [cur_line1_ptr]
+    mov     rsi, [cur_line1_len]
     xor     edx, edx
     call    output_line
 .skip_drain1_output:
-    inc     qword [rel count1]
-    mov     rax, [rel cur_line1_ptr]
-    mov     [rel prev1_ptr], rax
-    mov     rax, [rel cur_line1_len]
-    mov     [rel prev1_len], rax
-    mov     byte [rel has_prev1], 1
-    add     r12, [rel cur_line1_len]
+    inc     qword [count1]
+    mov     rax, [cur_line1_ptr]
+    mov     [prev1_ptr], rax
+    mov     rax, [cur_line1_len]
+    mov     [prev1_len], rax
+    mov     byte [has_prev1], 1
+    add     r12, [cur_line1_len]
     cmp     r12, r14
     jge     .after_drain
     inc     r12
@@ -622,89 +612,89 @@ _start:
 .drain_file2:
     cmp     r13, r15
     jge     .after_drain
-    mov     rax, [rel f2_base]
+    mov     rax, [f2_base]
     lea     rdi, [rax + r13]
-    mov     [rel cur_line2_ptr], rdi
+    mov     [cur_line2_ptr], rdi
     mov     rsi, r15
     sub     rsi, r13
-    movzx   edx, byte [rel line_delim]
+    movzx   edx, byte [line_delim]
     call    find_delim
-    mov     [rel cur_line2_len], rax
+    mov     [cur_line2_len], rax
     call    check_order_file2
     test    rax, rax
     jnz     .early_exit_order
-    cmp     byte [rel opt_suppress2], 0
+    cmp     byte [opt_suppress2], 0
     jne     .skip_drain2_output
-    cmp     byte [rel opt_suppress1], 0
+    cmp     byte [opt_suppress1], 0
     jne     .drain2_no_prefix
     mov     edx, 1
     jmp     .drain2_write
 .drain2_no_prefix:
     xor     edx, edx
 .drain2_write:
-    mov     rdi, [rel cur_line2_ptr]
-    mov     rsi, [rel cur_line2_len]
+    mov     rdi, [cur_line2_ptr]
+    mov     rsi, [cur_line2_len]
     call    output_line
 .skip_drain2_output:
-    inc     qword [rel count2]
-    mov     rax, [rel cur_line2_ptr]
-    mov     [rel prev2_ptr], rax
-    mov     rax, [rel cur_line2_len]
-    mov     [rel prev2_len], rax
-    mov     byte [rel has_prev2], 1
-    add     r13, [rel cur_line2_len]
+    inc     qword [count2]
+    mov     rax, [cur_line2_ptr]
+    mov     [prev2_ptr], rax
+    mov     rax, [cur_line2_len]
+    mov     [prev2_len], rax
+    mov     byte [has_prev2], 1
+    add     r13, [cur_line2_len]
     cmp     r13, r15
     jge     .after_drain
     inc     r13
     jmp     .drain_file2
 
 .after_drain:
-    cmp     byte [rel opt_total], 0
+    cmp     byte [opt_total], 0
     je      .skip_total
-    lea     rdi, [rel itoa_buf]
-    mov     rsi, [rel count1]
+    mov     rdi, itoa_buf
+    mov     rsi, [count1]
     call    itoa_u64
-    lea     rsi, [rel itoa_buf]
+    mov     rsi, itoa_buf
     mov     rdx, rax
     call    append_to_outbuf
-    lea     rsi, [rel opt_delim_buf]
-    mov     rdx, [rel opt_delim_len]
+    mov     rsi, opt_delim_buf
+    mov     rdx, [opt_delim_len]
     call    append_to_outbuf
-    lea     rdi, [rel itoa_buf]
-    mov     rsi, [rel count2]
+    mov     rdi, itoa_buf
+    mov     rsi, [count2]
     call    itoa_u64
-    lea     rsi, [rel itoa_buf]
+    mov     rsi, itoa_buf
     mov     rdx, rax
     call    append_to_outbuf
-    lea     rsi, [rel opt_delim_buf]
-    mov     rdx, [rel opt_delim_len]
+    mov     rsi, opt_delim_buf
+    mov     rdx, [opt_delim_len]
     call    append_to_outbuf
-    lea     rdi, [rel itoa_buf]
-    mov     rsi, [rel count3]
+    mov     rdi, itoa_buf
+    mov     rsi, [count3]
     call    itoa_u64
-    lea     rsi, [rel itoa_buf]
+    mov     rsi, itoa_buf
     mov     rdx, rax
     call    append_to_outbuf
-    lea     rsi, [rel opt_delim_buf]
-    mov     rdx, [rel opt_delim_len]
+    mov     rsi, opt_delim_buf
+    mov     rdx, [opt_delim_len]
     call    append_to_outbuf
     lea     rsi, [rel str_total_word]
     mov     rdx, 5
     call    append_to_outbuf
-    lea     rsi, [rel line_delim]
+    mov     rsi, line_delim
     mov     rdx, 1
     call    append_to_outbuf
 .skip_total:
     call    flush_outbuf
-    cmp     byte [rel had_order_error], 0
+    cmp     byte [had_order_error], 0
     je      .no_order_summary
-    cmp     byte [rel opt_order_check], ORDER_DEFAULT
+    cmp     byte [opt_order_check], ORDER_DEFAULT
     jne     .no_order_summary
     lea     rdi, [rel str_input_not_sorted]
     mov     rdx, str_input_not_sorted_len
     call    write_stderr
 .no_order_summary:
-    cmp     byte [rel had_order_error], 0
+    cmp     byte [had_order_error], 0
     jne     .exit_1
     xor     edi, edi
     mov     rax, SYS_EXIT
@@ -743,7 +733,7 @@ _start:
     lea     rdi, [rel str_quote_open]
     mov     rdx, 1
     call    write_stderr
-    mov     rdi, [rel file1_path]
+    mov     rdi, [file1_path]
     mov     rsi, rdi
     call    strlen
     mov     rdx, rax
@@ -771,14 +761,14 @@ _start:
     syscall
 
 .err_open_file1:
-    mov     rdi, [rel file1_path]
+    mov     rdi, [file1_path]
     call    err_open_file
     mov     edi, 1
     mov     rax, SYS_EXIT
     syscall
 
 .err_open_file2:
-    mov     rdi, [rel file2_path]
+    mov     rdi, [file2_path]
     call    err_open_file
     mov     edi, 1
     mov     rax, SYS_EXIT
@@ -868,12 +858,12 @@ open_and_mmap_file:
     js      .omf_open_fail
     mov     r12, rax
     mov     rdi, r12
-    lea     rsi, [rel stat_buf]
+    mov     rsi, stat_buf
     mov     rax, SYS_FSTAT
     syscall
     test    rax, rax
     js      .omf_fstat_fail
-    mov     r13, [rel stat_buf + 48]
+    mov     r13, [stat_buf + 48]
     test    r13, r13
     jz      .omf_empty_file
     xor     edi, edi
@@ -905,7 +895,7 @@ open_and_mmap_file:
 .omf_empty_file:
     mov     rdi, r12
     call    asm_close
-    lea     rax, [rel stat_buf]
+    mov     rax, stat_buf
     xor     edx, edx
     pop     r14
     pop     r13
@@ -955,7 +945,7 @@ find_delim:
 .fd_byte_scan:
     test    rcx, rcx
     jz      .fd_not_found
-    movzx   edx, byte [rel line_delim]
+    movzx   edx, byte [line_delim]
 .fd_byte_loop:
     cmp     byte [rdi], dl
     je      .fd_found_byte
@@ -1062,25 +1052,25 @@ output_line:
     mov     r13, rsi
     mov     r14d, edx
     movzx   eax, r14b
-    imul    rax, [rel opt_delim_len]
+    imul    rax, [opt_delim_len]
     add     rax, r13
     inc     rax
     mov     rbx, rax
-    mov     rcx, [rel out_buf_used]
+    mov     rcx, [out_buf_used]
     add     rcx, rbx
     cmp     rcx, OUT_BUF_SIZE
     jb      .ol_no_flush
     call    flush_outbuf
 .ol_no_flush:
-    mov     rcx, [rel out_buf_used]
+    mov     rcx, [out_buf_used]
     cmp     rcx, FLUSH_THRESHOLD
     jb      .ol_write_prefix
     call    flush_outbuf
 .ol_write_prefix:
     test    r14d, r14d
     jz      .ol_write_line
-    lea     rsi, [rel opt_delim_buf]
-    mov     rdx, [rel opt_delim_len]
+    mov     rsi, opt_delim_buf
+    mov     rdx, [opt_delim_len]
 .ol_prefix_loop:
     test    r14d, r14d
     jz      .ol_write_line
@@ -1094,7 +1084,7 @@ output_line:
     jz      .ol_write_delim
     call    append_to_outbuf
 .ol_write_delim:
-    lea     rsi, [rel line_delim]
+    mov     rsi, line_delim
     mov     rdx, 1
     call    append_to_outbuf
     pop     r14
@@ -1106,8 +1096,8 @@ output_line:
 append_to_outbuf:
     test    rdx, rdx
     jz      .atob_done
-    mov     rcx, [rel out_buf_used]
-    lea     rdi, [rel out_buf]
+    mov     rcx, [out_buf_used]
+    mov     rdi, out_buf
     add     rdi, rcx
     push    rsi
     push    rdx
@@ -1115,7 +1105,7 @@ append_to_outbuf:
     rep movsb
     pop     rdx
     pop     rsi
-    add     [rel out_buf_used], rdx
+    add     [out_buf_used], rdx
 .atob_done:
     ret
 
@@ -1124,16 +1114,16 @@ flush_outbuf:
     push    r13
     push    r14
     push    r15
-    mov     rax, [rel out_buf_used]
+    mov     rax, [out_buf_used]
     test    rax, rax
     jz      .fob_done
     mov     rdi, STDOUT
-    lea     rsi, [rel out_buf]
+    mov     rsi, out_buf
     mov     rdx, rax
     call    asm_write_all
     test    rax, rax
     js      .fob_write_error
-    mov     qword [rel out_buf_used], 0
+    mov     qword [out_buf_used], 0
 .fob_done:
     pop     r15
     pop     r14
@@ -1150,21 +1140,21 @@ flush_outbuf:
 
 check_order_file1:
     push    rbx
-    cmp     byte [rel opt_order_check], ORDER_NONE
+    cmp     byte [opt_order_check], ORDER_NONE
     je      .cof1_ok
-    cmp     byte [rel warned1], 0
+    cmp     byte [warned1], 0
     jne     .cof1_ok
-    cmp     byte [rel has_prev1], 0
+    cmp     byte [has_prev1], 0
     je      .cof1_ok
-    mov     rdi, [rel cur_line1_ptr]
-    mov     rsi, [rel cur_line1_len]
-    mov     rdx, [rel prev1_ptr]
-    mov     rcx, [rel prev1_len]
+    mov     rdi, [cur_line1_ptr]
+    mov     rsi, [cur_line1_len]
+    mov     rdx, [prev1_ptr]
+    mov     rcx, [prev1_len]
     call    compare_lines
     test    rax, rax
     jns     .cof1_ok
-    mov     byte [rel had_order_error], 1
-    mov     byte [rel warned1], 1
+    mov     byte [had_order_error], 1
+    mov     byte [warned1], 1
     push    r12
     push    r13
     push    r14
@@ -1176,7 +1166,7 @@ check_order_file1:
     pop     r14
     pop     r13
     pop     r12
-    cmp     byte [rel opt_order_check], ORDER_STRICT
+    cmp     byte [opt_order_check], ORDER_STRICT
     je      .cof1_stop
 .cof1_ok:
     xor     eax, eax
@@ -1189,21 +1179,21 @@ check_order_file1:
 
 check_order_file2:
     push    rbx
-    cmp     byte [rel opt_order_check], ORDER_NONE
+    cmp     byte [opt_order_check], ORDER_NONE
     je      .cof2_ok
-    cmp     byte [rel warned2], 0
+    cmp     byte [warned2], 0
     jne     .cof2_ok
-    cmp     byte [rel has_prev2], 0
+    cmp     byte [has_prev2], 0
     je      .cof2_ok
-    mov     rdi, [rel cur_line2_ptr]
-    mov     rsi, [rel cur_line2_len]
-    mov     rdx, [rel prev2_ptr]
-    mov     rcx, [rel prev2_len]
+    mov     rdi, [cur_line2_ptr]
+    mov     rsi, [cur_line2_len]
+    mov     rdx, [prev2_ptr]
+    mov     rcx, [prev2_len]
     call    compare_lines
     test    rax, rax
     jns     .cof2_ok
-    mov     byte [rel had_order_error], 1
-    mov     byte [rel warned2], 1
+    mov     byte [had_order_error], 1
+    mov     byte [warned2], 1
     push    r12
     push    r13
     push    r14
@@ -1215,7 +1205,7 @@ check_order_file2:
     pop     r14
     pop     r13
     pop     r12
-    cmp     byte [rel opt_order_check], ORDER_STRICT
+    cmp     byte [opt_order_check], ORDER_STRICT
     je      .cof2_stop
 .cof2_ok:
     xor     eax, eax
@@ -1234,10 +1224,10 @@ copy_output_delimiter:
     jbe     .cod_len_ok
     mov     rax, MAX_DELIM_LEN
 .cod_len_ok:
-    mov     [rel opt_delim_len], rax
+    mov     [opt_delim_len], rax
     mov     rcx, rax
     mov     rdi, rsi
-    lea     rsi, [rel opt_delim_buf]
+    mov     rsi, opt_delim_buf
     push    rdi
     mov     rdi, rsi
     pop     rsi
@@ -1258,7 +1248,7 @@ itoa_u64:
     pop     rbx
     ret
 .itoa_nonzero:
-    lea     rbx, [rel itoa_tmp]
+    mov     rbx, itoa_tmp
     xor     ecx, ecx
 .itoa_loop:
     test    rax, rax
@@ -1504,68 +1494,69 @@ version_text:
     db "comm (fcoreutils) 0.1.0", 10
 version_text_len equ $ - version_text
 
-file_end equ $
-bss_file_offset equ file_end - ehdr
+file_size equ $ - ehdr
 
-; ─── BSS Section ─────────────────────────────────────────
-align 4096
-bss_start:
+; ─── BSS Section (EQU-based, no bytes emitted) ───────────
+; The kernel zero-fills memory between p_filesz and p_memsz,
+; so these variables are all zero-initialized at load time.
 
-opt_suppress1:          resb 1
-opt_suppress2:          resb 1
-opt_suppress3:          resb 1
-opt_order_check:        resb 1
-opt_total:              resb 1
-opt_zero_terminated:    resb 1
-opt_delim_set:          resb 1
-seen_dashdash:          resb 1
-line_delim:             resb 1
+bss_base equ 0x400000 + file_size
 
-align 8
-opt_delim_len:          resq 1
-opt_delim_buf:          resb MAX_DELIM_LEN
+opt_suppress1           equ bss_base + 0
+opt_suppress2           equ bss_base + 1
+opt_suppress3           equ bss_base + 2
+opt_order_check         equ bss_base + 3
+opt_total               equ bss_base + 4
+opt_zero_terminated     equ bss_base + 5
+opt_delim_set           equ bss_base + 6
+seen_dashdash           equ bss_base + 7
+line_delim              equ bss_base + 8
 
-align 8
-file1_path:             resq 1
-file2_path:             resq 1
-file1_addr:             resq 1
-file1_len:              resq 1
-file2_addr:             resq 1
-file2_len:              resq 1
+; align 8: offset 9 -> 16
+opt_delim_len           equ bss_base + 16
+opt_delim_buf           equ bss_base + 24    ; 24 = 16 + 8
 
-f1_base:                resq 1
-f2_base:                resq 1
+; align 8: offset 24 + 256 = 280 (already aligned)
+file1_path              equ bss_base + 280
+file2_path              equ bss_base + 288
+file1_addr              equ bss_base + 296
+file1_len               equ bss_base + 304
+file2_addr              equ bss_base + 312
+file2_len               equ bss_base + 320
 
-cur_line1_ptr:          resq 1
-cur_line1_len:          resq 1
-cur_line2_ptr:          resq 1
-cur_line2_len:          resq 1
+f1_base                 equ bss_base + 328
+f2_base                 equ bss_base + 336
 
-prev1_ptr:              resq 1
-prev1_len:              resq 1
-prev2_ptr:              resq 1
-prev2_len:              resq 1
-has_prev1:              resb 1
-has_prev2:              resb 1
-warned1:                resb 1
-warned2:                resb 1
-had_order_error:        resb 1
+cur_line1_ptr           equ bss_base + 344
+cur_line1_len           equ bss_base + 352
+cur_line2_ptr           equ bss_base + 360
+cur_line2_len           equ bss_base + 368
 
-align 8
-count1:                 resq 1
-count2:                 resq 1
-count3:                 resq 1
+prev1_ptr               equ bss_base + 376
+prev1_len               equ bss_base + 384
+prev2_ptr               equ bss_base + 392
+prev2_len               equ bss_base + 400
+has_prev1               equ bss_base + 408
+has_prev2               equ bss_base + 409
+warned1                 equ bss_base + 410
+warned2                 equ bss_base + 411
+had_order_error         equ bss_base + 412
 
-align 8
-out_buf_used:           resq 1
+; align 8: offset 413 -> 416
+count1                  equ bss_base + 416
+count2                  equ bss_base + 424
+count3                  equ bss_base + 432
 
-align 8
-stat_buf:               resb 144
+; align 8: offset 440 (already aligned)
+out_buf_used            equ bss_base + 440
 
-itoa_buf:               resb 32
-itoa_tmp:               resb 32
+; align 8: offset 448 (already aligned)
+stat_buf                equ bss_base + 448   ; 144 bytes
 
-align 16
-out_buf:                resb OUT_BUF_SIZE
+itoa_buf                equ bss_base + 592   ; 32 bytes
+itoa_tmp                equ bss_base + 624   ; 32 bytes
 
-bss_end:
+; align 16: offset 656 (already aligned)
+out_buf                 equ bss_base + 656   ; OUT_BUF_SIZE = 1048576
+
+bss_size equ 656 + OUT_BUF_SIZE

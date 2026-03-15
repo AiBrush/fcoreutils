@@ -68,36 +68,26 @@ ehdr:
     dd      0
     dw      ehdr_end - ehdr
     dw      phdr_size
-    dw      3
+    dw      2
     dw      0, 0, 0
 ehdr_end:
 
 ; ── Program Headers ──
 phdr:
-    ; Code + Data (R+X)
-    dd      1
-    dd      5
-    dq      0
-    dq      0x400000
-    dq      0x400000
-    dq      file_end - ehdr
-    dq      file_end - ehdr
-    dq      0x1000
+    ; PT_LOAD: Code + Data + BSS (RWX)
+    dd      1                       ; PT_LOAD
+    dd      7                       ; PF_R | PF_W | PF_X
+    dq      0                       ; offset
+    dq      0x400000                ; virtual address
+    dq      0x400000                ; physical address
+    dq      file_size               ; file size
+    dq      file_size + bss_size    ; memory size (includes BSS)
+    dq      0x1000                  ; alignment
 phdr_size equ $ - phdr
 
-    ; BSS (R+W)
-    dd      1
-    dd      6
-    dq      0
-    dq      bss_start
-    dq      bss_start
-    dq      0
-    dq      bss_size
-    dq      0x1000
-
-    ; GNU_STACK (NX)
+    ; PT_GNU_STACK (NX)
     dd      0x6474E551
-    dd      6
+    dd      6                       ; PF_R | PF_W (no execute)
     dq      0, 0, 0, 0, 0
     dq      0x10
 
@@ -1131,27 +1121,32 @@ str_eacces:         db "Permission denied", 0
 str_eisdir:         db "Is a directory", 0
 str_eunknown:       db "Unknown error", 0
 
-file_end:
+; ============================================================================
+;  End of file content — compute file_size
+; ============================================================================
+file_size equ $ - $$
 
 ; ============================================================================
-;  BSS Section (virtual memory, not in file)
+;  BSS Section (EQU offsets — not emitted into binary)
+;  The kernel zeros memory between p_filesz and p_memsz at load time.
 ; ============================================================================
-align 4096
-bss_start:
+bss_base equ $$ + file_size
 
-width:              resd 1
-argc_rem:           resd 1
-flag_bytes:         resb 1
-flag_spaces:        resb 1
-past_dashdash:      resb 1
-opt_char_buf:       resb 2
+; 4-byte aligned variables
+width           equ bss_base + 0       ; resd 1 (4 bytes)
+argc_rem        equ bss_base + 4       ; resd 1 (4 bytes)
+flag_bytes      equ bss_base + 8       ; resb 1
+flag_spaces     equ bss_base + 9       ; resb 1
+past_dashdash   equ bss_base + 10      ; resb 1
+opt_char_buf    equ bss_base + 11      ; resb 2
 
-num_files:          resd 1
-alignb 8
-files:              resq MAX_FILES
+; Align to 4 for num_files (offset 13 -> pad to 16)
+num_files       equ bss_base + 16      ; resd 1 (4 bytes)
 
-read_buf:           resb READ_BUF_SIZE
-out_buf:            resb OUT_BUF_SIZE
+; Align to 8 for files array (offset 20 -> pad to 24)
+files           equ bss_base + 24      ; resq MAX_FILES (256 * 8 = 2048)
 
-bss_end:
-bss_size equ bss_end - bss_start
+read_buf        equ bss_base + 2072    ; resb READ_BUF_SIZE (131072)
+out_buf         equ bss_base + 133144  ; resb OUT_BUF_SIZE (524288)
+
+bss_size equ 133144 + OUT_BUF_SIZE     ; = 657432
