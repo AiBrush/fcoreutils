@@ -899,8 +899,16 @@ fn hash_from_raw_fd_to_buf(algo: HashAlgorithm, fd: i32, out: &mut [u8]) -> io::
         let file = unsafe { File::from_raw_fd(fd) };
         let mmap_result = unsafe { memmap2::MmapOptions::new().map(&file) };
         if let Ok(mmap) = mmap_result {
+            // HugePage reduces minor faults for large files (2MB pages vs 4KB)
+            if size >= 2 * 1024 * 1024 {
+                let _ = mmap.advise(memmap2::Advice::HugePage);
+            }
             let _ = mmap.advise(memmap2::Advice::Sequential);
-            if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+            if size >= 4 * 1024 * 1024 {
+                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                    let _ = mmap.advise(memmap2::Advice::WillNeed);
+                }
+            } else {
                 let _ = mmap.advise(memmap2::Advice::WillNeed);
             }
             return hash_bytes_to_buf(algo, &mmap, out);
@@ -1095,7 +1103,7 @@ fn hash_file_pipelined_read(
 ) -> io::Result<String> {
     use std::os::unix::io::AsRawFd;
 
-    const PIPE_BUF_SIZE: usize = 4 * 1024 * 1024; // 4MB per buffer
+    const PIPE_BUF_SIZE: usize = 8 * 1024 * 1024; // 8MB per buffer
 
     let _ = unsafe {
         libc::posix_fadvise(
@@ -1237,12 +1245,20 @@ fn hash_regular_file(algo: HashAlgorithm, file: File, file_size: u64) -> io::Res
         if let Ok(mmap) = mmap_result {
             #[cfg(target_os = "linux")]
             {
+                // HUGEPAGE MUST come before any page faults: reduces minor
+                // faults from 4KB pages to 2MB pages for large files.
+                if file_size >= 2 * 1024 * 1024 {
+                    let _ = mmap.advise(memmap2::Advice::HugePage);
+                }
                 let _ = mmap.advise(memmap2::Advice::Sequential);
-                // PopulateRead (Linux 5.14+) synchronously faults all pages into
-                // TLB before returning. This costs ~200µs/GB but eliminates TLB
-                // miss stalls during the hash computation, which is net positive
-                // for files that fit comfortably in page cache.
-                if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                // PopulateRead (Linux 5.14+) synchronously prefaults all pages
+                // before hashing begins. Only worthwhile for >= 4MB files;
+                // smaller files fault quickly enough during hash traversal.
+                if file_size >= 4 * 1024 * 1024 {
+                    if mmap.advise(memmap2::Advice::PopulateRead).is_err() {
+                        let _ = mmap.advise(memmap2::Advice::WillNeed);
+                    }
+                } else {
                     let _ = mmap.advise(memmap2::Advice::WillNeed);
                 }
             }

@@ -1,13 +1,10 @@
 /// GNU coreutils-compatible printf implementation.
 ///
-/// Processes a printf format string with the given arguments, returning the
-/// raw output bytes. The format string is reused if there are more arguments
-/// than a single pass consumes.
-
-/// Sentinel returned inside `process_format_string` when `\c` is encountered.
-const STOP_OUTPUT: u8 = 0xFF;
-
+/// Processes a printf format string with the given arguments, writing output
+/// directly to the provided writer. The format string is reused if there are
+/// more arguments than a single pass consumes.
 use std::cell::Cell;
+use std::io::Write;
 
 thread_local! {
     /// Set to true when a numeric conversion warning occurs (invalid argument).
@@ -41,28 +38,27 @@ fn mark_range_error(s: &str) {
 /// itself or inside a `%b` argument).
 pub fn process_format_string(format: &str, args: &[&str]) -> Vec<u8> {
     let mut output = Vec::with_capacity(256);
+    write_format_string(format, args, &mut output);
+    output
+}
+
+/// Process a printf format string, writing output directly to `writer`.
+///
+/// This is the zero-copy fast path: no intermediate `Vec<u8>` is allocated for
+/// the entire output. Each formatting helper writes directly into `writer`.
+pub fn write_format_string(format: &str, args: &[&str], writer: &mut impl Write) {
     let fmt_bytes = format.as_bytes();
 
     if args.is_empty() {
-        // Single pass with no arguments
-        let stop = format_one_pass(fmt_bytes, args, &mut 0, &mut output);
-        if stop {
-            // remove trailing STOP_OUTPUT sentinel if present
-            if output.last() == Some(&STOP_OUTPUT) {
-                output.pop();
-            }
-        }
-        return output;
+        format_one_pass(fmt_bytes, args, &mut 0, writer);
+        return;
     }
 
     let mut arg_idx: usize = 0;
     loop {
         let start_idx = arg_idx;
-        let stop = format_one_pass(fmt_bytes, args, &mut arg_idx, &mut output);
+        let stop = format_one_pass(fmt_bytes, args, &mut arg_idx, writer);
         if stop {
-            if output.last() == Some(&STOP_OUTPUT) {
-                output.pop();
-            }
             break;
         }
         // If no arguments were consumed, or we've used them all, stop
@@ -70,43 +66,51 @@ pub fn process_format_string(format: &str, args: &[&str]) -> Vec<u8> {
             break;
         }
     }
-
-    output
 }
 
 /// Run one pass of the format string. Returns `true` if output should stop (`\c`).
 /// `arg_idx` is advanced as arguments are consumed.
-fn format_one_pass(fmt: &[u8], args: &[&str], arg_idx: &mut usize, output: &mut Vec<u8>) -> bool {
+fn format_one_pass(fmt: &[u8], args: &[&str], arg_idx: &mut usize, w: &mut impl Write) -> bool {
+    let len = fmt.len();
     let mut i = 0;
-    while i < fmt.len() {
+    while i < len {
+        // Fast path: scan for the next special character (% or \) and write
+        // the entire literal run in one call.
+        let start = i;
+        while i < len && fmt[i] != b'%' && fmt[i] != b'\\' {
+            i += 1;
+        }
+        if i > start {
+            let _ = w.write_all(&fmt[start..i]);
+        }
+        if i >= len {
+            break;
+        }
         match fmt[i] {
             b'%' => {
                 i += 1;
-                if i >= fmt.len() {
-                    output.push(b'%');
+                if i >= len {
+                    let _ = w.write_all(b"%");
                     break;
                 }
                 if fmt[i] == b'%' {
-                    output.push(b'%');
+                    let _ = w.write_all(b"%");
                     i += 1;
                     continue;
                 }
-                let stop = process_conversion(fmt, &mut i, args, arg_idx, output);
+                let stop = process_conversion(fmt, &mut i, args, arg_idx, w);
                 if stop {
                     return true;
                 }
             }
             b'\\' => {
                 i += 1;
-                let stop = process_format_escape(fmt, &mut i, output);
+                let stop = process_format_escape(fmt, &mut i, w);
                 if stop {
                     return true;
                 }
             }
-            ch => {
-                output.push(ch);
-                i += 1;
-            }
+            _ => unreachable!(),
         }
     }
     false
@@ -119,7 +123,7 @@ fn process_conversion(
     i: &mut usize,
     args: &[&str],
     arg_idx: &mut usize,
-    output: &mut Vec<u8>,
+    w: &mut impl Write,
 ) -> bool {
     // Parse flags
     let mut flags = FormatFlags::default();
@@ -139,11 +143,11 @@ fn process_conversion(
     let (width, dyn_left_align) = if *i < fmt.len() && fmt[*i] == b'*' {
         *i += 1;
         let width_arg = consume_arg(args, arg_idx);
-        let w: i64 = width_arg.parse().unwrap_or(0);
-        if w < 0 {
-            ((-w) as usize, true) // negative width → left-align
+        let w_val: i64 = width_arg.parse().unwrap_or(0);
+        if w_val < 0 {
+            ((-w_val) as usize, true) // negative width -> left-align
         } else {
-            (w as usize, false)
+            (w_val as usize, false)
         }
     } else {
         (parse_decimal(fmt, i), false)
@@ -178,14 +182,12 @@ fn process_conversion(
 
     match conv {
         b's' => {
-            let s = arg;
-            let formatted = apply_string_format(s, &flags, width, precision);
-            output.extend_from_slice(&formatted);
+            write_string_format(w, arg.as_bytes(), &flags, width, precision);
         }
         b'b' => {
+            // %b needs escape processing first, so we must buffer the arg
             let (bytes, stop) = process_b_argument(arg);
-            let formatted = apply_string_format_bytes(&bytes, &flags, width, precision);
-            output.extend_from_slice(&formatted);
+            write_string_format(w, &bytes, &flags, width, precision);
             if stop {
                 return true;
             }
@@ -194,109 +196,95 @@ fn process_conversion(
             if let Some(ch) = arg.chars().next() {
                 let mut buf = [0u8; 4];
                 let encoded = ch.encode_utf8(&mut buf);
-                let formatted = apply_string_format(encoded, &flags, width, precision);
-                output.extend_from_slice(&formatted);
+                write_string_format(w, encoded.as_bytes(), &flags, width, precision);
             } else {
                 // empty arg: output a NUL byte (GNU compat)
-                let formatted = apply_string_format_bytes(&[0], &flags, width, precision);
-                output.extend_from_slice(&formatted);
+                write_string_format(w, &[0], &flags, width, precision);
             }
         }
         b'd' | b'i' => {
             let val = parse_integer(arg);
             let mut buf = itoa::Buffer::new();
             let s = buf.format(val);
-            let formatted = apply_numeric_format(s, val < 0, &flags, width, precision);
-            output.extend_from_slice(formatted.as_bytes());
+            write_numeric_format(w, s, val < 0, &flags, width, precision);
         }
         b'u' => {
             let val = parse_unsigned(arg);
             let mut buf = itoa::Buffer::new();
             let s = buf.format(val);
-            let formatted = apply_numeric_format(s, false, &flags, width, precision);
-            output.extend_from_slice(formatted.as_bytes());
+            write_numeric_format(w, s, false, &flags, width, precision);
         }
         b'o' => {
             let val = parse_unsigned(arg);
-            let s = format!("{:o}", val);
-            let prefix = if flags.alternate && !s.starts_with('0') {
+            // Format octal into a stack buffer to avoid heap allocation
+            let mut octal_buf = [0u8; 22]; // u64 max octal is 22 digits
+            let octal_str = format_octal(val, &mut octal_buf);
+            let prefix = if flags.alternate && !octal_str.starts_with('0') {
                 "0"
             } else {
                 ""
             };
-            let full = format!("{}{}", prefix, s);
-            let formatted = apply_numeric_format(&full, false, &flags, width, precision);
-            output.extend_from_slice(formatted.as_bytes());
+            write_numeric_format_with_prefix(w, prefix, octal_str, &flags, width, precision);
         }
         b'x' => {
             let val = parse_unsigned(arg);
-            let s = format!("{:x}", val);
+            let mut hex_buf = [0u8; 16]; // u64 max hex is 16 digits
+            let hex_str = format_hex_lower(val, &mut hex_buf);
             let prefix = if flags.alternate && val != 0 {
                 "0x"
             } else {
                 ""
             };
-            let full = format!("{}{}", prefix, s);
-            let formatted = apply_numeric_format(&full, false, &flags, width, precision);
-            output.extend_from_slice(formatted.as_bytes());
+            write_numeric_format_with_prefix(w, prefix, hex_str, &flags, width, precision);
         }
         b'X' => {
             let val = parse_unsigned(arg);
-            let s = format!("{:X}", val);
+            let mut hex_buf = [0u8; 16];
+            let hex_str = format_hex_upper(val, &mut hex_buf);
             let prefix = if flags.alternate && val != 0 {
                 "0X"
             } else {
                 ""
             };
-            let full = format!("{}{}", prefix, s);
-            let formatted = apply_numeric_format(&full, false, &flags, width, precision);
-            output.extend_from_slice(formatted.as_bytes());
+            write_numeric_format_with_prefix(w, prefix, hex_str, &flags, width, precision);
         }
         b'f' => {
             let val = parse_float(arg);
             let prec = precision.unwrap_or(6);
             let s = format!("{:.prec$}", val, prec = prec);
-            let formatted = apply_float_format(&s, val < 0.0, &flags, width);
-            output.extend_from_slice(formatted.as_bytes());
+            write_float_format(w, &s, val < 0.0, &flags, width);
         }
         b'e' => {
             let val = parse_float(arg);
             let prec = precision.unwrap_or(6);
             let s = format_scientific(val, prec, 'e');
-            let formatted = apply_float_format(&s, val < 0.0, &flags, width);
-            output.extend_from_slice(formatted.as_bytes());
+            write_float_format(w, &s, val < 0.0, &flags, width);
         }
         b'E' => {
             let val = parse_float(arg);
             let prec = precision.unwrap_or(6);
             let s = format_scientific(val, prec, 'E');
-            let formatted = apply_float_format(&s, val < 0.0, &flags, width);
-            output.extend_from_slice(formatted.as_bytes());
+            write_float_format(w, &s, val < 0.0, &flags, width);
         }
         b'g' => {
             let val = parse_float(arg);
             let prec = precision.unwrap_or(6);
             let s = format_g(val, prec, false);
-            let formatted = apply_float_format(&s, val < 0.0, &flags, width);
-            output.extend_from_slice(formatted.as_bytes());
+            write_float_format(w, &s, val < 0.0, &flags, width);
         }
         b'G' => {
             let val = parse_float(arg);
             let prec = precision.unwrap_or(6);
             let s = format_g(val, prec, true);
-            let formatted = apply_float_format(&s, val < 0.0, &flags, width);
-            output.extend_from_slice(formatted.as_bytes());
+            write_float_format(w, &s, val < 0.0, &flags, width);
         }
         b'q' => {
-            let s = arg;
-            let quoted = shell_quote(s);
-            let formatted = apply_string_format(&quoted, &flags, width, precision);
-            output.extend_from_slice(&formatted);
+            let quoted = shell_quote(arg);
+            write_string_format(w, quoted.as_bytes(), &flags, width, precision);
         }
         _ => {
             // Unknown conversion: output literally
-            output.push(b'%');
-            output.push(conv);
+            let _ = w.write_all(&[b'%', conv]);
         }
     }
     false
@@ -315,70 +303,70 @@ fn consume_arg<'a>(args: &[&'a str], arg_idx: &mut usize) -> &'a str {
 
 /// Process an escape sequence in the format string.
 /// `i` points to the character after `\`. Returns true if `\c` was encountered.
-fn process_format_escape(fmt: &[u8], i: &mut usize, output: &mut Vec<u8>) -> bool {
+fn process_format_escape(fmt: &[u8], i: &mut usize, w: &mut impl Write) -> bool {
     if *i >= fmt.len() {
-        output.push(b'\\');
+        let _ = w.write_all(b"\\");
         return false;
     }
     match fmt[*i] {
         b'\\' => {
-            output.push(b'\\');
+            let _ = w.write_all(b"\\");
             *i += 1;
         }
         b'"' => {
-            output.push(b'"');
+            let _ = w.write_all(b"\"");
             *i += 1;
         }
         b'a' => {
-            output.push(0x07);
+            let _ = w.write_all(&[0x07]);
             *i += 1;
         }
         b'b' => {
-            output.push(0x08);
+            let _ = w.write_all(&[0x08]);
             *i += 1;
         }
         b'c' => {
             return true;
         }
         b'e' | b'E' => {
-            output.push(0x1B);
+            let _ = w.write_all(&[0x1B]);
             *i += 1;
         }
         b'f' => {
-            output.push(0x0C);
+            let _ = w.write_all(&[0x0C]);
             *i += 1;
         }
         b'n' => {
-            output.push(b'\n');
+            let _ = w.write_all(b"\n");
             *i += 1;
         }
         b'r' => {
-            output.push(b'\r');
+            let _ = w.write_all(b"\r");
             *i += 1;
         }
         b't' => {
-            output.push(b'\t');
+            let _ = w.write_all(b"\t");
             *i += 1;
         }
         b'v' => {
-            output.push(0x0B);
+            let _ = w.write_all(&[0x0B]);
             *i += 1;
         }
         b'0' => {
             // Octal: \0NNN (up to 3 octal digits after the leading 0)
             *i += 1;
             let val = parse_octal_digits(fmt, i, 3);
-            output.push(val);
+            let _ = w.write_all(&[val]);
         }
         b'1'..=b'7' => {
             // Octal: \NNN (up to 3 octal digits)
             let val = parse_octal_digits(fmt, i, 3);
-            output.push(val);
+            let _ = w.write_all(&[val]);
         }
         b'x' => {
             *i += 1;
             let val = parse_hex_digits(fmt, i, 2);
-            output.push(val as u8);
+            let _ = w.write_all(&[val as u8]);
         }
         b'u' => {
             *i += 1;
@@ -386,7 +374,7 @@ fn process_format_escape(fmt: &[u8], i: &mut usize, output: &mut Vec<u8>) -> boo
             if let Some(ch) = char::from_u32(val) {
                 let mut buf = [0u8; 4];
                 let encoded = ch.encode_utf8(&mut buf);
-                output.extend_from_slice(encoded.as_bytes());
+                let _ = w.write_all(encoded.as_bytes());
             }
         }
         b'U' => {
@@ -395,13 +383,12 @@ fn process_format_escape(fmt: &[u8], i: &mut usize, output: &mut Vec<u8>) -> boo
             if let Some(ch) = char::from_u32(val) {
                 let mut buf = [0u8; 4];
                 let encoded = ch.encode_utf8(&mut buf);
-                output.extend_from_slice(encoded.as_bytes());
+                let _ = w.write_all(encoded.as_bytes());
             }
         }
         _ => {
             // Unknown escape: output backslash and the character
-            output.push(b'\\');
-            output.push(fmt[*i]);
+            let _ = w.write_all(&[b'\\', fmt[*i]]);
             *i += 1;
         }
     }
@@ -496,7 +483,7 @@ fn parse_octal_digits(data: &[u8], i: &mut usize, max_digits: usize) -> u8 {
     let mut count = 0;
     while *i < data.len() && count < max_digits {
         let ch = data[*i];
-        if ch >= b'0' && ch <= b'7' {
+        if (b'0'..=b'7').contains(&ch) {
             val = val * 8 + (ch - b'0') as u32;
             *i += 1;
             count += 1;
@@ -743,76 +730,158 @@ struct FormatFlags {
     alternate: bool,
 }
 
-/// Apply string formatting with width and precision (for %s, %b, %c).
-fn apply_string_format(
-    s: &str,
+/// Write string-formatted output directly (for %s, %b, %c).
+/// Avoids allocating a Vec<u8> for the common no-padding case.
+fn write_string_format(
+    w: &mut impl Write,
+    data: &[u8],
     flags: &FormatFlags,
     width: usize,
     precision: Option<usize>,
-) -> Vec<u8> {
-    let truncated: &str;
-    let owned: String;
-    if let Some(prec) = precision {
-        if s.len() > prec {
-            // Truncate to prec bytes, but respect UTF-8 boundaries
-            owned = s.chars().take(prec).collect();
-            truncated = &owned;
+) {
+    let data = if let Some(prec) = precision {
+        if data.len() > prec {
+            // Truncate to prec bytes, respecting UTF-8 boundaries
+            let end = truncate_utf8(data, prec);
+            &data[..end]
         } else {
-            truncated = s;
+            data
         }
     } else {
-        truncated = s;
-    }
-
-    apply_padding(truncated.as_bytes(), flags, width)
-}
-
-/// Apply string formatting for raw bytes.
-fn apply_string_format_bytes(
-    s: &[u8],
-    flags: &FormatFlags,
-    width: usize,
-    precision: Option<usize>,
-) -> Vec<u8> {
-    let data = if let Some(prec) = precision {
-        if s.len() > prec { &s[..prec] } else { s }
-    } else {
-        s
+        data
     };
 
-    apply_padding(data, flags, width)
+    write_padded(w, data, flags, width);
 }
 
-/// Apply padding (left or right) to reach the desired width.
-fn apply_padding(data: &[u8], flags: &FormatFlags, width: usize) -> Vec<u8> {
+/// Truncate byte slice to at most `max_bytes`, respecting UTF-8 char boundaries.
+fn truncate_utf8(data: &[u8], max_bytes: usize) -> usize {
+    if max_bytes >= data.len() {
+        return data.len();
+    }
+    // If the data is valid UTF-8, truncate at char boundary
+    if let Ok(s) = std::str::from_utf8(data) {
+        let mut end = 0;
+        for ch in s.chars() {
+            let next = end + ch.len_utf8();
+            if next > max_bytes {
+                break;
+            }
+            end = next;
+        }
+        end
+    } else {
+        // Not valid UTF-8: truncate at byte level
+        max_bytes
+    }
+}
+
+/// Write `data` to `w` with space-padding to reach `width`.
+/// Zero-allocation for the common case where data.len() >= width.
+fn write_padded(w: &mut impl Write, data: &[u8], flags: &FormatFlags, width: usize) {
     if width == 0 || data.len() >= width {
-        return data.to_vec();
+        let _ = w.write_all(data);
+        return;
     }
     let pad_len = width - data.len();
-    let mut result = Vec::with_capacity(width);
     if flags.left_align {
-        result.extend_from_slice(data);
-        result.resize(result.len() + pad_len, b' ');
+        let _ = w.write_all(data);
+        write_repeated(w, b' ', pad_len);
     } else {
-        result.resize(pad_len, b' ');
-        result.extend_from_slice(data);
+        write_repeated(w, b' ', pad_len);
+        let _ = w.write_all(data);
     }
-    result
 }
 
-/// Apply numeric formatting with width, flags, and optional precision for integers.
-fn apply_numeric_format(
+/// Write a byte repeated `count` times using a stack buffer.
+fn write_repeated(w: &mut impl Write, byte: u8, count: usize) {
+    const BUF_SIZE: usize = 64;
+    let buf = [byte; BUF_SIZE];
+    let mut remaining = count;
+    while remaining > 0 {
+        let chunk = remaining.min(BUF_SIZE);
+        let _ = w.write_all(&buf[..chunk]);
+        remaining -= chunk;
+    }
+}
+
+/// Write numeric format directly without heap allocation for common cases.
+#[inline]
+fn write_numeric_format(
+    w: &mut impl Write,
     num_str: &str,
-    is_negative: bool,
+    _is_negative: bool,
     flags: &FormatFlags,
     width: usize,
     precision: Option<usize>,
-) -> String {
-    // For integers, precision specifies minimum number of digits
-    let raw_digits = if is_negative {
-        &num_str[1..] // strip the minus
+) {
+    write_numeric_format_with_prefix(w, "", num_str, flags, width, precision);
+}
+
+/// Format a u64 as octal into a stack buffer. Returns the formatted string slice.
+fn format_octal(val: u64, buf: &mut [u8; 22]) -> &str {
+    if val == 0 {
+        return "0";
+    }
+    let mut pos = 22;
+    let mut v = val;
+    while v > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (v & 7) as u8;
+        v >>= 3;
+    }
+    // SAFETY: we only wrote ASCII digits
+    unsafe { std::str::from_utf8_unchecked(&buf[pos..]) }
+}
+
+/// Format a u64 as lowercase hex into a stack buffer. Returns the formatted string slice.
+fn format_hex_lower(val: u64, buf: &mut [u8; 16]) -> &str {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    if val == 0 {
+        return "0";
+    }
+    let mut pos = 16;
+    let mut v = val;
+    while v > 0 {
+        pos -= 1;
+        buf[pos] = HEX[(v & 0xF) as usize];
+        v >>= 4;
+    }
+    unsafe { std::str::from_utf8_unchecked(&buf[pos..]) }
+}
+
+/// Format a u64 as uppercase hex into a stack buffer. Returns the formatted string slice.
+fn format_hex_upper(val: u64, buf: &mut [u8; 16]) -> &str {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    if val == 0 {
+        return "0";
+    }
+    let mut pos = 16;
+    let mut v = val;
+    while v > 0 {
+        pos -= 1;
+        buf[pos] = HEX[(v & 0xF) as usize];
+        v >>= 4;
+    }
+    unsafe { std::str::from_utf8_unchecked(&buf[pos..]) }
+}
+
+/// Write numeric format with an optional prefix (e.g., "0x" for hex).
+/// Handles sign, precision zero-padding, width, and flag-based padding directly
+/// into the writer without heap allocation.
+fn write_numeric_format_with_prefix(
+    w: &mut impl Write,
+    prefix: &str,
+    num_str: &str,
+    flags: &FormatFlags,
+    width: usize,
+    precision: Option<usize>,
+) {
+    // Separate sign from digits
+    let (is_negative, raw_digits) = if let Some(rest) = num_str.strip_prefix('-') {
+        (true, rest)
     } else {
-        num_str
+        (false, num_str)
     };
 
     let sign: &str = if is_negative {
@@ -825,68 +894,74 @@ fn apply_numeric_format(
         ""
     };
 
-    // Build digits with precision zero-padding
-    let mut digits_buf = String::new();
-    let digits: &str = if let Some(prec) = precision {
-        if prec > 0 && raw_digits.len() < prec {
-            let pad = prec - raw_digits.len();
-            digits_buf.reserve(prec);
-            for _ in 0..pad {
-                digits_buf.push('0');
-            }
-            digits_buf.push_str(raw_digits);
-            &digits_buf
-        } else if prec == 0 && raw_digits == "0" {
-            ""
+    // Compute digits with precision
+    let prec_pad = if let Some(prec) = precision {
+        if prec == 0 && raw_digits == "0" {
+            // Special case: precision 0 with value 0 → no digits
+            // We'll handle this by setting raw_digits to empty
+            // Can't reassign raw_digits, so we track it
+            usize::MAX // sentinel for "suppress digits"
+        } else if prec > raw_digits.len() {
+            prec - raw_digits.len()
         } else {
-            raw_digits
+            0
         }
     } else {
-        raw_digits
+        0
     };
 
-    let content_len = sign.len() + digits.len();
+    let suppress_digits = prec_pad == usize::MAX;
+    let actual_prec_pad = if suppress_digits { 0 } else { prec_pad };
+    let digits_len = if suppress_digits { 0 } else { raw_digits.len() };
+
+    let content_len = sign.len() + prefix.len() + actual_prec_pad + digits_len;
 
     if width > 0 && content_len < width {
         let pad_len = width - content_len;
-        let mut result = String::with_capacity(width);
         if flags.left_align {
-            result.push_str(sign);
-            result.push_str(digits);
-            for _ in 0..pad_len {
-                result.push(' ');
+            let _ = w.write_all(sign.as_bytes());
+            let _ = w.write_all(prefix.as_bytes());
+            write_repeated(w, b'0', actual_prec_pad);
+            if !suppress_digits {
+                let _ = w.write_all(raw_digits.as_bytes());
             }
+            write_repeated(w, b' ', pad_len);
         } else if flags.zero_pad && precision.is_none() {
-            result.push_str(sign);
-            for _ in 0..pad_len {
-                result.push('0');
+            let _ = w.write_all(sign.as_bytes());
+            let _ = w.write_all(prefix.as_bytes());
+            write_repeated(w, b'0', pad_len);
+            if !suppress_digits {
+                let _ = w.write_all(raw_digits.as_bytes());
             }
-            result.push_str(digits);
         } else {
-            for _ in 0..pad_len {
-                result.push(' ');
+            write_repeated(w, b' ', pad_len);
+            let _ = w.write_all(sign.as_bytes());
+            let _ = w.write_all(prefix.as_bytes());
+            write_repeated(w, b'0', actual_prec_pad);
+            if !suppress_digits {
+                let _ = w.write_all(raw_digits.as_bytes());
             }
-            result.push_str(sign);
-            result.push_str(digits);
         }
-        result
     } else {
-        let mut result = String::with_capacity(content_len);
-        result.push_str(sign);
-        result.push_str(digits);
-        result
+        let _ = w.write_all(sign.as_bytes());
+        let _ = w.write_all(prefix.as_bytes());
+        write_repeated(w, b'0', actual_prec_pad);
+        if !suppress_digits {
+            let _ = w.write_all(raw_digits.as_bytes());
+        }
     }
 }
 
-/// Apply float formatting with width and flags.
-fn apply_float_format(
+/// Write float format directly to writer.
+fn write_float_format(
+    w: &mut impl Write,
     num_str: &str,
     _is_negative: bool,
     flags: &FormatFlags,
     width: usize,
-) -> String {
-    let (sign_prefix, abs_str) = if num_str.starts_with('-') {
-        ("-", &num_str[1..])
+) {
+    let (sign_prefix, abs_str) = if let Some(rest) = num_str.strip_prefix('-') {
+        ("-", rest)
     } else if flags.plus_sign {
         ("+", num_str)
     } else if flags.space_sign {
@@ -899,32 +974,22 @@ fn apply_float_format(
 
     if width > 0 && content_len < width {
         let pad_len = width - content_len;
-        let mut result = String::with_capacity(width);
         if flags.left_align {
-            result.push_str(sign_prefix);
-            result.push_str(abs_str);
-            for _ in 0..pad_len {
-                result.push(' ');
-            }
+            let _ = w.write_all(sign_prefix.as_bytes());
+            let _ = w.write_all(abs_str.as_bytes());
+            write_repeated(w, b' ', pad_len);
         } else if flags.zero_pad {
-            result.push_str(sign_prefix);
-            for _ in 0..pad_len {
-                result.push('0');
-            }
-            result.push_str(abs_str);
+            let _ = w.write_all(sign_prefix.as_bytes());
+            write_repeated(w, b'0', pad_len);
+            let _ = w.write_all(abs_str.as_bytes());
         } else {
-            for _ in 0..pad_len {
-                result.push(' ');
-            }
-            result.push_str(sign_prefix);
-            result.push_str(abs_str);
+            write_repeated(w, b' ', pad_len);
+            let _ = w.write_all(sign_prefix.as_bytes());
+            let _ = w.write_all(abs_str.as_bytes());
         }
-        result
     } else {
-        let mut result = String::with_capacity(content_len);
-        result.push_str(sign_prefix);
-        result.push_str(abs_str);
-        result
+        let _ = w.write_all(sign_prefix.as_bytes());
+        let _ = w.write_all(abs_str.as_bytes());
     }
 }
 
@@ -1111,7 +1176,14 @@ fn emit_escape(byte: u8, result: &mut String) {
         0x0b => result.push_str("\\v"),
         0x1b => result.push_str("\\E"),
         b => {
-            result.push_str(&format!("\\{:03o}", b));
+            // Use stack-based formatting instead of format!()
+            let d2 = b >> 6;
+            let d1 = (b >> 3) & 7;
+            let d0 = b & 7;
+            result.push('\\');
+            result.push((b'0' + d2) as char);
+            result.push((b'0' + d1) as char);
+            result.push((b'0' + d0) as char);
         }
     }
 }
