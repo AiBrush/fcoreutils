@@ -8,7 +8,7 @@
 
 High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelerated, drop-in compatible, cross-platform.
 
-## Independent Test Results (v0.22.2)
+## Independent Test Results (v0.22.3)
 
 *Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, hyperfine*
 
@@ -226,7 +226,7 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **107 tools** have assembly implementations — all 107 are fully buildable static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
 
-All 107 tools are tested by the [independent test suite](https://github.com/AiBrush/coreutils-rs-independent-test). Results below from the latest CI run (v0.22.2). Speedups **>1.0x** vs GNU are **bold**. ✅ = all tests pass, ⚠️ = partial.
+All 107 tools are tested by the [independent test suite](https://github.com/AiBrush/coreutils-rs-independent-test). Results below from the latest CI run (v0.22.3). Speedups **>1.0x** vs GNU are **bold**. ✅ = all tests pass, ⚠️ = partial.
 
 | Tool | Compat | Security | Asm Size | Speedup vs GNU |
 |------|--------|----------|----------|----------------|
@@ -243,7 +243,7 @@ All 107 tools are tested by the [independent test suite](https://github.com/AiBr
 | chown | ✅ 11/11 | ✅ 75/78 | 7.2 KB | — |
 | chroot | ✅ 7/7 | ✅ 67/69 | 4.5 KB | — |
 | cksum | ✅ 22/22 | ✅ 82/84 | 3.4 KB | — |
-| comm | ✅ 71/71 | ✅ 87/89 | 23.2 KB | **2.3x** |
+| comm | ✅ 71/71 | ✅ 87/89 | 6.3 KB | **2.3x** |
 | cp | ✅ 28/28 | ✅ 85/87 | 6.2 KB | — |
 | csplit | ✅ 8/8 | ✅ 67/69 | 3.7 KB | — |
 | cut | ✅ 24/24 | ✅ 91/91 | 9.3 KB | **4.1x** |
@@ -261,7 +261,7 @@ All 107 tools are tested by the [independent test suite](https://github.com/AiBr
 | factor | — | ✅ 82/84 | 16.8 KB | — |
 | false | ✅ 20/20 | ✅ 92/94 | 4.8 KB | — |
 | fmt | ✅ 31/31 | ✅ 90/90 | 6.5 KB | — |
-| fold | ✅ 58/58 | ✅ 90/90 | 9.8 KB | **7.2x** |
+| fold | ✅ 58/58 | ✅ 90/90 | 4.3 KB | **7.2x** |
 | groups | ✅ 5/5 | ✅ 79/81 | 3.5 KB | — |
 | head | ✅ 19/19 | ✅ 89/89 | 7.2 KB | **3.1x** |
 | hostid | ✅ 6/6 | ✅ 77/79 | 13.1 KB | — |
@@ -337,11 +337,11 @@ All 107 tools are tested by the [independent test suite](https://github.com/AiBr
 | who | ✅ 25/25 | ✅ 65/70 | 12.4 KB | — |
 | whoami | ✅ 4/4 | ✅ 78/80 | 12.4 KB | — |
 | yes | ✅ 884/884 | ✅ 956/956 | 1.8 KB | — |
-| **Totals** | **3560/3560** | **9932/10114** | avg **10.4 KB** | up to **18.5x** |
+| **Totals** | **3560/3560** | **9932/10114** | avg **11.6 KB** | up to **18.5x** |
 
 - **107 tools implemented**, all 107 buildable and tested as static ELF binaries
 - **All 107 tools pass 100% of compat tests** — security tests pass 98.2% with **0 failures** (all shortfall is CI environment skips: `/proc` permissions, `mktemp` variants)
-- **Size** — Stripped static ELF binary on disk. Assembly averages **10.4 KB** across all 107 tools
+- **Size** — Stripped static ELF binary on disk. Assembly averages **11.6 KB** across all 107 tools
 - **Speedup** — Wall-clock throughput on a 10 MB file (hyperfine, warmup). `—` means the tool is not benchmarked. Top performers: seq (18.5x), pr (10.7x), nl/od (10.3x), rev (9.8x), fold (7.2x)
 - **Security** — 65-133 point security audit per tool: ELF hardening, syscall surface, memory safety, signal handling, fuzzing
 
