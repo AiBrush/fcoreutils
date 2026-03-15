@@ -417,6 +417,14 @@ enc_b64_common:
 .ml:
     cmp rcx, 3
     jl .sv
+    ; === FAST PATH: check if wrap=0 or wrap divisible by 4 ===
+    test r13d, r13d
+    jz .fast_triplet
+    mov eax, r13d
+    and eax, 3
+    jnz .slow_triplet
+.fast_triplet:
+    ; Encode 3 bytes -> 4 base64 chars fully inline, no function calls
     movzx eax, byte [rsi]
     shl eax, 16
     movzx edx, byte [rsi+1]
@@ -426,8 +434,64 @@ enc_b64_common:
     or eax, edx
     add rsi, 3
     sub rcx, 3
-    ; encode 3 bytes -> 4 base64 chars with per-char wrap check
+    mov edx, eax
+    shr edx, 18
+    movzx edx, byte [r10+rdx]
+    mov [rdi], dl
+    mov edx, eax
+    shr edx, 12
+    and edx, 0x3F
+    movzx edx, byte [r10+rdx]
+    mov [rdi+1], dl
+    mov edx, eax
+    shr edx, 6
+    and edx, 0x3F
+    movzx edx, byte [r10+rdx]
+    mov [rdi+2], dl
+    and eax, 0x3F
+    movzx eax, byte [r10+rax]
+    mov [rdi+3], al
+    add rdi, 4
+    ; Batch wrap check: add 4 to column, insert newline if needed
+    test r13d, r13d
+    jz .fast_nowrap
+    add r8d, 4
+    cmp r8d, r13d
+    jl .fast_nowrap
+    mov byte [rdi], 10
+    inc rdi
+    sub r8d, r13d
+.fast_nowrap:
+    mov rax, rdi
+    sub rax, outbuf
+    cmp rax, OUTBUF_SIZE-1024
+    jl .ml
     push rcx
+    push rsi
+    mov rdx, rdi
+    sub rdx, outbuf
+    mov rsi, outbuf
+    mov rdi, STDOUT
+    call asm_write_all
+    test eax, eax
+    js werr2
+    pop rsi
+    pop rcx
+    mov rdi, outbuf
+    jmp .ml
+.slow_triplet:
+    ; Slow path for non-4-aligned wrap: per-char wrap check
+    movzx eax, byte [rsi]
+    shl eax, 16
+    movzx edx, byte [rsi+1]
+    shl edx, 8
+    or eax, edx
+    movzx edx, byte [rsi+2]
+    or eax, edx
+    add rsi, 3
+    sub rcx, 3
+    push rcx
+    push rsi
     mov rbx, rax
     mov edx, eax
     shr edx, 18
@@ -454,6 +518,7 @@ enc_b64_common:
     mov [rdi], al
     inc rdi
     call wchk
+    pop rsi
     pop rcx
     mov rax, rdi
     sub rax, outbuf
@@ -579,7 +644,7 @@ enc_b64_common:
     call asm_write_all
     jmp done_ok
 
-; b64_triplet: encode 24-bit value in eax -> 4 chars at rdi with wrap
+; b64_triplet: encode 24-bit value in eax -> 4 chars at rdi with wrap (slow path only)
 b64_triplet:
     push rax
     mov edx, eax
@@ -847,6 +912,118 @@ enc_b32_common:
 .ml:
     cmp rcx, 5
     jl .sv
+    ; === FAST PATH: check if wrap=0 or wrap >= 8 ===
+    test r13d, r13d
+    jz .fast_5bytes
+    cmp r13d, 8
+    jge .fast_5bytes
+    jmp .slow_5bytes
+.fast_5bytes:
+    ; Build 40-bit value in rax directly from input (no stack copy)
+    movzx eax, byte [rsi]
+    shl rax, 8
+    movzx edx, byte [rsi+1]
+    or eax, edx
+    shl rax, 8
+    movzx edx, byte [rsi+2]
+    or eax, edx
+    shl rax, 8
+    movzx edx, byte [rsi+3]
+    or eax, edx
+    shl rax, 8
+    movzx edx, byte [rsi+4]
+    or rax, rdx
+    add rsi, 5
+    sub rcx, 5
+    ; Extract 8 x 5-bit groups directly to output (fully inline)
+    mov rdx, rax
+    shr rdx, 35
+    and edx, 0x1F
+    movzx edx, byte [r10+rdx]
+    mov [rdi], dl
+    mov rdx, rax
+    shr rdx, 30
+    and edx, 0x1F
+    movzx edx, byte [r10+rdx]
+    mov [rdi+1], dl
+    mov rdx, rax
+    shr rdx, 25
+    and edx, 0x1F
+    movzx edx, byte [r10+rdx]
+    mov [rdi+2], dl
+    mov rdx, rax
+    shr rdx, 20
+    and edx, 0x1F
+    movzx edx, byte [r10+rdx]
+    mov [rdi+3], dl
+    mov rdx, rax
+    shr rdx, 15
+    and edx, 0x1F
+    movzx edx, byte [r10+rdx]
+    mov [rdi+4], dl
+    mov rdx, rax
+    shr rdx, 10
+    and edx, 0x1F
+    movzx edx, byte [r10+rdx]
+    mov [rdi+5], dl
+    mov rdx, rax
+    shr rdx, 5
+    and edx, 0x1F
+    movzx edx, byte [r10+rdx]
+    mov [rdi+6], dl
+    and eax, 0x1F
+    movzx eax, byte [r10+rax]
+    mov [rdi+7], al
+    add rdi, 8
+    ; Batch wrap check: add 8 to column
+    test r13d, r13d
+    jz .fast_b32_nowrap
+    add r8d, 8
+    cmp r8d, r13d
+    jl .fast_b32_nowrap
+    je .fast_b32_exact
+    ; column > wrap: need to insert newline within the 8-char block
+    mov eax, r8d
+    sub eax, r13d      ; overflow count (1..7)
+    mov r11d, eax       ; save overflow
+    lea rbx, [rdi - 1]  ; last char position
+.fast_b32_shift:
+    test eax, eax
+    jz .fast_b32_shifted
+    movzx edx, byte [rbx]
+    mov [rbx+1], dl
+    dec rbx
+    dec eax
+    jmp .fast_b32_shift
+.fast_b32_shifted:
+    mov byte [rbx+1], 10
+    inc rdi
+    mov r8d, r11d
+    jmp .fast_b32_nowrap
+.fast_b32_exact:
+    mov byte [rdi], 10
+    inc rdi
+    xor r8d, r8d
+.fast_b32_nowrap:
+    mov rax, rdi
+    sub rax, outbuf
+    cmp rax, OUTBUF_SIZE-1024
+    jl .ml
+    push rcx
+    push rsi
+    mov rdx, rdi
+    sub rdx, outbuf
+    mov rsi, outbuf
+    mov rdi, STDOUT
+    call asm_write_all
+    test eax, eax
+    js werr2
+    pop rsi
+    pop rcx
+    mov rdi, outbuf
+    jmp .ml
+.slow_5bytes:
+    ; Slow path for wrap < 8: copy to stack, use per-char b32_group
     mov al, [rsi]
     mov [rsp+4], al
     mov al, [rsi+1]
@@ -1327,6 +1504,7 @@ enc_b16:
 .bl:
     test rcx, rcx
     jz .fr
+    ; Write both hex chars inline, single batch wrap check
     movzx eax, byte [rsi]
     inc rsi
     dec rcx
@@ -1334,13 +1512,29 @@ enc_b16:
     shr edx, 4
     movzx edx, byte [r10+rdx]
     mov [rdi], dl
-    inc rdi
-    call wchk
     and eax, 0xF
     movzx eax, byte [r10+rax]
-    mov [rdi], al
+    mov [rdi+1], al
+    add rdi, 2
+    ; Batch wrap check: column += 2
+    test r13d, r13d
+    jz .hex_nowrap
+    add r8d, 2
+    cmp r8d, r13d
+    jl .hex_nowrap
+    je .hex_exact_wrap
+    ; column > wrap (odd wrap): split the 2-char pair with a newline
+    movzx edx, byte [rdi-1]
+    mov [rdi], dl
+    mov byte [rdi-1], 10
     inc rdi
-    call wchk
+    mov r8d, 1
+    jmp .hex_nowrap
+.hex_exact_wrap:
+    mov byte [rdi], 10
+    inc rdi
+    xor r8d, r8d
+.hex_nowrap:
     mov rax, rdi
     sub rax, outbuf
     cmp rax, OUTBUF_SIZE-1024
@@ -1521,6 +1715,148 @@ enc_b2_common:
 .bl:
     test rcx, rcx
     jz .fr
+    ; === FAST PATH: wrap=0 or wrap >= 8 ===
+    test r13d, r13d
+    jz .fast_b2
+    cmp r13d, 8
+    jge .fast_b2
+    jmp .slow_b2
+.fast_b2:
+    movzx eax, byte [rsi]
+    inc rsi
+    dec rcx
+    ; Write all 8 bits at once using branchless arithmetic: (bit & 1) + '0'
+    test r9d, r9d
+    jnz .fast_msb
+    ; LSB first: bit 0 first
+    mov edx, eax
+    and edx, 1
+    add edx, '0'
+    mov [rdi], dl
+    mov edx, eax
+    shr edx, 1
+    and edx, 1
+    add edx, '0'
+    mov [rdi+1], dl
+    mov edx, eax
+    shr edx, 2
+    and edx, 1
+    add edx, '0'
+    mov [rdi+2], dl
+    mov edx, eax
+    shr edx, 3
+    and edx, 1
+    add edx, '0'
+    mov [rdi+3], dl
+    mov edx, eax
+    shr edx, 4
+    and edx, 1
+    add edx, '0'
+    mov [rdi+4], dl
+    mov edx, eax
+    shr edx, 5
+    and edx, 1
+    add edx, '0'
+    mov [rdi+5], dl
+    mov edx, eax
+    shr edx, 6
+    and edx, 1
+    add edx, '0'
+    mov [rdi+6], dl
+    shr eax, 7
+    add eax, '0'
+    mov [rdi+7], al
+    jmp .fast_b2_done
+.fast_msb:
+    ; MSB first: bit 7 first
+    mov edx, eax
+    shr edx, 7
+    add edx, '0'
+    mov [rdi], dl
+    mov edx, eax
+    shr edx, 6
+    and edx, 1
+    add edx, '0'
+    mov [rdi+1], dl
+    mov edx, eax
+    shr edx, 5
+    and edx, 1
+    add edx, '0'
+    mov [rdi+2], dl
+    mov edx, eax
+    shr edx, 4
+    and edx, 1
+    add edx, '0'
+    mov [rdi+3], dl
+    mov edx, eax
+    shr edx, 3
+    and edx, 1
+    add edx, '0'
+    mov [rdi+4], dl
+    mov edx, eax
+    shr edx, 2
+    and edx, 1
+    add edx, '0'
+    mov [rdi+5], dl
+    mov edx, eax
+    shr edx, 1
+    and edx, 1
+    add edx, '0'
+    mov [rdi+6], dl
+    and eax, 1
+    add eax, '0'
+    mov [rdi+7], al
+.fast_b2_done:
+    add rdi, 8
+    ; Batch wrap check
+    test r13d, r13d
+    jz .fast_b2_nowrap
+    add r8d, 8
+    cmp r8d, r13d
+    jl .fast_b2_nowrap
+    je .fast_b2_exact
+    ; column > wrap: insert newline within the 8-char block
+    mov eax, r8d
+    sub eax, r13d       ; overflow count (1..7)
+    mov r11d, eax        ; save overflow
+    lea rbx, [rdi - 1]   ; last char position
+.fast_b2_shift:
+    test eax, eax
+    jz .fast_b2_shifted
+    movzx edx, byte [rbx]
+    mov [rbx+1], dl
+    dec rbx
+    dec eax
+    jmp .fast_b2_shift
+.fast_b2_shifted:
+    mov byte [rbx+1], 10
+    inc rdi
+    mov r8d, r11d
+    jmp .fast_b2_nowrap
+.fast_b2_exact:
+    mov byte [rdi], 10
+    inc rdi
+    xor r8d, r8d
+.fast_b2_nowrap:
+    mov rax, rdi
+    sub rax, outbuf
+    cmp rax, OUTBUF_SIZE-1024
+    jl .bl
+    push rcx
+    push rsi
+    mov rdx, rdi
+    sub rdx, outbuf
+    mov rsi, outbuf
+    mov rdi, STDOUT
+    call asm_write_all
+    test eax, eax
+    js werr2
+    pop rsi
+    pop rcx
+    mov rdi, outbuf
+    jmp .bl
+.slow_b2:
+    ; Slow path for non-8-aligned wrap
     movzx eax, byte [rsi]
     inc rsi
     dec rcx

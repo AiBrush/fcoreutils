@@ -2,7 +2,7 @@
 //
 // Usage: printf FORMAT [ARGUMENT...]
 
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::process;
 
 const TOOL_NAME: &str = "printf";
@@ -52,7 +52,11 @@ fn print_version() {
 fn main() {
     coreutils_rs::common::reset_sigpipe();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Collect args once into a single Vec<String>. We skip(1) to drop argv[0].
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
 
     if args.is_empty() {
         eprintln!("{}: missing operand", TOOL_NAME);
@@ -86,12 +90,14 @@ fn main() {
     let arg_strs: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
 
     coreutils_rs::printf::reset_conv_error();
-    let output = coreutils_rs::printf::process_format_string(format, &arg_strs);
-    let had_error = coreutils_rs::printf::had_conv_error();
 
     let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    if let Err(e) = handle.write_all(&output) {
+    let handle = stdout.lock();
+    let mut writer = BufWriter::new(handle);
+    coreutils_rs::printf::write_format_string(format, &arg_strs, &mut writer);
+    let had_error = coreutils_rs::printf::had_conv_error();
+
+    if let Err(e) = writer.flush() {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
             process::exit(0);
         }
