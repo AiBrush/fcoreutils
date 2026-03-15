@@ -5,7 +5,7 @@ UNIFIED_SRC = $(TARGET)_unified.asm
 TEST_DEP    = release
 TEST_BIN    = ./$(TARGET)_release
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU (startup-dominated) ==="

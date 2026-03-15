@@ -3,4 +3,4 @@ TARGET    = fexpr
 LIB_SRCS  = io.asm args.asm str.asm
 UNIFIED_SRC = fexpr_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

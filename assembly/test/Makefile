@@ -6,7 +6,7 @@ UNIFIED_SRC = ftest_unified.asm
 TEST_DEP    = release
 TEST_BIN    = ./ftest_release
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU (startup-dominated) ==="

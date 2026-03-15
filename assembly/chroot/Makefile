@@ -3,7 +3,7 @@ TARGET     = fchroot
 LIB_SRCS   = io.asm args.asm str.asm
 UNIFIED_SRC = fchroot_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU ==="

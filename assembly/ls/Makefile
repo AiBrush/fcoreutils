@@ -4,7 +4,7 @@ LIB_SRCS    = io.asm str.asm
 TOOL_SRCS   = tools/fls.asm
 UNIFIED_SRC = unified/fls_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU ls ==="

@@ -3,4 +3,4 @@ TARGET    = fwho
 LIB_SRCS  =
 UNIFIED_SRC = unified/fwho_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

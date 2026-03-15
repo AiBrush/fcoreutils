@@ -2,4 +2,4 @@
 TARGET    = fwc
 LIB_SRCS  = io.asm str.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

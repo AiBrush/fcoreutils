@@ -4,7 +4,7 @@ LIB_SRCS    = io.asm args.asm str.asm
 TOOL_SRCS   = tools/fmkfifo.asm
 UNIFIED_SRC = fmkfifo_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU mkfifo ==="

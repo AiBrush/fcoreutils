@@ -3,4 +3,4 @@ TARGET    = fusers
 LIB_SRCS  =
 UNIFIED_SRC = unified/fusers_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

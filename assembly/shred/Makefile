@@ -2,4 +2,4 @@
 TARGET    = fshred
 UNIFIED_SRC = unified/fshred_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

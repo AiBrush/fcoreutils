@@ -4,7 +4,7 @@ LIB_SRCS    = io.asm str.asm args.asm
 TOOL_SRCS   = tools/fb2sum.asm
 UNIFIED_SRC = unified/fb2sum_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 # Override dev to build from unified since tools/fb2sum.asm is a placeholder
 dev: $(UNIFIED_SRC)

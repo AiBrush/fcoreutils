@@ -5,7 +5,7 @@ UNIFIED_SRC = funame_unified.asm
 TEST_DEP    = release
 TEST_BIN    = ./funame_release
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU (startup-dominated) ==="

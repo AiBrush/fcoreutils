@@ -3,7 +3,7 @@ TARGET      = fpaste
 LIB_SRCS    = io.asm
 UNIFIED_SRC = unified/fpaste_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU paste ==="

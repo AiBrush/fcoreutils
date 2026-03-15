@@ -3,7 +3,7 @@ TARGET    = ftac
 LIB_SRCS  = io.asm
 UNIFIED_SRC = unified/$(TARGET)_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU tac ==="

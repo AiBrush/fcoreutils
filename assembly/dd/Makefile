@@ -3,4 +3,4 @@ TARGET    = fdd
 LIB_SRCS  = io.asm str.asm args.asm
 UNIFIED_SRC = fdd_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

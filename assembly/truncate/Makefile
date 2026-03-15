@@ -6,7 +6,7 @@ UNIFIED_SRC = ftruncate_unified.asm
 TEST_DEP   = release
 TEST_BIN   = ./ftruncate_release
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 # Override default: truncate only supports unified/release build
 all: release

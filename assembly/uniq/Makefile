@@ -2,7 +2,7 @@
 TARGET      = funiq
 LIB_SRCS    = io.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU uniq ==="

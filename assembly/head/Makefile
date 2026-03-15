@@ -3,4 +3,4 @@ TARGET    = fhead
 LIB_SRCS  = io.asm
 UNIFIED_SRC = unified/fhead_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

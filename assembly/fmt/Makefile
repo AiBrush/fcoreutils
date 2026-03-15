@@ -3,4 +3,4 @@ TARGET    = ffmt
 LIB_SRCS  = io.asm
 UNIFIED_SRC = unified/ffmt_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

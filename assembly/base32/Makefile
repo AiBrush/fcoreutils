@@ -6,7 +6,7 @@ LIB_SRCS    = io.asm str.asm args.asm
 TOOL_SRCS   = tools/fbase32.asm
 UNIFIED_SRC = unified/fbase32_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 # Override dev to build from unified since no modular source exists yet
 dev: $(UNIFIED_SRC)

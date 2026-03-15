@@ -4,7 +4,7 @@ LIB_SRCS    = io.asm str.asm
 TOOL_SRCS   = tools/fmd5sum.asm
 UNIFIED_SRC = unified/fmd5sum_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU md5sum ==="

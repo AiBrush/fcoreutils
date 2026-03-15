@@ -3,4 +3,4 @@ TARGET    = fdir
 LIB_SRCS  = io.asm str.asm
 UNIFIED_SRC = unified/fdir_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

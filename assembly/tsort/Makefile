@@ -4,7 +4,7 @@ LIB_SRCS   = io.asm
 LDFLAGS    = --gc-sections --strip-all
 UNIFIED_SRC = unified/ftsort_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU tsort ==="

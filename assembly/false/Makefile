@@ -3,4 +3,4 @@ TARGET    = ffalse
 LIB_SRCS  = io.asm args.asm str.asm
 UNIFIED_SRC = ffalse_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc

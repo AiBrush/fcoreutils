@@ -5,7 +5,7 @@ UNIFIED_SRC = fmknod_unified.asm
 TEST_DEP    = release
 TEST_BIN    = ./fmknod_release
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: release
 	@echo "=== Benchmark vs GNU ==="

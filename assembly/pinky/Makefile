@@ -2,7 +2,7 @@
 TARGET      = fpinky
 LIB_SRCS    = io.asm args.asm str.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
 
 bench: dev
 	@echo "=== Benchmark vs GNU ==="

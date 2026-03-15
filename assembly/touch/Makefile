@@ -3,4 +3,4 @@ TARGET    = ftouch
 LIB_SRCS  =
 UNIFIED_SRC = unified/ftouch_unified.asm
 
-include ../../Makefile.inc
+include ../Makefile.inc
