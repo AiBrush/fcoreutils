@@ -97,7 +97,8 @@ org 0x400000
 %define b_du_path_buf   (b_stat_buf + STAT_STRUCT_SIZE)
 %define b_itoa_buf      (b_du_path_buf + PATH_MAX)
 %define b_getdents_buf  (b_itoa_buf + 32)
-%define b_out_buf       (b_getdents_buf + GETDENTS_SIZE)
+%define b_char_buf      (b_getdents_buf + GETDENTS_SIZE)
+%define b_out_buf       (b_char_buf + 8)
 %define BSS_END         (b_out_buf + OUT_BUF_SIZE)
 %define BSS_SIZE        (BSS_END - BSS_BASE)
 
@@ -740,11 +741,17 @@ parse_args:
     test    eax, eax
     jnz     .pa_max_depth
 
+    ; Unknown long option: error and exit
+    mov     rsi, [r13 + rbx*8]
     pop     r14
     pop     r13
     pop     r12
     pop     rbx
-    jmp     .pa_next
+    mov     rdi, rsi
+    call    err_unrecognized_option
+    mov     edi, 1
+    mov     eax, SYS_EXIT
+    syscall
 
 .pa_do_help:
     pop     r14
@@ -815,7 +822,14 @@ parse_args:
     je      .f_S
     cmp     al, 'd'
     je      .f_d
-    jmp     .pa_short_next
+    ; Unknown short option: error and exit
+    push    rsi
+    push    rcx
+    movzx   esi, al
+    call    err_invalid_option
+    mov     edi, 1
+    mov     eax, SYS_EXIT
+    syscall
 
 .f_s: or byte [b_flags], FLAG_S
     jmp .pa_short_next
@@ -1148,6 +1162,67 @@ err_cannot_read:
     pop     rbx
     ret
 
+; err_unrecognized_option(rdi=option_string) — print "du: unrecognized option '...'"
+err_unrecognized_option:
+    push    rbx
+    mov     rbx, rdi
+    xor     r12d, r12d              ; reset out_buf_used (clobbered by parse_args)
+    call    flush_output
+    mov     rdi, STDERR
+    lea     rsi, [str_prefix]
+    mov     rdx, str_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    lea     rsi, [str_unrecognized]
+    mov     rdx, str_unrecognized_len
+    call    asm_write_all
+    mov     rdi, rbx
+    call    asm_strlen
+    mov     rdx, rax
+    mov     rdi, STDERR
+    mov     rsi, rbx
+    call    asm_write_all
+    mov     rdi, STDERR
+    lea     rsi, [str_quote_nl]
+    mov     rdx, 2
+    call    asm_write_all
+    mov     rdi, STDERR
+    lea     rsi, [str_try_help]
+    mov     rdx, str_try_help_len
+    call    asm_write_all
+    pop     rbx
+    ret
+
+; err_invalid_option(esi=char) — print "du: invalid option -- 'X'"
+err_invalid_option:
+    push    rbx
+    mov     ebx, esi
+    xor     r12d, r12d              ; reset out_buf_used (clobbered by parse_args)
+    call    flush_output
+    mov     rdi, STDERR
+    lea     rsi, [str_prefix]
+    mov     rdx, str_prefix_len
+    call    asm_write_all
+    mov     rdi, STDERR
+    lea     rsi, [str_invalid_opt]
+    mov     rdx, str_invalid_opt_len
+    call    asm_write_all
+    mov     byte [b_char_buf], bl
+    mov     rdi, STDERR
+    lea     rsi, [b_char_buf]
+    mov     rdx, 1
+    call    asm_write_all
+    mov     rdi, STDERR
+    lea     rsi, [str_quote_nl]
+    mov     rdx, 2
+    call    asm_write_all
+    mov     rdi, STDERR
+    lea     rsi, [str_try_help]
+    mov     rdx, str_try_help_len
+    call    asm_write_all
+    pop     rbx
+    ret
+
 strerror:
     cmp     edi, 2
     je      .st_e2
@@ -1302,6 +1377,13 @@ str_enoent: db "No such file or directory", 0
 str_eacces: db "Permission denied", 0
 str_enotdir: db "Not a directory", 0
 str_eunknown: db "Unknown error", 0
+str_unrecognized: db "unrecognized option '"
+str_unrecognized_len equ $ - str_unrecognized
+str_invalid_opt: db "invalid option -- '"
+str_invalid_opt_len equ $ - str_invalid_opt
+str_quote_nl: db "'", 10
+str_try_help: db "Try 'du --help' for more information.", 10
+str_try_help_len equ $ - str_try_help
 
 help_text:
     db "Usage: du [OPTION]... [FILE]...", 10
