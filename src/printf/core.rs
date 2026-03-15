@@ -206,13 +206,13 @@ fn process_conversion(
             let val = parse_integer(arg);
             let mut buf = itoa::Buffer::new();
             let s = buf.format(val);
-            write_numeric_format(w, s, val < 0, &flags, width, precision);
+            write_numeric_format(w, s, &flags, width, precision);
         }
         b'u' => {
             let val = parse_unsigned(arg);
             let mut buf = itoa::Buffer::new();
             let s = buf.format(val);
-            write_numeric_format(w, s, false, &flags, width, precision);
+            write_numeric_format(w, s, &flags, width, precision);
         }
         b'o' => {
             let val = parse_unsigned(arg);
@@ -810,7 +810,6 @@ fn write_repeated(w: &mut impl Write, byte: u8, count: usize) {
 fn write_numeric_format(
     w: &mut impl Write,
     num_str: &str,
-    _is_negative: bool,
     flags: &FormatFlags,
     width: usize,
     precision: Option<usize>,
