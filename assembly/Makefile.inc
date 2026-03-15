@@ -41,7 +41,7 @@ $(BUILD)/%.o: tools/%.asm | $(BUILD)
 
 # Dev build — unified flat binary (matches CI)
 dev: $(UNIFIED_SRC)
-	nasm -f bin $(UNIFIED_SRC) -o $(TARGET)
+	$(NASM) -f bin $(UNIFIED_SRC) -o $(TARGET)
 	chmod +x $(TARGET)
 
 # Modular build — elf64 + ld, for tools with complete modular sources
@@ -51,7 +51,7 @@ modular: $(TOOL_SRCS) $(SHARED_LIB_OBJS) | $(BUILD)
 
 # Release build — unified file, nasm -f bin, no linker
 release: $(UNIFIED_SRC)
-	nasm -f bin $(UNIFIED_SRC) -o $(TARGET)_release
+	$(NASM) -f bin $(UNIFIED_SRC) -o $(TARGET)_release
 	chmod +x $(TARGET)_release
 
 clean:
