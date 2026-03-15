@@ -8,11 +8,11 @@
 
 High-performance GNU coreutils replacement in Rust — 100+ tools, SIMD-accelerated, drop-in compatible, cross-platform.
 
-## Independent Test Results (v0.22.1)
+## Independent Test Results (v0.22.2)
 
 *Source: [AiBrush/coreutils-rs-independent-test](https://github.com/AiBrush/coreutils-rs-independent-test) — Linux x86_64, GitHub Actions, hyperfine*
 
-**Summary:** 108 tools tested · **fastest: unexpand at 36.2x** vs GNU · compat: **3807/3811 (99.9%)** across 108 tools · only 4 real failures
+**Summary:** 107 tools tested · **fastest: unexpand at 41.9x** vs GNU · compat: **3807/3811 (99.9%)** across 107 tools · only 4 real failures (numfmt locale + yes race)
 
 > Compat is GNU test pass rate on Linux x86_64 (skipped tests excluded from denominator for tools that only skip due to environment). Speedup is peak across all benchmark scenarios. `-` = no benchmark data collected. `N/A` = not applicable (requires root/SELinux/tty).
 
@@ -226,7 +226,7 @@ Output is byte-identical to GNU coreutils. All flags are supported including `--
 
 We pursue a second optimization track alongside Rust: hand-crafted x86_64 assembly for platforms where maximum throughput matters. **107 tools** have assembly implementations — all 107 are fully buildable static ELF binaries with no dynamic linker, no libc, and non-executable stacks.
 
-All 107 tools are tested by the [independent test suite](https://github.com/AiBrush/coreutils-rs-independent-test). Results below from the latest CI run (v0.22.1). Speedups **>1.0x** vs GNU are **bold**. ✅ = all tests pass, ⚠️ = partial.
+All 107 tools are tested by the [independent test suite](https://github.com/AiBrush/coreutils-rs-independent-test). Results below from the latest CI run (v0.22.2). Speedups **>1.0x** vs GNU are **bold**. ✅ = all tests pass, ⚠️ = partial.
 
 | Tool | Compat | Security | Asm Size | Speedup vs GNU |
 |------|--------|----------|----------|----------------|
