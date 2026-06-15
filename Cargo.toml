@@ -472,7 +472,7 @@ rayon = "1"
 blake2b_simd = "1"
 
 # SHA-256 fallback for Apple targets (ring 0.17 doesn't compile on macOS aarch64)
-sha2 = "0.10"
+sha2 = "0.11"
 
 # SHA-1 hashing
 sha1 = "0.10"
